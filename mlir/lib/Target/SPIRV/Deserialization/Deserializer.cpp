@@ -3404,8 +3404,38 @@ LogicalResult spirv::Deserializer::wireUpBlockArgument() {
 
       branchCondOp.erase();
     } else if (auto switchOp = dyn_cast<spirv::SwitchOp>(op)) {
-      if (target == switchOp.getDefaultTarget()) {
+      // A `target` block may legitimately appear more than once among
+      // `switchOp`'s own successors: as two or more distinct case-literal
+      // targets, as both the default target and one (or more) case-literal
+      // targets (e.g. a case label that falls through to the same block the
+      // default also reaches -- a real
+      // dEQP-VK.graphicsfuzz.switch-with-fall-through-cases shape), or any
+      // combination of these. Every one of those occurrences is its own
+      // successor entry needing its own block-argument list (`OpPhi`'s value
+      // for a given predecessor block is shared across all of that
+      // predecessor's edges to the target, since SPIR-V/LLVM phis key on
+      // predecessor block, not predecessor edge, so every duplicate
+      // occurrence gets the exact same `blockArgs` this phi produced). Only
+      // fixing up one occurrence (either just the first case-literal match,
+      // or -- when `target` is also the default -- only the default, leaving
+      // any case-literal duplicates of it untouched) left the other
+      // duplicate(s)' target-operand list empty, producing a real block
+      // downstream (`LLVM::SwitchOp`'s own verifier via SPIRVToLLVM's 1:1
+      // conversion) that failed with "branch has 0 operands for successor
+      // #N, but target block has 1" the moment the target block expected any
+      // block arguments at all.
+      SuccessorRange targets = switchOp.getTargets();
+      bool matchesDefault = target == switchOp.getDefaultTarget();
+      bool foundTarget = matchesDefault;
+
+      if (matchesDefault) {
         SmallVector<ValueRange> targetOperands(switchOp.getTargetOperands());
+        for (auto [index, candidate] : llvm::enumerate(targets)) {
+          if (candidate != target)
+            continue;
+          foundTarget = true;
+          targetOperands[index] = blockArgs;
+        }
         DenseIntElementsAttr literals =
             switchOp.getLiterals().value_or(DenseIntElementsAttr());
         spirv::SwitchOp::create(
@@ -3414,34 +3444,15 @@ LogicalResult spirv::Deserializer::wireUpBlockArgument() {
             switchOp.getTargets(), targetOperands);
         switchOp.erase();
       } else {
-        // A `target` block may legitimately appear more than once in
-        // `switchOp`'s own target list (e.g. two distinct SPIR-V `OpSwitch`
-        // case literals both branching to the same block -- a real
-        // dEQP-VK.graphicsfuzz.call-if-while-switch shape). Every one of
-        // those occurrences is its own successor entry needing its own
-        // block-argument list (`OpPhi`'s value for a given predecessor
-        // block is shared across all of that predecessor's edges to the
-        // target, since SPIR-V/LLVM phis key on predecessor block, not
-        // predecessor edge, so every duplicate occurrence gets the exact
-        // same `blockArgs` this phi produced). Only fixing up the *first*
-        // occurrence (this code's own prior behavior, via `llvm::find`)
-        // left every later duplicate's target-operand list empty,
-        // producing a real block downstream (`LLVM::SwitchOp`'s own
-        // verifier via SPIRVToLLVM's 1:1 conversion) that failed with
-        // "branch has 0 operands for successor #N, but target block has
-        // 1" the moment the target block expected any block arguments at
-        // all.
-        SuccessorRange targets = switchOp.getTargets();
-        bool foundTarget = false;
         for (auto [index, candidate] : llvm::enumerate(targets)) {
           if (candidate != target)
             continue;
           foundTarget = true;
           switchOp.getTargetOperandsMutable(index).assign(blockArgs);
         }
-        assert(foundTarget);
-        (void)foundTarget;
       }
+      assert(foundTarget);
+      (void)foundTarget;
     } else {
       return emitError(unknownLoc, "unimplemented terminator for Phi creation");
     }
