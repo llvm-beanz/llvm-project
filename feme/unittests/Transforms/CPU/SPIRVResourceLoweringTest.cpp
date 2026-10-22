@@ -9774,3 +9774,87 @@ TEST(SPIRVResourceLoweringTest,
   ASSERT_TRUE(TrueOperand);
   EXPECT_TRUE(TrueOperand->getZExtValue());
 }
+
+// Roadmap `ENV6(b)(1)`: `SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) now
+// threads an indexed subpass input's own resolved handle through as
+// `feme.stage.subpass.load.*`'s new 4th operand (rather than discarding it
+// as dead code); `classifySubpassImage2DHandle`/
+// `hasOnlySupportedSubpassImageUses` accept that one new use shape, and
+// `lowerImageAccesses`'s own new dispatch branch
+// (`getOrInsertResolvedSubpassLoadFunc`) replaces the handle-typed call
+// with a plain-`i32`-operand one naming the handle's own resolved
+// image-heap slot, so a later (not yet implemented, roadmap piece (d))
+// `FragmentWrapper.cpp` fallback can read it. This test only exercises
+// pieces (a)-(c): the resolved call's own 4th operand correctly names
+// the handle's assigned heap index; `FragmentWrapper.cpp` still ignores
+// it today (see that file's own `lowerFragmentSubpassLoad`).
+TEST(SPIRVResourceLoweringTest,
+     ResolvesIndexedSubpassLoadHandleToItsOwnImageHeapIndex) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main() {
+      %img = call target("spirv.Image", float, 6, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.tsub(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %texel = call float @feme.stage.subpass.load.f32(
+          i32 0, i32 0, i32 0,
+          target("spirv.Image", float, 6, 0, 0, 0, 2, 0) %img)
+      ret float %texel
+    }
+    declare target("spirv.Image", float, 6, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.tsub(i32, i32, i32, i32, ptr)
+    declare float @feme.stage.subpass.load.f32(
+        i32, i32, i32, target("spirv.Image", float, 6, 0, 0, 0, 2, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Resolved =
+      findImageCall(*F, "feme.stage.subpass.load.resolved.f32");
+  ASSERT_TRUE(Resolved);
+  EXPECT_EQ(Resolved->arg_size(), 4u);
+  auto *AttachmentIndex = dyn_cast<ConstantInt>(Resolved->getArgOperand(0));
+  ASSERT_TRUE(AttachmentIndex);
+  EXPECT_EQ(AttachmentIndex->getSExtValue(), 0);
+  // The 4th (new) operand is the handle's own resolved image-heap index
+  // -- the sole bound handle in this module, so heap index 0.
+  auto *ImageIndex = dyn_cast<ConstantInt>(Resolved->getArgOperand(3));
+  ASSERT_TRUE(ImageIndex);
+  EXPECT_EQ(ImageIndex->getZExtValue(), 0u);
+
+  // Normalizes into the image heap, exactly like a sampled/storage image.
+  MDNode *Bound = findBoundNode(*M, "main");
+  ASSERT_TRUE(Bound);
+  EXPECT_EQ(mdInt(Bound, 2), 1u); // one image slot
+  EXPECT_EQ(mdInt(Bound, 8), static_cast<uint64_t>(BoundResourceClass::Image));
+}
+
+// Roadmap `ENV6(b)(1)`: a direct (no `InputAttachmentIndex`) depth/stencil
+// `subpassLoad` -- `SubpassLoadPattern`'s own `IndexAttr`-less case --
+// passes a `PoisonOp` rather than the real handle (see that class's own
+// comment), so its handle never has a real use at all; this mirrors the
+// stale "roadmap L108" carve-out this session's change removed, now
+// handled by `hasOnlySupportedSubpassImageUses`'s own vacuous acceptance
+// of a handle with zero uses instead. Confirms `collectHandles` still
+// accepts (rather than rejects) such a handle, so a real driver's mixed
+// direct/indexed subpass-input shader still compiles.
+TEST(SPIRVResourceLoweringTest,
+     AcceptsSubpassImage2DHandleWithNoRealUses) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() {
+      %img = call target("spirv.Image", float, 6, 1, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding.tsub(i32 0, i32 0, i32 1, i32 0, ptr null)
+      ret void
+    }
+    declare target("spirv.Image", float, 6, 1, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding.tsub(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyFunction(*F, &errs()));
+}

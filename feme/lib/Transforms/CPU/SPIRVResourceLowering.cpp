@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 
+#include "feme/Core/StageOps.h"
 #include "feme/Target/CPU/ResourceInfo.h"
 
 #include "feme/Transforms/CPU/ImageCalls.h"
@@ -127,7 +128,31 @@ enum class HandleKind {
   /// `Cube`/`CubeArray` (and an arrayed `Plain1D`) remain unstarted
   /// follow-on work (roadmap H19d/H19e) -- unlike `SampledImage2D`, this
   /// kind's `Shape` is therefore never `Cube`/`CubeArray` in practice.
-  StorageImage2D
+  StorageImage2D,
+  /// Roadmap `ENV6(b)(1)`: a `Dim::SubpassData` handle (a GLSL
+  /// `subpassInput`/`subpassInputMS` variable's own `handlefrombinding`) --
+  /// unlike every other kind above, this handle is never read through an
+  /// ordinary `feme.cpu.image.*` sample/fetch/load call (see
+  /// `feme::spirv::SubpassLoadPattern`, SPIRVToLLVMPatterns.cpp, which
+  /// converts its `OpImageRead` directly to `feme.stage.subpass.load`
+  /// instead); its sole supported use is appearing as that call's own 4th
+  /// operand (`hasOnlySupportedSubpassImageUses`), which `lowerImageAccesses`
+  /// resolves to this handle's own assigned image-heap index so
+  /// `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad` can read the
+  /// `subpassInput`'s own bound descriptor as a `VK_ATTACHMENT_UNUSED`
+  /// fallback whenever the ordinary index-addressed `subpass_input_heap`
+  /// slot was never populated (`L501`/`L503`). Normalizes into the
+  /// *image* heap exactly like `SampledImage2D`/`StorageImage2D`
+  /// (`getResourceClass`) -- the runtime's `image_heap` already contains a
+  /// `subpassInput`'s own descriptor regardless of whether the shader
+  /// references its handle (`Descriptor.cpp`'s `isImageDescriptorType`
+  /// already includes `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT`), so no new
+  /// heap or runtime change is needed, only this handle's own
+  /// classification/use-shape acceptance and `lowerImageAccesses`'s own
+  /// resolution. `Shape` is never meaningful for this kind (stays
+  /// `Plain2D`, its zero-value) -- unlike a sampled/storage image, this
+  /// handle is never addressed with a coordinate at all.
+  SubpassImage2D
 };
 
 /// Which of the four sampled-image shapes `HandleKind::SampledImage2D`
@@ -231,7 +256,8 @@ bool isTexelHandleKind(HandleKind Kind) {
 /// buffer kind) rather than `feme.cpu.image.*`.
 bool isBufferHandleKind(HandleKind Kind) {
   return Kind != HandleKind::SampledImage2D && Kind != HandleKind::Sampler &&
-         Kind != HandleKind::StorageImage2D;
+         Kind != HandleKind::StorageImage2D &&
+         Kind != HandleKind::SubpassImage2D;
 }
 
 /// The heap \p Kind's descriptors are assigned slots in.
@@ -246,6 +272,7 @@ BoundResourceClass getResourceClass(HandleKind Kind) {
     return BoundResourceClass::Buffer;
   case HandleKind::SampledImage2D:
   case HandleKind::StorageImage2D:
+  case HandleKind::SubpassImage2D:
     return BoundResourceClass::Image;
   case HandleKind::Sampler:
     return BoundResourceClass::Sampler;
@@ -614,6 +641,9 @@ constexpr unsigned SPIRVDim2D = 1;
 constexpr unsigned SPIRVDim3D = 2;
 /// SPIR-V's `Dim` operand value for `OpTypeImage Cube` (roadmap H7b-a).
 constexpr unsigned SPIRVDimCube = 3;
+/// SPIR-V's `Dim` operand value for `OpTypeImage SubpassData` (roadmap
+/// `ENV6(b)(1)`): a GLSL `subpassInput`/`subpassInputMS`.
+constexpr unsigned SPIRVDimSubpassData = 6;
 
 /// Returns \p Handle's classification if its type is a single-sampled,
 /// floating-point or 32-bit-integer 1D, 2D, or Cube `spirv.Image`/
@@ -803,6 +833,41 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
     Shape = Arrayed ? ImageShape::Array2D : ImageShape::Plain2D;
   return HandleClassification{HandleKind::StorageImage2D, 0, nullptr,
                               ChannelType, Shape};
+}
+
+/// Returns \p Handle's classification if its type is a `Dim::SubpassData`
+/// handle (roadmap `ENV6(b)(1)`, `L501`/`L503`) -- a GLSL `subpassInput`/
+/// `subpassInputMS` variable's own `handlefrombinding`, which
+/// `feme::spirv::SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) keeps alive
+/// as `feme.stage.subpass.load`'s new 4th operand rather than discarding
+/// as dead code. Unlike `classifySampledImage2DHandle`/
+/// `classifyStorageImage2DHandle`, `Multisampled` is not recorded in the
+/// returned classification's `Shape` (meaningless for this kind, see
+/// `HandleKind::SubpassImage2D`'s own doc) -- `SubpassLoadPattern`'s own
+/// `(ElementTy, MS)` callee-name mangling is what keeps a plain and a
+/// multisampled subpass load from colliding, not anything this pass
+/// tracks; this classifier only needs to recognize the handle shape at
+/// all, exactly as permissively as every other `Dim`'s classifier already
+/// does for its own two (`MS` and non-`MS`) handle types.
+std::optional<HandleClassification>
+classifySubpassImage2DHandle(const CallInst &Handle) {
+  auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
+  if (!HandleTy || (HandleTy->getName() != "spirv.Image" &&
+                    HandleTy->getName() != "spirv.SignedImage"))
+    return std::nullopt;
+  if (HandleTy->getNumTypeParameters() != 1 ||
+      HandleTy->getNumIntParameters() != 6)
+    return std::nullopt;
+  if (HandleTy->getIntParameter(0) != SPIRVDimSubpassData)
+    return std::nullopt;
+  if (HandleTy->getIntParameter(4) != SPIRVSampledWithoutSampler)
+    return std::nullopt;
+
+  Type *ChannelType = HandleTy->getTypeParameter(0);
+  if (!ChannelType->isFloatTy() && !ChannelType->isIntegerTy(32))
+    return std::nullopt; // No other channel shape is decodable today.
+  return HandleClassification{HandleKind::SubpassImage2D, 0, nullptr,
+                              ChannelType};
 }
 
 /// Returns \p Handle's classification if its type is a `spirv.Sampler`
@@ -2572,6 +2637,31 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
   return true;
 }
 
+/// Checks that every use of a `Dim::SubpassData` handle (roadmap
+/// `ENV6(b)(1)`, `HandleKind::SubpassImage2D`) is the trailing (image)
+/// operand of a `feme.stage.subpass.load.*` call (`feme::StageOpKind::
+/// SubpassLoad`, `isStageOpCall`) -- the one use-shape `SubpassLoadPattern`
+/// (SPIRVToLLVMPatterns.cpp) now produces for this handle, keeping it
+/// alive specifically so `lowerImageAccesses` can resolve it to this
+/// handle's own assigned image-heap index there. A handle with no uses at
+/// all (the shape every subpass handle had before `ENV6(b)(1)`'s operand-
+/// threading change, and the one the superseded "Roadmap L108" carve-out
+/// in `collectHandles` used to tolerate on its own) is still accepted
+/// here too, vacuously, the same way `hasOnlySupportedSamplerUses`'s own
+/// callers tolerate an unused sampler.
+bool hasOnlySupportedSubpassImageUses(const CallInst &Handle) {
+  for (const User *U : Handle.users()) {
+    const auto *CI = dyn_cast<CallInst>(U);
+    feme::StageOpKind Kind;
+    if (!CI || !feme::isStageOpCall(*CI, &Kind) || Kind != feme::StageOpKind::SubpassLoad)
+      return false;
+    if (CI->arg_size() == 0 ||
+        CI->getArgOperand(CI->arg_size() - 1) != &Handle)
+      return false;
+  }
+  return true;
+}
+
 /// Returns whether \p GEP's byte offset relative to its pointer operand can
 /// be recovered as a (possibly negative) constant plus zero or more
 /// `index * constant` terms, the only form `lowerRawPointerUses` below
@@ -3311,27 +3401,10 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     if (!Classification)
       Classification = classifyStorageImage2DHandle(*CI);
     if (!Classification)
+      Classification = classifySubpassImage2DHandle(*CI);
+    if (!Classification)
       Classification = classifySamplerHandle(*CI);
     if (!Classification) {
-      // (Roadmap L108) A `Dim::SubpassData` handle (a GLSL `subpassInput`
-      // variable's own `handlefrombinding`) is never one of the kinds
-      // this pass classifies -- its `OpImageRead` converts directly to
-      // `feme.stage.subpass.load` (`feme::spirv::SubpassLoadPattern`,
-      // SPIRVToLLVMPatterns.cpp), never referencing this handle's own
-      // result at all, so it is always left with no uses (see
-      // `feme::cpu::checkSupportedRaisedOps`'s own comment for this same
-      // shape, which already tolerates it there). Rejecting the *whole*
-      // function over a handle nothing actually uses -- as opposed to one
-      // some other, real resource access genuinely needs but this pass
-      // cannot model -- would otherwise leave every *other*, perfectly
-      // normalizable handle in the same function un-normalized purely
-      // because a subpass input happened to be declared alongside them
-      // (found via `dEQP-VK.pipeline.pipeline_library.graphics_library.
-      // independent_sets_random.*.vert_frag.*`, whose generated shaders
-      // routinely mix a `subpassInput` with several genuinely
-      // unrelated, otherwise-supported resources in the same function).
-      if (CI->use_empty())
-        continue;
       logNormalizationRejection(
           "handle result type is not one of the kinds this pass normalizes",
           CI);
@@ -3352,6 +3425,12 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
               *CI, Classification->TexelElementType->isIntegerTy(32),
               Classification->Shape)) {
         logNormalizationRejection("unsupported storage-image-2D use", CI);
+        return std::nullopt;
+      }
+      break;
+    case HandleKind::SubpassImage2D:
+      if (!hasOnlySupportedSubpassImageUses(*CI)) {
+        logNormalizationRejection("unsupported subpass-image use", CI);
         return std::nullopt;
       }
       break;
@@ -4949,6 +5028,35 @@ struct ImageHeapEntry {
   ImageShape Shape = ImageShape::Plain2D;
 };
 
+/// Declares (or finds) the resolved counterpart of
+/// `feme::spirv::getOrInsertSubpassLoadFunc`'s (SPIRVToLLVMPatterns.cpp)
+/// handle-typed `feme.stage.subpass.load.*` declaration: `(i32
+/// attachment_index, i32 component, i32 sample, i32 image_descriptor_index)
+/// -> ElementTy`, mangled only by `ElementTy` (not `(ElementTy, MS)` the way
+/// the handle-typed declaration needs to be) -- an already-resolved `i32`
+/// descriptor index carries no handle-shape information for a later reader
+/// to need disambiguated, unlike the raw handle type itself (roadmap
+/// `ENV6(b)(1)`). Named distinctly (`.resolved.<suffix>`, not reusing
+/// `getOrInsertSubpassLoadFunc`'s own name) since the same module may still
+/// contain other, not-yet-lowered `feme.stage.subpass.load.*` calls whose
+/// handle-typed declaration must not collide with this differently-typed
+/// one. Still recognized by `feme::isStageOpCall`/`getStageOpKind` as
+/// `StageOpKind::SubpassLoad` (its own name-prefix match only requires
+/// `feme.stage.subpass.load` followed by `.`), so `FragmentWrapper.cpp`'s
+/// `lowerFragmentSubpassLoad` dispatches on it exactly like the
+/// unresolved form.
+Function *getOrInsertResolvedSubpassLoadFunc(Module &M, Type *ElementTy) {
+  bool IsInt = ElementTy->isIntegerTy();
+  StringRef Name = IsInt ? "feme.stage.subpass.load.resolved.i32"
+                        : "feme.stage.subpass.load.resolved.f32";
+  if (Function *Existing = M.getFunction(Name))
+    return Existing;
+  Type *I32Ty = Type::getInt32Ty(M.getContext());
+  auto *FTy = FunctionType::get(ElementTy, {I32Ty, I32Ty, I32Ty, I32Ty},
+                                /*isVarArg=*/false);
+  return Function::Create(FTy, GlobalValue::ExternalLinkage, Name, M);
+}
+
 /// Rewrites every sample and texel fetch performed through the image and
 /// sampler handles in \p HeapIndices -- a map from each accepted
 /// `handlefrombinding` call to the range-checked heap index (and, for an
@@ -4982,6 +5090,35 @@ void lowerImageAccesses(
     ImageShape Shape = Entry.Shape;
     for (User *U : llvm::make_early_inc_range(Handle->users())) {
       auto *CI = cast<CallInst>(U);
+      // Roadmap `ENV6(b)(1)`: a `Dim::SubpassData` handle's sole supported
+      // use (`hasOnlySupportedSubpassImageUses`) is as a
+      // `feme.stage.subpass.load.*` call's own trailing (image) operand --
+      // replace the call with one to the resolved, i32-index-operand
+      // counterpart (`getOrInsertResolvedSubpassLoadFunc`), since the
+      // original declaration's handle-typed operand cannot be mutated in
+      // place without producing an ill-typed call (the resolved index's
+      // `i32` type differs from the handle type the call was originally
+      // declared against). `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad`
+      // does not yet read this new operand (roadmap `ENV6(b)(1)`'s own
+      // follow-on piece), so this alone does not yet change behavior --
+      // it only keeps every existing `subpassInput`/`subpassInputMS` shader
+      // correctly resolving once `SubpassLoadPattern` started keeping this
+      // handle's use alive instead of leaving it dead.
+      feme::StageOpKind SubpassKind;
+      if (feme::isStageOpCall(*CI, &SubpassKind) &&
+          SubpassKind == feme::StageOpKind::SubpassLoad &&
+          CI->getArgOperand(CI->arg_size() - 1) == Handle) {
+        IRBuilder<> Builder(CI);
+        Function *Resolved =
+            getOrInsertResolvedSubpassLoadFunc(*CI->getModule(), CI->getType());
+        CallInst *NewCall = Builder.CreateCall(
+            Resolved, {CI->getArgOperand(0), CI->getArgOperand(1),
+                      CI->getArgOperand(2), ImageIndex},
+            CI->getName());
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
       bool ExplicitLod = false;
       bool HasMinLodClamp = false;
       bool HasBias = false;
