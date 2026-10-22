@@ -69,7 +69,8 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-Pick any one of these to start the next session -- all are independent, no shared setup:
+Pick any one of these to start the next session -- all are independent, no
+shared setup:
 
 1. **`ENV6(c)(2)(k)`** (new this session, needs its own session): the same
    case's own runtime hang (`vkWaitForFences Timeout`) plus the separate
