@@ -3675,4 +3675,82 @@ TEST(LinearizeTest, MsaaDepthCopyLoopWithUniformBoundsCheckAheadOfHeader) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap ENV6(c)(1): a `ShadowExitFixup`'s own "outside use" can itself
+// be a phi resident in `ExitBlock`, on an incoming edge that is *not*
+// `Latch` -- reduced from
+// `dEQP-VK.graphicsfuzz.cov-loop-decrease-integer-never-break`'s exact
+// `FEME_DUMP_IR_PRELINEARIZE` output (the `1`/`.Flow_crit_edge`/`Flow`/
+// `.loopexit`/`13` block names below are kept as-is from that dump,
+// unminimized, specifically so this test tracks the real shape). Before
+// this fix, the fixup loop's special case only recognized an
+// `ExitBlock`-resident user phi on the `Latch` edge specifically
+// (substituting the correctly-dominating `LatchValue`); any other
+// `ExitBlock`-resident user phi fell through to the generic `else`
+// branch and got pointed at the newly created `ExitPN` -- itself defined
+// in `ExitBlock`, and therefore unable to dominate any of `ExitBlock`'s
+// own predecessors, including the one supplying that very use. Here,
+// `Flow`'s own `%7` phi (not part of `ShadowExitFixups` itself, a
+// pre-existing merge) reads the shadow value on `.Flow_crit_edge`'s
+// edge, not `Flow`'s own `Latch` edge, and both `%7` and the generated
+// shadow-exit merge phi live in the same block (`Flow`, which doubles as
+// `ExitBlock` here -- the loop's divergent exit lands directly back at
+// the block merging the loop's two paths out) -- so `ExitPN` and `%7`
+// are peer phis in the very block `ExitPN` cannot dominate.
+TEST(LinearizeTest,
+     ShadowExitFixupSubstitutesRawValueForExitBlockResidentUseOnAnyEdge) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %root_constants, i32 %root_constant_size) #0 {
+      br label %1
+
+    1:                                                ; preds = %Flow._crit_edge, %0
+      %.0 = phi i32 [ 100, %0 ], [ %6, %Flow._crit_edge ]
+      %push_const.inbounds = icmp ule i32 4, %root_constant_size
+      br i1 %push_const.inbounds, label %2, label %3
+
+    2:                                                ; preds = %1
+      %push_const.ptr = getelementptr inbounds i8, ptr %root_constants, i64 0
+      %push_const.load = load i32, ptr %push_const.ptr, align 4
+      br label %4
+
+    3:                                                ; preds = %1
+      br label %4
+
+    4:                                                ; preds = %3, %2
+      %push_const.value = phi i32 [ %push_const.load, %2 ], [ 0, %3 ]
+      %5 = icmp sge i32 %push_const.value, 1
+      br i1 %5, label %13, label %.Flow_crit_edge
+
+    .Flow_crit_edge:                                  ; preds = %4
+      br label %Flow
+
+    Flow:                                             ; preds = %.Flow_crit_edge, %13
+      %6 = phi i32 [ %14, %13 ], [ %.0, %.Flow_crit_edge ]
+      %7 = phi i1 [ %15, %13 ], [ true, %.Flow_crit_edge ]
+      br i1 %7, label %.loopexit, label %Flow._crit_edge
+
+    Flow._crit_edge:                                  ; preds = %Flow
+      br label %1
+
+    .loopexit:                                        ; preds = %Flow
+      %8 = icmp eq i32 %6, 1
+      call void @llvm.assume(i1 %8)
+      ret void
+
+    13:                                               ; preds = %4
+      %14 = add nsw i32 %.0, -1
+      %15 = icmp sle i32 %.0, 2
+      br label %Flow
+    }
+
+    attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()))
+      << "a ShadowExitFixup outside-use that is itself an ExitBlock-"
+         "resident phi on a non-Latch edge must be substituted with the "
+         "raw per-edge value, not the ExitBlock-resident ExitPN merge";
+}
+
 } // namespace

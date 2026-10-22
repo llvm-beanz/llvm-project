@@ -1555,14 +1555,24 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
   // here).
   //
   // An outside use that is *itself* a phi already resident in
-  // `ExitBlock`, with `Shadow` as its specific incoming value for the
-  // `Latch` edge, needs different handling: the new merge phi above would
-  // itself be defined in `ExitBlock`, so using it as that *same* phi's
-  // own `Latch`-edge operand is not valid SSA (`ExitBlock` does not
-  // dominate `Latch`, which is still inside the loop) -- substitute the
-  // already-resolved `LatchValue` directly into that one operand slot
-  // instead, leaving the phi's other incoming edges (and its use of
-  // `Shadow` on any non-`Latch` edge) untouched.
+  // `ExitBlock`, on *any* of its own incoming edges, needs different
+  // handling than a genuine outside-the-loop use: the new merge phi below
+  // (`ExitPN`) is itself defined in `ExitBlock`, so using it as one of
+  // `ExitBlock`'s own other phis' incoming-edge operands is not valid SSA
+  // -- `ExitBlock` cannot dominate any of its own predecessors, no matter
+  // which predecessor edge the use sits on. This is not limited to the
+  // `Latch` edge specifically: any predecessor of `ExitBlock` can equally
+  // be shared with some other `ExitBlock`-resident phi's own incoming
+  // edge (e.g. a critical-edge-split block with more than one successor,
+  // one into `ExitBlock` and another into a different `ExitBlock`-
+  // resident phi's own predecessor list under the same block name,
+  // reduced from `dEQP-VK.graphicsfuzz.cov-loop-decrease-integer-never-
+  // break`'s own shape). Substitute the already-resolved, per-edge-
+  // correct raw value directly into that one operand slot instead
+  // (`LatchValue` for the `Latch` edge, the raw `Shadow` phi for any
+  // other edge -- exactly what `ExitPN`'s own corresponding incoming
+  // value would be, without ever materializing `ExitPN` itself), leaving
+  // the phi's other incoming edges untouched.
   for (ShadowExitFixup &Fixup : ShadowExitFixups) {
     Value *LatchValue = Fixup.Shadow->getIncomingValueForBlock(Latch);
     if (LatchValue == Fixup.Shadow)
@@ -1570,9 +1580,9 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
     PHINode *ExitPN = nullptr;
     for (Use *U : Fixup.OutsideUses) {
       if (auto *UserPN = dyn_cast<PHINode>(U->getUser());
-          UserPN && UserPN->getParent() == ExitBlock &&
-          UserPN->getIncomingBlock(*U) == Latch) {
-        U->set(LatchValue);
+          UserPN && UserPN->getParent() == ExitBlock) {
+        BasicBlock *IncomingBB = UserPN->getIncomingBlock(*U);
+        U->set(IncomingBB == Latch ? LatchValue : Fixup.Shadow);
         continue;
       }
       if (!ExitPN) {
