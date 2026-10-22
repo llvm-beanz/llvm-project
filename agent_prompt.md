@@ -71,11 +71,14 @@ the next steps:
 
 Pick any one of these to start the next session -- all are independent, no shared setup:
 
-1. **`ENV6(c)(2)(f)`** (~30-60 min to triage): 1 case,
-   `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`,
-   unexplained non-dominance `Fail`. Not started. Start by reproducing with
-   `FEME_DUMP_DIVERGENT_BRANCH=1`/`FEME_DEBUG_FLATTEN_TRACE=1` the same way this
-   session did, before assuming anything about the cause.
+1. **`ENV6(c)(2)(k)`** (new this session, needs its own session): the same
+   case's own runtime hang (`vkWaitForFences Timeout`) plus the separate
+   `QueueExecutor` shutdown-hang robustness gap. Start with a **non-`deqp-vk`**
+   standalone repro (e.g. a CPU-side interpreter trace or manual step-through of
+   the generated masked-loop code) to avoid triggering the un-killable process
+   hang while investigating. The shutdown-hang itself may be worth fixing
+   independently of root-causing the shader's own infinite loop -- it's a
+   general robustness gap, not specific to this one case.
 2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket,
    not discard-centric. Investigate fresh -- these haven't been looked at since
    the original triage pass.
@@ -87,6 +90,7 @@ Pick any one of these to start the next session -- all are independent, no share
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
    for many sessions.
 
-**Fastest next concrete action**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(f)`
-and re-run its one case through `deqp-vk` with `FEME_DUMP_DIVERGENT_BRANCH=1` to
-see what it actually says today -- under two minutes.
+**Fastest next concrete action**: open `feme/docs/Roadmap.md` at
+`ENV6(c)(2)(k)`, then try to get a standalone (non-`deqp-vk`) repro of the
+runtime hang going -- under two minutes to start, but budget the hang
+investigation itself as its own session.
