@@ -69,16 +69,24 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-## Why `ENV6(c)(2)(j)` is genuinely new work, not a quick continuation
+Pick any one of these to start the next session -- all are independent, no shared setup:
 
-`loop.exit.guard` lives entirely outside `bb584`/`bb608` (both confirmed fully flattened already) -- it's a block `LoopLinearizer` itself synthesizes post-loop for deferred divergent-exit handling, and apparently can carry a genuinely divergent branch of its own that no flatten pass ever revisits. Two candidate directions noted in `Roadmap.md`: (a) re-invoke `DiamondFlattener`'s whole-function flatten against freshly-synthesized `loop.exit.guard` diamonds after `LoopLinearizer` runs, or (b) have `LoopLinearizer` flatten such a diamond itself during its own construction. Neither investigated beyond pinpointing the block this session -- budget as its own session.
+1. **`ENV6(c)(2)(f)`** (~30-60 min to triage): 1 case,
+   `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`,
+   unexplained non-dominance `Fail`. Not started. Start by reproducing with
+   `FEME_DUMP_DIVERGENT_BRANCH=1`/`FEME_DEBUG_FLATTEN_TRACE=1` the same way this
+   session did, before assuming anything about the cause.
+2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket,
+   not discard-centric. Investigate fresh -- these haven't been looked at since
+   the original triage pass.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
+   architecture efforts, not a quick fix.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
+   unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
+   for many sessions.
 
-## Carried-forward backlog (unchanged, not investigated this session)
-
-- `ENV6(c)(2)(j)` (new this session, 1 case, `loop.exit.guard` divergent-branch SIMDize limitation) -- next pickup for this shader
-- `ENV6(c)(2)(f)` (1 case, unexplained non-dominance `Fail`, not started)
-- `ENV6(c)(2)(a)` (7-case all-black-render bucket, investigate fresh)
-- `ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues, not started)
-- `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases) -- own multi-session efforts
-- `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) -- lowest priority
-- offload-test-suite upstreaming (3 patches, blocked on push access)
+**Fastest next concrete action**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(f)`
+and re-run its one case through `deqp-vk` with `FEME_DUMP_DIVERGENT_BRANCH=1` to
+see what it actually says today -- under two minutes.
