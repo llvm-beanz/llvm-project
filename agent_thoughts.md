@@ -129053,3 +129053,40 @@ reader of that struct."
    not started, lowest priority.
 4. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(c) graphicsfuzz clustered, switch-with-fall-through-cases fixed (L507)
+
+**Next action (under two minutes)**: `source /home/dev/.config/feme/env.sh && cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && "$FEME_VULKAN_CTS_DEQP_VK" --deqp-case=dEQP-VK.graphicsfuzz.cov-basic-block-discard-in-function` and extract the QPA PNG to start `ENV6(c)(2)`'s discard/kill sub-pattern check.
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (standing requirement, done first).
+2. Pulled all 106 `dEQP-VK.graphicsfuzz.*` cases out of `env4-full-corpus-verified-failures.txt`, ran the full list through `run_vulkan_cts.py` per the user's explicit "cluster before picking a reproducer" instruction. Result: 105 Fail / 1 Pass.
+3. Wrote a small log-parsing script (split on `Test case 'NAME'..`, authoritative `verify-*.log` overrides `initial-*.log`) to bucket every case's first `error:` line by normalized shape. 12 clusters, counts recorded in `Roadmap.md`/`VulkanCTSReport.md`'s `L507`.
+4. One cluster stood out: `switch-with-fall-through-cases`'s "branch has 0 operands for successor #N, but target block has 1" has no `feme-cpu-*:` prefix -- a raw verifier error, not an intentional bailout. Picked it as the reproducer.
+5. Traced it to `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s `wireUpBlockArgument`. A pre-existing fix (not from this project, already in tree) handled a target block repeated across multiple case literals, but missed the block also being the switch's *default* target -- the default-match code path rebuilt the whole op but only filled in the default's own operand slot, leaving a case-literal duplicate of that same block with an empty operand list.
+6. Fixed by folding both cases into one pass. Added `selection_switch_default_matches_case_target.spvasm`, a sibling to the existing `selection_switch_duplicate_target.spvasm`.
+7. **Gotcha** (now in `.instructions.md`): running the new test through `llvm-lit` after reverting the fix still reported `PASS` -- the lit RUN line's `mlir-translate | FileCheck` pipe doesn't reliably propagate a verifier failure. Had to confirm the "fails without the fix" half via a **direct** `mlir-translate --deserialize-spirv` invocation instead.
+8. Built `mlir-translate`, confirmed fail-without/pass-with the fix directly; ran the rest of `mlir/test/Target/SPIRV/` (76/77 pass, the 1 failure is pre-existing and unrelated to this change, confirmed via `git stash`).
+9. Built `feme_vulkan`, re-ran the real CTS case: now `Pass`. Re-ran all 106 graphicsfuzz cases: 104 Fail / 2 Pass (was 105/1), no regressions.
+10. Ran `check-feme`: 3862/3866 Passed, 4 Unsupported, 0 regressions.
+11. Committed: (a) the outside-FeMe `mlir/` fix on its own (per the "isolate outside-FeMe fixes" rule), (b) `Roadmap.md`/`VulkanCTSReport.md` docs, (c) `.instructions.md` gotcha, (d) this file.
+
+## Why this reproducer first, not a cluster
+
+The user's instructions this session specifically said don't assume one root cause -- cluster first. Clustering showed 11 of 12 buckets are large, known, self-documented architecture gaps (several diagnostics literally say "(roadmap milestone N deviation)" in their own text) -- genuinely substantial, multi-session work, not a quick fix. The 12th (this one) was a single standalone case with a qualitatively different diagnostic shape (a raw verifier failure, no FeMe-authored message at all) -- the only one that looked like a real, narrowly-scoped bug rather than an intentional "not yet supported" bailout. Picking it first banked a real, clean win instead of starting a multi-session effort without first confirming there wasn't a cheaper target.
+
+## State of `ENV6(c)` now
+
+- **Done**: `switch-with-fall-through-cases` (1 case).
+- **`ENV6(c)(2)`, not started**: 18 cases that compile/run fine but render wrong pixels (no compiler diagnostic at all). 5 share `discard`/`kill` in the name -- check that sub-pattern first via the QPA-embedded-PNG technique.
+- **`ENV6(c)(3)`, not started, flagged as multi-session**: 83 cases across `feme-cpu-linearize`/`feme-cpu-simdize`/`feme-cpu-wrap-entry` -- the loop/divergence-shape architecture gap. Do not rush this into one sitting; it's larger than the `emulate_msrtss`/centroid efforts that each took several sessions.
+- **`ENV6(c)(4)`**: re-verify once `(2)`/`(3)` land.
+
+## Next steps
+
+1. **`ENV6(c)(2)` first** (smaller, likely faster): pick `cov-basic-block-discard-in-function` (one of the 5 discard/kill-named cases), extract its QPA-embedded PNG vs. golden, diff visually, see if the 5 discard-named cases share one root cause before touching the other 13.
+2. If the discard sub-pattern doesn't hold, triage the other 13 `ENV6(c)(2)` cases independently -- they likely don't share a cause with each other either.
+3. Only after `(2)` is exhausted, start scoping `ENV6(c)(3)` -- read `Linearize.cpp`'s existing shape-recognition code first to understand which of the 7 named sub-shapes are closest to already-supported, pick the smallest extension, and budget it as its own multi-session milestone (don't try to fix 83 cases in one pass).
+4. `ENV6(d)` (`memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader`, 132 cases) and `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) remain untouched, lower priority than `ENV6(c)`.
+5. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
