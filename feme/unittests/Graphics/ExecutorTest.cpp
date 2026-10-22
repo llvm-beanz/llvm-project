@@ -13857,4 +13857,153 @@ TEST(ExecutorTest, ColorResolveDefaultsToAverageWhenModesIsEmpty) {
   EXPECT_EQ(ResolveStorage[3], (40u + 130u + 1030u + 8u) / 4);
 }
 
+/// Roadmap `ENV6(b)(2)(a)`: a true coverage-weighted centroid, end to end
+/// through the real executor -- `FragmentWrapperTest.cpp`'s own
+/// `InterpolateAtCentroidUsesCoverageWeightedAverageNotJustPixelCenter`
+/// only checks the lowering's IR *shape*; this is the runtime-phase
+/// companion exercising the actual rasterizer coverage mask and
+/// `Executor.cpp`'s own padded `SamplePositions` table.
+///
+/// The varying this test interpolates is rigged to equal each vertex's
+/// own screen-space X coordinate exactly, so (by the defining identity of
+/// barycentric coordinates: `P == B0*V0 + B1*V1 + B2*V2` for *any* point
+/// `P` in the plane, not just points inside the triangle) the
+/// interpolated result at whatever point `InterpolateAtCentroid` actually
+/// evaluates is exactly that point's own X coordinate -- turning "which
+/// point did this evaluate at" into a single, exact floating-point
+/// equality check rather than a fuzzy rendering comparison.
+///
+/// The single covered pixel is (0, 0) at `SampleCount == 4`, with a
+/// triangle whose only locally-relevant edge is the vertical line
+/// `screenX == 0.5` (vertices `(0.5, -100)`, `(0.5, 100)`, `(-100, 0)`,
+/// confirmed by direct edge-function evaluation to cover exactly the two
+/// samples left of that line): this pixel's four fixed sample positions
+/// (`Executor.cpp`'s own "Standard Sample Locations" table) are
+/// `{0.375,0.125}`, `{0.875,0.375}`, `{0.125,0.625}`, `{0.625,0.875}` --
+/// samples 0 and 2 (`x < 0.5`) are covered, samples 1 and 3 (`x > 0.5`)
+/// are not. The plain pixel center (`(0.5, 0.5)`, this implementation's
+/// pre-fix centroid location) sits exactly on the covered/uncovered
+/// boundary -- under the bug, `InterpolateAtCentroid` would read back
+/// `0.5`; the true coverage-weighted centroid instead averages only the
+/// two *covered* samples' own X offsets, `(0.375 + 0.125) / 2 == 0.25`.
+TEST(ExecutorTest,
+     InterpolateAtCentroidAveragesOnlyActuallyCoveredSamplesNotPixelCenter) {
+  Context Ctx;
+  constexpr uint32_t SampleCount = 4;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 1, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 1, /*Location=*/0)};
+  constexpr char VertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %x = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 1, /*Location=*/0)};
+  constexpr char FragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      %v = call float @feme.stage.interpolate.at.centroid.f32(i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %v, i32 0)
+      ret void
+    }
+    declare float @feme.stage.interpolate.at.centroid.f32(i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> AttachFormats = {
+      {cpu::ResourceFormat::R32_FLOAT, 1, 1}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, SampleCount, std::move(AttachFormats),
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Screen-space vertex positions `(0.5,-100)`, `(0.5,100)`, `(-100,0)`,
+  // converted to NDC for a `{0,0,1,1}` viewport (`ndc = 2*screen - 1`,
+  // this executor's own un-flipped X/Y mapping, see
+  // `InterpolatesColorAcrossTheTriangle`'s identical convention); vertex
+  // W is pinned to 1.0 (vertex shader above) so perspective-correct
+  // interpolation's `InvW` weighting degenerates to the plain affine
+  // barycentric sum this test's math depends on. Each vertex's own
+  // varying (`x`) is independently set to that same vertex's screen-space
+  // X -- not derived from `Position` by the shader -- so the identity in
+  // this test's own file comment above holds for the interpolated varying
+  // at any evaluation point, not merely at the three vertices.
+  std::array<float, 4 * 4> VertexData = {
+      /*ndcX=*/0.0f, /*ndcY=*/-201.0f, /*ndcZ=*/0.0f, /*x=*/0.5f,
+      /*ndcX=*/0.0f, /*ndcY=*/199.0f, /*ndcZ=*/0.0f, /*x=*/0.5f,
+      /*ndcX=*/-201.0f, /*ndcY=*/-1.0f, /*ndcZ=*/0.0f, /*x=*/-100.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 16,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  // One pixel, `SampleCount` samples, one component each: read sample 0's
+  // own raw storage directly below rather than resolving, since a
+  // box-filter average would blend this shaded value (written to every
+  // *covered* sample, i.e. samples 0 and 2) together with whatever the
+  // uncovered samples (1 and 3) happen to hold.
+  std::array<float, SampleCount> AttachmentStorage{};
+  AttachmentView Color{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(AttachmentStorage.data()),
+                      AttachmentStorage.size() * sizeof(float)),
+      cpu::ResourceFormat::R32_FLOAT, 1, 1};
+  std::array<AttachmentView, 1> Attachments = {Color};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 1, 1};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  EXPECT_FLOAT_EQ(AttachmentStorage[0], 0.25f)
+      << "InterpolateAtCentroid must average only the actually-covered "
+         "samples' own offsets (0.25, the midpoint of the two covered "
+         "samples' own X offsets 0.375/0.125), not the plain pixel center "
+         "(0.5, which this test's edge sits exactly on)";
+}
+
 } // namespace
