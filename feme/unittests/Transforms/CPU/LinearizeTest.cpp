@@ -3864,4 +3864,146 @@ TEST(LinearizeTest,
          "own predecessor block, not the phi's own (destination) block";
 }
 
+// Roadmap ENV6(c)(2)(e): a real, captured pre-`feme-cpu-linearize` IR
+// reduction of `dEQP-VK.graphicsfuzz.{cov-loop-condition-filter-some-
+// iterations-never-discard,stable-mergesort-for-always-false-if-
+// discard}`'s own shared shape: a uniform outer loop (header `%2`, whose
+// own trip count is a uniform resource load) contains, in its body, a
+// *uniform* inner branch (`LeafBlock`'s `%SwitchLeaf`, itself derived
+// from the loop's own uniform induction variable `%.0`) that gates
+// whether a later, genuinely divergent discard check (block `%12`'s
+// `fcmp uge float %13, 0.0`) even runs *this* iteration at all. The
+// `SwitchLeaf`-false arm (`LeafBlock.Flow1_crit_edge`) bypasses that
+// check entirely and rejoins downstream of the check's own "stay in
+// loop" continuation, looping all the way back around to the outer
+// loop's header on a later iteration -- a backedge `collectUniform
+// PassThroughRegion`'s pre-ENV6(c)(2)(e) walk mistook for an ordinary
+// "already visited via another arm" diamond merge, rather than a
+// backedge that bypasses the check's own mask-propagation values
+// (`active.check.live`/`active.check.sideeffect`/`exited.via.check.
+// next`) on the iterations that take it. Before this fix, this silently
+// produced IR failing `verifyModule` ("Instruction does not dominate
+// all uses!") that `opt`'s own `VerifierPass` turns into a hard
+// `report_fatal_error` abort when chained directly after `feme-cpu-
+// linearize` (as `feme-opt --llvm -passes=feme-cpu-linearize,verify`
+// does) -- this milestone instead recognizes the backedge and bails out
+// with a clean, diagnosed "unsupported shape" error, the same way every
+// other not-yet-understood shape in this pass already does, rather than
+// producing invalid IR.
+TEST(LinearizeTest,
+     DiagnosesUniformInnerCondGatingDivergentCheckInsteadOfInvalidIR) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    declare void @feme.stage.discard(i1)
+    declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1) #1
+
+    define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
+      %1 = call i32 @feme.cpu.resource.load.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 16, i1 true)
+      br label %2
+
+    2:                                                ; preds = %Flow._crit_edge, %0
+      %.0 = phi i32 [ %1, %0 ], [ %6, %Flow._crit_edge ]
+      %3 = call i32 @feme.cpu.resource.load.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 true)
+      %4 = icmp slt i32 %.0, %3
+      br i1 %4, label %5, label %.Flow_crit_edge
+
+    .Flow_crit_edge:                                  ; preds = %2
+      br label %Flow
+
+    common.ret:                                       ; preds = %loop.exit.guard.common.ret_crit_edge, %22
+      ret void
+
+    5:                                                ; preds = %2
+      br label %LeafBlock
+
+    Flow:                                             ; preds = %.Flow_crit_edge, %Flow3
+      %6 = phi i32 [ %26, %Flow3 ], [ poison, %.Flow_crit_edge ]
+      %7 = phi i1 [ %23, %Flow3 ], [ true, %.Flow_crit_edge ]
+      %8 = phi i1 [ %27, %Flow3 ], [ true, %.Flow_crit_edge ]
+      br i1 %8, label %loop.exit.guard, label %Flow._crit_edge
+
+    Flow._crit_edge:                                  ; preds = %Flow
+      br label %2
+
+    LeafBlock:                                        ; preds = %5
+      %.0.off = add i32 %.0, -1
+      %SwitchLeaf = icmp ugt i32 %.0.off, 1
+      br i1 %SwitchLeaf, label %12, label %LeafBlock.Flow1_crit_edge
+
+    LeafBlock.Flow1_crit_edge:                        ; preds = %LeafBlock
+      br label %Flow1
+
+    Flow2:                                            ; preds = %.Flow2_crit_edge, %25
+      %9 = phi i1 [ true, %25 ], [ false, %.Flow2_crit_edge ]
+      br label %Flow1
+
+    10:                                               ; preds = %Flow1
+      %11 = add i32 %.0, 1
+      br label %Flow3
+
+    12:                                               ; preds = %LeafBlock
+      %13 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %21 = fcmp uge float %13, 0.000000e+00
+      br i1 %21, label %25, label %.Flow2_crit_edge
+
+    .Flow2_crit_edge:                                 ; preds = %12
+      br label %Flow2
+
+    22:                                               ; preds = %loop.exit.guard
+      call void @feme.stage.discard(i1 true)
+      br label %common.ret
+
+    Flow1:                                            ; preds = %LeafBlock.Flow1_crit_edge, %Flow2
+      %23 = phi i1 [ false, %Flow2 ], [ true, %LeafBlock.Flow1_crit_edge ]
+      %24 = phi i1 [ %9, %Flow2 ], [ true, %LeafBlock.Flow1_crit_edge ]
+      br i1 %24, label %10, label %Flow1.Flow3_crit_edge
+
+    Flow1.Flow3_crit_edge:                            ; preds = %Flow1
+      br label %Flow3
+
+    25:                                               ; preds = %12
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.000000e+00, i32 0)
+      br label %Flow2
+
+    Flow3:                                            ; preds = %Flow1.Flow3_crit_edge, %10
+      %26 = phi i32 [ %11, %10 ], [ poison, %Flow1.Flow3_crit_edge ]
+      %27 = phi i1 [ false, %10 ], [ true, %Flow1.Flow3_crit_edge ]
+      br label %Flow
+
+    loop.exit.guard:                                  ; preds = %Flow
+      %Guard.common.ret.inv = xor i1 %7, true
+      br i1 %Guard.common.ret.inv, label %22, label %loop.exit.guard.common.ret_crit_edge
+
+    loop.exit.guard.common.ret_crit_edge:             ; preds = %loop.exit.guard
+      br label %common.ret
+    }
+
+    attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
+    attributes #1 = { nounwind willreturn memory(argmem: read) }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  run(*M);
+  EXPECT_TRUE(SawError) << "the uniform inner conditional gating whether "
+                            "the divergent discard check runs this "
+                            "iteration should be diagnosed as unsupported";
+  EXPECT_FALSE(verifyModule(*M, &errs()))
+      << "collectUniformPassThroughRegion must recognize a walk that "
+         "loops back to the cycle's own header without ever reaching "
+         "the exit check as escaping the region, not as an ordinary "
+         "already-visited diamond merge, otherwise the check's own "
+         "mask-propagation values end up read on a path where they were "
+         "never computed";
+}
+
 } // namespace

@@ -5467,6 +5467,26 @@ LoopLinearizer::collectUniformPassThroughRegion(
     BasicBlock *Cur = Worklist.pop_back_val();
     if (Cur == To || Cur == ExitBlock)
       continue;
+    // Roadmap ENV6(c)(2)(e): reaching `C`'s own header again, other than
+    // as `From` itself, means this particular walk looped all the way
+    // back around `C`'s backedge without ever reaching `To`/`ExitBlock`
+    // -- i.e. `To` is only *conditionally* reached on some iterations of
+    // `C`, not on every pass through this region, which breaks the
+    // "every active lane takes it identically" guarantee this walk
+    // exists to provide (see this function's own comment above). Found
+    // reducing `dEQP-VK.graphicsfuzz.{cov-loop-condition-filter-some-
+    // iterations-never-discard,stable-mergesort-for-always-false-if-
+    // discard}`: a uniform inner branch, itself derived from `C`'s own
+    // uniform induction variable, gates whether a later genuinely
+    // divergent discard check runs *this* iteration at all; its skip arm
+    // rejoins downstream of that check's own `StayInLoop` continuation
+    // and loops back around to `C`'s header on a later iteration, which
+    // this walk previously treated as an ordinary "already visited"
+    // diamond merge instead of a backedge that bypasses `To` entirely --
+    // silently producing invalid IR once the caller trusted `To`'s own
+    // mask-propagation values as unconditionally live at the merge.
+    if (Cur == CI.getHeader(C) && Cur != From)
+      return std::nullopt;
     if (!Visited.insert(Cur).second)
       continue; // Already queued/visited via another arm.
     if (!CI.contains(C, Cur))
