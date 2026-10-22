@@ -129785,3 +129785,111 @@ No feature/extension inventory update needed -- no code change this session.
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not a quick fix.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(k)` deepened -- "stuck register" re-attributed to a mask-sync suspect, no fix landed
+
+**Next action (under two minutes)**: open `/tmp/env6c2k/module2.ll` and
+`/tmp/env6c2k/module2.s`, find the `addv`/`cmlt` sequence feeding `d13`
+around line 625-665 of `module2.s`, and trace it back to its IR source in
+`module2.ll` -- that's the loop-continuation mask. Compare it against the
+IR source of `w23`'s mask (the per-variable `select`/`csel` gate). This is
+the single next investigative step, already scoped.
+
+## State: still investigating, no fix yet (2nd session on this bug)
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan
+   Device` at start and end of session (standing requirement).
+2. Picked up `ENV6(c)(2)(k)` from last session's handoff: last session
+   found a register (`w21`) that looked "pinned" forever via live `gdb`
+   sampling, and called it the loop's induction variable.
+3. This session found that attribution was **wrong** -- `w21` is a
+   loop-invariant bound hoisted once into the preheader, not the
+   induction variable. Here's how, step by step:
+   - Discovered `FEME_DUMP_IR_POSTOPT=1` -- an env var that dumps the
+     *exact* IR fed to the backend (after runtime linking + full
+     optimization), more trustworthy than the `FEME_DUMP_IR_PRELINEARIZE=1`
+     dump used last session.
+   - Extracted a standalone fragment-shader module from that dump
+     (`/tmp/env6c2k/module2.ll`) -- confirmed it compiles via `llc -O2`
+     with **no `deqp-vk` needed at all** for the static half of this
+     investigation. This is a genuinely reusable artifact.
+   - Confirmed the FeMe JIT's `TargetMachine` uses the same empty
+     CPU/features as plain `llc` (checked
+     `feme/lib/Target/TargetMachineBackend.cpp`) -- so this static
+     compile is a faithful stand-in for the real JIT output, not a rough
+     approximation.
+   - Compiled `module2.ll` to MIR (`-print-after=greedy`) and final asm
+     (`module2.s`). Both show the induction variable's own update
+     (`add w27, w21, #1`) **correctly gated** by `csel w21, w27, w21, ne`
+     at the loop's back-edge block -- a sound, textbook masked-execution
+     pattern, not a dropped copy.
+4. **New hypothesis, more precise than last session's**: the freeze is
+   *by design* once a lane's own mask bit (`w23`) clears -- that's correct
+   masked-execution semantics. The actual bug candidate is that the
+   **loop's own continuation test** (`cbnz x8, .LBB0_8`, fed by a
+   separately-recomputed vector compare `d13`) doesn't observe that this
+   lane already finished, so the loop re-executes forever instead of
+   exiting. This points at `Linearize`/`SIMDize` (IR-generation level, not
+   CodeGen/register-allocation as last session guessed) -- specifically,
+   two masks that should be the same condition but apparently aren't
+   unified.
+5. Did **not** get as far as tracing `d13`'s and `w23`'s IR origins back to
+   specific `Linearize`/`SIMDize` instructions -- that's the next step,
+   already scoped above.
+
+## Why this matters (even with no fix): corrects last session's target
+
+Last session's handoff said "single-step from `bb47`'s own `add`
+instruction forward to find which CodeGen pass drops the copy." That would
+have been a dead end -- the copy isn't dropped, the `csel` is sound. This
+session's handoff instead points at a specific pair of masks to compare in
+`Linearize`/`SIMDize`-emitted IR, which is a much narrower, more
+actionable target for whoever picks this up next.
+
+## No code change, no build, no corpus re-run this session
+
+Pure investigation. `check-feme` was not rebuilt (nothing to verify).
+Corpus was not re-run (no fix landed, baseline unchanged from `L516`/`L517`:
+13 Pass / 91 Fail / 1 pre-existing flake, this case still a runtime hang).
+
+## Commits (3, in order)
+
+1. `Roadmap.md` + `VulkanCTSReport.md` (`L518`): `ENV6(c)(2)(k)` entry
+   rewritten with the corrected attribution and the new, narrower
+   hypothesis and next step. Still open, not struck through.
+2. `.instructions.md`: new entry on `FEME_DUMP_IR_POSTOPT=1` vs.
+   `FEME_DUMP_IR_PRELINEARIZE=1`, the dump-file module-slicing gotcha, the
+   `llc`-equals-JIT-target-config confirmation, and the general lesson
+   about not assuming a "stuck" register is the induction variable just
+   because a comparison looks superficially right.
+3. This `agent_thoughts.md` entry.
+
+No feature/extension inventory update needed -- no code change this
+session.
+
+## Next steps
+
+**Fastest next concrete action** (under two minutes): open
+`/tmp/env6c2k/module2.s`, locate the `addv`/`cmlt` sequence around lines
+625-665 that produces `d13` (the loop-continuation mask), and cross-
+reference it against `/tmp/env6c2k/module2.ll` to find the IR instruction
+it lowers from.
+
+1. **Continue `ENV6(c)(2)(k)`** (needs its own session, now with a
+   narrow, specific target): trace `d13`'s IR origin vs. `w23`'s IR
+   origin in `module2.ll`; find where `Linearize`/`SIMDize` should unify
+   the per-variable "still active" condition with the loop's own exit
+   condition for this nested-loop shape but doesn't. Once found, fix and
+   add an IR-level lit-test regression (reduce from `module2.ll`, which is
+   already standalone-compilable -- no end-to-end execution test needed
+   for the fix itself, though the real `deqp-vk` case should still be
+   re-run to confirm the hang is gone).
+2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render
+   bucket, not discard-centric. Investigate fresh.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, not a quick fix.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
+   unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
