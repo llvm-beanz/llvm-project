@@ -2776,7 +2776,48 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
     }
 
     if (auto *UBr = dyn_cast<UncondBrInst>(Term)) {
-      Cur = UBr->getSuccessor(0);
+      BasicBlock *Succ = UBr->getSuccessor(0);
+      // Roadmap ENV6(c)(2)(h): an ordinary fallthrough successor reached
+      // this way must be owned *solely* by this walk -- i.e. `Cur` must
+      // be its one and only predecessor -- unless it is `End` itself,
+      // whose own predecessor set is the caller's concern (see
+      // `R->hasNPredecessors(2)` a few lines below, or, for the
+      // whole-function entry walk, simply unconstrained), or it is a
+      // cycle header: a loop preheader's own fallthrough into its
+      // header legitimately lands on a block with a *second*
+      // predecessor -- the loop's own back edge -- which is not this
+      // shape's concern at all (the cycle-boundary check above, and
+      // `LoopLinearizer` itself, already own that edge). A nested
+      // `CondBr`'s own reconvergence point already gets an equivalent
+      // check (`R->hasNPredecessors(2)`, just below) at the moment it is
+      // computed, but that check only ever looks at a reconvergence
+      // point *this* walk itself discovers -- it says nothing about a
+      // plain pass-through block silently shared with a *different*,
+      // sibling diamond this walk has no visibility into at all. Found
+      // via `stable-mergesort-for-always-false-if-discard`: an inner,
+      // divergent diamond (handled in isolation by
+      // `LoopLinearizer::linearizeCycle`'s own loop-body fixed-point
+      // scan, long before the uniform diamond it is actually nested
+      // inside is ever itself validated) walked straight through a
+      // block that was, unbeknownst to it, also the real reconvergence
+      // point of that enclosing uniform diamond's *other* arm --
+      // producing `select`s at the inner diamond's own (too-distant)
+      // merge point built from values that do not dominate a path
+      // reaching that merge point via the sibling arm, which never
+      // executes the inner diamond's branch at all. Rejecting here
+      // (recognized, not silently mis-flattened) gives a clean
+      // diagnostic instead of malformed IR.
+      if (Succ != End && !isCycleHeader(Succ) && !Succ->hasNPredecessors(1)) {
+        if (!Quiet)
+          diagnose(F, "block '" + Succ->getName() +
+                          "' is reached both by this region's own "
+                          "fallthrough and by a predecessor outside it "
+                          "(a shared merge point this milestone does not "
+                          "yet generalize to); unsupported (roadmap "
+                          "milestone 6 deviation, ENV6(c)(2)(h))");
+        return false;
+      }
+      Cur = Succ;
       continue;
     }
 
