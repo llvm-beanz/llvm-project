@@ -69,29 +69,27 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-Pick any one of these to start the next session -- all are independent, no
-shared setup:
+**Fastest next concrete action** (under two minutes): open
+`/tmp/env6c2k/module2.s`, locate the `addv`/`cmlt` sequence around lines
+625-665 that produces `d13` (the loop-continuation mask), and cross-
+reference it against `/tmp/env6c2k/module2.ll` to find the IR instruction
+it lowers from.
 
-1. **`ENV6(c)(2)(k)`** (new this session, needs its own session): the same
-   case's own runtime hang (`vkWaitForFences Timeout`) plus the separate
-   `QueueExecutor` shutdown-hang robustness gap. Start with a **non-`deqp-vk`**
-   standalone repro (e.g. a CPU-side interpreter trace or manual step-through of
-   the generated masked-loop code) to avoid triggering the un-killable process
-   hang while investigating. The shutdown-hang itself may be worth fixing
-   independently of root-causing the shader's own infinite loop -- it's a
-   general robustness gap, not specific to this one case.
-2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket,
-   not discard-centric. Investigate fresh -- these haven't been looked at since
-   the original triage pass.
+1. **Continue `ENV6(c)(2)(k)`** (needs its own session, now with a
+   narrow, specific target): trace `d13`'s IR origin vs. `w23`'s IR
+   origin in `module2.ll`; find where `Linearize`/`SIMDize` should unify
+   the per-variable "still active" condition with the loop's own exit
+   condition for this nested-loop shape but doesn't. Once found, fix and
+   add an IR-level lit-test regression (reduce from `module2.ll`, which is
+   already standalone-compilable -- no end-to-end execution test needed
+   for the fix itself, though the real `deqp-vk` case should still be
+   re-run to confirm the hang is gone).
+2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render
+   bucket, not discard-centric. Investigate fresh.
 3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
-4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
-   architecture efforts, not a quick fix.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, not a quick fix.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
    unchanged for many sessions.
-6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
-   for many sessions.
-
-**Fastest next concrete action**: open `feme/docs/Roadmap.md` at
-`ENV6(c)(2)(k)`, then try to get a standalone (non-`deqp-vk`) repro of the
-runtime hang going -- under two minutes to start, but budget the hang
-investigation itself as its own session.
+6. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
