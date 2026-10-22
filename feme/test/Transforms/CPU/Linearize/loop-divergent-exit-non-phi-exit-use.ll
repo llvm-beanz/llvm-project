@@ -25,13 +25,24 @@
 ; group's single longest-running lane's own stale value for everyone
 ; else instead (confirmed via direct runtime comparison against a
 ; `numpy.float32` reference of Clang's own `Basic/Mandelbrot.test`).
+;
+; Roadmap ENV6(c)(2)(k): `%sq.lcssa.frozen`'s own `select` now builds
+; immediately after `%sq` itself, in `header`, rather than at `latch`'s
+; terminator -- `Template`/`I`/`LCSSAPhi` are all `header`-resident, so
+; building it there instead makes it valid to reuse at *any* point in
+; this cycle's body, not just at `latch`, fixing a separate stale-LCSSA
+; hang on shapes where a `BodyRegion`-bypass block has its own direct,
+; divergent, `latch`-bypassing edge to `ExitBlock` (see
+; `loop-divergent-exit-non-phi-exit-use-bypass.ll`). This reduction has
+; no such bypass block, so the relocation is purely a (harmless, still
+; correct) placement change, not a semantic one.
 
 ; CHECK-LABEL: define void @main(
 ; CHECK: header:
 ; CHECK: %sq.lcssa = phi i32 [ poison, %entry ], [ %sq.lcssa.frozen, %latch ]
 ; CHECK: %sq = mul i32 %i, %i
-; CHECK: latch:
 ; CHECK: %sq.lcssa.frozen = select i1 %active.live, i32 %sq, i32 %sq.lcssa
+; CHECK: latch:
 ; CHECK: exit:
 ; CHECK: %sq.lcssa.exit = phi i32 [ %sq.lcssa.frozen, %latch ]
 ; CHECK-NEXT: store i32 %sq.lcssa.exit, ptr %out

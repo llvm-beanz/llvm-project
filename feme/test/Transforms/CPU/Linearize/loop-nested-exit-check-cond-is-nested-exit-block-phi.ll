@@ -25,10 +25,24 @@
 ; instruction, so falling back to `getFirstNonPHIIt()` (already skipping
 ; every phi, `Cond` and any sibling alike) is exactly equivalent whenever
 ; `Cond` itself is one, and keeps every phi correctly grouped.
+;
+; Roadmap ENV6(c)(2)(k): this reduction's own second phi (`%.1.lcssa.exit`
+; in the original full shader, materializing the inner loop's own
+; loop-carried `%.1` at this exact `loop.exit.guard1` block) is gone
+; entirely as of that fix. `.Flow5_crit_edge`/`.Flow6_crit_edge` are each
+; `BodyRegion`-bypass edges with their own direct, `Latch`-bypassing path
+; to this `ExitBlock` (the very shape `ENV6(c)(2)(k)`'s own hang came
+; from); `freezeLoopCarriedValues`'s `ShadowExitFixup` now reuses the
+; single, fully Header-resident-dominating `%.1.lcssa.frozen` value for
+; every one of this block's incoming edges instead of falling back to a
+; stale, un-frozen value on the non-`Latch` ones, so all three incoming
+; values here are now identical and this pass's own generic phi-folding
+; collapses the phi away rather than materializing it at all -- a
+; correctness fix, not a regression in this file's own, separate
+; phi-grouping fix above (still exercised by the one remaining `phi i1`).
 
 ; CHECK-LABEL: loop.exit.guard1:
 ; CHECK-NEXT: = phi i1
-; CHECK-NEXT: = phi i32
 ; CHECK-NOT: phi
 ; CHECK: br label
 

@@ -126,6 +126,19 @@ attributes #1 = { nounwind willreturn memory(argmem: read) }
 ; `DiamondFlattener::run()`'s early whole-function walk, builds this
 ; loop's masking).
 ; CHECK: %active.live = phi i1 [ true, {{.*}} ], [ %active.check.live, {{.*}} ]
+; Roadmap ENV6(c)(2)(k): `%14` (the loop-carried `%.08` phi's own
+; shufflevector, read post-loop at block `17` by direct dominance, not
+; through its own phi) gets its own `freezeLoopCarriedValues`-
+; materialized LCSSA phi + entering-mask freeze, same as any other
+; value this cycle's masking must keep correct for a lane exiting this
+; round. As of that fix, the freeze's own `select` builds immediately
+; after `%14` itself (both are block-`12`-resident), not at this loop's
+; own latch-equivalent terminator -- harmless to this reduction's own
+; correctness (neither block `17`'s lone caller nor this file's own
+; `CHECK`s read `%14` through a divergent path), but it does move this
+; `select`'s own position earlier in the block.
+; CHECK: %14 = shufflevector <4 x float> %13, <4 x float> poison,
+; CHECK-NEXT: %.lcssa.frozen = select i1 %active.live, <4 x float> %14, <4 x float> %.lcssa
 ; Header's own internal if/else's resource load is now masked by
 ; `active.live` (narrowed once the poison-placeholder fix lets masking
 ; see this phi as genuinely non-constant) ...
@@ -144,13 +157,4 @@ attributes #1 = { nounwind willreturn memory(argmem: read) }
 ; CHECK-NOT: %live.merge
 ; CHECK-NOT: %sideeffect.merge
 ; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.check.live)
-; Roadmap ENV3(c)(10): `%14` (the loop-carried `%.08` phi's own
-; shufflevector, read post-loop at block `17` by direct dominance, not
-; through its own phi) now gets its own `freezeLoopCarriedValues`-
-; materialized LCSSA phi + entering-mask freeze, same as any other
-; value this cycle's masking must keep correct for a lane exiting this
-; round -- harmless to this reduction's own correctness (neither block
-; `17`'s lone caller nor this file's own `CHECK`s read `%14` through a
-; divergent path), but it does insert this `select` here.
-; CHECK-NEXT: %.lcssa.frozen = select i1 %active.live, <4 x float> %14, <4 x float> %.lcssa
 ; CHECK-NEXT: br i1 %loop.any.active, label %12, label %17
