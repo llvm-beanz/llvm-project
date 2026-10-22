@@ -128805,3 +128805,34 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
 4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
 5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
 6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(b)(2) disambiguated -- nonuniform_interpolant_indexing fixed, centroid_qualifier_inside_primitive scoped (L502)
+
+**Next action (under two minutes):** open `feme/docs/Roadmap.md` at `ENV6(b)(1)` (`emulate_msrtss`, 8 cases) -- the next-smallest remaining `ENV6(b)` cluster, now that `ENV6(b)(2)`'s compile-time half is fixed and its rendering half needs a dedicated multi-session effort of its own.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (confirmed, start and end of session).
+
+## What got done
+
+1. **Split a bundled 12-case cluster into two unrelated bugs by reproducing each sub-case individually**, instead of trusting the prior sessions' single "confirmed genuine rendering-correctness bug" label for the whole cluster. `nonuniform_interpolant_indexing` (3 cases) turned out to be a **compile-time** `feme-cpu-simdize` abort (`unsupported divergent call`), not a render mismatch at all -- a materially different, and much more tractable, bug class than `centroid_qualifier_inside_primitive` (9 cases), which really is a render-time `Fail (Failed)`.
+2. **Root-caused `nonuniform_interpolant_indexing` via `FEME_DUMP_IR_PRENORM`.** `interpolateAtCentroid(arr[dynamicIdx].y)`-shaped calls produce a pair of nested GEPs that MLIR's own GEP-to-LLVM translation always byte-flattens: an inner dynamic-row-select GEP wrapped by an *outer* **constant**-offset GEP selecting the `.y` lane. `CanonicalizeStage.cpp` already handled the reverse nesting (dynamic lane into a constant-offset prefix) but had no path for this one.
+3. **Fixed it with a new shared `peelConstantComponentGEP` helper**, used from both `resolveStageIOAccess` (actual conversion) and `getStageIOGlobal` (the separate discovery pass that populates `ElementIDs`) -- the second use was only discovered necessary after a standalone lit test (where the array global has *no other* recognized reference to register it independently) revealed the first fix alone wasn't sufficient in general, even though it happened to be sufficient for the real CTS shader (which has other already-recognized accesses to the same global).
+4. **Verified against real `deqp-vk`:** all 3 cases now pass. Also ran the *entire* `dEQP-VK.pipeline.*.multisample_interpolation.*` group (1699 cases across every construction type) post-fix: exactly the expected 9 `centroid_qualifier_inside_primitive` failures remain, 0 unexpected regressions.
+5. **Root-caused but deliberately did not fix `centroid_qualifier_inside_primitive`.** `FragmentWrapper.cpp`'s `InterpolateAtCentroid` case always samples at the plain pixel center; an existing code comment already flags this as a known simplification that's only correct when every covered sample's own weighted average happens to equal the pixel center -- untrue on a triangle edge, exactly what this test checks. A correct fix needs a per-quad coverage mask threaded into `FemeFragmentPrimitive`/`FragmentWrapper.cpp`, a runtime-ABI change with its own new tests -- the same shape of multi-session deferral as `ENV6(b)(1)`'s `emulate_msrtss` finding last session, so I scoped it in the roadmap instead of rushing it.
+6. **`check-feme`: 3852 Passed, 4 unsupported, 0 regressions.** Code change (fix + new lit test) committed separately from the docs update, per standing instructions.
+
+## Wins
+
+- Caught a mislabeled failure bucket early: without reproducing each of the 12 cases individually, this session would likely have spent its whole budget looking for a rendering bug in the wrong 3 cases (which were actually a compiler abort).
+- The `getStageIOGlobal` vs `resolveStageIOAccess` duplicate-discovery-path gotcha (two independent code paths needing the identical peeling fix, invisible until a standalone lit test exercised the "global's only reference is this one shape" case) is now documented in code comments and in this file, so a future session hitting a similar "my fix works on the real repro but not my new lit test" surprise in this pass has a precedent to recognize faster.
+- Full `multisample_interpolation` group re-run (not just the 3 targeted cases) confirms the fix is clean with no collateral damage, and gives an exact, verified residual count (9) for the next session's starting point.
+
+## State for next session
+
+`ENV6`'s remaining untriaged clusters, in priority order:
+1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- root-caused in an earlier session (`VK_ATTACHMENT_UNUSED` subpass-input descriptor fallback missing), not yet fixed. Scoped in `Roadmap.md`: (a) thread the descriptor-set image handle through `feme.stage.subpass.load` as a new operand, (b) add a CPU-runtime fallback read when the live-attachment heap slot for a requested index is unmapped, (c) new lowering-phase and runtime-phase unit tests, (d) re-verify the whole existing subpass-input CTS corpus for regressions. **Best next target** of the two scoped-but-unstarted `ENV6(b)` gaps -- slightly smaller (8 vs 9 cases) and already has a fuller implementation sketch from last session.
+2. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) -- root-caused this session (plain-pixel-center-instead-of-coverage-weighted-centroid), not yet fixed. Needs a per-quad coverage mask threaded into `FemeFragmentPrimitive`/`FragmentWrapper.cpp`'s `InterpolateAtCentroid` case, a runtime-ABI change with new lowering-phase and runtime-phase tests, plus re-verification of the rest of the centroid-qualifier/`multisample_interpolation` corpus. Multi-session effort; do not rush it into one sitting.
+3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions, likely a long tail of distinct small bugs.
+4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
+5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
+6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
