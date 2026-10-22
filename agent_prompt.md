@@ -69,14 +69,14 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. `ENV6(c)(2)(e)` (2 cases): the relay/exit-check matcher's own validation
-   needs to confirm a candidate check block is unconditionally reached every
-   iteration before admitting it as a relay-chain hop -- likely touches
-   `matchExitCheckWithRelay`/`recoverRelayExitCheck`, not
-   `freezeRelayChainExitValues`. Reproducers already at
-   `/tmp/relay_frozen2/repro.ll` and `/tmp/relay_frozen2/invalid.log` -- start
-   there instead of re-deriving. Budget as its own session; this looked more
-   structural than the last two relay fixes.
+1. `ENV6(c)(2)(g)` (2 cases, new): design and implement real support for a
+   uniform inner conditional gating a divergent per-iteration check. Two
+   candidate directions (not yet chosen between): (a) generalize the
+   `ChainGate`/`L377(a)` bypass-diamond fix's reconnect-point recognition from
+   exactly `CheckExit->StayInLoop` to anywhere in the uniform post-check region,
+   inserting merge phis for the mask-propagation values at the real reconnect
+   point; (b) a new, separate recognition path for this specific shape. Budget
+   as its own session -- do not rush, same caution as `emulate_msrtss`.
 2. `ENV6(c)(2)(f)` (1 case,
    `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
    still an unexplained non-dominance `Fail`; short, standalone investigation,
