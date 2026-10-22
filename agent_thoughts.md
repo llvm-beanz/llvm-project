@@ -128995,3 +128995,61 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
    not started, lowest priority.
 5. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(b)(2)(a) closed -- centroid_qualifier_inside_primitive fixed, closing out all of ENV6(b) (L506)
+
+**Done this session**: `ENV6(b)(2)(a)` `centroid_qualifier_inside_primitive`
+(9 cases) fixed. All 181 `ENV6(b)` `pipeline.*` cases are now closed.
+Real CTS sweep (247 cases): 0 unexpected failures (127 Pass, 120
+NotSupported). `check-feme`: 3862 Passed, 4 Unsupported, 0 regressions.
+
+## What actually happened (3 rounds, not 1)
+
+Scoped last session as "needs a new runtime-ABI coverage-mask operand."
+Wrong guess -- the ABI already had what was needed. The real work was
+finding three separate things wrong, one at a time, each only visible
+after fixing the last:
+
+1. **Round 1**: `FragmentWrapper.cpp`'s `InterpolateAtCentroid` builtin
+   lowering used the plain pixel center. Fixed to average actually-covered
+   samples' offsets using the existing `Coverage[4]` mask. Committed:
+   `2b5840f9cdd2`, `48064597916f`, `1e865c7b939d`.
+2. **Round 2**: fixing round 1 broke a *different* 30 CTS cases
+   (`centroid_interpolation_consistency`) that were passing before.
+   Found a second, totally separate centroid implementation in
+   `Executor.cpp` (an ordinary `centroid`-qualified varying's own
+   rasterizer code path, not compiled shader IR) that was deliberately
+   kept in pixel-center-only lockstep with the first. Fixed it to match.
+   Committed: `d12878bd07e0`.
+3. **Round 3**: still 30 failures after round 2. Root cause: per-sample
+   shading (forced by an unrelated `sample`-qualified varying in the same
+   shader) narrows `Coverage[4]` to one bit per pass -- wrong for a
+   centroid, which needs the whole pixel's coverage. Added a new
+   `FullCoverage[4]` ABI field that's never narrowed this way. Committed:
+   `4877a4bca803`.
+
+Each round had its own regression test; round 3's test was confirmed to
+fail against the pre-fix code before being left in its passing state.
+
+## Codified so this doesn't get rediscovered from scratch
+
+Added to `feme/.instructions.md`: the two-centroid-implementations trap,
+and "a narrowed-per-pass ABI field isn't automatically safe for every
+reader of that struct."
+
+## Next steps, in priority order
+
+1. `ENV6(c)`: `graphicsfuzz` (106 cases) -- untriaged, likely a long tail
+   of distinct small bugs. Now the single largest untriaged cluster.
+   Start by running the full 106-case list through `run_vulkan_cts.py`
+   and clustering failures by shared QPA diagnostic text before picking
+   a first reproducer -- don't assume they share one root cause.
+2. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader`
+   (132 cases combined) -- unchanged; check
+   `memory_model.{write_after_read,message_passing}` (52) and
+   `tessellation.invariance` (26) for a shared cause first, since those
+   two alone are over half this bucket.
+3. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped,
+   not started, lowest priority.
+4. (low priority, unchanged for many sessions) Upstream the 3
+   `offload-test-suite` patches if push access ever becomes available.
