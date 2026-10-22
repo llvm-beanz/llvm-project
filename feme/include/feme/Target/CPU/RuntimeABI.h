@@ -1069,8 +1069,29 @@ struct FemeFragmentInvocation {
   uint32_t PrimitiveID[4];
   /// Sample index per lane.
   uint32_t SampleIndex[4];
-  /// Coverage mask per lane.
+  /// Coverage mask per lane: the whole-pixel sample-coverage bitmask,
+  /// narrowed to a single live bit for the current pass whenever
+  /// per-sample shading is active (matching `gl_SampleMaskIn`/
+  /// `SV_Coverage`'s own per-sample-shaded semantics). `FullCoverage`
+  /// below carries the *un*-narrowed whole-pixel mask for the one
+  /// consumer that must never see that narrowing.
   uint32_t Coverage[4];
+  /// (Roadmap ENV6(b)(2)(a)) This quad's whole-pixel sample-coverage
+  /// bitmask per lane, identical to `Coverage` above except *never*
+  /// narrowed to a single bit under per-sample shading. A true
+  /// coverage-weighted `InterpolateAtCentroid` must average every
+  /// sample actually covered by this pixel's primitive, not just
+  /// whichever one sample the current per-sample-shading pass happens to
+  /// be processing -- per the GLSL/SPIR-V spec, a `centroid`/
+  /// `interpolateAtCentroid` evaluation point must stay fixed across
+  /// every sample within one pixel even under per-sample shading,
+  /// mirroring `Executor.cpp`'s own push-model `centroid`-qualified
+  /// varying path (see that file's own `CentroidB0/1/2` comment), which
+  /// this field exists so the pull-model `interpolateAtCentroid()`
+  /// builtin can agree with bit-for-bit
+  /// (`centroid_interpolation_consistency` checks for exactly that
+  /// agreement).
+  uint32_t FullCoverage[4];
   /// Front-face flag per lane: 0 for back-facing, 1 for front-facing.
   uint32_t IsFrontFace[4];
   /// (Roadmap H3a) `gl_ViewportIndex` read back as a fragment-shader input:

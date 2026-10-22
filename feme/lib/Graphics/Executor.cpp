@@ -4153,6 +4153,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               Inv.PrimitiveID[Lane] = Tri.PrimitiveID;
               Inv.SampleIndex[Lane] = 0;
               Inv.Coverage[Lane] = Quad.SampleMask[Lane];
+              // (Roadmap ENV6(b)(2)(a)) `FullCoverage` always starts
+              // identical to `Coverage` above; unlike `Coverage`, it is
+              // never subsequently narrowed to a single bit by the
+              // per-sample-shading pass loop below (see
+              // `PassInv.Coverage[Lane] &= SampleBit;` and this field's
+              // own doc comment in `RuntimeABI.h`).
+              Inv.FullCoverage[Lane] = Quad.SampleMask[Lane];
               // (roadmap L114) Default (non-per-sample-shaded) pass:
               // sample 0's own real offset, matching `SampleIndex`'s own
               // default of 0 above -- overwritten with the real
@@ -4209,6 +4216,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 }
                 Quad.SampleMask[Lane] = Survived;
                 Inv.Coverage[Lane] = Survived;
+                // (Roadmap ENV6(b)(2)(a)) Early depth/stencil narrows
+                // real sample coverage (a sample that failed the test is
+                // genuinely not covered by a visible primitive at this
+                // fragment at all), unlike per-sample-shading's pass-by-
+                // pass narrowing below -- so `FullCoverage` must track
+                // this reduction too, keeping `interpolateAtCentroid()`
+                // consistent with `Executor.cpp`'s own push-model
+                // `centroid`-qualified varying path, which reads
+                // `Quad.SampleMask[Lane]` (also reduced to `Survived`
+                // above) directly.
+                Inv.FullCoverage[Lane] = Survived;
                 if (Survived == 0)
                   Quad.Coverage &= ~(1u << Lane);
               }

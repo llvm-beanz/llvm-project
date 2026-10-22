@@ -74,19 +74,23 @@ enum FragmentInvocationField : unsigned {
   FragmentInvocationFieldPrimitiveID = 1,
   FragmentInvocationFieldSampleIndex = 2,
   FragmentInvocationFieldCoverage = 3,
-  FragmentInvocationFieldIsFrontFace = 4,
-  FragmentInvocationFieldViewportIndex = 5,
-  FragmentInvocationFieldRenderTargetArrayIndex = 6,
-  FragmentInvocationFieldViewIndex = 7,
+  // (Roadmap ENV6(b)(2)(a)) Inserted between `Coverage` and
+  // `IsFrontFace`, mirroring `FemeFragmentInvocation`'s own field order
+  // exactly.
+  FragmentInvocationFieldFullCoverage = 4,
+  FragmentInvocationFieldIsFrontFace = 5,
+  FragmentInvocationFieldViewportIndex = 6,
+  FragmentInvocationFieldRenderTargetArrayIndex = 7,
+  FragmentInvocationFieldViewIndex = 8,
   // (Roadmap L114) Inserted between `ViewIndex` and `LiveMask` to mirror
   // `FemeFragmentInvocation`'s own field order exactly.
-  FragmentInvocationFieldSamplePosition = 8,
+  FragmentInvocationFieldSamplePosition = 9,
   // (Roadmap L280) Inserted between `SamplePosition` and `LiveMask`,
   // mirroring `FemeFragmentInvocation`'s own field order exactly.
-  FragmentInvocationFieldPointCoord = 9,
-  FragmentInvocationFieldLiveMask = 10,
-  FragmentInvocationFieldSideEffectMask = 11,
-  FragmentInvocationFieldReserved = 12,
+  FragmentInvocationFieldPointCoord = 10,
+  FragmentInvocationFieldLiveMask = 11,
+  FragmentInvocationFieldSideEffectMask = 12,
+  FragmentInvocationFieldReserved = 13,
 };
 
 enum FragmentResultField : unsigned {
@@ -271,8 +275,8 @@ inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *PointCoordTy =
       llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 2), 4);
   return llvm::StructType::get(
-      Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4, I32x4, I32x4, I32Ty,
-            SamplePositionTy, PointCoordTy, I32Ty, I32Ty,
+      Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4, I32x4, I32x4, I32x4,
+            I32Ty, SamplePositionTy, PointCoordTy, I32Ty, I32Ty,
             llvm::ArrayType::get(I32Ty, 3)});
 }
 

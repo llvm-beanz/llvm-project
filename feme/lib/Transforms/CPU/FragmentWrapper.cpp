@@ -482,17 +482,26 @@ Value *loadFragmentPositionComponent(IRBuilder<> &Builder,
                                  InvocationIndex, Lane);
 }
 
-/// (Roadmap L115(b) follow-up) Reads \p Lane's own `Coverage` bitmask --
-/// mirrors `loadFragmentPositionComponent` immediately above exactly,
-/// just against `SystemValue = Coverage` (already a plain shader-visible
-/// system value of its own, `gl_SampleMaskIn`/`SV_Coverage`, so this
-/// needs no dedicated `loadFragmentSystemValue` case of its own either).
+/// (Roadmap ENV6(b)(2)(a)) Reads \p Lane's own whole-pixel, never-per-
+/// sample-narrowed `FullCoverage` bitmask (see that field's own doc
+/// comment in `RuntimeABI.h` for why `InterpolateAtCentroid` needs this
+/// instead of the ordinary, sometimes-narrowed `Coverage` system value --
+/// unlike `Coverage`, `FullCoverage` is not itself a shader-visible system
+/// value, so this reads the `FemeFragmentInvocation` field directly rather
+/// than going through `loadFragmentSystemValue`'s `SignatureSystemValue`
+/// dispatch).
 Value *loadFragmentCoverageMask(IRBuilder<> &Builder, Value *InvocationsArg,
                                 Value *InvocationIndex, unsigned Lane) {
-  SignatureElement CoverageElt;
-  CoverageElt.SystemValue = SignatureSystemValue::Coverage;
-  return loadFragmentSystemValue(Builder, CoverageElt, InvocationsArg,
-                                 InvocationIndex, Lane);
+  StructType *InvocationTy = getFragmentInvocationType(Builder.getContext());
+  Value *InvocationPtr =
+      getFragmentInvocationPtr(Builder, InvocationsArg, InvocationIndex);
+  unsigned QuadLane = Lane & 3u;
+  Value *Ptr = Builder.CreateStructGEP(
+      InvocationTy, InvocationPtr, FragmentInvocationFieldFullCoverage);
+  Value *LanePtr = Builder.CreateInBoundsGEP(
+      ArrayType::get(Builder.getInt32Ty(), 4), Ptr,
+      {Builder.getInt32(0), Builder.getInt32(QuadLane)});
+  return Builder.CreateLoad(Builder.getInt32Ty(), LanePtr);
 }
 
 /// Roadmap F8a: lowers `feme.stage.subpass.load(attachment_index,
@@ -777,14 +786,14 @@ Value *buildEdgeFn(IRBuilder<> &Builder, Value *Ax, Value *Ay, Value *Bx,
   return Builder.CreateFSub(T1, T2);
 }
 
-/// (Roadmap L115(b)) Lowers one of the three pull-model interpolation
-/// stage ops (`InterpolateAt{Centroid,Sample,Offset}`) for the whole wave,
-/// mirroring `lowerFragmentInputLoad`'s own per-lane loop shape exactly.
-/// Recomputes barycentric weights at a caller-chosen point (pixel center
-/// plus a shader offset for `AtOffset`; a fixed sample's own table entry
-/// for `AtSample`; the pixel center itself for `AtCentroid` -- see this
-/// function's own `AtCentroid` comment below for why that is a documented
-/// simplification, not yet a true coverage-weighted centroid), then
+/// (Roadmap L115(b), ENV6(b)(2)(a)) Lowers one of the three pull-model
+/// interpolation stage ops (`InterpolateAt{Centroid,Sample,Offset}`) for
+/// the whole wave, mirroring `lowerFragmentInputLoad`'s own per-lane loop
+/// shape exactly. Recomputes barycentric weights at a caller-chosen point
+/// (pixel center plus a shader offset for `AtOffset`; a fixed sample's own
+/// table entry for `AtSample`; a true coverage-weighted centroid -- the
+/// average of every actually-covered sample's own offset -- for
+/// `AtCentroid`, see this function's own `AtCentroid` case below), then
 /// re-runs `Executor.cpp`'s own per-varying interpolation formula
 /// (flat/perspective/non-perspective) against that point's weights and
 /// this primitive's raw per-vertex values in `FEnv.VertexInputs`.

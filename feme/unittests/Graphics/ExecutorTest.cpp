@@ -14006,4 +14006,185 @@ TEST(ExecutorTest,
          "(0.5, which this test's edge sits exactly on)";
 }
 
+/// Roadmap `ENV6(b)(2)(a)` round 3: `InterpolateAtCentroid` must keep
+/// seeing the *whole pixel's* coverage even when a co-present
+/// `Sample`-decorated varying (see `SampleDecoratedVaryingForcesPer
+/// SampleShading` above) forces `PerSampleShading` on -- this is
+/// precisely `dEQP-VK.pipeline.*.multisample_interpolation.centroid_
+/// interpolation_consistency.*`'s own shape (a `sample`-qualified
+/// varying's mere presence forces per-sample re-execution of the *whole*
+/// fragment shader, including an unrelated `interpolateAtCentroid()`
+/// call, which must still agree with the push-model `centroid`-qualified
+/// path's own whole-pixel answer rather than narrowing to whichever
+/// single sample the current per-sample pass happens to be shading).
+///
+/// Reuses `InterpolateAtCentroidAveragesOnlyActuallyCoveredSamplesNot
+/// PixelCenter`'s exact triangle/varying setup (samples 0 and 2 covered,
+/// 1 and 3 not, so the true coverage-weighted centroid is `0.25`, the
+/// plain pixel center `0.5`), adding a second, `Sample`-decorated varying
+/// so every covered sample's own pass re-executes
+/// `InterpolateAtCentroid` independently. Before this fix,
+/// `FemeFragmentInvocation::Coverage` was narrowed to a single sample bit
+/// by each `PerSampleShading` pass before `interpolateAtCentroid()`'s own
+/// lowering read it, so each pass would see only its own one sample as
+/// "covered" -- averaging a single offset with itself, collapsing back to
+/// that one sample's own raw offset (`0.375` for sample 0, `0.125` for
+/// sample 2) instead of the correct, pass-independent `0.25`.
+TEST(ExecutorTest,
+     InterpolateAtCentroidSeesFullPixelCoverageUnderForcedPerSampleShading) {
+  Context Ctx;
+  constexpr uint32_t SampleCount = 4;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 1, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 1, /*Location=*/0),
+      makeElement(4, SignatureDirection::Output, 1, /*Location=*/1)};
+  constexpr char VertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %x = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %x, i32 0)
+      call void @feme.stage.output.store.f32(i32 4, i32 0, i32 0, float %x, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  // Input 0: the plain varying `InterpolateAtCentroid` reads. Input 1: a
+  // second, otherwise-unrelated copy of the *same* underlying data, but
+  // `Sample`-decorated so its mere presence forces `PerSampleShading` --
+  // matching `centroid_interpolation_consistency`'s own two-varyings-of-
+  // one-value shape exactly (see this test's own file comment above).
+  SignatureElement SampleVaryingIn =
+      makeElement(1, SignatureDirection::Input, 1, /*Location=*/1);
+  SampleVaryingIn.Interpolation = SignatureInterpolationMode::PerspectiveSample;
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/0),
+      SampleVaryingIn,
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/0),
+      makeElement(3, SignatureDirection::Output, 1, /*Location=*/1)};
+  constexpr char FragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      %v = call float @feme.stage.interpolate.at.centroid.f32(i32 0, i32 0, i32 0)
+      %s = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %v, i32 0)
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %s, i32 0)
+      ret void
+    }
+    declare float @feme.stage.interpolate.at.centroid.f32(i32, i32, i32)
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  // Same two `R32_FLOAT` attachments as `SampleDecoratedVaryingForcesPer
+  // SampleShading` uses, one per output, with no `sampleShadingEnable`
+  // and no `SampleIndex`/`SamplePosition` system value -- only the
+  // `Sample`-decorated ordinary varying's own `Interpolation` is what
+  // should be forcing per-sample execution.
+  std::vector<AttachmentFormat> AttachFormats = {
+      {cpu::ResourceFormat::R32_FLOAT, 1, 1},
+      {cpu::ResourceFormat::R32_FLOAT, 1, 1}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, SampleCount, std::move(AttachFormats),
+      StencilState{}, std::vector<BlendState>{BlendState{}, BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Same geometry (screen-space vertical edge at `x == 0.5`, samples 0
+  // and 2 covered, 1 and 3 not) as `InterpolateAtCentroidAveragesOnly
+  // ActuallyCoveredSamplesNotPixelCenter` above; see that test's own file
+  // comment for the full derivation.
+  std::array<float, 4 * 4> VertexData = {
+      /*ndcX=*/0.0f, /*ndcY=*/-201.0f, /*ndcZ=*/0.0f, /*x=*/0.5f,
+      /*ndcX=*/0.0f, /*ndcY=*/199.0f, /*ndcZ=*/0.0f, /*x=*/0.5f,
+      /*ndcX=*/-201.0f, /*ndcY=*/-1.0f, /*ndcZ=*/0.0f, /*x=*/-100.0f,
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 16,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  // Read every sample's own raw storage directly (not resolved), exactly
+  // as `InterpolateAtCentroidAveragesOnlyActuallyCoveredSamplesNotPixel
+  // Center` above does, so each covered sample's own independent
+  // per-sample-shading pass result is visible separately.
+  std::array<float, SampleCount> CentroidStorage{};
+  AttachmentView CentroidColor{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(CentroidStorage.data()),
+                      CentroidStorage.size() * sizeof(float)),
+      cpu::ResourceFormat::R32_FLOAT, 1, 1};
+  std::array<float, SampleCount> SampleStorage{};
+  AttachmentView SampleColor{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(SampleStorage.data()),
+                      SampleStorage.size() * sizeof(float)),
+      cpu::ResourceFormat::R32_FLOAT, 1, 1};
+  std::array<AttachmentView, 2> Attachments = {CentroidColor, SampleColor};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 1, 1};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // The `Sample`-decorated varying forced an independent shading pass
+  // for each of the two covered samples (0 and 2) -- confirmed by the
+  // per-sample varying itself genuinely differing between them (it is
+  // *not* expected to equal 0.5 at either, since this triangle's `x`
+  // varying is NOT constant -- it's the same affine formula as the
+  // centroid varying, so at sample 0's own offset (0.375, 0.125) and
+  // sample 2's own offset (0.125, 0.625) the "screen X" identity gives
+  // 0.375 and 0.125 respectively, matching `ExpectedOffsets` in
+  // `SampleDecoratedVaryingForcesPerSampleShading`).
+  EXPECT_FLOAT_EQ(SampleStorage[0], 0.375f) << "sample 0's own real offset";
+  EXPECT_FLOAT_EQ(SampleStorage[2], 0.125f) << "sample 2's own real offset";
+
+  // Both of those independent per-sample passes' own `InterpolateAt
+  // Centroid` must still agree on the *same* whole-pixel answer (0.25,
+  // the average of covered samples 0's and 2's own offsets) -- not each
+  // pass narrowing to its own single sample's offset (which would wrongly
+  // read back 0.375 at sample 0's pass and 0.125 at sample 2's pass,
+  // diverging from each other and from the true centroid).
+  EXPECT_FLOAT_EQ(CentroidStorage[0], 0.25f)
+      << "sample 0's own InterpolateAtCentroid pass must still see the "
+         "whole pixel's coverage, not just itself";
+  EXPECT_FLOAT_EQ(CentroidStorage[2], 0.25f)
+      << "sample 2's own InterpolateAtCentroid pass must still see the "
+         "whole pixel's coverage, not just itself";
+}
+
 } // namespace
