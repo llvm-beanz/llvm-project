@@ -129250,3 +129250,47 @@ Not a dead end -- the design is solid and scoped. But implementing it safely nee
 5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority.
 6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
 7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
+
+# Session: `ENV6(c)(2)(g)` implemented -- 1 of 2 cases now Pass, 1 new bug found (`ENV6(c)(2)(h)`)
+
+**Win**: `dEQP-VK.graphicsfuzz.cov-loop-condition-filter-some-iterations-never-discard` is now **Pass**. Full 106-case `graphicsfuzz` corpus: 10 Pass (up from 9), 0 regressions.
+
+## What happened
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed (start and end of session).
+2. Picked up last session's `ENV6(c)(2)(g)` design (topology confirmed, fix not yet written).
+3. Implemented `LoopLinearizer::recognizeUniformChainGateMergeBypass` + `ChainGateMergeBypass` struct in `Linearize.cpp`: finds the uniform `ChainGate`, both its arms, the real merge block (`ChainBypassRegion ∩ PostRegion`), validates the narrow confirmed shape, folds its blocks into `PreRegion`.
+4. Wired merge-phi insertion into `linearizeCycle`: right after `MasksAfterCheck`/`ExitedViaCheckNext` are computed, built 3 phis at the merge block, redirected every downstream consumer (`Latch` masking, `closeLatch`, relay-restore `select`, `ExitedViaCheck`'s `Latch` edge, `freezeLoopCarriedValues`, `addLatchIncoming`) to use the merged values.
+5. Built `feme-opt` clean on the first try. Ran directly against `/tmp/relay_frozen2/repro.ll` -- **`verifyModule` passed clean, no diagnostic**. Inspected the output IR: exactly the designed merge-phi shape.
+6. Same clean result against the *original*, more complex pre-reduction IR baked into the existing unit test (`LinearizeTest.cpp`'s own test body) -- confirms the fix generalizes slightly beyond the minimal repro, not just overfit to it.
+7. Updated the unit test: renamed `DiagnosesUniformInnerCondGatingDivergentCheckInsteadOfInvalidIR` → `LinearizesUniformInnerCondGatingDivergentCheck`, now asserts successful lowering instead of the old diagnostic. All 669 `FeMeTransformsCPUTests` pass.
+8. `ninja check-feme`: 3865/3869 Passed, 4 Unsupported, 0 Failed, 0 regressions. `clang-format-diff.py` run on the diff before committing.
+9. Committed the fix + test together (1 commit).
+10. Re-confirmed `vulkaninfo`. Rebuilt `feme_vulkan`. Ran both target CTS cases via `run_vulkan_cts.py`: **1 Pass, 1 still Fail** -- but the still-failing one (`stable-mergesort-for-always-false-if-discard`) now fails on a **different** dominance violation (`%live.t214`/`%live.merge218`, naming matches `flatten`'s own divergent-diamond `select` code, not this session's cycle-linearization fix at all).
+11. Captured a standalone reproducer for the new bug: `FEME_DUMP_IR_PRELINEARIZE=1` + `FEME_OPT_DUMP_INVALID=1` on the real case, saved to `/tmp/mergesort_discard_repro/` (`repro.ll`, `invalid.log`). Confirmed it reproduces standalone via `feme-opt --llvm -passes=feme-cpu-linearize`.
+12. Did **not** attempt to fix the new bug this session -- genuinely separate root cause, deserves its own dedicated investigation, not a rushed tack-on.
+13. Ran the full 106-case `graphicsfuzz` corpus via `run_vulkan_cts.py`: 10 Pass / 96 Fail, exactly +1 vs. the known 9-Pass baseline, 0 regressions (confirmed by diffing the full pass/fail name list, not just counts).
+14. Updated `Roadmap.md`: struck through `ENV6(c)(2)(g)` (done, partial -- design fully implemented and working, even though only 1 of its original 2 target cases ended up matching that exact shape), added new `ENV6(c)(2)(h)` entry for the newly-found bug. Own commit.
+15. Added `VulkanCTSReport.md`'s `L512` entry with full fix description, CTS verification, and regression-sweep results. Own commit.
+16. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update needed -- pure compiler-correctness fix, not a feature/extension status change.
+17. Writing this now, about to commit as the final commit of the session.
+
+## Why this counts as "done" even though only 1 of 2 cases pass
+
+The roadmap item's actual scope was "implement real support for [the confirmed] shape" -- that's done, verified working (clean `verifyModule`, correct merge-phi semantics, both the minimal repro and the original full-complexity IR lower cleanly). The second case's continued failure isn't this fix falling short -- it's a second, pre-existing, totally unrelated bug in different code (`flatten`'s divergent-diamond merge) that happened to share a shader with the first bug. Striking through and splitting out a fresh roadmap entry for the new bug is more honest than leaving `ENV6(c)(2)(g)` open for a problem it doesn't actually describe.
+
+## State of `ENV6(c)(2)` now
+
+- **`ENV6(c)(2)(g)`**: ~~done~~ (struck through). Shape implemented, 1 case Pass.
+- **`ENV6(c)(2)(h)`** (new): `stable-mergesort-for-always-false-if-discard`'s second bug, in `flatten`'s own `select`-merge code. Reproducer ready at `/tmp/mergesort_discard_repro/`. Not started.
+- All other `ENV6(c)(2)(*)` sub-items and `ENV6(c)(3)`/`ENV6(d)`/`ENV5(c)(7)(b)`: unchanged, not touched this session.
+
+## Next steps
+
+1. **`ENV6(c)(2)(h)` investigation** (1 case, `stable-mergesort-for-always-false-if-discard`): start at `/tmp/mergesort_discard_repro/repro.ll` + `invalid.log` (already captured, no need to re-derive). Trace `%.inv`'s own definition and the `select`'s own block (`flatten`, `Linearize.cpp` ~line 3339-3363) back through `flatten`'s recursion for this specific shape -- likely a divergent diamond whose `T`/`Fsucc` arms recursively contain further non-trivial control flow (nested loop or another diamond) that relocates `Cond`'s definition or the merge block `R` somewhere `Cond` no longer dominates. Don't assume shared cause with `ENV6(c)(2)(e)`/`(g)` just because all three say "does not dominate all uses" on mask-looking names -- confirmed this is a different function, different code path.
+2. `ENV6(c)(2)(f)` (1 case, `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`): still unexplained, not started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, not discard-centric (confirmed 3 of 7 aren't discard/kill-named).
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error, histogram tolerance), not started.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts.
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
+7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
