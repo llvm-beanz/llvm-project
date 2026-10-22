@@ -482,6 +482,19 @@ Value *loadFragmentPositionComponent(IRBuilder<> &Builder,
                                  InvocationIndex, Lane);
 }
 
+/// (Roadmap L115(b) follow-up) Reads \p Lane's own `Coverage` bitmask --
+/// mirrors `loadFragmentPositionComponent` immediately above exactly,
+/// just against `SystemValue = Coverage` (already a plain shader-visible
+/// system value of its own, `gl_SampleMaskIn`/`SV_Coverage`, so this
+/// needs no dedicated `loadFragmentSystemValue` case of its own either).
+Value *loadFragmentCoverageMask(IRBuilder<> &Builder, Value *InvocationsArg,
+                                Value *InvocationIndex, unsigned Lane) {
+  SignatureElement CoverageElt;
+  CoverageElt.SystemValue = SignatureSystemValue::Coverage;
+  return loadFragmentSystemValue(Builder, CoverageElt, InvocationsArg,
+                                 InvocationIndex, Lane);
+}
+
 /// Roadmap F8a: lowers `feme.stage.subpass.load(attachment_index,
 /// component, sample)` (see `feme::StageOpKind::SubpassLoad`) into a
 /// `feme.cpu.image.load.2d.v4f32`/`.v4i32` call (roadmap L179: whichever
@@ -892,17 +905,67 @@ Value *lowerFragmentInterpolateAt(CallInst &CI, StageOpKind Kind,
           Builder.CreateUnaryIntrinsic(Intrinsic::floor, FragY), OffY);
       break;
     }
-    case StageOpKind::InterpolateAtCentroid:
-      // (Roadmap L115(b) follow-up) A true coverage-weighted centroid
-      // needs this quad's per-sample coverage mask threaded through, not
-      // yet plumbed into `FemeFragmentPrimitive` -- the pixel center is
-      // this implementation's own documented simplification for now
-      // (correct whenever every covered sample's own weighted average
-      // happens to equal the pixel center, e.g. no multisampling, or
-      // full coverage with a symmetric sample pattern).
-      PointX = PixelCenterX;
-      PointY = PixelCenterY;
+    case StageOpKind::InterpolateAtCentroid: {
+      // (Roadmap L115(b) follow-up, fixed) A true coverage-weighted
+      // centroid: average the pixel-relative offsets of every sample
+      // this lane's own live `Coverage` bitmask (`FemeFragmentInvocation
+      // ::Coverage`, `gl_SampleMaskIn`) marks covered, against
+      // `FEnv.SamplePositions`'s table -- `Executor.cpp` now always pads
+      // that table to 8 entries regardless of the pipeline's real
+      // sample count (see its own comment), so unconditionally reading
+      // all 8 slots here is safe: a `Coverage` bit is only ever set for
+      // a real sample, never one of the padding slots beyond the actual
+      // count, so this never actually sums a padding entry's value into
+      // a lane with any real coverage. Falls back to the plain pixel
+      // center when `Coverage` is entirely zero (shouldn't happen for a
+      // live lane, but keeps this well-defined rather than dividing by
+      // zero). This matches the spec's requirement that a `centroid`-
+      // qualified varying be sampled somewhere within both the pixel and
+      // the primitive, even on a partial-coverage (edge) pixel where the
+      // plain pixel center itself can fall outside the primitive -- this
+      // implementation's prior simplification, now replaced.
+      Value *Coverage =
+          loadFragmentCoverageMask(Builder, FEnv.Invocations, InvocationIndex, Lane);
+      Value *SampleBase = Builder.CreateBitCast(FEnv.SamplePositions, PtrTy);
+      Value *Zero = ConstantFP::get(F32Ty, 0.0);
+      Value *SumOffX = Zero, *SumOffY = Zero;
+      Value *CoveredCount = Builder.getInt32(0);
+      for (unsigned S = 0; S != 8; ++S) {
+        Value *BitSet = Builder.CreateTrunc(
+            Builder.CreateLShr(Coverage, Builder.getInt32(S)),
+            Builder.getInt1Ty());
+        Value *SampleOff = Builder.CreateInBoundsGEP(
+            ArrayType::get(F32Ty, 2), SampleBase, Builder.getInt32(S));
+        Value *OffX = Builder.CreateLoad(
+            F32Ty, Builder.CreateInBoundsGEP(ArrayType::get(F32Ty, 2),
+                                             SampleOff,
+                                             {Builder.getInt32(0),
+                                              Builder.getInt32(0)}));
+        Value *OffY = Builder.CreateLoad(
+            F32Ty, Builder.CreateInBoundsGEP(ArrayType::get(F32Ty, 2),
+                                             SampleOff,
+                                             {Builder.getInt32(0),
+                                              Builder.getInt32(1)}));
+        SumOffX =
+            Builder.CreateFAdd(SumOffX, Builder.CreateSelect(BitSet, OffX, Zero));
+        SumOffY =
+            Builder.CreateFAdd(SumOffY, Builder.CreateSelect(BitSet, OffY, Zero));
+        CoveredCount = Builder.CreateAdd(
+            CoveredCount, Builder.CreateZExt(BitSet, Builder.getInt32Ty()));
+      }
+      Value *HasCoverage =
+          Builder.CreateICmpNE(CoveredCount, Builder.getInt32(0));
+      Value *CoveredCountF = Builder.CreateUIToFP(CoveredCount, F32Ty);
+      Value *CentroidX = Builder.CreateFAdd(
+          Builder.CreateUnaryIntrinsic(Intrinsic::floor, FragX),
+          Builder.CreateFDiv(SumOffX, CoveredCountF));
+      Value *CentroidY = Builder.CreateFAdd(
+          Builder.CreateUnaryIntrinsic(Intrinsic::floor, FragY),
+          Builder.CreateFDiv(SumOffY, CoveredCountF));
+      PointX = Builder.CreateSelect(HasCoverage, CentroidX, PixelCenterX);
+      PointY = Builder.CreateSelect(HasCoverage, CentroidY, PixelCenterY);
       break;
+    }
     default:
       llvm_unreachable("not an interpolate-at StageOpKind");
     }

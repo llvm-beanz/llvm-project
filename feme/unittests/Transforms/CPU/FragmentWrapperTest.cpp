@@ -15,6 +15,7 @@
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -741,5 +742,129 @@ TEST(FragmentWrapperTest,
          "direct-depth/-stencil tail-slot collision";
 }
 
+// Roadmap `ENV6(b)(2)(a)`: `lowerFragmentInterpolateAt()`'s `AtCentroid`
+// case previously always used the plain pixel center as the centroid
+// location -- a known-wrong simplification for partial-coverage (edge)
+// pixels, where the pixel center itself can fall outside the primitive
+// even though every actually-covered sample is inside (the real
+// `dEQP-VK.pipeline.multisample_interpolation.centroid_qualifier_inside_
+// primitive` cluster's failure mode). Fixed by computing a true
+// coverage-weighted centroid: average `stage_fragment_sample_positions`'s
+// own per-sample offsets over every sample this lane's own `Coverage`
+// bitmask marks covered, falling back to the pixel center only when
+// `Coverage` is entirely zero. This test only checks the *shape* of the
+// emitted IR -- that the new coverage-counting/averaging code is actually
+// present -- not the exact numeric result, matching this file's own
+// `LowersResolvedSubpassLoadWithIsMappedGatedImageHeapFallback` precedent
+// for a lowering-phase-only regression test; the runtime-phase behavior
+// (`Executor.cpp`'s own padding of `SamplePositions` to 8 entries so this
+// code can safely read every slot) is covered separately by
+// `ExecutorTest.cpp`.
+TEST(FragmentWrapperTest,
+     InterpolateAtCentroidUsesCoverageWeightedAverageNotJustPixelCenter) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ps_main() #0 {
+      %v = call float @feme.stage.interpolate.at.centroid.f32(i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %v, i32 0)
+      ret void
+    }
+    declare float @feme.stage.interpolate.at.centroid.f32(i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement In;
+  In.ElementID = 0;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::Float;
+  In.FirstComponent = 0;
+  In.ComponentCount = 1;
+  SignatureElement Out = In;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Sig.Elements = {In, Out};
+  dxil::setEntrySignature(*M->getFunction("ps_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  FragmentWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // `lowerFragmentInterpolateAt()` rewrites the per-lane "wave body"
+  // function (the one still carrying the original
+  // `stage_fragment_sample_positions` parameter forwarded through
+  // Linearize/SIMDize/WaveLowering), not `feme_cpu_entry_ps_main` itself.
+  Function *Body = nullptr;
+  Argument *SamplePositionsArg = nullptr;
+  for (Function &F : *M) {
+    for (Argument &Arg : F.args()) {
+      if (Arg.getName() == "stage_fragment_sample_positions") {
+        Body = &F;
+        SamplePositionsArg = &Arg;
+        break;
+      }
+    }
+    if (Body)
+      break;
+  }
+  ASSERT_TRUE(Body) << "no function declared a "
+                        "stage_fragment_sample_positions parameter";
+
+  // The fix reads all 8 of the (now unconditionally safe,
+  // `Executor.cpp`-padded) sample-position table slots: find every GEP
+  // directly rooted at `SamplePositionsArg` (opaque pointers mean
+  // `lowerFragmentInterpolateAt()`'s own `CreateBitCast` to the same
+  // pointer type is a no-op, not a real instruction), and collect each
+  // one's own constant sample index (the GEP indexing directly into the
+  // `[N x [2 x float]]` table, not the inner `{x, y}` component GEP
+  // chained off of it).
+  llvm::SmallSet<uint64_t, 8> SampleIndices;
+  for (const Use &U : SamplePositionsArg->uses()) {
+    auto *GEP = dyn_cast<GetElementPtrInst>(U.getUser());
+    if (!GEP || GEP->getNumIndices() != 1)
+      continue;
+    if (auto *Idx = dyn_cast<ConstantInt>(GEP->getOperand(1)))
+      SampleIndices.insert(Idx->getZExtValue());
+  }
+  EXPECT_EQ(SampleIndices.size(), 8u)
+      << "expected lowerFragmentInterpolateAt()'s AtCentroid case to read "
+         "all 8 sample-position table slots (indices 0-7), not just reuse "
+         "the plain pixel center";
+
+  // The averaging itself: a `uitofp` of the covered-sample popcount is new
+  // and unique to this fix -- nothing else in this lowering ever converts
+  // an integer count to float.
+  bool FoundCoverageCountToFloat = false;
+  for (Instruction &I : instructions(Body))
+    if (isa<UIToFPInst>(&I))
+      FoundCoverageCountToFloat = true;
+  EXPECT_TRUE(FoundCoverageCountToFloat)
+      << "expected a uitofp of the covered-sample count, feeding the "
+         "coverage-weighted average's own fdiv";
+
+  // The pixel-center fallback (for the all-zero-coverage case) must still
+  // be reachable via a `select` gated on whether any sample was covered
+  // at all (an `icmp ne ..., 0`), distinct from the pre-existing
+  // active-lane-masking `select` at the very end of this lowering (gated
+  // on an `extractelement`, not an `icmp`).
+  bool FoundCoverageGatedSelect = false;
+  for (Instruction &I : instructions(Body)) {
+    auto *Sel = dyn_cast<SelectInst>(&I);
+    if (!Sel)
+      continue;
+    auto *Cmp = dyn_cast<ICmpInst>(Sel->getCondition());
+    if (Cmp && Cmp->getPredicate() == ICmpInst::ICMP_NE)
+      FoundCoverageGatedSelect = true;
+  }
+  EXPECT_TRUE(FoundCoverageGatedSelect)
+      << "expected a select, gated on whether the covered-sample count is "
+         "nonzero, falling back to the plain pixel center";
+}
 
 } // namespace
