@@ -128836,3 +128836,35 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
 4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
 5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
 6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(b)(1) emulate_msrtss -- architecture fully mapped, first inert piece landed, deliberately not rushed
+
+**Next action (under two minutes):** open `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`'s `SubpassLoadPattern` (~line 9405) and `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`'s `collectHandles` (~line 3297, the `Dim::SubpassData` carve-out at the "Roadmap L108" comment) side by side -- the next session's first real code change must touch both together.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (confirmed, start and end of session).
+
+## What got done
+
+1. **Landed one small, inert, fully-tested piece**: a new `ImageCallKind::IsMapped` / `createIsMapped` / `feme.cpu.image.is_mapped.i1` runtime primitive (`ImageCalls.h`/`.cpp`, `FeMeRuntimeCPU.c`), exposing the runtime's existing "is this heap slot a real descriptor" bounds-check as a standalone boolean query. No caller exists yet -- zero regression risk, one new unit test, `check-feme` clean (3853 passed).
+2. **Deliberately stopped short of the full fix.** The real fix needs 4 more pieces (MLIR operand-threading, a new `SPIRVResourceLowering.cpp` classifier, a new `lowerImageAccesses` dispatch branch, `FragmentWrapper.cpp`'s consumer), and discovered mid-session that two of those pieces (MLIR threading + the new classifier) **cannot land separately** -- `collectHandles` has a deliberate existing rule that a subpass-input handle must stay completely unused or it rejects the *whole function*, so threading the handle through without simultaneously teaching that pass to accept the new use-shape would silently break every subpass-reading shader in the corpus, not just `emulate_msrtss`. Given that coupling, and the standing instruction to keep commits small and each one test-clean, I chose to bank the one genuinely independent piece and write up the rest precisely rather than attempt a single large, higher-risk commit under time pressure.
+3. **Fully mapped the remaining architecture** so the next session does not need to re-derive it (see `Roadmap.md`'s `ENV6(b)(1)` entry for the complete version):
+   - Confirmed `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` already counts as an ordinary image descriptor (`Descriptor.cpp`'s `isImageDescriptorType`), so the runtime-side `image_heap` already contains a `subpassInput`'s own bound image today -- **no runtime/heap-population change needed**, only compiler plumbing to read it.
+   - Found the `collectHandles` `Dim::SubpassData` "must stay unused" trap described above.
+   - Found the handle's own LLVM type varies by `(ElementTy, MS)` (4 shapes), and the eventually-resolved operand (an `i32` index) has a different type than the call was originally declared with -- so resolution can't just overwrite the operand in place (unlike the one existing precedent, `mergeIntoHandleCompare`, which only works because its callee is an `llvm_any_ty`-overloaded intrinsic); it needs a full call-replacement, the same shape every other `lowerImageAccesses` resolution already uses.
+4. **Hit and documented a process gotcha**: `--deqp-case` built from the roadmap's own shorthand case name silently matched zero cases (missing a `dynamic_rendering.` path segment) instead of erroring -- added a `.instructions.md` tip to grep the mustpass `.txt` lists for the exact name first.
+5. Re-ran the real `emulate_msrtss` cluster (64 cases, 56 `NotSupported`) to confirm still exactly 8 Fail / 0 Pass -- unchanged, as expected for an inert commit.
+
+## Wins
+
+- Avoided a false start: if I'd threaded the MLIR operand through first without checking `collectHandles`, I'd have either broken the whole subpass-input corpus or spent the rest of the session untangling a self-inflicted regression.
+- The one piece that did land (`IsMapped`) is real, forward progress, not throwaway exploration -- it's the exact primitive `FragmentWrapper.cpp`'s eventual fallback `CreateSelect` will call.
+
+## State for next session
+
+`ENV6`'s remaining untriaged clusters, in priority order:
+1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- design now fully mapped (see `Roadmap.md`). **Best next target.** Land, as one commit (they're coupled, see above): (a) `SubpassLoadPattern`/`getOrInsertSubpassLoadFunc` threading `Adaptor.getImage()` through as a new operand, mangling the callee name by `(ElementTy, MS)`, and (b) a new `classifySubpassImageHandle` + narrow `hasOnlySupportedSubpassImageUses` in `SPIRVResourceLowering.cpp`'s `collectHandles`. Then, as follow-on commits: (c) `lowerImageAccesses`'s new dispatch branch building the replacement, correctly-typed call, (d) `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad` consuming the new operand + the already-landed `IsMapped` query via `CreateSelect`. Each needs its own unit test; finish with a full subpass-input CTS regression sweep (`descriptorset_random`, `multiview.input_attachments`, the rest of `ENV6(b)`).
+2. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) -- unchanged from last session, similarly-sized separate architecture gap (coverage-weighted centroid needs a per-quad coverage mask threaded into the runtime ABI).
+3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged, likely a long tail of distinct small bugs.
+4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
+5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
+6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
