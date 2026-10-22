@@ -129692,3 +129692,53 @@ Pick any one of these to start the next session -- all are independent, no share
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
 
 **Fastest next concrete action**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(f)` and re-run its one case through `deqp-vk` with `FEME_DUMP_DIVERGENT_BRANCH=1` to see what it actually says today -- under two minutes.
+
+# Session: `ENV6(c)(2)(f)` fixed -- `CheckSplitPt` phi-ordering bug, compile crash gone, new runtime hang found (`ENV6(c)(2)(k)`)
+
+**Confirmed device**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Checked again before the real-ICD single-case and corpus runs.
+
+## What happened, in order
+
+1. Reproduced `ENV6(c)(2)(f)` directly against the real ICD: **the roadmap's own description was stale**. It's not a silent rendering `Fail` -- it's a genuine LLVM IR verifier failure, "PHI nodes not grouped at top of basic block!", inside block `loop.exit.guard1`.
+2. Checked it wasn't a regression from last session's `ENV6(c)(2)(j)` fix: checked out the pre-`(j)` `Linearize.cpp`, rebuilt, reran -- identical failure. Pre-existing, unrelated to `(j)` despite the shared block-naming coincidence.
+3. Captured a fast, CTS-independent `feme-opt`-only repro from a `FEME_DUMP_IR_PRELINEARIZE=1` dump. Dumped the actual broken module (`FEME_OPT_DUMP_INVALID=1`, goes to stderr in this failure mode) and found the exact malformed shape: a second phi sitting after 5 non-phi instructions.
+4. Spent a long time on **static** code reading trying to trace which of two suspect code regions (`ShadowExitFixups` vs. the `CheckBuilder` exit-narrowing code) was responsible and in what order -- got close but didn't pin the exact collision down from reading alone.
+5. **Switched to direct instrumentation** instead of more static reading: added two temporary, env-var-gated `errs()` prints at the two insertion sites. One run immediately showed the smoking gun: `CheckSplitPt` (the anchor for new non-phi instructions) was resolving to the *other* phi itself, not past it.
+6. Root cause: `loop.exit.guard1` is simultaneously an inner loop's own `ExitBlock` (gets a relay-forwarding phi from `ShadowExitFixups`) and an outer loop's own `CheckBlock`, whose `CheckExit->Cond` is itself one of that same block's own phis (reassigned there by the inner loop's own processing). The "insert right after `Cond`'s own instruction" fast path (added for an earlier roadmap item, L442) doesn't account for `Cond` itself being a phi -- it lands between the two phis instead of after both.
+7. Fix: only take that fast path when `Cond`'s own instruction is **not** a `PHINode`; otherwise fall back to `getFirstNonPHIIt()` (already correct in that case, since nothing but another phi can follow a phi before a block's first non-phi instruction). Removed the temporary tracing before landing.
+8. Wrote a new regression lit test (near-verbatim reduction of the real dump -- tried trimming further but broke an unrelated pre-existing diagnostic, so kept the full loop nest). Confirmed fail-before/pass-after via `git stash`.
+9. **Real `deqp-vk` re-run surprise**: the targeted case no longer crashes the compiler, but now hits `vkWaitForFences Timeout` at runtime instead -- a genuine, not-yet-root-caused infinite loop somewhere in the generated code for this shape. New backlog item, `ENV6(c)(2)(k)`.
+10. **Second surprise, bigger deal**: after that `Fail` result printed, the `deqp-vk` process itself hung forever during shutdown. `gdb -p <pid> -batch -ex "thread apply all bt"` showed `vkDestroyDevice` -> `QueueExecutor::~QueueExecutor()`'s `thread::join()` waiting on worker threads parked in `pthread_cond_wait` that never wake up. This is a real robustness gap (*any* future genuinely-hanging shader will wedge the test process on exit) -- documented in `.instructions.md` so nobody trusts an un-`timeout`-wrapped solo rerun again.
+11. Had to re-run the 106-case corpus **excluding** the newly-hanging case (the full-caselist run got stuck on it in the initial round, confirming the task's own warning that the initial round has no built-in timeout). The other 105: 13 Pass, unchanged from last session's `L515` baseline, zero regressions.
+
+## Verification (all green except the new runtime hang, which is now its own tracked item)
+
+- `check-feme`: 3868/3872, 4 unsupported, 0 regressions (the +1 is the new test).
+- `FeMeTransformsCPUTests`: 670/670.
+- Full `Linearize/` lit suite: 70/70 (69 existing + 1 new).
+- Real `deqp-vk`, 105 of 106 graphicsfuzz cases (excluding the newly-hanging one): 13 Pass, matching `L515`'s own baseline exactly, zero regressions.
+- The 106th case (`cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`): compiler crash gone, but `Fail` via runtime timeout instead -- not a net `Pass`, tracked separately.
+
+## Commits (4, in order)
+
+1. `Linearize.cpp` fix + new lit test (kept together, test is the direct proof).
+2. `Roadmap.md` + `VulkanCTSReport.md` (`L516`) update: `ENV6(c)(2)(f)` struck through (partial), new `ENV6(c)(2)(k)` entry added for the runtime hang + shutdown-hang discovery.
+3. `.instructions.md` update documenting the `QueueExecutor` shutdown-hang-after-`Fail` gotcha.
+4. This `agent_thoughts.md` entry.
+
+No feature/extension inventory update needed -- compiler control-flow bug fix, not a feature-level change (same precedent as prior `ENV6(c)(2)` sessions).
+
+**Lesson for future sessions**: when static code reading stalls on a "which of these two code paths runs in what order" question in this file, don't keep reading -- add two throwaway `errs()` prints gated on a scratch env var, rebuild, run the standalone repro once, read the trace, then rip the prints back out before landing the real fix. This session burned a lot of turns on static tracing before switching to this, and the instrumented run answered the question in one shot.
+
+## Next steps
+
+Pick any one of these to start the next session -- all are independent, no shared setup:
+
+1. **`ENV6(c)(2)(k)`** (new this session, needs its own session): the same case's own runtime hang (`vkWaitForFences Timeout`) plus the separate `QueueExecutor` shutdown-hang robustness gap. Start with a **non-`deqp-vk`** standalone repro (e.g. a CPU-side interpreter trace or manual step-through of the generated masked-loop code) to avoid triggering the un-killable process hang while investigating. The shutdown-hang itself may be worth fixing independently of root-causing the shader's own infinite loop -- it's a general robustness gap, not specific to this one case.
+2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket, not discard-centric. Investigate fresh -- these haven't been looked at since the original triage pass.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not a quick fix.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+**Fastest next concrete action**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(k)`, then try to get a standalone (non-`deqp-vk`) repro of the runtime hang going -- under two minutes to start, but budget the hang investigation itself as its own session.
