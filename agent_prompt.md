@@ -69,17 +69,20 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. `ENV6(c)`: `graphicsfuzz` (106 cases) -- untriaged, likely a long tail
-   of distinct small bugs. Now the single largest untriaged cluster.
-   Start by running the full 106-case list through `run_vulkan_cts.py`
-   and clustering failures by shared QPA diagnostic text before picking
-   a first reproducer -- don't assume they share one root cause.
-2. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader`
-   (132 cases combined) -- unchanged; check
-   `memory_model.{write_after_read,message_passing}` (52) and
-   `tessellation.invariance` (26) for a shared cause first, since those
-   two alone are over half this bucket.
-3. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped,
-   not started, lowest priority.
-4. (low priority, unchanged for many sessions) Upstream the 3
-   `offload-test-suite` patches if push access ever becomes available.
+1. **`ENV6(c)(2)` first** (smaller, likely faster): pick
+   `cov-basic-block-discard-in-function` (one of the 5 discard/kill-named
+   cases), extract its QPA-embedded PNG vs. golden, diff visually, see if the 5
+   discard-named cases share one root cause before touching the other 13.
+2. If the discard sub-pattern doesn't hold, triage the other 13 `ENV6(c)(2)`
+   cases independently -- they likely don't share a cause with each other
+   either.
+3. Only after `(2)` is exhausted, start scoping `ENV6(c)(3)` -- read
+   `Linearize.cpp`'s existing shape-recognition code first to understand which
+   of the 7 named sub-shapes are closest to already-supported, pick the smallest
+   extension, and budget it as its own multi-session milestone (don't try to fix
+   83 cases in one pass).
+4. `ENV6(d)` (`memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader`, 132
+   cases) and `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) remain untouched,
+   lower priority than `ENV6(c)`.
+5. (Still low priority, unchanged for many sessions) Upstream the 3
+   `offload-test-suite` patches if push access becomes available.
