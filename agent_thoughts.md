@@ -128775,3 +128775,33 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
 4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
 5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
 6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(b)(1) root-caused -- emulate_msrtss is a VK_ATTACHMENT_UNUSED subpass-input gap (L501)
+
+**Next action (under two minutes):** open `feme/docs/Roadmap.md` at `ENV6(b)(2)` (`multisample_interpolation`, 12 cases) -- the next-smallest untriaged `ENV6(b)` cluster, since `ENV6(b)(1)`'s fix now needs a dedicated multi-session compiler+runtime ABI effort, scoped below.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (confirmed, start and end of session).
+
+## What got done
+
+1. **Reproduced and narrowed the failure.** Re-ran all 8 `emulate_msrtss` cases against the rebuilt ICD: all 3 color attachments fail identically (`Fail (Incorrect multisampled rendering for color attachment 1, color attachment 2, color attachment 3)`), with and without depth/stencil input reads. Got the per-attachment failed-pixel count (3723, identical across all 3 attachments, consistent with the *entire* render area) via `FEME_VULKAN_LOG_CREATION_ERRORS=1` + qpa log inspection -- ruled out a resolve-mode-specific (`AVERAGE` vs `SAMPLE_ZERO`) or depth/stencil-specific cause.
+2. **Read the CTS test's two-pass "unresolve" emulation technique in full** (`vktPipelineMultisampledRenderToSingleSampledTests.cpp`'s `testResolveAsInput`/`drawUnresolve`/`drawBlendIntoUnresolvedValues`): pass 1 broadcasts a single-sampled resolve attachment's value to every MSAA sample; pass 2 self-referentially reads that same attachment per-sample and blends, relying on the pipeline's own real MSAA resolve for the final value.
+3. **Found the actual root cause by reading pass 1's descriptor-set setup, not just its shader source.** Pass 1's `vkCmdSetRenderingInputAttachmentIndices` call sets *every* color/depth/stencil input index to `VK_ATTACHMENT_UNUSED` -- per spec, this means its `subpassInput`s must be served from their own bound descriptor image (the resolve attachments), not from any of pass 1's own render-target attachments. FeMe's `SubpassLoadPattern` always serves `subpassLoad` from the index-addressed live-attachment heap and has no fallback to the descriptor set's own image for an unmapped index -- a gap invisible until this is the first CTS case that deliberately binds a *different* image than sits at the matching attachment position.
+4. **Decided not to attempt the fix this session.** Closing this gap needs new compiler ABI plumbing (threading the descriptor handle through `feme.stage.subpass.load`) and a runtime fallback path, plus re-verification against the whole subpass-input CTS corpus to avoid regressions -- too large and risky for the remaining session budget to do justice to.
+5. **Docs updated, no code changed.** `Roadmap.md`'s `ENV6(b)(1)` row rewritten with the full root-cause + scoped remaining work (kept as one row, not split into deeper letter-nested sub-entries, matching the `ENV5(c)(7)(a)`/`(b)` precedent of refining one entry in place). `VulkanCTSReport.md`'s `L501` entry added. `FeMeVulkanDesign.md`'s "Render passes and dynamic rendering" section gets a new "Known gap" note so a future session doesn't have to rediscover this. One docs-only commit.
+
+## Wins
+
+- Root-caused a bug that looked like it could be anywhere in FeMe's MSAA/subpass-input/self-referencing-color machinery, down to one specific, narrow, well-understood spec corner (`VK_ATTACHMENT_UNUSED` input-index mapping) -- not a vague "rendering is wrong somewhere" dead end.
+- Confirmed the bug is NOT in any of the previously-suspect machinery (per-sample shading detection, `HasSelfReferencingDepthStencilInput`, `buildSubpassInputHeap`'s sample-count tracking) -- all read in detail and ruled out, saving a future session from re-treading that ground.
+- Documented the gap precisely enough (exact pattern name, exact discarded operand, exact spec clause) that the eventual fix session can start writing code immediately instead of re-investigating.
+
+## State for next session
+
+`ENV6`'s remaining untriaged clusters, in priority order:
+1. `ENV6(b)(2)`: `multisample_interpolation.{centroid_qualifier_inside_primitive,nonuniform_interpolant_indexing}` (12 cases) -- confirmed genuine rendering-correctness bug, not yet root-caused, **best next target** now that `ENV6(b)(1)` needs a dedicated larger effort.
+2. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- root-caused this session (`VK_ATTACHMENT_UNUSED` subpass-input descriptor fallback missing), not yet fixed. Scoped in `Roadmap.md`: (a) thread the descriptor-set image handle through `feme.stage.subpass.load` as a new operand, (b) add a CPU-runtime fallback read when the live-attachment heap slot for a requested index is unmapped, (c) new lowering-phase and runtime-phase unit tests, (d) re-verify the whole existing subpass-input CTS corpus for regressions. Multi-session effort; do not rush it into one sitting.
+3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions, likely a long tail of distinct small bugs.
+4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
+5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
+6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
