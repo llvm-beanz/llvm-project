@@ -9330,16 +9330,17 @@ std::optional<SubpassVariableAccess> getSubpassVariable(mlir::Value Image) {
 
 /// Declares (or finds) the `feme.stage.subpass.load.<suffix>` function
 /// `SubpassLoadPattern` calls: `(i32 attachment_index, i32 component,
-/// i32 sample) -> <ElementTy>`, matching `feme::StageOpKind::SubpassLoad`'s
-/// overloaded shape (see StageOps.h) -- an ordinary named call, not an
-/// `llvm.spv.*` intrinsic, since `feme.stage.*` calls (StageOps.h's file
-/// comment) are FeMe's own vocabulary rather than a real target-independent
-/// LLVM intrinsic. \p ElementTy (roadmap L179) is either `f32` (a plain
-/// `subpassInput`) or `i32` (an `isubpassInput`/`usubpassInput` -- SPIR-V's
-/// `OpTypeImage`/LLVM's own `target("spirv.SignedImage"/"UnsignedImage",
-/// ...)` don't distinguish signed from unsigned any further than this, and
-/// neither does this callee: both read back the same bit pattern, exactly
-/// like `feme::cpu::createLoad2DI32` itself). Named with the explicit type
+/// i32 sample, <handle> image) -> <ElementTy>`, matching
+/// `feme::StageOpKind::SubpassLoad`'s overloaded shape (see StageOps.h) --
+/// an ordinary named call, not an `llvm.spv.*` intrinsic, since
+/// `feme.stage.*` calls (StageOps.h's file comment) are FeMe's own
+/// vocabulary rather than a real target-independent LLVM intrinsic. \p
+/// ElementTy (roadmap L179) is either `f32` (a plain `subpassInput`) or
+/// `i32` (an `isubpassInput`/`usubpassInput` -- SPIR-V's `OpTypeImage`/
+/// LLVM's own `target("spirv.SignedImage"/"UnsignedImage", ...)` don't
+/// distinguish signed from unsigned any further than this, and neither does
+/// this callee: both read back the same bit pattern, exactly like
+/// `feme::cpu::createLoad2DI32` itself). Named with the explicit type
 /// suffix `feme::getOrInsertStageOp` gives every overloaded `feme.stage.*`
 /// op (SubpassLoad is marked overloaded for exactly this reason -- see
 /// `StageOpKind::SubpassLoad`'s comment): `feme::cpu::SIMDizePass` widens
@@ -9349,12 +9350,38 @@ std::optional<SubpassVariableAccess> getSubpassVariable(mlir::Value Image) {
 /// this codebase, not least `feme::isStageOpCall`) would refuse to
 /// recognize either call once both exist -- nor may the `f32` and `i32`
 /// declarations collide with each other, for the same reason.
+///
+/// Roadmap `ENV6(b)(1)`: \p HandleTy (the `Adaptor.getImage()` -- the
+/// `subpassInput` variable's own resolved `llvm.spv.resource.
+/// handlefrombinding` result, kept alive rather than discarded as dead code
+/// the way this callee's own pre-`ENV6(b)(1)` 3-operand shape always did)
+/// is the 4th operand, letting `lowerFragmentSubpassLoad`
+/// (FragmentWrapper.cpp) fall back to reading straight from the
+/// `subpassInput`'s own bound descriptor-set image whenever the
+/// index-addressed `subpass_input_heap` slot \p IndexValue names was never
+/// populated (every attachment-input index mapped to `VK_ATTACHMENT_
+/// UNUSED`, the gap `L501`/`L503` root-caused and designed a fix for).
+/// `HandleTy` -- an `LLVM::LLVMTargetExtType` (`convertImageTypeAs`) -- is
+/// not a single fixed type the way the first three (`i32`) operands are:
+/// per the SPIR-V spec a `Dim::SubpassData` image always has `Arrayed=0`/
+/// `Depth=0`/`Sampled=2`/`Format=Unknown`, so it varies *only* by
+/// `(ElementTy, MS)` -- 4 combinations total -- but that still means two
+/// different subpass loads (e.g. one plain `subpassInput`, one
+/// `subpassInputMS`) need two differently-typed declarations; \p Name is
+/// mangled by both \p ElementTy and whether \p HandleTy is multisampled
+/// (`.ms`), alongside the existing `SIMDizePass`-widening/`f32`-vs-`i32`
+/// mangling, so each of the 4 shapes gets its own non-colliding
+/// declaration.
 mlir::LLVM::LLVMFuncOp
 getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
-                           mlir::ModuleOp Module, mlir::Type ElementTy) {
+                           mlir::ModuleOp Module, mlir::Type ElementTy,
+                           mlir::Type HandleTy, bool IsMultisampled) {
   bool IsInt = mlir::isa<mlir::IntegerType>(ElementTy);
-  llvm::StringRef Name = IsInt ? "feme.stage.subpass.load.i32"
-                               : "feme.stage.subpass.load.f32";
+  llvm::SmallString<40> NameBuf(IsInt ? "feme.stage.subpass.load.i32"
+                                     : "feme.stage.subpass.load.f32");
+  if (IsMultisampled)
+    NameBuf += ".ms";
+  llvm::StringRef Name = NameBuf;
   if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
     return Existing;
   mlir::OpBuilder::InsertionGuard Guard(Rewriter);
@@ -9363,8 +9390,8 @@ getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
       IsInt ? static_cast<mlir::Type>(Rewriter.getI32Type())
             : static_cast<mlir::Type>(mlir::Float32Type::get(Rewriter.getContext()));
   auto FuncTy = mlir::LLVM::LLVMFunctionType::get(
-      LLVMElementTy,
-      {Rewriter.getI32Type(), Rewriter.getI32Type(), Rewriter.getI32Type()});
+      LLVMElementTy, {Rewriter.getI32Type(), Rewriter.getI32Type(),
+                      Rewriter.getI32Type(), HandleTy});
   return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name,
                                         FuncTy, mlir::LLVM::Linkage::External);
 }
@@ -9375,19 +9402,44 @@ getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
 /// side -- directly into one `feme.stage.subpass.load` call per result
 /// component, rather than through `ImageReadPattern`'s ordinary resource-
 /// handle load: a subpass input is not read from the bound descriptor's
-/// image memory at all (see `feme::StageOpKind::SubpassLoad`'s comment and
-/// "Render passes and dynamic rendering" in feme/docs/FeMeVulkanDesign.md),
-/// so `Adaptor.getImage()` -- whatever `ResourceGlobalVariablePattern`/
-/// `ResourceAddressOfPattern` converted the variable's own `handlefrom
-/// binding` load to -- is deliberately never referenced; it is left to
-/// become dead code once this pattern consumes every other use of the
-/// `spirv.ImageRead`. The `InputAttachmentIndex` decoration this needs is
-/// read directly off the underlying `spirv.GlobalVariable` (getSubpass
-/// Variable), which the SPIR-V deserializer now preserves as a plain
-/// `input_attachment_index` integer attribute (mlir/lib/Target/SPIRV/
-/// Deserialization/Deserializer.cpp) -- there is no dedicated
-/// `GlobalVariableOp` accessor for it, the same way `component`/`index`
-/// are read as plain attributes elsewhere in this file
+/// image memory in the ordinary (index-addressed `subpass_input_heap`)
+/// case (see `feme::StageOpKind::SubpassLoad`'s comment and "Render passes
+/// and dynamic rendering" in feme/docs/FeMeVulkanDesign.md). Roadmap
+/// `ENV6(b)(1)` (`L501`/`L503`): `Adaptor.getImage()` -- whatever
+/// `ResourceGlobalVariablePattern`/`ResourceAddressOfPattern` converted the
+/// variable's own `handlefrombinding` load to -- is nonetheless threaded
+/// through as `feme.stage.subpass.load`'s new 4th operand (rather than
+/// discarded as dead code, this pattern's own prior design for every
+/// subpass load, since the ordinary index-based heap read was always
+/// previously assumed sufficient) so `lowerFragmentSubpassLoad`
+/// (FragmentWrapper.cpp) can fall back to the descriptor's own bound image
+/// whenever the index this read names was never populated (every
+/// attachment-input index mapped to `VK_ATTACHMENT_UNUSED` via
+/// `vkCmdSetRenderingInputAttachmentIndices`) -- but only for an *indexed*
+/// read (`IndexAttr` set): a no-`InputAttachmentIndex`-decoration direct
+/// depth/stencil read (see `kSubpassLoadDirectDepthAttachmentIndex`'s own
+/// comment, and the `IndexValue` fallback immediately below) names no
+/// real descriptor at all -- `VK_KHR_dynamic_rendering_local_read` reads
+/// straight from whichever depth/stencil attachment this draw is
+/// currently rendering to, regardless of what (if anything) is bound at
+/// the variable's own `set`/`binding` -- so threading its handle through
+/// the same way would wrongly make `SPIRVResourceLowering.cpp`'s
+/// `collectHandles` require a real bound descriptor for a read that is
+/// never going to use it (the `DrawTest.cpp`
+/// `SubpassLoadReadsBackTheDepthAttachmentItWroteWithNoIndex` regression
+/// this comment fixed: its `VkPipelineLayout` declares zero descriptor
+/// sets, by design, since the shader's own `bind(0, 0)` is a syntactic
+/// SPIR-V requirement only). A `PoisonOp` of the same handle type keeps
+/// the call's signature uniform between the indexed and direct cases
+/// without being a real use of whatever `Adaptor.getImage()` actually is,
+/// so `collectHandles`'s use-walk never sees this call as a use of any
+/// bound resource for a direct read. The `InputAttachmentIndex`
+/// decoration this needs is read directly off the underlying
+/// `spirv.GlobalVariable` (getSubpassVariable), which the SPIR-V
+/// deserializer now preserves as a plain `input_attachment_index` integer
+/// attribute (mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp) --
+/// there is no dedicated `GlobalVariableOp` accessor for it, the same way
+/// `component`/`index` are read as plain attributes elsewhere in this file
 /// (buildStageIODecorationsAttr).
 ///
 /// Roadmap F8c: a `subpassInputMS`'s explicit-sample `subpassLoad(input,
@@ -9446,7 +9498,8 @@ public:
 
     mlir::Location Loc = Op.getLoc();
     mlir::LLVM::LLVMFuncOp Callee = getOrInsertSubpassLoadFunc(
-        Rewriter, Op->getParentOfType<mlir::ModuleOp>(), ElementTy);
+        Rewriter, Op->getParentOfType<mlir::ModuleOp>(), ElementTy,
+        Adaptor.getImage().getType(), /*IsMultisampled=*/HasSample);
     // Roadmap L390: a subpass-input variable with no `InputAttachmentIndex`
     // decoration at all (GLSL `layout(binding=N) uniform subpassInput`,
     // deliberately omitting `input_attachment_index` -- see
@@ -9470,6 +9523,16 @@ public:
                   : mlir::LLVM::ConstantOp::create(
                         Rewriter, Loc, Rewriter.getI32Type(),
                         Rewriter.getI32IntegerAttr(0));
+    // A direct (no `IndexAttr`) read names no real descriptor -- see this
+    // class's own doc comment -- so pass a `PoisonOp` of the handle's own
+    // type rather than `Adaptor.getImage()` itself, keeping every call's
+    // operand count/types uniform without making `collectHandles`
+    // (SPIRVResourceLowering.cpp) see a real use of the bound resource.
+    mlir::Value HandleArg =
+        IndexAttr ? Adaptor.getImage()
+                  : mlir::LLVM::PoisonOp::create(Rewriter, Loc,
+                                                 Adaptor.getImage().getType())
+                        .getResult();
 
     mlir::Value Result =
         VectorTy ? mlir::LLVM::PoisonOp::create(Rewriter, Loc, VectorTy)
@@ -9481,7 +9544,8 @@ public:
       mlir::Value Scalar =
           mlir::LLVM::CallOp::create(
               Rewriter, Loc, Callee,
-              mlir::ValueRange{IndexConst, ComponentConst, SampleVal})
+              mlir::ValueRange{IndexConst, ComponentConst, SampleVal,
+                              HandleArg})
               .getResult();
       if (!VectorTy) {
         Result = Scalar;
