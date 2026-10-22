@@ -7418,9 +7418,32 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // atomic add for every lane that was merely still live *entering*
     // the check, regardless of whether that lane's own iteration was
     // actually in range, double-counting exactly one lane per wave.
+    // Roadmap L516: when `CheckExit->Cond` is itself a `PHINode` resident
+    // in `CheckBlock` (rather than some ordinary, freestanding computed
+    // instruction), the "insert right after `Cond`'s own instruction"
+    // fast path above can land *between* that phi and some other phi
+    // `CheckBlock` already has (e.g. `freezeLoopCarriedValues`'s own
+    // `ShadowExitFixups` mechanism, which inserts its own exit-value
+    // phi at `CheckBlock->getFirstNonPHIIt()` -- i.e. immediately after
+    // every phi already present, `Cond` included) -- splitting two phis
+    // apart with freshly inserted non-phi instructions in between them,
+    // an "PHI nodes not grouped at top of basic block!" verifier
+    // failure. The L442 concern this fast path exists for (a resource/
+    // atomic call sitting between `Cond` and `CheckExit->Br` needing
+    // this check's own, narrower mask) cannot actually arise when
+    // `Cond` is a phi: nothing but another phi can validly follow a
+    // phi before the block's first non-phi instruction, so falling back
+    // to `getFirstNonPHIIt()` (which already skips every phi, `Cond` and
+    // any later-inserted sibling alike) is exactly equivalent whenever
+    // `Cond` itself is one. Confirmed via a real, reproduced
+    // `dEQP-VK.graphicsfuzz.cov-nested-loops-assign-vector-elements-
+    // from-matrix-no-negative-indexing` verifier failure, where an
+    // enclosing cycle's own `CheckExit->Cond` was exactly such a phi,
+    // itself resident in a nested cycle's own `ExitBlock`/`CheckBlock`.
     Instruction *CheckCondInst = dyn_cast<Instruction>(CheckExit->Cond);
     BasicBlock::iterator CheckSplitPt =
-        (CheckCondInst && CheckCondInst->getParent() == CheckBlock)
+        (CheckCondInst && CheckCondInst->getParent() == CheckBlock &&
+         !isa<PHINode>(CheckCondInst))
             ? std::next(CheckCondInst->getIterator())
             : CheckBlock->getFirstNonPHIIt();
     // Roadmap L442: `freezeRelayChainExitValues` (called earlier, for
