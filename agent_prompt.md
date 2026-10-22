@@ -70,21 +70,19 @@ Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
 `ENV6`'s remaining untriaged clusters, in priority order:
-1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- design now fully
-   mapped (see `Roadmap.md`). **Best next target.** Land, as one commit (they're
-   coupled, see above): (a) `SubpassLoadPattern`/`getOrInsertSubpassLoadFunc`
-   threading `Adaptor.getImage()` through as a new operand, mangling the callee
-   name by `(ElementTy, MS)`, and (b) a new `classifySubpassImageHandle` +
-   narrow `hasOnlySupportedSubpassImageUses` in `SPIRVResourceLowering.cpp`'s
-   `collectHandles`. Then, as follow-on commits: (c) `lowerImageAccesses`'s new
-   dispatch branch building the replacement, correctly-typed call, (d)
-   `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad` consuming the new operand
-   + the already-landed `IsMapped` query via `CreateSelect`. Each needs its own
-   unit test; finish with a full subpass-input CTS regression sweep
-   (`descriptorset_random`, `multiview.input_attachments`, the rest of
-   `ENV6(b)`).
-2. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) -- unchanged
-   from last session, similarly-sized separate architecture gap
+1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- pieces
+   (a)/(b)/(minimal c) now landed and crash-free. **Best next target, and likely
+   closeable in one more session**: land piece (d), `FragmentWrapper.cpp`'s
+   `lowerFragmentSubpassLoad` actually consuming the resolved index plus the
+   already-landed `IsMapped` query via `CreateSelect` (fall back to the ordinary
+   image heap when the subpass-input-heap slot is unmapped). Needs its own new
+   lowering-phase and runtime-phase unit tests, then reuse this session's same
+   regression-sweep pattern set (`renderpass*.misc.*`,
+   `renderpass*.dynamic_rendering*.local_read.*`, `pipeline.*subpass*`,
+   `*framebuffer_attachment*`, `*multisample_interpolation*`) rather than
+   re-deriving it.
+2. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) -- confirmed
+   unchanged this session, separately-scoped, similarly-sized architecture gap
    (coverage-weighted centroid needs a per-quad coverage mask threaded into the
    runtime ABI).
 3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged, likely a long tail of
