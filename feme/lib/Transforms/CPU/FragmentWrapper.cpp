@@ -510,11 +510,17 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
                                 const FragmentStageEnv &FEnv) {
   Value *SubpassInputHeap = nullptr;
   Value *SubpassInputHeapCount = nullptr;
+  Value *ImageHeap = nullptr;
+  Value *ImageHeapCount = nullptr;
   for (Argument &Arg : F.args()) {
     if (Arg.getName() == "subpass_input_heap")
       SubpassInputHeap = &Arg;
     else if (Arg.getName() == "subpass_input_heap_count")
       SubpassInputHeapCount = &Arg;
+    else if (Arg.getName() == "image_heap")
+      ImageHeap = &Arg;
+    else if (Arg.getName() == "image_heap_count")
+      ImageHeapCount = &Arg;
   }
   if (!SubpassInputHeap || !SubpassInputHeapCount) {
     F.getContext().emitError(
@@ -546,6 +552,48 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
       DirectAttachmentIndex =
           Builder.CreateSub(SubpassInputHeapCount, Builder.getInt32(1));
   }
+  // Roadmap `ENV6(b)(1)`: an *indexed* subpass read (never a direct
+  // depth/stencil one -- `SubpassLoadPattern` always threads a real
+  // handle for those, never the sentinel `DirectAttachmentIndex` case
+  // above) carries `SPIRVResourceLowering.cpp`'s own already-resolved
+  // regular-image-heap descriptor index as `CI`'s own trailing operand
+  // (`getOrInsertResolvedSubpassLoadFunc`) -- distinguishable from a
+  // direct read's still-unresolved `target("spirv.Image", ...)` handle
+  // purely by type (always `i32` here, never for a direct read: see
+  // `StageOps.cpp`'s `getOrInsertStageOp`, which mangles the two shapes
+  // under distinct callee names specifically so they can never collide).
+  // When the draw's own `dynamicRenderingLocalRead` mapping left this
+  // index's own `SubpassInputHeap` slot unpopulated
+  // (`VK_ATTACHMENT_UNUSED` -- `CommandBuffer.cpp`'s
+  // `buildSubpassInputHeap` never writes it), the `subpassInput`
+  // variable's own ordinary, regularly-bound
+  // `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` descriptor must instead be read
+  // directly out of the regular image heap, at this resolved index --
+  // `feme::cpu::ImageCallKind::IsMapped` (`ImageCalls.h`) is how this
+  // decides which heap to actually read from. Computed once, outside the
+  // lane loop below, rather than once per lane: `AttachmentIndex` and
+  // `SubpassInputHeap`'s own contents are both uniform across every lane
+  // of one fragment-shader invocation, so whether this slot is mapped
+  // cannot itself be per-lane divergent.
+  Value *ResolvedImageHeapIndex = nullptr;
+  Value *SubpassInputIsMapped = nullptr;
+  if (!DirectAttachmentIndex &&
+      CI.getArgOperand(CI.arg_size() - 1)->getType()->isIntegerTy(32)) {
+    if (!ImageHeap || !ImageHeapCount) {
+      F.getContext().emitError(
+          &CI, "feme-cpu-wrap-fragment: resolved subpass load with no "
+               "image heap parameter (feme::cpu::SPIRVResourceLoweringPass "
+               "did not run?)");
+      return nullptr;
+    }
+    ResolvedImageHeapIndex = CI.getArgOperand(CI.arg_size() - 1);
+    feme::cpu::ImageCallEnv SubpassEnv;
+    SubpassEnv.ImageHeap = SubpassInputHeap;
+    SubpassEnv.ImageHeapCount = SubpassInputHeapCount;
+    SubpassInputIsMapped =
+        feme::cpu::createIsMapped(Builder, SubpassEnv, CI.getArgOperand(0),
+                                  "subpass.is_mapped");
+  }
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *Active =
@@ -574,13 +622,52 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
     // widened) type carries tells us which of the image heap's two
     // per-format load intrinsics to read the texel back with.
     bool IsIntFormat = CI.getType()->getScalarType()->isIntegerTy();
-    CallInst *Texel =
-        IsIntFormat
-            ? feme::cpu::createLoad2DI32(Builder, ImgEnv, AttachmentIndex, X,
-                                         Y, Builder.getInt32(0), Sample,
-                                         Active)
-            : feme::cpu::createLoad2D(Builder, ImgEnv, AttachmentIndex, X, Y,
-                                      Builder.getInt32(0), Sample, Active);
+    Value *Texel;
+    if (ResolvedImageHeapIndex) {
+      // Roadmap `ENV6(b)(1)`: mask each of the two candidate reads by
+      // `Active` *and* `SubpassInputIsMapped` (or its negation), exactly
+      // mirroring the existing `Active`-only masking convention this
+      // function already uses elsewhere -- an inactive lane, or a lane
+      // reading the heap this slot is *not* actually mapped into, must
+      // still produce a well-defined (zero) texel rather than reading
+      // out-of-bounds/garbage heap state.
+      Value *FromSubpassActive =
+          Builder.CreateAnd(Active, SubpassInputIsMapped);
+      Value *FromImageActive = Builder.CreateAnd(
+          Active, Builder.CreateNot(SubpassInputIsMapped));
+      feme::cpu::ImageCallEnv FallbackEnv;
+      FallbackEnv.ImageHeap = ImageHeap;
+      FallbackEnv.ImageHeapCount = ImageHeapCount;
+      Value *SubpassTexel =
+          IsIntFormat
+              ? feme::cpu::createLoad2DI32(Builder, ImgEnv, AttachmentIndex,
+                                           X, Y, Builder.getInt32(0), Sample,
+                                           FromSubpassActive)
+              : feme::cpu::createLoad2D(Builder, ImgEnv, AttachmentIndex, X,
+                                        Y, Builder.getInt32(0), Sample,
+                                        FromSubpassActive);
+      Value *FallbackTexel =
+          IsIntFormat
+              ? feme::cpu::createLoad2DI32(Builder, FallbackEnv,
+                                           ResolvedImageHeapIndex, X, Y,
+                                           Builder.getInt32(0), Sample,
+                                           FromImageActive)
+              : feme::cpu::createLoad2D(Builder, FallbackEnv,
+                                        ResolvedImageHeapIndex, X, Y,
+                                        Builder.getInt32(0), Sample,
+                                        FromImageActive);
+      Texel = Builder.CreateSelect(SubpassInputIsMapped, SubpassTexel,
+                                   FallbackTexel);
+    } else {
+      Texel =
+          IsIntFormat
+              ? feme::cpu::createLoad2DI32(Builder, ImgEnv, AttachmentIndex,
+                                           X, Y, Builder.getInt32(0), Sample,
+                                           Active)
+              : feme::cpu::createLoad2D(Builder, ImgEnv, AttachmentIndex, X,
+                                        Y, Builder.getInt32(0), Sample,
+                                        Active);
+    }
     auto *IndexConst = dyn_cast<ConstantInt>(Component);
     Value *LaneResult =
         IndexConst
