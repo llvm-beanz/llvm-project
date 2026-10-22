@@ -129893,3 +129893,49 @@ it lowers from.
    unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(k)` fixed -- stale-LCSSA on a BodyRegion-bypass exit edge, targeted case now Pass
+
+`vulkaninfo --summary | grep deviceName`: **confirmed `FeMe CPU Vulkan Device`** (start and end of session).
+
+**Done.** `ENV6(c)(2)(k)`'s runtime hang (`vkWaitForFences Timeout`) is fixed. The targeted case, `dEQP-VK.graphicsfuzz.cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`, now **Pass**es against the real `deqp-vk` ICD. Full graphicsfuzz corpus: 14 Pass (up from 13), zero regressions.
+
+## What broke it, in one sentence
+
+`freezeLoopCarriedValues` froze a loop-carried value correctly but only applied the freeze to `Latch`'s own edge into the loop's exit block, leaving every *other* exit-block predecessor edge reading a stale, one-round-old value -- wrong whenever one of those other predecessors has its own divergent exit path that bypasses `Latch` entirely.
+
+## How I found it (do this first next time, not live debugging)
+
+1. Built a 30-line standalone C model of the exact phi/select shape from the pre-Linearize IR. It hung with the same symptom (stuck value, incrementing counter) in under a second. Confirmed: this is a masking-logic bug, not a CodeGen bug -- no need to keep chasing registers.
+2. `FEME_DUMP_IR_PRELINEARIZE=1` (safe under `timeout -s KILL` even for a runtime-hanging case) + `feme-opt --llvm -passes=feme-cpu-linearize` + `FEME_DEBUG_LINEARIZE_TRACE=1` gave ground-truth `Header`/`Latch`/`ExitBlock` identities directly from the pass itself -- no more guessing from post-opt block names (which get renamed by later passes and misled the last two sessions).
+3. The post-Linearize IR showed the bug in one line: a 3-way phi at the exit block where 2 of 3 incoming edges used the stale value.
+
+## The fix
+
+Relocated the freeze's `select()` from `Latch`'s terminator to right after the fresh value, in `Header` -- all its operands are Header-resident, and Header dominates the whole loop body, so the relocated freeze is valid to reuse everywhere, not just at `Latch`. Reused it for every exit-block predecessor instead of falling back to the stale phi.
+
+## Commits (5, in order)
+
+1. `Linearize.cpp` fix + new lit test `loop-divergent-exit-non-phi-exit-use-bypass.ll` (synthetic repro, confirmed to fail pre-fix / pass post-fix via `git stash`).
+2. Updates to 3 pre-existing lit tests whose `CHECK` lines encoded the old freeze position or expected a phi that this fix now correctly folds away.
+3. `Roadmap.md`: `ENV6(c)(2)(k)` struck through; new `ENV6(c)(2)(l)` watch item added (unaudited `FeedsUniformBranch` gap, no known failing case).
+4. `VulkanCTSReport.md`: new `L519` entry.
+5. `.instructions.md`: codified the "`feme-opt` + pre-Linearize dump + trace env var, before live debugging" methodology, the post-opt-block-renaming trap, and the uniform-vs-divergent bypass-condition requirement for building this kind of synthetic repro.
+
+(`agent_thoughts.md`, this entry, is commit 6.)
+
+## Verification
+
+- `check-feme`: 3869/3873 Passed, 4 Unsupported, 0 regressions.
+- Real `deqp-vk`: targeted case Pass (was hang). Full 106-case graphicsfuzz corpus, before/after baseline diff: 14 Pass / 92 Fail (was 13/93), zero regressions.
+
+## Next steps
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(a)` and skim the 7 case names in that bucket to pick a first reproducer.
+
+1. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket, not discard-centric, untouched since the original triage pass. Best next target -- largest untriaged cluster that isn't a multi-session architecture effort.
+2. **`ENV6(c)(2)(l)`** (new this session, no known failing case, low urgency): audit `FeedsUniformBranch`/`HeaderExitRelayValues`'s constant-only-capture gap for other instances of this session's bug class before assuming it's unreachable.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
