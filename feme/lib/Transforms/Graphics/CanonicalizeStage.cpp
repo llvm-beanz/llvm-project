@@ -2884,6 +2884,39 @@ getTaskPayloadDynamicOffsetAccess(IRBuilderBase &B, Value *Ptr,
   return std::make_pair(GV, ByteOffset);
 }
 
+/// (Roadmap L502) `resolveInterpolantAddress`'s own extractelement-based
+/// address reconstruction (`SPIRVToLLVMPatterns.cpp`) for a pull-model
+/// interpolation of one constant lane/component of a vector-typed element
+/// living inside a dynamically row-indexed array (e.g.
+/// `interpolateAtCentroid(arr[dynamicIdx].y)`) produces a *pair* of
+/// nested `getelementptr`s rather than one combined access chain: an
+/// inner, `[N x i8]`-sourced GEP selecting the dynamic row (the shape
+/// `getDynamicRowIndexedAccess`'s own `OuterGEP` branch recognizes),
+/// wrapped by an *outer*, plain-`i8`-sourced GEP with one constant index
+/// giving the leaf component's raw byte offset within that row (`.y` of
+/// a `vec2` -> byte offset 4). Neither `getStageIOGlobal` nor
+/// `resolveStageIOAccess` recognize that outer wrapper on its own (it has
+/// no `GlobalVariable` pointer operand -- it wraps another `getelementptr`
+/// instead), so peel it off \p Ptr here first: both callers only need the
+/// *inner* pointer to resolve the global/row this access actually
+/// touches, and `resolveStageIOAccess` separately recovers the peeled
+/// byte offset itself (`PeeledComponentOffset`) to convert back into a
+/// lane index once it already knows the expected leaf type. Returns \p
+/// Ptr unchanged, and leaves `PeeledComponentOffset` untouched, if \p Ptr
+/// is not this exact shape.
+Value *peelConstantComponentGEP(Value *Ptr,
+                                std::optional<uint64_t> &PeeledComponentOffset) {
+  auto *OuterGEP = dyn_cast<GetElementPtrInst>(Ptr);
+  if (!OuterGEP || OuterGEP->getNumIndices() != 1 ||
+      !OuterGEP->getSourceElementType()->isIntegerTy(8))
+    return Ptr;
+  auto *Idx = dyn_cast<ConstantInt>(*OuterGEP->idx_begin());
+  if (!Idx)
+    return Ptr;
+  PeeledComponentOffset = Idx->getZExtValue();
+  return OuterGEP->getPointerOperand();
+}
+
 /// The stage-IO global \p Ptr addresses, trying
 /// `getStageIOBaseAndOffset`'s constant-offset resolution, (roadmap H5b)
 /// `getDynamicVertexIndexedAccess`'s dynamic-vertex-indexed one, and
@@ -2901,6 +2934,17 @@ GlobalVariable *getStageIOGlobal(Value *Ptr, const DataLayout &DL,
     return Dyn->GV;
   if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL, Stage))
     return Dyn->GV;
+  // (Roadmap L502) See `peelConstantComponentGEP`'s own comment -- a
+  // marker call's `Interpolant` reaching a constant lane/component of a
+  // dynamically row-indexed array element has one more wrapper GEP to
+  // peel before `getDynamicRowIndexedAccess` can recognize the row
+  // selection underneath it.
+  std::optional<uint64_t> PeeledComponentOffset;
+  if (Value *Inner = peelConstantComponentGEP(Ptr, PeeledComponentOffset);
+      Inner != Ptr) {
+    if (auto Dyn = getDynamicRowIndexedAccess(Inner, DL, Stage))
+      return Dyn->GV;
+  }
   return nullptr;
 }
 
@@ -5040,7 +5084,37 @@ std::optional<StageIOAccess> resolveStageIOAccess(
     // element, so it builds its own `StageIOAccess` rather than routing
     // through `resolveOffsetWithinElement`'s byte-offset-based recursion,
     // which has no way to represent a non-constant `Row` mid-recursion.
-    if (auto Dyn = getDynamicRowIndexedAccess(Ptr, DL, Stage)) {
+    // (Roadmap L502) `resolveInterpolantAddress`'s own extractelement-
+    // based address reconstruction (`SPIRVToLLVMPatterns.cpp`) for a
+    // pull-model interpolation of one constant lane/component of a
+    // vector-typed element living inside a dynamically row-indexed array
+    // (e.g. `interpolateAtCentroid(arr[dynamicIdx].y)`,
+    // `dEQP-VK.pipeline.*.multisample_interpolation.
+    // nonuniform_interpolant_indexing.*`) produces a *pair* of nested
+    // `getelementptr`s rather than one combined access chain: an inner,
+    // `[N x i8]`-sourced `getelementptr` selecting the dynamic row (the
+    // only shape `getDynamicRowIndexedAccess`'s own `OuterGEP` branch
+    // recognizes), wrapped by an *outer*, plain-`i8`-sourced
+    // `getelementptr` with one *constant* index giving the leaf
+    // component's raw byte offset within that row (`.y` of a `vec2` ->
+    // byte offset 4). `getDynamicRowIndexedAccess` itself has no way to
+    // turn that raw byte offset back into a lane index (it never sees
+    // `ValueTy`), so peel the outer wrapper off here instead -- using
+    // `ValueTy`'s own store size (always the scalar leaf type a
+    // pull-model interpolation call's own result type names) to convert
+    // it -- before letting `getDynamicRowIndexedAccess` resolve what's
+    // left exactly like it already does for the one-level shape.
+    std::optional<uint64_t> PeeledByteOffset;
+    Value *DynPtr = peelConstantComponentGEP(Ptr, PeeledByteOffset);
+    std::optional<uint64_t> PeeledComponent;
+    if (PeeledByteOffset) {
+      uint64_t LaneSize = DL.getTypeStoreSize(ValueTy);
+      if (LaneSize && *PeeledByteOffset % LaneSize == 0)
+        PeeledComponent = *PeeledByteOffset / LaneSize;
+      else
+        DynPtr = Ptr; // Not a lane-aligned offset -- do not misattribute.
+    }
+    if (auto Dyn = getDynamicRowIndexedAccess(DynPtr, DL, Stage)) {
       auto It = ElementIDs.find(Dyn->GV);
       if (It == ElementIDs.end())
         return std::nullopt;
@@ -5059,6 +5133,14 @@ std::optional<StageIOAccess> resolveStageIOAccess(
                              ? B.CreateZExtOrTrunc(Dyn->DynamicComponent,
                                                    B.getInt32Ty())
                              : nullptr;
+      // (Roadmap L502) `PeeledComponent` only ever applies to the whole-
+      // row shape above (`Dyn->DynamicComponent` null, meaning
+      // `getDynamicRowIndexedAccess` selected an entire vector-typed row
+      // with no further lane narrowing of its own) -- a case that
+      // already set its own `Component` from the *inner* GEP's own
+      // dynamic lane select takes precedence and is never overwritten.
+      if (!Component && PeeledComponent)
+        Component = B.getInt32(static_cast<uint32_t>(*PeeledComponent));
       return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1),
                            RowIndex, Component, nullptr,
                            OutputGlobals.contains(Dyn->GV)};
