@@ -888,6 +888,28 @@ enum class ImageCallKind : uint8_t {
   /// only against a multisampled image, the one shape pair
   /// `QuerySizeLod2D`/`QueryLevels` above deliberately do not cover.
   QuerySamples,
+  /// `feme.cpu.image.is_mapped.i1` (roadmap ENV6(b)(1)): whether \p
+  /// ImageIndex names a real, bound descriptor (`FemeImageDescriptor::Data
+  /// != nullptr`) rather than an out-of-range index or an unwritten/
+  /// zero-initialized heap slot (the same "unwritten descriptor reads as
+  /// empty" convention every other `feme.cpu.image.*` query already relies
+  /// on for its own out-of-range behavior -- see `femeRTLoadImageDescriptor`'s
+  /// own doc). The sole caller is `lowerFragmentSubpassLoad`
+  /// (FragmentWrapper.cpp)'s `VK_ATTACHMENT_UNUSED` subpass-input fallback:
+  /// a `subpassLoad` whose indexed slot in the subpass-input heap was never
+  /// populated (every `pColorAttachmentInputIndices`/depth-stencil entry
+  /// mapped to `VK_ATTACHMENT_UNUSED`, so `CommandBuffer.cpp`'s
+  /// `buildSubpassInputHeap` never wrote that slot) must instead read the
+  /// `subpassInput` variable's own bound `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT`
+  /// descriptor directly out of the ordinary image heap -- this query is how
+  /// that caller decides, per lane, which of the two heaps/indices to
+  /// actually read the texel from. Structurally identical to `QueryLevels`/
+  /// `QuerySamples` above (same minimal operand list: no `Mask`, no
+  /// coordinate/mip operand, just \p ImageIndex against \p Env's image
+  /// heap), for the same reason -- a pure, side-effect-free read with a
+  /// well-defined, safe answer for an inactive lane, needing no mask to
+  /// guard it.
+  IsMapped,
   /// `feme.cpu.image.gathercmp.2d.v4f32` (roadmap L7d): `Plain2D`
   /// depth-comparison gather (SPIR-V `OpImageDrefGather` -- HLSL's
   /// `Texture2D::GatherCmp()`). Unlike `SampleCmp2D`'s own single
@@ -2208,6 +2230,16 @@ llvm::CallInst *createQuerySamples(llvm::IRBuilderBase &Builder,
                                    const ImageCallEnv &Env,
                                    llvm::Value *ImageIndex,
                                    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.is_mapped.i1` call (roadmap ENV6(b)(1)): see
+/// `ImageCallKind::IsMapped`'s own doc for its scalar `i1` result. Same
+/// minimal operand list as `createQueryLevels`/`createQuerySamples` -- only
+/// \p ImageIndex from \p Env's image heap, no `Mask`/sampler heap/
+/// coordinate operand of any kind.
+llvm::CallInst *createIsMapped(llvm::IRBuilderBase &Builder,
+                               const ImageCallEnv &Env,
+                               llvm::Value *ImageIndex,
+                               const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.1d.v4f32` call (roadmap H19c). See
 /// `createLoad2D`'s `Sample` doc for its meaning here.

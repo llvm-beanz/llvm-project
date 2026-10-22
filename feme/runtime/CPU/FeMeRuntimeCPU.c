@@ -7069,6 +7069,31 @@ femeCpuImageQuerySamplesI32(const FemeRTImageDescriptor *ImageHeap,
   return (int32_t)Img.SampleCount;
 }
 
+// `feme.cpu.image.is_mapped.i1` (roadmap ENV6(b)(1)): whether `ImageIndex`
+// names a real, bound descriptor rather than an out-of-range index or an
+// unwritten/zero-initialized heap slot -- structurally identical to
+// `femeCpuImageQueryLevelsI32`/`femeCpuImageQuerySamplesI32` immediately
+// above (no `Mask`, no explicit mip level/coordinate), just surfacing
+// `femeRTLoadImageDescriptor`'s own existing `Data != NULL` bounds-checked
+// "is this a real descriptor" fact directly, instead of reading one of its
+// fields. The sole caller is `lowerFragmentSubpassLoad`'s
+// `VK_ATTACHMENT_UNUSED` subpass-input fallback (FragmentWrapper.cpp):
+// deciding, per lane, whether the subpass-input heap's own indexed slot was
+// ever populated by `CommandBuffer.cpp`'s `buildSubpassInputHeap`, or
+// whether to fall back to reading the `subpassInput` variable's own bound
+// descriptor out of the ordinary image heap instead.
+_Bool femeCpuImageIsMappedI1(const FemeRTImageDescriptor *ImageHeap,
+                             uint32_t ImageHeapCount,
+                             uint32_t ImageIndex) asm("feme.cpu.image.is_mapped.i1");
+
+__attribute__((always_inline)) _Bool
+femeCpuImageIsMappedI1(const FemeRTImageDescriptor *ImageHeap,
+                       uint32_t ImageHeapCount, uint32_t ImageIndex) {
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  return Img.Data != 0;
+}
+
 // `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
 // image, comparing `Dref` against each fetched texel's first (depth)
 // component via `Samp->CompareFunc`, then filters the per-texel 0/1

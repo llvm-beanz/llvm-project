@@ -1202,6 +1202,26 @@ TEST_F(ImageCallsTest, MatchesQuerySamplesCall) {
   EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
 }
 
+// `createIsMapped`'s own `feme.cpu.image.is_mapped.i1` call (roadmap
+// ENV6(b)(1)): whether an image-heap index names a real, bound descriptor
+// -- see `ImageCallKind::IsMapped`'s own doc. Same minimal operand list as
+// `QueryLevels`/`QuerySamples` above.
+TEST_F(ImageCallsTest, MatchesIsMappedCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createIsMapped(Builder, Env, Builder.getInt32(3));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::IsMapped);
+  EXPECT_EQ(Matched->Call, CI);
+  EXPECT_EQ(Matched->Env.ImageHeap, Env.ImageHeap);
+  EXPECT_EQ(Matched->Env.ImageHeapCount, Env.ImageHeapCount);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_TRUE(CI->getType()->isIntegerTy(1));
+}
+
 // `createSample2DI32`'s own `feme.cpu.image.sample.2d.v4i32` call (roadmap
 // H109, widened by L262): a sample against an integer-channel
 // (`usampler2D`/`isampler2D`) sampled image -- see
