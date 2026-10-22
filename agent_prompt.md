@@ -70,29 +70,27 @@ Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
 `ENV6`'s remaining untriaged clusters, in priority order:
-1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- root-caused in
-   an earlier session (`VK_ATTACHMENT_UNUSED` subpass-input descriptor fallback
-   missing), not yet fixed. Scoped in `Roadmap.md`: (a) thread the
-   descriptor-set image handle through `feme.stage.subpass.load` as a new
-   operand, (b) add a CPU-runtime fallback read when the live-attachment heap
-   slot for a requested index is unmapped, (c) new lowering-phase and
-   runtime-phase unit tests, (d) re-verify the whole existing subpass-input CTS
-   corpus for regressions. **Best next target** of the two scoped-but-unstarted
-   `ENV6(b)` gaps -- slightly smaller (8 vs 9 cases) and already has a fuller
-   implementation sketch from last session.
-2. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) --
-   root-caused this session
-   (plain-pixel-center-instead-of-coverage-weighted-centroid), not yet fixed.
-   Needs a per-quad coverage mask threaded into
-   `FemeFragmentPrimitive`/`FragmentWrapper.cpp`'s `InterpolateAtCentroid` case,
-   a runtime-ABI change with new lowering-phase and runtime-phase tests, plus
-   re-verification of the rest of the
-   centroid-qualifier/`multisample_interpolation` corpus. Multi-session effort;
-   do not rush it into one sitting.
-3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions,
-   likely a long tail of distinct small bugs.
+1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- design now fully
+   mapped (see `Roadmap.md`). **Best next target.** Land, as one commit (they're
+   coupled, see above): (a) `SubpassLoadPattern`/`getOrInsertSubpassLoadFunc`
+   threading `Adaptor.getImage()` through as a new operand, mangling the callee
+   name by `(ElementTy, MS)`, and (b) a new `classifySubpassImageHandle` +
+   narrow `hasOnlySupportedSubpassImageUses` in `SPIRVResourceLowering.cpp`'s
+   `collectHandles`. Then, as follow-on commits: (c) `lowerImageAccesses`'s new
+   dispatch branch building the replacement, correctly-typed call, (d)
+   `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad` consuming the new operand
+   + the already-landed `IsMapped` query via `CreateSelect`. Each needs its own
+   unit test; finish with a full subpass-input CTS regression sweep
+   (`descriptorset_random`, `multiview.input_attachments`, the rest of
+   `ENV6(b)`).
+2. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) -- unchanged
+   from last session, similarly-sized separate architecture gap
+   (coverage-weighted centroid needs a per-quad coverage mask threaded into the
+   runtime ABI).
+3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged, likely a long tail of
+   distinct small bugs.
 4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
-   cases combined) -- unchanged from prior sessions;
+   cases combined) -- unchanged;
    `memory_model.{write_after_read,message_passing}` (52) and
    `tessellation.invariance` (26) worth checking for a shared cause first.
 5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not
