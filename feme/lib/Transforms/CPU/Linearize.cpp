@@ -5457,14 +5457,36 @@ BasicBlock *LoopLinearizer::findForwardExitCheckBlock(BasicBlock *From,
   return nullptr;
 }
 
+// Roadmap ENV6(c)(2)(g): `FEME_DEBUG_PASSTHROUGH=1` traces every block this
+// walk pops/pushes, and the exact reason for any `std::nullopt` rejection
+// (header revisit, escaped cycle, unsupported terminator, divergent
+// `CondBr`), plus the final success/failure outcome -- the same style as the
+// pre-existing `FEME_DEBUG_L419H_TRACE`/`FLATTENTRACE` knobs above, kept
+// permanently (zero cost when unset) rather than stripped after use, since
+// this walk's own worklist order is otherwise easy to misremember between
+// sessions (confirmed: an earlier session's hand-derived trace of this exact
+// walk, without this instrumentation, turned out to have reconstructed the
+// wrong block identities from a stale premise).
 std::optional<SmallPtrSet<BasicBlock *, 8>>
 LoopLinearizer::collectUniformPassThroughRegion(
     BasicBlock *From, BasicBlock *To, BasicBlock *ExitBlock, CycleRef C,
     const SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
+  bool Trace = ::getenv("FEME_DEBUG_PASSTHROUGH") != nullptr;
+  auto PName = [](BasicBlock *BB) {
+    std::string S;
+    raw_string_ostream OS(S);
+    BB->printAsOperand(OS, false);
+    return S;
+  };
+  if (Trace)
+    errs() << "PTRACE: call From=" << PName(From) << " To=" << PName(To)
+           << "\n";
   SmallPtrSet<BasicBlock *, 8> Visited;
   SmallVector<BasicBlock *, 8> Worklist{From};
   while (!Worklist.empty()) {
     BasicBlock *Cur = Worklist.pop_back_val();
+    if (Trace)
+      errs() << "PTRACE: pop " << PName(Cur) << "\n";
     if (Cur == To || Cur == ExitBlock)
       continue;
     // Roadmap ENV6(c)(2)(e): reaching `C`'s own header again, other than
@@ -5485,29 +5507,51 @@ LoopLinearizer::collectUniformPassThroughRegion(
     // diamond merge instead of a backedge that bypasses `To` entirely --
     // silently producing invalid IR once the caller trusted `To`'s own
     // mask-propagation values as unconditionally live at the merge.
-    if (Cur == CI.getHeader(C) && Cur != From)
+    if (Cur == CI.getHeader(C) && Cur != From) {
+      if (Trace)
+        errs() << "PTRACE: reject (header revisit) " << PName(Cur)
+               << "\n";
       return std::nullopt;
+    }
     if (!Visited.insert(Cur).second)
       continue; // Already queued/visited via another arm.
-    if (!CI.contains(C, Cur))
+    if (!CI.contains(C, Cur)) {
+      if (Trace)
+        errs() << "PTRACE: reject (escaped cycle) " << PName(Cur)
+               << "\n";
       return std::nullopt; // Escaped the cycle without ever reaching `To`.
+    }
     if (auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
       Worklist.push_back(UBr->getSuccessor(0));
       continue;
     }
     auto *CBr = dyn_cast<CondBrInst>(Cur->getTerminator());
-    if (!CBr)
+    if (!CBr) {
+      if (Trace)
+        errs() << "PTRACE: reject (not CondBr/UncondBr) " << PName(Cur)
+               << "\n";
       return std::nullopt; // Not a shape this milestone understands.
+    }
     // A further, genuinely divergent branch strictly *inside* this
     // region (rather than being `To` itself) is the two-divergent-check
     // shape this milestone does not yet support -- `PeeledFrom` wins the
     // same way it does everywhere else in this pass (see
     // `linearizeCycle`'s own comment).
-    if (!PeeledFrom.contains(Cur) && isDivergentBranch(CBr))
+    if (!PeeledFrom.contains(Cur) && isDivergentBranch(CBr)) {
+      if (Trace)
+        errs() << "PTRACE: reject (divergent CondBr) " << PName(Cur)
+               << "\n";
       return std::nullopt;
+    }
+    if (Trace)
+      errs() << "PTRACE: push " << PName(CBr->getSuccessor(0)) << ", "
+             << PName(CBr->getSuccessor(1)) << " from "
+             << PName(Cur) << "\n";
     Worklist.push_back(CBr->getSuccessor(0));
     Worklist.push_back(CBr->getSuccessor(1));
   }
+  if (Trace)
+    errs() << "PTRACE: success, " << Visited.size() << " blocks\n";
   return Visited;
 }
 
