@@ -8537,6 +8537,72 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
       EliminateUnreachableBlocks(F);
     Changed |= CycleChanged;
 
+    // Roadmap ENV6(c)(2)(j): a block `StructurizeCFG` names like a loop's
+    // own uniform exit-check relay (e.g. `loop.exit.guard`) can carry a
+    // second, genuinely divergent decision of its own that has nothing to
+    // do with the loop's real continuation condition -- e.g. a deferred
+    // discard/`kill` check whose own effect must only apply once the loop
+    // as a whole has exited, routed through the identical relay block
+    // `LoopLinearizer`'s own exit-check matching (`matchExitCheckWithRelay`/
+    // `OtherCondBrBlocks`) legitimately treats as part of the loop's
+    // uniform exit chain for its own, *structural* ("does this lane keep
+    // looping") purpose. That matching correctly converts the structural
+    // role to a mask, but never separately re-examines whether the
+    // relay's own *condition value* is itself divergent, since in the
+    // ordinary case (confirmed via `Linearize/loop-relay-chain-two-hops.
+    // ll`) it trivially is not (a compile-time-constant-valued phi). When
+    // it genuinely is divergent (confirmed via a real
+    // `dEQP-VK.graphicsfuzz.stable-mergesort-for-always-false-if-discard`
+    // reduction, `Linearize/loop-nested-sibling-diamonds-peel-shared-
+    // merge.ll`), the relay's own `CondBr` survives all the way to
+    // `feme::cpu::SIMDizePass`, which has no choice but to reject the
+    // whole function.
+    //
+    // The whole-function `DiamondFlattener` pass above cannot catch this
+    // itself: `loop.exit.guard`-style blocks sit *inside* the cycle in
+    // the original, pre-`LoopLinearizer` IR (part of the loop's own
+    // exit-check relay chain), so that earlier pass correctly defers to
+    // `LoopLinearizer` for them, the same way it defers for the loop's
+    // own header/latch/body. Once `LoopLinearizer` has finished, any such
+    // block that sits *outside* every remaining cycle (the loop itself,
+    // if any, is by now either fully linearized into a uniform mask-
+    // driven backedge, or untouched because it was genuinely uniform to
+    // begin with) and whose own terminator is still a genuinely divergent
+    // `CondBr` is exactly the "ordinary diamond with no further loop
+    // structure of its own" shape `DiamondFlattener::flattenLoopBodyDiamond`
+    // already knows how to flatten (the same method `LoopLinearizer`'s own
+    // `H165` fixed-point scan uses for an analogous in-cycle shape) --
+    // reuse it here, fixed-point, sharing `MergeVisited`/`ResolvedBlocks`
+    // so any block `LoopLinearizer` (or the earlier whole-function pass)
+    // already claimed is safely declined by `validate`'s own bookkeeping
+    // rather than reconsidered.
+    if (CycleChanged) {
+      DominatorTree DT3(F);
+      PostDominatorTree PDT3(F);
+      CycleInfo CI3;
+      CI3.compute(F);
+      UniformityInfo UI3 = computeWaveUniformity(F, DT3, CI3);
+      DiamondFlattener DF2(F, DT3, PDT3, CI3, UI3, MergeVisited,
+                           ResolvedBlocks);
+      bool FlattenedAny = true;
+      while (FlattenedAny) {
+        FlattenedAny = false;
+        for (BasicBlock &BB : F) {
+          if (CI3.getCycle(&BB).isValid())
+            continue;
+          auto *CondBr = dyn_cast<CondBrInst>(BB.getTerminator());
+          if (!CondBr || !UI3.isDivergentTerminator(CondBr))
+            continue;
+          if (DF2.flattenLoopBodyDiamond(&BB)) {
+            Changed = true;
+            FlattenedAny = true;
+            break; // The scan below is stale the moment any block's
+                   // terminator changes; restart it.
+          }
+        }
+      }
+    }
+
     // `DiamondFlattener`/`LoopLinearizer` only lower a `feme.stage.discard`/
     // `.demote`/`.is_helper` call inside the divergent-diamond and
     // divergent-loop-exit shapes they already support (see their own

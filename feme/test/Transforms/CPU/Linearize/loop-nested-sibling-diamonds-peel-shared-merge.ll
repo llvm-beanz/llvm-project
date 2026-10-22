@@ -1,4 +1,5 @@
 ; RUN: feme-opt --llvm -passes="function(instnamer),feme-cpu-linearize" -S %s | opt -passes=verify -S | FileCheck %s
+; RUN: feme-opt --llvm -passes="function(instnamer),feme-cpu-linearize,feme-cpu-simdize" -S %s -o /dev/null
 
 ; Roadmap ENV6(c)(2)(i): a real, captured pre-`feme-cpu-linearize` IR
 ; reduction of `dEQP-VK.graphicsfuzz.stable-mergesort-for-always-false-if-
@@ -39,11 +40,44 @@
 ; (`cov-function-large-loop-always-return-first-iteration`) from Fail to
 ; Pass, with zero regressions across the full 106-case graphicsfuzz
 ; corpus. `stable-mergesort-for-always-false-if-discard` itself still
-; `Fail`s under the real ICD, but now at a later pipeline stage
-; (`feme-cpu-simdize` rejects a separate, pre-existing, independent
-; divergent-branch shape synthesized by `LoopLinearizer` itself in block
-; `loop.exit.guard`, outside this diamond entirely -- tracked separately,
-; see `Roadmap.md`).
+; `Fail`ed under the real ICD at the time, but at a later pipeline stage:
+; `feme-cpu-simdize` rejected a separate, pre-existing, independent
+; divergent-branch shape left behind in block `loop.exit.guard`, outside
+; this diamond entirely.
+;
+; Roadmap ENV6(c)(2)(j): `loop.exit.guard` is a `StructurizeCFG`-built
+; relay block that already exists in this shader's IR *before*
+; `feme-cpu-linearize` runs, as part of the loop's own uniform exit-check
+; chain. `LoopLinearizer`'s own exit-check matching
+; (`matchExitCheckWithRelay`/`OtherCondBrBlocks`) correctly recognizes its
+; *structural* role (continue-vs-exit) and converts that to a mask, but
+; never separately re-validates whether the relay block's own `CondBr`
+; *condition* is itself divergent -- ordinarily it trivially is not (see
+; `loop-relay-chain-two-hops.ll`'s own uniform, constant-valued relay
+; condition), but here it is a genuine, per-lane, loop-carried value (fed,
+; transitively, by this very diamond's own `bb584`/`bb608` output), so a
+; real divergent `CondBr` survived all the way to `feme-cpu-simdize`.
+;
+; Fixed by a new, narrow, post-`LoopLinearizer` scan in
+; `LinearizePass::run()`: once every cycle in the function has been
+; linearized, re-walk every remaining block whose terminator is still a
+; `CondBrInst`, skipping any block still inside a cycle (so this can never
+; interfere with `LoopLinearizer`'s own domain), and reuse the existing
+; `DiamondFlattener::flattenLoopBodyDiamond` (the same, already-proven-safe
+; mechanism `LoopLinearizer`'s own `H165` fixed-point scan uses for an
+; analogous in-cycle shape) on any survivor that a freshly recomputed
+; `UniformityInfo::isDivergentTerminator` still calls divergent -- exactly
+; the same criterion `feme-cpu-simdize` itself uses to reject a function,
+; so a block like `loop.exit.guard` in `loop-relay-chain-two-hops.ll`,
+; whose surviving condition is uniform, is never even considered a
+; candidate and cannot regress. With this fix, `loop.exit.guard`'s own
+; diamond (`bb622` vs. `loop.exit.guard.Flow46_crit_edge`, reconverging at
+; `Flow46`) is flattened to an ordinary "every lane active" diamond (it
+; contains no `feme.stage.*` mask-affecting calls), and
+; `stable-mergesort-for-always-false-if-discard` passes `feme-cpu-simdize`
+; cleanly -- confirmed with zero regressions across the full
+; `feme/test/Transforms/CPU/Linearize/` lit suite and
+; `FeMeTransformsCPUTests`.
 
 ; CHECK-NOT: has an internal branch in
 ; CHECK: ret void
