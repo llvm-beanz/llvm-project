@@ -4591,7 +4591,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         FRes.Primitives = Primitives;
         FRes.VertexInputs = FSVertexInputs->Data.data();
         FRes.VertexInputLayout = &FSVertexInLayout;
-        FRes.SamplePositions = *SamplePositions;
+        // (Roadmap L115(b) follow-up) Padded to the architecture's fixed
+        // 8-sample cap (`PhysicalDeviceInfo.cpp`'s own
+        // `framebufferColorSampleCounts`), not just `*SamplePositions`'s
+        // real (possibly smaller) size: a coverage-weighted
+        // `InterpolateAtCentroid` (`FragmentWrapper.cpp`) needs to read
+        // every slot up to index 7 unconditionally (no per-sample-count
+        // value is threaded through the compiled ABI, see
+        // `FemeFragmentArgs::SamplePositions`'s own comment), gating each
+        // sample's actual contribution on its own live `Coverage` bit
+        // instead -- those bits are already guaranteed never set above
+        // the real sample count (see this pass's own per-sample coverage
+        // loop above), so the padding values below are never read as
+        // live data; zero is simply a safe, well-defined placeholder.
+        std::array<std::array<float, 2>, 8> PaddedSamplePositions{};
+        llvm::copy(*SamplePositions, PaddedSamplePositions.begin());
+        FRes.SamplePositions = PaddedSamplePositions;
         const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
         cpu::PreparedFragmentBatch PFB =
             cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
