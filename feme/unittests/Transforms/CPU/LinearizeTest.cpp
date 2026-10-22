@@ -3864,7 +3864,7 @@ TEST(LinearizeTest,
          "own predecessor block, not the phi's own (destination) block";
 }
 
-// Roadmap ENV6(c)(2)(e): a real, captured pre-`feme-cpu-linearize` IR
+// Roadmap ENV6(c)(2)(g): a real, captured pre-`feme-cpu-linearize` IR
 // reduction of `dEQP-VK.graphicsfuzz.{cov-loop-condition-filter-some-
 // iterations-never-discard,stable-mergesort-for-always-false-if-
 // discard}`'s own shared shape: a uniform outer loop (header `%2`, whose
@@ -3877,21 +3877,24 @@ TEST(LinearizeTest,
 // check entirely and rejoins downstream of the check's own "stay in
 // loop" continuation, looping all the way back around to the outer
 // loop's header on a later iteration -- a backedge `collectUniform
-// PassThroughRegion`'s pre-ENV6(c)(2)(e) walk mistook for an ordinary
-// "already visited via another arm" diamond merge, rather than a
-// backedge that bypasses the check's own mask-propagation values
-// (`active.check.live`/`active.check.sideeffect`/`exited.via.check.
-// next`) on the iterations that take it. Before this fix, this silently
-// produced IR failing `verifyModule` ("Instruction does not dominate
-// all uses!") that `opt`'s own `VerifierPass` turns into a hard
-// `report_fatal_error` abort when chained directly after `feme-cpu-
-// linearize` (as `feme-opt --llvm -passes=feme-cpu-linearize,verify`
-// does) -- this milestone instead recognizes the backedge and bails out
-// with a clean, diagnosed "unsupported shape" error, the same way every
-// other not-yet-understood shape in this pass already does, rather than
-// producing invalid IR.
-TEST(LinearizeTest,
-     DiagnosesUniformInnerCondGatingDivergentCheckInsteadOfInvalidIR) {
+// PassThroughRegion`'s own walk mistook for an ordinary "already visited
+// via another arm" diamond merge, rather than a backedge that bypasses
+// the check's own mask-propagation values (`active.check.live`/
+// `active.check.sideeffect`/`exited.via.check.next`) on the iterations
+// that take it. ENV6(c)(2)(e) first recognized this and bailed out with
+// a clean, diagnosed "unsupported shape" error rather than producing IR
+// failing `verifyModule` ("Instruction does not dominate all uses!").
+// ENV6(c)(2)(g) (this fix) goes further: `recognizeUniformChainGateMerge
+// Bypass` now additionally locates the real merge block the bypass
+// rejoins at (one hop past `CheckExit->StayInLoop`, not at it -- the
+// shape `L377(a)`'s own, narrower bypass-diamond fix already handles),
+// and `linearizeCycle` inserts ordinary merge phis there for the three
+// mask-propagation values, fed by the real, check-narrowed values on
+// the check-ran edge and by the unmodified, pre-check values on the
+// bypass edge (a lane that skipped the check is, by definition,
+// unaffected by it) -- so this shape now lowers successfully instead of
+// merely being diagnosed.
+TEST(LinearizeTest, LinearizesUniformInnerCondGatingDivergentCheck) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
@@ -3993,17 +3996,19 @@ TEST(LinearizeTest,
       },
       &SawError);
 
-  run(*M);
-  EXPECT_TRUE(SawError) << "the uniform inner conditional gating whether "
-                            "the divergent discard check runs this "
-                            "iteration should be diagnosed as unsupported";
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(SawError)
+      << "recognizeUniformChainGateMergeBypass should recognize this "
+         "exact shape (a uniform inner conditional's bypass arm "
+         "rejoining one hop past CheckExit->StayInLoop) and lower it "
+         "via merge phis, not fall back to the generic diagnostic";
   EXPECT_FALSE(verifyModule(*M, &errs()))
-      << "collectUniformPassThroughRegion must recognize a walk that "
-         "loops back to the cycle's own header without ever reaching "
-         "the exit check as escaping the region, not as an ordinary "
-         "already-visited diamond merge, otherwise the check's own "
-         "mask-propagation values end up read on a path where they were "
-         "never computed";
+      << "recognizeUniformChainGateMergeBypass's merge phis, inserted "
+         "at the real block the bypass arm rejoins at, must make every "
+         "use of the check's own mask-propagation values "
+         "(active.check.live/active.check.sideeffect/exited.via.check."
+         "next) properly dominated, whether reached via the check "
+         "itself or via the uniform bypass that skips it";
 }
 
 } // namespace

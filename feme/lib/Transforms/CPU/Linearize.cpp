@@ -3955,6 +3955,69 @@ private:
                                   BasicBlock *ExitBlock, CycleRef C,
                                   const SmallPtrSetImpl<BasicBlock *> &PeeledFrom);
 
+  /// Roadmap ENV6(c)(2)(g): the result of successfully recognizing a
+  /// *uniform* `ChainGate` -- see `recognizeUniformChainGateMergeBypass`'s
+  /// own comment -- bundling everything `linearizeCycle` needs to both
+  /// fold \p ChainGate's two arms back into an ordinary `PreRegion` (so
+  /// the rest of this pass's existing single-source machinery keeps
+  /// working unmodified) and later install merge phis at \p MergeBlock
+  /// for the three mask-propagation values `CheckBlock`'s own check
+  /// computes.
+  struct ChainGateMergeBypass {
+    /// Every block `PreRegionStart`'s walk reaches before `CheckBlock`,
+    /// on *either* of `ChainGate`'s two arms, except `MergeBlock` itself
+    /// (which belongs to `PostRegion`, not `PreRegion` -- see below).
+    SmallPtrSet<BasicBlock *, 8> PreRegionBlocks;
+    /// The single block where `ChainGate`'s "skip the check" arm and
+    /// `CheckExit->StayInLoop`'s own "ran the check" continuation
+    /// actually reconverge -- already a member of `PostRegion`, and the
+    /// only `PostRegion` member that needs this fix's new merge phis
+    /// (every other `PostRegion` member is reached *only* via the check,
+    /// so it keeps using `MasksAfterCheck`/`ExitedViaCheckNext` directly,
+    /// completely unmodified by this fix).
+    BasicBlock *MergeBlock;
+    /// `MergeBlock`'s own predecessor on `ChainGate`'s bypass arm (the
+    /// other incoming edge is always `CheckExit->StayInLoop` itself --
+    /// see the narrow shape this recognizer requires).
+    BasicBlock *BypassPred;
+  };
+
+  /// Roadmap ENV6(c)(2)(g): recognizes one narrow, specific shape that
+  /// makes `PreRegion` fail above: a *uniform* `ChainGate` sitting along
+  /// `PreRegionStart`'s own walk to \p CheckBlock, one of whose two arms
+  /// reaches \p CheckBlock the ordinary way while the other (its "skip
+  /// the check" arm) is itself a pure uniform pass-through chain that
+  /// bypasses \p CheckBlock -- and `CheckExit->StayInLoop` -- entirely,
+  /// reconverging with `StayInLoop`'s own continuation at a single
+  /// shared diamond-merge block already inside \p PostRegion, strictly
+  /// before \p Latch (confirmed via a real, reduced `dEQP-VK.graphicsfuzz.
+  /// cov-loop-condition-filter-some-iterations-never-discard` reproducer,
+  /// retained at `/tmp/relay_frozen2/`). Unlike the `L377(a)` fix just
+  /// above (which only ever triggers for a *divergent* `ChainGate`, and
+  /// must physically delete its branch -- `feme-cpu-simdize` forbids any
+  /// leftover *divergent* branch, but tolerates a uniform one just fine),
+  /// this shape's `ChainGate` is uniform, so its branch can simply stay;
+  /// the only real problem is that \p CheckBlock's own `MasksAfterCheck`/
+  /// `ExitedViaCheckNext` do not dominate the bypass arm's own edge into
+  /// the merge block -- fixed by the caller inserting ordinary merge
+  /// phis there once this recognizer has found it (see
+  /// `ChainGateMergeBypass`'s own comment).
+  ///
+  /// Deliberately narrow: requires the merge block's own terminator to
+  /// branch straight to \p Latch (so there is no further, not-yet-
+  /// understood region downstream of the merge this fix would also need
+  /// to repair) and requires the merge block's only two predecessors to
+  /// be exactly `CheckExit->StayInLoop` and the bypass arm's own tail --
+  /// anything else bails to `std::nullopt`, leaving the caller's existing
+  /// generic diagnostic as the safe fallback. A wrong partition here
+  /// would be a silent per-lane miscompile, not just a missed
+  /// optimization -- see roadmap `ENV6(c)(2)(g)`'s own writeup.
+  std::optional<ChainGateMergeBypass> recognizeUniformChainGateMergeBypass(
+      BasicBlock *PreRegionStart, BasicBlock *CheckBlock, BasicBlock *Latch,
+      BasicBlock *ExitBlock, BasicBlock *StayInLoop, CycleRef C,
+      const SmallPtrSetImpl<BasicBlock *> &PeeledFrom,
+      const SmallPtrSetImpl<BasicBlock *> &PostRegion);
+
   /// Finalizes \p Latch's backedge once its loop-carried masks are fully
   /// known (\p MasksAtLatch), returning the resulting backedge condition:
   /// \p Latch's own natural condition (if it has one -- real, uniform
@@ -5555,6 +5618,111 @@ LoopLinearizer::collectUniformPassThroughRegion(
   return Visited;
 }
 
+std::optional<LoopLinearizer::ChainGateMergeBypass>
+LoopLinearizer::recognizeUniformChainGateMergeBypass(
+    BasicBlock *PreRegionStart, BasicBlock *CheckBlock, BasicBlock *Latch,
+    BasicBlock *ExitBlock, BasicBlock *StayInLoop, CycleRef C,
+    const SmallPtrSetImpl<BasicBlock *> &PeeledFrom,
+    const SmallPtrSetImpl<BasicBlock *> &PostRegion) {
+  // Walk the plain `UncondBr` chain from `PreRegionStart` up to the first
+  // block with some other terminator -- exactly
+  // `collectUniformPassThroughRegion`'s own first loop body, just without the
+  // `To`/`ExitBlock`/header-revisit bookkeeping this recognizer does not need
+  // (there is no `To` yet: that is exactly what this function is trying to
+  // discover).
+  SmallPtrSet<BasicBlock *, 8> BeforeChainGate;
+  BasicBlock *Cur = PreRegionStart;
+  while (true) {
+    if (Cur == CheckBlock)
+      return std::nullopt; // No `ChainGate` at all: `PreRegion` failed for
+                           // some other, unrelated reason.
+    if (!CI.contains(C, Cur) || !BeforeChainGate.insert(Cur).second)
+      return std::nullopt;
+    auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
+    if (!UBr)
+      break;
+    Cur = UBr->getSuccessor(0);
+  }
+  auto *ChainGateBr = dyn_cast<CondBrInst>(Cur->getTerminator());
+  if (!ChainGateBr ||
+      (!PeeledFrom.contains(Cur) && isDivergentBranch(ChainGateBr)))
+    return std::nullopt; // Not a uniform `CondBr`: either no `ChainGate`
+                         // here at all, or it is the genuinely divergent
+                         // shape `L377(a)` above already handles.
+  BasicBlock *ChainGate = Cur;
+  BeforeChainGate.erase(ChainGate);
+
+  // Try both arm assignments: whichever one's "check" arm can still
+  // reach `CheckBlock` uniformly, and whose "bypass" arm can reach
+  // `Latch` uniformly (skipping `CheckBlock` entirely), is `ChainGate`'s
+  // real shape here. At most one assignment can ever satisfy both halves
+  // (the two arms are different blocks), so trying both and keeping
+  // whichever succeeds is safe.
+  for (BasicBlock *ToCheckEntry :
+       {ChainGateBr->getSuccessor(0), ChainGateBr->getSuccessor(1)}) {
+    BasicBlock *ChainBypassEntry = ToCheckEntry == ChainGateBr->getSuccessor(0)
+                                       ? ChainGateBr->getSuccessor(1)
+                                       : ChainGateBr->getSuccessor(0);
+    std::optional<SmallPtrSet<BasicBlock *, 8>> ToCheckRegion =
+        collectUniformPassThroughRegion(ToCheckEntry, CheckBlock, ExitBlock, C,
+                                        PeeledFrom);
+    if (!ToCheckRegion)
+      continue;
+    std::optional<SmallPtrSet<BasicBlock *, 8>> ChainBypassRegion =
+        collectUniformPassThroughRegion(ChainBypassEntry, Latch, ExitBlock, C,
+                                        PeeledFrom);
+    if (!ChainBypassRegion)
+      continue;
+    // Roadmap ENV6(c)(2)(g): the real reconnect point is the single block
+    // both `ChainBypassRegion`'s own walk (toward `Latch`) and
+    // `PostRegion`'s own walk (from `StayInLoop`, also toward `Latch`)
+    // agree on. Requiring there to be exactly one such block -- not zero,
+    // not several -- is what keeps this recognizer from ever guessing at
+    // an ambiguous or multi-block shared tail this fix has not been
+    // validated against.
+    BasicBlock *MergeBlock = nullptr;
+    for (BasicBlock *BB : *ChainBypassRegion) {
+      if (!PostRegion.contains(BB))
+        continue;
+      if (MergeBlock)
+        return std::nullopt; // Ambiguous: more than one shared block.
+      MergeBlock = BB;
+    }
+    if (!MergeBlock || MergeBlock == StayInLoop)
+      return std::nullopt;
+    // Narrow, confirmed-shape requirements (see this function's own
+    // comment): `MergeBlock` must branch straight to `Latch` (nothing
+    // left unaccounted-for downstream of the merge), and its only two
+    // predecessors must be exactly `StayInLoop` and one block from
+    // `ChainBypassRegion`.
+    auto *MergeUBr = dyn_cast<UncondBrInst>(MergeBlock->getTerminator());
+    if (!MergeUBr || MergeUBr->getSuccessor(0) != Latch)
+      return std::nullopt;
+    BasicBlock *BypassPred = nullptr;
+    for (BasicBlock *Pred : predecessors(MergeBlock)) {
+      if (Pred == StayInLoop)
+        continue;
+      if (BypassPred || !ChainBypassRegion->contains(Pred))
+        return std::nullopt;
+      BypassPred = Pred;
+    }
+    if (!BypassPred)
+      return std::nullopt;
+
+    ChainGateMergeBypass Result;
+    Result.PreRegionBlocks = std::move(BeforeChainGate);
+    Result.PreRegionBlocks.insert(ChainGate);
+    Result.PreRegionBlocks.insert(ToCheckRegion->begin(), ToCheckRegion->end());
+    for (BasicBlock *BB : *ChainBypassRegion)
+      if (BB != MergeBlock)
+        Result.PreRegionBlocks.insert(BB);
+    Result.MergeBlock = MergeBlock;
+    Result.BypassPred = BypassPred;
+    return Result;
+  }
+  return std::nullopt;
+}
+
 bool LoopLinearizer::isKnownUniform(const Value *V) const {
   return isa<Constant>(V) || KnownUniformValues.contains(V);
 }
@@ -6931,6 +7099,26 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     std::optional<SmallPtrSet<BasicBlock *, 8>> PostRegion =
         collectUniformPassThroughRegion(CheckExit->StayInLoop, Latch,
                                         ExitBlock, C, PeeledFrom);
+    // Roadmap ENV6(c)(2)(g): before falling back to the generic "internal
+    // branch" diagnostic below, see whether `PreRegion`'s own failure is
+    // exactly the one narrow, already-understood shape a uniform
+    // `ChainGate` bypassing `CheckBlock` produces -- see
+    // `recognizeUniformChainGateMergeBypass`'s own comment. `ChainGateFix`
+    // staying null is the overwhelmingly common case (this shape is rare):
+    // every other `PreRegion`/`PostRegion` failure falls straight through
+    // to the existing diagnostic exactly as before.
+    BasicBlock *ChainGateMergeBlock = nullptr;
+    BasicBlock *ChainGateBypassPred = nullptr;
+    if (!PreRegion && PostRegion) {
+      if (std::optional<ChainGateMergeBypass> ChainGateFix =
+              recognizeUniformChainGateMergeBypass(
+                  PreRegionStart, CheckBlock, Latch, ExitBlock,
+                  CheckExit->StayInLoop, C, PeeledFrom, *PostRegion)) {
+        PreRegion = std::move(ChainGateFix->PreRegionBlocks);
+        ChainGateMergeBlock = ChainGateFix->MergeBlock;
+        ChainGateBypassPred = ChainGateFix->BypassPred;
+      }
+    }
     if (!PreRegion || !PostRegion) {
       // Roadmap L419(h): `PreRegion`/`PostRegion` failing here (rather
       // than at `RealExitCandidates.size() > 1` above) almost always
@@ -7160,17 +7348,59 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
     CheckExit->Br->eraseFromParent();
 
+    // Roadmap ENV6(c)(2)(g): `MasksAfterCheck`/`ExitedViaCheckNext` only
+    // dominate every `PostRegion` member (and `Latch`) in the ordinary
+    // case, where `CheckExit->StayInLoop` is `PostRegion`'s own sole
+    // entry. When `recognizeUniformChainGateMergeBypass` found a uniform
+    // `ChainGate` bypassing `CheckBlock` entirely, `ChainGateMergeBlock`
+    // also has a *second* incoming edge (`ChainGateBypassPred`) that
+    // never ran this check at all -- insert ordinary merge phis there,
+    // fed by the real, check-narrowed values on `StayInLoop`'s edge and
+    // by the unmodified, pre-check `Masks`/`ExitedViaCheck` on the
+    // bypass edge (a lane that skipped the check is, by definition,
+    // unaffected by it), and use the merged results for everything at or
+    // downstream of the merge -- `ChainGateMergeBlock` itself, `Latch`,
+    // and every later consumer of `MasksAfterCheck`/`ExitedViaCheckNext`.
+    // Every `PostRegion` member *before* the merge (just `StayInLoop`
+    // itself, by this recognizer's own narrow requirements) keeps using
+    // the raw, check-narrowed values exactly as before -- it is only ever
+    // reached via the check having actually run.
+    MaskPair EffectiveMasksAfterCheck = MasksAfterCheck;
+    Value *EffectiveExitedViaCheckNext = ExitedViaCheckNext;
+    if (ChainGateMergeBlock) {
+      IRBuilder<> MergeBuilder(&*ChainGateMergeBlock->getFirstNonPHIIt());
+      PHINode *MergedLive =
+          MergeBuilder.CreatePHI(I1Ty, 2, "chaingate.merge.live");
+      PHINode *MergedSideEffect =
+          MergeBuilder.CreatePHI(I1Ty, 2, "chaingate.merge.sideeffect");
+      PHINode *MergedExitedViaCheck =
+          MergeBuilder.CreatePHI(I1Ty, 2, "chaingate.merge.exited.via.check");
+      MergedLive->addIncoming(MasksAfterCheck.Live, CheckExit->StayInLoop);
+      MergedLive->addIncoming(Masks.Live, ChainGateBypassPred);
+      MergedSideEffect->addIncoming(MasksAfterCheck.SideEffect,
+                                    CheckExit->StayInLoop);
+      MergedSideEffect->addIncoming(Masks.SideEffect, ChainGateBypassPred);
+      MergedExitedViaCheck->addIncoming(ExitedViaCheckNext,
+                                        CheckExit->StayInLoop);
+      MergedExitedViaCheck->addIncoming(ExitedViaCheck, ChainGateBypassPred);
+      EffectiveMasksAfterCheck = {MergedLive, MergedSideEffect};
+      EffectiveExitedViaCheckNext = MergedExitedViaCheck;
+    }
+
     for (BasicBlock *BB : *PostRegion) {
-      applyStageMasks(*BB, MasksAfterCheck);
-      rethreadNestedEntryMasks(BB, MasksAfterCheck);
+      MaskPair &BlockMasks = BB == ChainGateMergeBlock
+                                 ? EffectiveMasksAfterCheck
+                                 : MasksAfterCheck;
+      applyStageMasks(*BB, BlockMasks);
+      rethreadNestedEntryMasks(BB, BlockMasks);
     }
     // Roadmap L419(w): see the identical `PreRegion` call above.
     if (!flattenTaintedBranchesInRegion(*PostRegion, MasksAfterCheck, C))
       return false;
-    applyStageMasks(*Latch, MasksAfterCheck);
-    rethreadNestedEntryMasks(Latch, MasksAfterCheck);
+    applyStageMasks(*Latch, EffectiveMasksAfterCheck);
+    rethreadNestedEntryMasks(Latch, EffectiveMasksAfterCheck);
 
-    Value *Continue = closeLatch(Latch, Header, MasksAfterCheck);
+    Value *Continue = closeLatch(Latch, Header, EffectiveMasksAfterCheck);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
     // Roadmap H94a: `Latch` just became a brand-new predecessor of
     // `ExitBlock` (unlike the `HeaderDivergent`/`LatchDivergent` cases
@@ -7198,7 +7428,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       Value *Restored;
       if (HeaderValue && CheckValue && HeaderValue != CheckValue)
         Restored = RelayRestoreBuilder.CreateSelect(
-            ExitedViaCheckNext, CheckValue, HeaderValue,
+            EffectiveExitedViaCheckNext, CheckValue, HeaderValue,
             PN->getName() + ".exit.merge");
       else
         Restored = CheckValue ? CheckValue : HeaderValue;
@@ -7206,16 +7436,17 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
     // Replace (not add to) `Latch`'s already-seeded poison placeholder
     // (see `ExitedViaCheck`'s own creation comment above).
-    ExitedViaCheck->setIncomingValueForBlock(Latch, ExitedViaCheckNext);
+    ExitedViaCheck->setIncomingValueForBlock(Latch,
+                                             EffectiveExitedViaCheckNext);
     freezeLoopCarriedValues(
-        Header, Latch, MasksAfterCheck.Live,
+        Header, Latch, EffectiveMasksAfterCheck.Live,
         {cast<PHINode>(EntryMasks.Live), cast<PHINode>(EntryMasks.SideEffect),
          ExitedViaCheck},
         [&](const BasicBlock *BB) { return CI.contains(C, BB); },
         SmallVector<PHINode *, 4>(RelayCapturedHeaderPhis.begin(),
                                   RelayCapturedHeaderPhis.end()),
         ExitBlock);
-    addLatchIncoming(EntryMasks, MasksAfterCheck);
+    addLatchIncoming(EntryMasks, EffectiveMasksAfterCheck);
     // Roadmap L282: record this cycle's own entry masks so an *enclosing*
     // cycle (linearized afterward, post-order) can retroactively narrow
     // them via `rethreadNestedEntryMasks` if it turns out this cycle's
