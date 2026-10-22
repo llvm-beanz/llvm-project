@@ -2793,13 +2793,26 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
   // (SPIRVToLLVMPatterns.cpp) synthesizes a constant `0` for the common
   // implicit-sample case, but a real `OpImageRead` `Sample` image operand
   // can be a genuinely divergent per-lane value -- so it is widened like
-  // any other operand rather than forced scalar.
+  // any other operand rather than forced scalar. Its fourth operand (ENV6(b)
+  // (1)), present only once `SPIRVResourceLowering.cpp`'s
+  // `getOrInsertResolvedSubpassLoadFunc` has already replaced the original
+  // handle-typed call with the resolved-image-heap-index one (this pass
+  // always runs after that resolution, so the handle-typed shape with its
+  // non-numeric `target("spirv.Image", ...)` operand is never observed
+  // here), is the resolved image-heap slot index -- a single value shared
+  // by every invocation executing this call, exactly like `attachment_index`
+  // /`component`, so it stays scalar too rather than being (invalidly, for
+  // a non-numeric handle) or needlessly (for the already-scalar resolved
+  // index) widened.
   bool FirstTwoOperandsAreConstantIDs =
+      Kind == feme::StageOpKind::SubpassLoad;
+  bool FourthOperandIsConstantImageIndex =
       Kind == feme::StageOpKind::SubpassLoad;
   auto KeepOperandScalar = [&](unsigned I) {
     return (I == 0 && (FirstOperandIsElementID ||
                        FirstOperandIsConstantTaskPayloadOffset)) ||
-           (I <= 1 && FirstTwoOperandsAreConstantIDs);
+           (I <= 1 && FirstTwoOperandsAreConstantIDs) ||
+           (I == 3 && FourthOperandIsConstantImageIndex);
   };
 
   // (Roadmap H171) `Derivative{X,Y}{Fine,Coarse}`/`QuadRead` are the only

@@ -4343,3 +4343,65 @@ TEST(SIMDizeTest,
 } // namespace
 
 
+
+// Roadmap `ENV6(b)(1)`: `widenStageOp`'s `SubpassLoad` handling keeps its
+// new 4th operand (the handle's own resolved image-heap index, added by
+// `SPIRVResourceLowering.cpp`'s `getOrInsertResolvedSubpassLoadFunc`)
+// scalar -- exactly like `attachment_index`/`component` (operands 0/1) --
+// since it is always a single value shared by every invocation, unlike
+// `sample` (operand 2), which is widened whenever it is genuinely
+// per-lane divergent. Before this fix, `KeepOperandScalar` only exempted
+// operands 0 and 1, so this 4th operand was wrongly widened into a
+// `<4 x i32>` vector too, producing a callee whose declared (scalar)
+// signature didn't match its actual (vector) call operands -- caught by
+// `vkCreateGraphicsPipelines`'s own descriptor-binding validation in
+// `DrawTest.cpp`'s `SubpassLoadReadsBackTheDepthAttachmentItWroteWithNoIndex`
+// regression, rather than this pass's own (non-existent) operand-shape
+// assertion.
+TEST(SIMDizeTest, KeepsSubpassLoadResolvedImageIndexOperandScalar) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %v = call float @feme.stage.subpass.load.resolved.f32(
+          i32 0, i32 0, i32 %tid, i32 0)
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %v, i32 0)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare float @feme.stage.subpass.load.resolved.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "hlsl.shader"="pixel" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWidenedCall = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (!CI->getCalledFunction()->getName().starts_with(
+            "feme.stage.subpass.load"))
+      continue;
+    FoundWidenedCall = true;
+    ASSERT_EQ(CI->arg_size(), 4u);
+    // attachment_index/component (0/1) stay scalar constants.
+    EXPECT_TRUE(isa<ConstantInt>(CI->getArgOperand(0)));
+    EXPECT_TRUE(isa<ConstantInt>(CI->getArgOperand(1)));
+    // sample (2) is genuinely divergent, so it is widened.
+    EXPECT_TRUE(isa<FixedVectorType>(CI->getArgOperand(2)->getType()));
+    // The resolved image-heap index (3) stays a scalar `i32`, never a
+    // widened `<4 x i32>` -- the fix this test guards.
+    EXPECT_TRUE(isa<ConstantInt>(CI->getArgOperand(3)));
+    EXPECT_TRUE(CI->getArgOperand(3)->getType()->isIntegerTy(32));
+  }
+  EXPECT_TRUE(FoundWidenedCall);
+}
