@@ -129742,3 +129742,46 @@ Pick any one of these to start the next session -- all are independent, no share
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
 
 **Fastest next concrete action**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(k)`, then try to get a standalone (non-`deqp-vk`) repro of the runtime hang going -- under two minutes to start, but budget the hang investigation itself as its own session.
+
+# Session: `ENV6(c)(2)(k)` investigated -- runtime hang root cause localized to a stuck induction-variable register, no fix landed
+
+**Confirmed device**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Re-confirmed again at session end.
+
+## What happened, in order
+
+1. Started where last session left off: `/tmp/env6c2f/repro.ll` still existed. Ran it through `feme-opt`'s full `feme-cpu-linearize,feme-cpu-simdize,verify` pipeline -- clean, no verifier failure, confirming `L516`'s fix holds. This only proves IR correctness, not runtime termination, so it wasn't enough on its own.
+2. **Standalone `feme-run` repro attempt failed**: `feme-run` only supports compute entry points. This case is a fragment shader -- fragment execution only runs through the full `Graphics::Executor`, not `feme-run`. Tried feeding `feme-run` `repro.ll` directly anyway; got `no compute entry point named 'main'`, confirming the limitation.
+3. Built a hand-written HLSL **compute** re-encoding of the exact same nested-loop control flow (`/tmp/env6c2k/shader2.hlsl`), with the uniform values loaded from a real bound resource (not local constants, so nothing constant-folds away). Ran it through `feme-run` in both `--reference` (ground truth) and normal (widened) modes -- **both terminate correctly**, matching the hand-traced GLSL semantics (outer loop runs once, inner loop runs exactly twice). This ruled out a genuine source-level infinite loop, but also meant this particular repro angle couldn't reproduce the real bug at all -- the fragment/compute difference, or some other real-shape difference, matters.
+4. Fell back to a **safe, live `deqp-vk` attach** instead, since `feme-run` couldn't drive a fragment shader. First confirmed the safety net actually works: `timeout -s KILL 60 ./deqp-vk --deqp-case=...` reliably reaps the process with zero manual intervention (no `kill -9` needed) -- correcting last session's more alarmist wording.
+5. While the process was alive, used `ps -L -o pid,lwp,pcpu,stat,comm` to find the *actual* CPU-bound thread (~99%), not the idle `QueueExecutor` workers or the legitimately-blocked main thread a naive `gdb thread apply all bt` would otherwise surface first.
+6. Attached specifically to that thread. Its backtrace was unreadable (`Backtrace stopped: Cannot access memory at address 0x19`) -- it's raw JIT-compiled shader code with no unwind info. Instead of giving up, read the live PC's disassembly (`x/i $pc`) and link register (`info registers x30`), and found a tight `bl <resource-load-helper>` / `cmp` / `cset lt` sequence matching the inner loop's own bound check.
+7. Set a breakpoint right after that call and sampled registers across several hits. **The bound register stayed correctly `3`, but the loop's own induction-variable register stayed pinned at `2` forever** -- the comparison never flips. This is the concrete root cause signature: the generated native code's loop-carried induction variable isn't actually being re-threaded to the next iteration, even though the IR's own phi/`add` structure looks correct.
+8. Didn't go further this session (single-stepping from the `add`'s own site to find exactly where the updated value gets dropped) -- this is squarely the next session's starting point, and I was at a good, well-documented stopping point rather than guessing blindly for another hour.
+
+## Why this took longer than it should have
+
+I burned real time trying to force a "pure IR" or "pure compute" standalone repro before accepting that this specific bug can only currently be observed through the real fragment-shader execution path. In hindsight, the prior session's suggestion to avoid `deqp-vk` was reasonable caution but not actually necessary once `timeout -s KILL` is confirmed reliable -- I should have tried the live-attach-with-`ps -L`-triage approach first, and only fallen back to standalone repro attempts if that had been genuinely unsafe. Noted in `.instructions.md` as `feme-run`'s own fragment-shader limitation so a future session doesn't repeat this detour.
+
+## Verification
+
+- No code changed this session, so no `check-feme`/`FeMeTransformsCPUTests`/lit rebuild was needed or run.
+- No real `deqp-vk` corpus re-run either (no fix to verify) -- only the single targeted case's live hang was observed, safely, multiple times.
+
+## Commits (3, in order)
+
+1. `Roadmap.md` + `VulkanCTSReport.md` (`L517`) update: `ENV6(c)(2)(k)` entry enriched with this session's findings (not struck through -- still open, no fix landed). Corrected the prior session's claim that the shutdown hang needs a manual `kill -9` and that it's an independent robustness bug -- it isn't; `timeout -s KILL` already handles it, and it's simply the expected consequence of the shader's own hang.
+2. `.instructions.md` update: two new entries -- `timeout -s KILL` (not plain `timeout`) is required for this failure mode, and the `ps -L` + register/disassembly technique for sampling a hung JIT-compiled thread with no unwind info.
+3. This `agent_thoughts.md` entry.
+
+No feature/extension inventory update needed -- no code change this session.
+
+## Next steps
+
+**Fastest next concrete action** (under two minutes): re-run the exact same live-attach sequence documented in `Roadmap.md`'s `ENV6(c)(2)(k)` entry and `.instructions.md`'s new "`feme-run` cannot drive a fragment-shader standalone repro" section, but this time set the breakpoint at `bb47`'s own `%.1 = add i32 %.1.in, 1` site (find its native address via the same disassembly technique) instead of the comparison site, and single-step forward to see exactly which instruction fails to carry the incremented value to the next iteration.
+
+1. **Continue `ENV6(c)(2)(k)`** (needs its own session, but now has a precise, non-blind starting point): single-step from the induction variable's own increment site to find where the update is dropped; strong suspicion is the masked-loop PHI/copy-elimination machinery touched by `L516`'s fix, or a register-allocation bug specific to this masked-loop shape. Once isolated to a specific pass, minimize an IR-level lit test from `FEME_DUMP_IR_PRELINEARIZE=1` output (not an end-to-end execution test -- neither `feme-run` nor `feme-opt` alone can execute this fragment shader).
+2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket, not discard-centric. Investigate fresh -- these haven't been looked at since the original triage pass.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not a quick fix.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
