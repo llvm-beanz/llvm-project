@@ -10764,3 +10764,92 @@ not started); `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases, both own
 multi-session efforts); `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases,
 lowest priority); offload-test-suite upstreaming (3 patches, blocked on
 push access).
+
+## L527: `ENV6(c)(2)(q)` fixed -- dual-exit loop's `MergedRelayValues` restore loop was silently dropping a divergent check's captured value
+
+Picked up `ENV6(c)(2)(q)` (found last session while auditing the other 3
+`closeLatch`/`freezeLoopCarriedValues` call sites for `L521`'s own
+`BodyMask`-vs-`NaturalContinue` bug class). Re-derived the bug against
+the existing `/tmp/env6c2l/repro.ll` synthetic repro (unchanged from last
+session, no re-derivation needed): `%v.exit`'s phi collapsed to
+`phi i32 [ %v.next, %latch ]`, silently dropping the `%body`-sourced,
+Check-captured edge.
+
+**Root cause**: the `MergedRelayValues` restore loop (in the
+`OtherCondBrBlocks`/`CheckExit` `closeLatch` path) unconditionally
+`continue`d past any `ExitBlock` phi that already had its own,
+independent `Latch`-incoming entry -- true for a genuine dual-exit loop
+(a separate uniform `Latch` trip-count check coexisting with a separate
+divergent body-level break, both originally targeting `ExitBlock`
+directly). Last session's first-attempt fix (a flat, un-frozen `select`
+against the raw captured value) was disproved via a 3-round, 4-lane
+symbolic trace: a lane diverging earlier than the group's eventual last
+round kept having its own captured value silently overwritten by the raw
+value's continued per-round advancement, yielding `[2, 2, 2, 3]` instead
+of the correct `[0, 1, 2, 3]`.
+
+**Fix**: routes the captured value through `freezeExitRelayValue`'s own
+existing sticky, self-referential shadow-phi technique first (the exact
+mechanism the already-correct, analogous `HeaderExitRelayValues` restore
+loop already uses), before merging against the pre-existing natural
+`Latch` value. This required one small, necessary extension:
+`freezeExitRelayValue` gained a `ForceShadow` parameter, since this call
+site's own new use is built *inside* the loop body (at `Latch`'s
+terminator) -- invisible to `freezeLoopCarriedValues`'s own later
+`Header->phis()` outside-use scan, which only redirects uses it finds via
+an `!InLoop(...)` check (and `Latch` is always `InLoop()==true`), unlike
+every pre-existing caller of `freezeExitRelayValue`. Also added
+`EffectiveDivergedViaCheckThisIter`, mirroring the existing
+`EffectiveExitedViaCheckNext`'s own `ChainGateMergeBlock` merge, so the
+per-round divergence signal is correct even when a uniform `ChainGate`
+bypasses `CheckBlock` entirely.
+
+**Verification**: re-ran the same 3-round, 4-lane by-hand symbolic trace
+that disproved last session's attempt -- this time correctly yielding
+`[0, 1, 2, 3]`. `opt -passes=verify` clean; 20x nondeterminism-loop
+identical/deterministic IR. New regression coverage:
+`loop-dual-exit-divergent-check-and-uniform-latch-both-capture-carried-value.ll`
+(lit, FileCheck'd against the sticky-shadow IR shape) and
+`LinearizeTest.FreezesDivergentCheckCapturedValueAcrossMultipleRoundsForDualExitLoop`
+(unit test). `check-feme`: 3875/3879 Passed, 4 Unsupported, 0
+regressions (3877 pre-existing + 2 new tests). Deliberately scoped out
+the rare, unconfirmed combination of a phi having both a `HeaderValue`
+capture *and* its own pre-existing `Latch` entry simultaneously -- no
+known/confirmed case exercises it; documented inline as a known
+limitation rather than guessed at.
+
+**Sanity check against the unrelated, still-open `ENV6(c)(2)(o)`**: ran
+`/tmp/env6c2m/full_module.ll` 10x after this fix landed -- still produces
+the same deterministic, clean "unsupported" bailout diagnostic (not a
+crash), confirming this fix does not destabilize that unrelated path.
+
+**105-case graphicsfuzz corpus re-run** (same list as `L525`'s own
+re-run, `/tmp/env6c2p_corpus.txt`, saved this session as
+`/tmp/env6c2q_corpus.txt`; `cov-two-nested-loops-switch-case-matrix-array-increment`
+already excluded from that list): **23 Pass / 82 Fail**, exactly matching
+`L525`'s own documented baseline, no new regressions. This bug (a
+synthetic dual-exit shape with both a uniform-`Latch`-level and a
+divergent-body-level exit to the same block) has 0 currently-known real
+CTS/`graphicsfuzz` failing cases, so no corpus-visible pass/fail delta
+was expected or observed -- the value of this fix is closing a
+confirmed, reproducible correctness bug before it was ever hit in
+practice, not changing any case's outcome. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no changes needed, confirmed (internal
+compiler correctness fix only, no feature/extension surface change).
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start
+and mid-session.
+
+**Next steps**: `ENV6(c)(2)(o)` remains the highest-value open item --
+needs a completely fresh investigation, ideally committing to one of the
+two directions already on record (semantic `ExitBlock`-reachability vs.
+a `L377(a)`-style repair-matcher extension) rather than a seventh local
+guard. Otherwise unchanged: `ENV6(c)(2)(l)` (watch item, no known failing
+case, audit the other 3 `closeLatch`/`freezeLoopCarriedValues` call
+sites -- now fully resolved for `MergedRelayValues`/`HeaderExitRelayValues`,
+2 call sites remain unaudited); `ENV6(c)(2)(c)`/`(d)` (two isolated
+1-case issues, not started); `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132
+cases, both own multi-session efforts); `ENV5(c)(7)(b)` (hull lockstep
+barrier, 3 cases, lowest priority); offload-test-suite upstreaming (3
+patches, blocked on push access).
