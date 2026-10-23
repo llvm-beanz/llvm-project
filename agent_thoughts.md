@@ -130741,3 +130741,73 @@ rediscover them from scratch.
 4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
 5. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(l)` fixed (closeLatch half) — fix was real, my own first trace was wrong
+
+**Do this first next session**: `ENV6(c)(2)(c)`/`(d)` — two isolated
+1-case issues, still not started, lowest-effort thing left (open
+`feme/docs/Roadmap.md`, search `ENV6(c)(2)(c)`).
+
+## What happened
+
+1. Picked up the `ENV6(c)(2)(l)` audit (closeLatch's 3rd call site,
+   `DivergentCandidates`/`CheckBlock`-relay path) left mid-investigation
+   by the prior (compacted) session: a fix was coded and built, but the
+   prior session's own hand-trace cast doubt on whether it was a fix or
+   a regression.
+2. Re-derived the trace carefully, tracking exactly what the Header phi
+   itself equals *entering* each round (not what gets computed *during*
+   the round) — a natural `Latch`-to-`ExitBlock` exit never retakes the
+   backedge, so the phi never gets reassigned that round. That resolved
+   the doubt: the fix is correct. The earlier worry was comparing against
+   a *different* mechanism (`loop-dual-exit-...-both-capture-carried-
+   value.ll`'s own explicit `ExitBlock`-phi convention, `[%v.next,
+   %latch]`) that doesn't apply here — this call site goes through
+   `freezeLoopCarriedValues`'s `FeedsUniformBranch` shadow-freeze
+   instead, the same mechanism `L521` fixed at its own call site, and
+   both now agree.
+3. Wrote a proper lit test, ran it (pass), ran full `check-feme`
+   (3877/3881, 0 regressions), ran the 6 closest-shaped real CTS cases
+   (`dEQP-VK.glsl.loops.special.*_dynamic_iterations.conditional_break_*`
+   — still 6/6 Pass) and the 105-case graphicsfuzz corpus (23/82, exactly
+   baseline, no change — expected, no case in that corpus hits this
+   dual-exit shape).
+4. Committed in 3 small commits: fix, test, docs (Roadmap + CTS report).
+
+## Key lesson for future `freezeLoopCarriedValues`/`closeLatch` work
+
+When judging whether a frozen/shadow value is "right", trace what the
+*actual Header phi* equals **entering** the round that naturally exits
+— not what gets computed partway through that round, and not a
+different test's own separately-chosen `ExitBlock`-phi convention. Two
+different mechanisms in this file can legitimately disagree about which
+round's value "counts" (an explicit author-built `ExitBlock` phi vs.
+`freezeLoopCarriedValues`'s own shadow-freeze) — don't assume they must
+match just because they look superficially similar.
+
+## Verification
+
+- `check-feme`: 3877/3881 pass (4 unsupported), 0 regressions (+1 new
+  test vs. prior session's 3876/3880).
+- New lit test `Linearize/loop-checkblock-divergent-with-separate-uniform-latch-shadow-freeze.ll`:
+  fails without the fix, passes with it (confirmed via `git stash`).
+- 6 `dEQP-VK.glsl.loops.special.*_dynamic_iterations.conditional_break_*`
+  cases: still 6/6 Pass.
+- 105-case graphicsfuzz corpus: 23 Pass / 82 Fail, exactly matching
+  baseline, zero regressions (expected — no corpus case hits this shape).
+
+## Next steps (ranked)
+
+1. **`ENV6(c)(2)(c)`/`(d)`** (~do next, not started across many
+   sessions): two isolated 1-case issues — open `Roadmap.md`, search
+   `ENV6(c)(2)(c)` for the specifics.
+2. **`ENV6(c)(2)(l)` remaining half**: `FeedsUniformBranch`/
+   `HeaderExitRelayValues` constant-only-capture gap — still no live
+   reproducer after multiple sessions, pure watch item, don't spend a
+   whole session hunting for a synthetic repro unless a real case
+   surfaces naturally.
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
+5. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
