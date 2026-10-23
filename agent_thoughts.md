@@ -129939,3 +129939,54 @@ Relocated the freeze's `select()` from `Latch`'s terminator to right after the f
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+
+# Session: `ENV6(c)(2)(a)` triaged fresh -- shift-amount poison bug found and fixed, 3 of 7 cases now Pass
+
+`vulkaninfo --summary | grep deviceName`: **confirmed `FeMe CPU Vulkan Device`** (start and end of session).
+
+**Done.** Found and fixed a genuine poison-shift-amount bug behind 3 of the `ENV6(c)(2)(a)` bucket's 7 all-black-render cases. Full graphicsfuzz corpus: 17 Pass (up from 14), zero regressions. One new runtime hang discovered incidentally (not fixed this session, see below).
+
+## What broke it, in one sentence
+
+SPIR-V permits a `BitField*`/shift op's shift-amount operand to be `>= Size` (spec says the *result* is merely "undefined"), but FeMe's lowering (and upstream MLIR's own `ShiftPattern`) fed that operand straight into an LLVM shift instruction, which treats an out-of-range shift amount as outright *poison* -- and a poisoned branch condition downstream let the optimizer silently delete the whole shader body, with zero diagnostic anywhere.
+
+## How I found it (do this first next time, not guessing from code-reading)
+
+1. Picked `cov-bitfieldExtract-undefined` first (name hints at the bug). Confirmed the imported SPIR-V MLIR was fully correct via `FEME_DEBUG_DUMP_SPIRV_MLIR=1`, and a standalone `feme-opt --feme-convert-spirv-to-llvm` repro also produced correct output -- ruled out the obvious `ConvertSPIRVToLLVMPass` suspect.
+2. Added temporary `FEME_DEBUG_DUMP_POST_*` dumps directly in `Pipeline.cpp`/`GraphicsPipeline.cpp` at each pass boundary and bisected: body intact after `translate()`, after `patchUnboundedResourceRanges`, after `InlineHelperFunctionsPass` -- only `UnrollConstantTripCountStageLoopsPass` (which runs `InstCombine`/`SimplifyCFG` unconditionally on every entry function) was left as the culprit.
+3. Traced the shader's own logic (`bitfieldExtract(a, -1, 1)`) and recognized the classic poison-shift pattern: `Offset = -1` reinterpreted unsigned is `4294967295`, way past `Size == 32`.
+4. Checked the sibling case `cov-fold-shift-gte32` (literal shift amounts of 32/33/345) and found the identical bug, but in upstream MLIR's own `ShiftPattern`, not FeMe code.
+
+## The fix
+
+Clamp the shift amount to `[0, Size - 1]` via `llvm.intr.umin` before it is ever used as the real shift-amount operand -- a no-op for every legitimate in-range input, and turns the out-of-range case into some ordinary, still-spec-undefined-but-no-longer-poison value. Applied in two places: FeMe's `BitFieldUExtractPattern`/`BitFieldInsertPattern`/`BitFieldSExtractPattern` (new `clampBitFieldShiftAmount` helper, mirrors the file's own pre-existing `createBitFieldLowMask` clamp technique), and upstream MLIR's `ShiftPattern` (new `clampShiftAmountToOperandWidth` helper).
+
+## Commits (4, in order)
+
+1. `[MLIR][SPIRVToLLVM] Clamp shift amount in ShiftPattern to avoid poison` -- upstream fix, touches only files outside `feme/` per the standing "isolate outside-FeMe fixes" convention. Updated `shift-ops-to-llvm.mlir`, added `shift-ops-out-of-range-clamp.mlir`.
+2. `feme: clamp BitField*'s Offset-derived shift amounts to avoid poison` -- FeMe-side fix, new `spirv-to-llvm-bitfield-offset-edge-cases.mlir` test.
+3. `feme: docs for ENV6(c)(2)(a) poison-shift fix (L520)` -- `Roadmap.md`/`VulkanCTSReport.md`/`.instructions.md` updates.
+4. This entry (final commit).
+
+## Verification
+
+- `mlir/test/Conversion/SPIRVToLLVM/` (24 tests) and `feme/test/Conversion/SPIRVToLLVM/` (143 tests): all Pass, zero regressions.
+- `check-feme`: 3870/3874 Passed, 4 Unsupported, 0 regressions.
+- Real `deqp-vk`: `cov-bitfieldExtract-undefined`, `cov-bitfieldinsert-undefined`, `cov-fold-shift-gte32` all flip `Fail` -> `Pass`. Full 106-case graphicsfuzz corpus, before/after baseline diff: 17 Pass / 88 Fail / 1 Unrun (was 14 Pass), zero regressions among the 14 previously-passing cases.
+- The three temporary `FEME_DEBUG_DUMP_POST_*` bisection dump points added mid-session were reverted before committing -- not kept as permanent debug aids.
+
+## Found but not fixed: a new runtime hang
+
+The full-corpus re-run turned up `cov-two-nested-loops-switch-case-matrix-array-increment` as a new `Unrun` case -- it didn't complete even at the finest (one-case-per-process, 60s timeout) recovery granularity, the same `vkWaitForFences`-style symptom as the now-fixed `ENV6(c)(2)(k)` hang. Not investigated this session (new roadmap entry `ENV6(c)(2)(m)`, budget as its own full session).
+
+## Next steps
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(a)`'s remaining 3-case list (`cov-basic-block-discard-in-function`, `cov-nested-structs-function-set-inner-struct-field-return`, `cov-wrap-op-kill-for-loop`) and pick one to reproduce fresh -- no shared-cause theory confirmed for any of them.
+
+1. **`ENV6(c)(2)(a)` remainder** (3 cases, budget a full session): investigate each from scratch -- the poison-shift theory does not apply to these 3 (confirmed no out-of-range shift amount in their own shader logic at a glance; not yet deep-dived).
+2. **`ENV6(c)(2)(m)`** (new this session, needs its own session): the newly-discovered `cov-two-nested-loops-switch-case-matrix-array-increment` hang. Use `ENV6(c)(2)(k)`'s own proven methodology: standalone non-`deqp-vk` repro first, `FEME_DUMP_IR_PRELINEARIZE`/`FEME_DEBUG_LINEARIZE_TRACE` next, live-attach register sampling only as a last resort.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
