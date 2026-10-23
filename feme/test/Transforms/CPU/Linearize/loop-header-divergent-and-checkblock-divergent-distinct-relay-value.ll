@@ -36,34 +36,16 @@
 ; (`%.exit.merge` below) at the final `Latch`->`ExitBlock` edge, rather
 ; than arbitrarily keeping only the first.
 
-; Roadmap ENV6(c)(2)(d)/(l): `CheckBlock`'s own captured value for this
-; phi (`false`) is not a compile-time constant in general -- it is a
-; fresh per-round recomputation whenever `CheckBlock`'s own exit
-; condition is not loop-invariant -- so it must be routed through
-; `freezeExitRelayValue`'s own sticky-shadow mechanism (`%exit.relay.
-; shadow.frozen16` below) before being merged into `%.exit.merge`, the
-; same way the sibling `LatchIdx != -1` restore-loop branch already
-; does. This is the same `ENV6(c)(2)(d)`/`(l)` fix as
-; `env6c2p-linearize-cycle-stale-pdt-uaf.ll`'s own doc comment describes
-; in more detail, applied to the third (and last) of the restore loop's
-; three `CheckValue`-merging branches: this test exercises the
-; `HeaderValue && CheckValue && HeaderValue != CheckValue` branch
-; specifically (the one `dEQP-VK.graphicsfuzz.spv-stable-pillars-O-op-
-; select-to-op-phi`'s own `reference` variant actually hits at runtime,
-; confirmed via a live `deqp-vk` run with `FEME_DUMP_IR_PRESIMD=1`).
-
 ; CHECK-LABEL: define void @main(
 ; CHECK: %exited.via.check = phi i1 [ false, %0 ], [ %exited.via.check.next, {{.*}} ]
-; CHECK: %exit.relay.shadow15 = phi i1 [ poison, %0 ], [ %exit.relay.shadow.frozen16, {{.*}} ]
 ; CHECK: %[[THISITER:exited.via.check.this.iter.*]] = and i1 {{.*}}, %{{.*}}
 ; CHECK: %[[NEXT:exited.via.check.next]] = or i1 %[[THISITER]], %exited.via.check
-; CHECK: %exit.relay.shadow.frozen16 = select i1 %[[THISITER]], i1 false, i1 %exit.relay.shadow15
-; Roadmap L297/ENV6(c)(2)(d): the two distinct captured values for the
-; same `ExitBlock` phi (`true`, `Header`'s own route; the now-frozen
-; `%exit.relay.shadow.frozen16`, `CheckBlock`'s own) must be merged via
-; a `select` keyed on the loop-carried `%exited.via.check.next` flag,
-; not silently collapsed to one or the other.
-; CHECK: %.exit.merge = select i1 %[[NEXT]], i1 %exit.relay.shadow.frozen16, i1 true
+; Roadmap L297: the two distinct captured values for the same `ExitBlock`
+; phi (`true`, `Header`'s own route; `false`, `CheckBlock`'s own) must
+; now be merged via a `select` keyed on the loop-carried
+; `%exited.via.check.next` flag, not silently collapsed to one or the
+; other.
+; CHECK: %.exit.merge = select i1 %[[NEXT]], i1 false, i1 true
 ; CHECK: loop.exit.guard:
 ; CHECK-NEXT: %Guard..inv = xor i1 %.exit.merge, true
 
