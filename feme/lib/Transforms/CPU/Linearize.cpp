@@ -8031,7 +8031,20 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     applyStageMasks(*Latch, EffectiveMasksAfterCheck);
     rethreadNestedEntryMasks(Latch, EffectiveMasksAfterCheck);
 
-    Value *Continue = closeLatch(Latch, Header, EffectiveMasksAfterCheck);
+    // Roadmap ENV6(c)(2)(l): `Latch` can itself still carry its own,
+    // genuinely separate *uniform* exit check here (`LatchExit` matched
+    // but `LatchDivergent == false`; the dual-exit `LatchIdx != -1`
+    // handling below already anticipates exactly this combination for
+    // `ExitBlockRelayValues`'s own phis) -- capture `closeLatch`'s own
+    // per-lane "did this lane's natural, uniform condition also say
+    // continue" signal via `OutPerLaneContinue`, the same way the
+    // `HeaderDivergent`/`LatchDivergent` combined-handling path below
+    // already does (see its own call to `closeLatch`), so
+    // `freezeLoopCarriedValues`'s own `BodyMask` argument reflects that
+    // conjunction too, not just this check's own mask.
+    Value *PerLaneContinue = nullptr;
+    Value *Continue =
+        closeLatch(Latch, Header, EffectiveMasksAfterCheck, &PerLaneContinue);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
     // Roadmap H94a: `Latch` just became a brand-new predecessor of
     // `ExitBlock` for a phi with no pre-existing `Latch`-incoming entry
@@ -8117,7 +8130,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     ExitedViaCheck->setIncomingValueForBlock(Latch,
                                              EffectiveExitedViaCheckNext);
     freezeLoopCarriedValues(
-        Header, Latch, EffectiveMasksAfterCheck.Live,
+        Header, Latch, PerLaneContinue,
         {cast<PHINode>(EntryMasks.Live), cast<PHINode>(EntryMasks.SideEffect),
          ExitedViaCheck},
         [&](const BasicBlock *BB) { return CI.contains(C, BB); },
