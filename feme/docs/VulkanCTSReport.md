@@ -10980,3 +10980,76 @@ found across several sessions -- pure watch item); `ENV6(c)(2)(c)`/`(d)`
 / `ENV6(d)` (132 cases, both own multi-session architecture efforts);
 `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
 offload-test-suite upstreaming (3 patches, blocked on push access).
+
+## L529: `ENV6(c)(2)(l)` fixed (closeLatch half) -- `DivergentCandidates`/`CheckBlock`-relay call site shared `L521`'s own `BodyMask`-vs-`NaturalContinue` gap
+
+Resolved the `closeLatch`-call-site half of the long-standing
+`ENV6(c)(2)(l)` watch item (two sessions of inconclusive live-corpus
+audits found the structural gap but no reproducer). This session
+constructed a minimal, hand-crafted repro instead of searching the
+corpus further: a per-thread divergent `break` check in `body` (matched
+as a `DivergentCandidates` member, i.e. `CheckBlock != Header`/`Latch`),
+plus `Latch`'s own separate, genuinely uniform natural trip-count check,
+with the carried induction variable read again after the loop (routed
+through `freezeLoopCarriedValues`'s `FeedsUniformBranch` shadow-`phi`
+mechanism, the same one `L521` fixed at its own, different call site).
+
+Before this fix, the `DivergentCandidates`/`CheckBlock`-relay path's own
+`closeLatch` call did not pass its `OutPerLaneContinue` out-parameter
+through to the subsequent `freezeLoopCarriedValues` call, unlike `L521`'s
+general-fallback path. For the one lane that stops via the group's shared
+uniform natural condition (never itself taking the divergent `break`),
+the unconjoined `BodyMask` stayed live through the final round, so the
+shadow kept selecting the about-to-be-applied next-round value instead of
+the value the lane actually had entering its last round.
+
+Initially cast doubt on this fix via a hand symbolic trace that
+(incorrectly) assumed the post-loop read should reflect the post-increment
+value, based on a surface-level comparison with a different, already-passing
+test's own `ExitBlock`-phi convention (`loop-dual-exit-divergent-check-and-
+uniform-latch-both-capture-carried-value.ll`, whose own `[%v.next, %latch]`
+edge is a *different* mechanism -- an explicit author-chosen `ExitBlock`
+phi value, not `freezeLoopCarriedValues`'s own shadow-freeze semantics).
+Re-deriving the trace carefully (tracking exactly what the Header phi
+itself equals entering each round, since a natural `Latch`-to-`ExitBlock`
+exit never retakes the backedge that would otherwise advance it) confirmed
+the fix's conjoined-mask output is in fact the reference-correct answer,
+matching `L521`'s own test's identical convention.
+
+Fixed by threading `closeLatch`'s `OutPerLaneContinue` (Latch's own natural
+condition conjoined with the check's post-check liveness) into
+`freezeLoopCarriedValues`'s `BodyMask` parameter at this call site, mirroring
+`L521`'s fix pattern exactly. New regression lit test
+`Linearize/loop-checkblock-divergent-with-separate-uniform-latch-shadow-freeze.ll`,
+confirmed to fail without the fix and pass with it (`git stash`/`git stash pop`).
+
+Full `check-feme`: 3877/3881 discovered tests pass (4 unsupported), 0
+regressions (3876 pre-existing + 1 new test).
+
+**CTS spot checks**: re-ran all 6 `dEQP-VK.glsl.loops.special.
+{for,while,do_while}_dynamic_iterations.conditional_break_{fragment,vertex}`
+cases (the closest-shaped real cases identified by earlier sessions'
+audits) -- all 6 still **Pass**, no change. Re-ran `L525`/`L527`'s own
+105-case graphicsfuzz corpus (`/tmp/env6c2q_corpus.txt`): **23 Pass / 82
+Fail**, exactly matching the established baseline, zero regressions, zero
+new passes (expected -- this fix's blast radius only applies to a dual-
+exit shape no case in this exact corpus currently exercises).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no changes
+needed (internal compiler correctness fix only, no feature/extension
+surface change).
+
+The remaining, `FeedsUniformBranch`/`HeaderExitRelayValues` constant-only-
+capture half of `ENV6(c)(2)(l)` is still open, still with no live
+reproducer after multiple sessions -- remains a pure watch item.
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start,
+again mid-session, and once more before these CTS spot checks.
+
+**Next steps**: `ENV6(c)(2)(l)` (remaining `FeedsUniformBranch`/
+`HeaderExitRelayValues` half, pure watch item, no reproducer);
+`ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues, still not started);
+`ENV6(c)(3)` (83 cases) / `ENV6(d)` (132 cases, both own multi-session
+architecture efforts); `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases,
+lowest priority); offload-test-suite upstreaming (3 patches, blocked on
+push access).
