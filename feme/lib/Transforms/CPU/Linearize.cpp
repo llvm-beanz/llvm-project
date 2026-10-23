@@ -8237,6 +8237,50 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       return false;
     }
 
+    // Roadmap ENV6(c)(2)(r): `HeaderExit` is classified uniform right now,
+    // using `UniformityInfo`'s own one-time, pre-masking snapshot -- but
+    // if its own condition transitively depends on a resource/image load
+    // sitting in some *ancestor* cycle (not yet processed, and so not yet
+    // mask-narrowed, by this same post-order `LoopLinearizer::run` walk),
+    // that classification can go stale the instant the ancestor's own
+    // masking actually runs, later in this same pass. Left alone,
+    // `HeaderExit->Br` stays a plain, unconverted conditional branch whose
+    // condition's data-dependency chain still automatically picks up the
+    // ancestor's later mask narrowing (narrowing mutates the *same* call
+    // instruction's mask operand in place, never replacing the value) --
+    // but `feme-cpu-simdize`'s own fresh `UniformityInfo`, computed well
+    // after this entire pass has finished, then correctly finds it
+    // genuinely divergent, with no conversion left to perform by then.
+    //
+    // Fold `HeaderExit`'s own exit decision into this cycle's
+    // loop-carried mask *now* instead, converting it into exactly the
+    // same "never really exit here, narrow the mask instead, make the
+    // real backedge decision uniform via `feme.cpu.mask.any`" shape the
+    // genuinely-`HeaderDivergent` case below already uses -- but without
+    // routing through that case's own `CheckBlock`/
+    // `collectUniformPassThroughRegion` machinery (reusing
+    // `DiamondFlattener::flattenLoopBodyRegion` for the body instead,
+    // exactly as this, non-folded, branch already does just below).
+    // Scoped tightly to `OtherCondBrBlocks.empty()` (no other candidate
+    // divergent/pass-through block anywhere else in the cycle) so this
+    // stays a strict, minimal addition on top of the already-working
+    // `DiamondFlattener`-based body handling, not a wholesale reroute of
+    // this cycle through a differently-shaped, less tolerant mechanism
+    // -- confirmed the hard way: an earlier attempt that instead forced
+    // `HeaderDivergent = true` broadly (feeding this same ancestor-aware
+    // prediction into `CycleWillNeedMaskingRegardless`'s existing check)
+    // regressed this exact case, because the `CheckBlock` path's own
+    // `collectUniformPassThroughRegion` cannot tolerate this case's own
+    // internal `switch`-case dispatch, unlike `DiamondFlattener`, which
+    // already handles it today. See `.instructions.md`'s own write-up of
+    // that regression for the full trace.
+    bool FoldHeaderExitIntoMask = false;
+    if (OtherCondBrBlocks.empty()) {
+      SmallPtrSet<Value *, 8> Visited;
+      FoldHeaderExitIntoMask = dependsOnResourceOrImageLoadInCycle(
+          HeaderExit->Cond, C, CI, Visited, /*AlsoCheckAncestorCycles=*/true);
+    }
+
     // Roadmap L292: confirmed via a real, reproduced `verifyModule`
     // failure -- check the region *before* mutating anything at `Header`
     // below (see `canFlattenLoopBodyRegion`'s own comment): a failure
@@ -8323,6 +8367,46 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     applyStageMasks(*Header, Masks);
     rethreadNestedEntryMasks(Header, Masks);
 
+    // Roadmap ENV6(c)(2)(r): `BodyEntryMasks` -- not `Masks` -- is what
+    // actually feeds the body's own flattening below. They are identical
+    // unless `FoldHeaderExitIntoMask` folds `HeaderExit`'s own exit
+    // decision into a narrower mask first (see that flag's own comment,
+    // just above). Keeping `Masks` itself untouched either way matters:
+    // it is still `Header`'s own true *entry* mask, exactly what
+    // `HeaderActiveMasks[Header]`/`addLatchIncoming` below (and, via
+    // those, every nested child cycle's own `rethreadNestedEntryMasks`
+    // call elsewhere) already assume it to be.
+    MaskPair BodyEntryMasks = Masks;
+    SmallVector<std::pair<PHINode *, Value *>, 2> HeaderExitRelayValues;
+    SmallPtrSet<PHINode *, 4> RelayCapturedHeaderPhis;
+    if (FoldHeaderExitIntoMask) {
+      // Roadmap ENV6(c)(2)(r): this exact sequence (fold the exit
+      // condition via `stayInLoop`, capture then freeze
+      // `HeaderExit->RelayBlock`'s own leftover `ExitBlock` phi value,
+      // strip `Header`'s own now-stale predecessor entry, convert
+      // `HeaderExit->Br` into an unconditional branch into the loop body)
+      // is deliberately copied verbatim from the `HeaderDivergent` case's
+      // own identical steps further below -- see each individual step's
+      // own comment there for the full reasoning; not duplicated here to
+      // avoid the two copies silently drifting apart.
+      IRBuilder<> B(HeaderExit->Br);
+      Value *Cond = HeaderExit->Cond;
+      Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
+      BodyEntryMasks = stayInLoop(B, Masks, Staying, "active.header");
+      for (PHINode &PN : ExitBlock->phis())
+        if (int Idx = PN.getBasicBlockIndex(HeaderExit->RelayBlock);
+            Idx != -1)
+          HeaderExitRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+      freezeRelayChainExitValues(HeaderExit->RelayChain, Header,
+                                BodyEntryMasks.Live, Header,
+                                RelayCapturedHeaderPhis);
+      if (llvm::is_contained(predecessors(ExitBlock), Header))
+        ExitBlock->removePredecessor(Header, /*KeepOneInputPHIs=*/true);
+      UncondBrInst::Create(HeaderExit->StayInLoop,
+                           HeaderExit->Br->getIterator());
+      HeaderExit->Br->eraseFromParent();
+    }
+
     // Roadmap K6z: this must be a named local, not an unnamed temporary
     // passed directly as `DF`'s constructor argument below -- `DF` only
     // stores a `function_ref` (a non-owning pointer to the callable), so
@@ -8341,7 +8425,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited, ResolvedBlocks,
                         GetAlreadyLinearizedCycleExit, NarrowChildEntryMasks);
     std::optional<MaskPair> MasksAtLatch =
-        DF.flattenLoopBodyRegion(HeaderStayInLoop, Latch, Masks);
+        DF.flattenLoopBodyRegion(HeaderStayInLoop, Latch, BodyEntryMasks);
     if (!MasksAtLatch) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in a body shape this "
@@ -8355,35 +8439,99 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     freezeLoopCarriedValues(
         Header, Latch, MasksAtLatch->Live,
         {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
-        [&](const BasicBlock *BB) { return CI.contains(C, BB); }, {},
+        [&](const BasicBlock *BB) { return CI.contains(C, BB); },
+        SmallVector<PHINode *, 4>(RelayCapturedHeaderPhis.begin(),
+                                  RelayCapturedHeaderPhis.end()),
         ExitBlock);
     addLatchIncoming(Masks, *MasksAtLatch);
-    // Roadmap L292: `Header`'s own exit edge to `ExitBlock` is untouched
-    // by this path (unlike the `HeaderDivergent` case below, this check
-    // really is uniform, so every lane takes it together -- no
-    // restructuring into a latch-only exit is needed for correctness of
-    // the *iteration* decision itself). But `DiamondFlattener::run()`
-    // already walked `ExitBlock` as one of its own "cycle exit" roots
-    // *before* this pass ever ran (see its own comment on `Roots`),
-    // seeding that walk with a guess (`CycleBoundaryMasks[Header]`, the
-    // mask reaching `Header` from *outside* the loop, i.e. the loop's own
-    // entry mask, not its *exit* mask) that is only ever correct when
-    // `Header`'s own mask-affecting op decision cannot differ between
-    // entry and exit -- false here, precisely because the loop's body
-    // (just flattened above) can have narrowed `Masks`'s `SideEffect`
-    // field via a `demote` since entry. That stale guess already baked a
-    // wrong `feme.cpu.stage.return.masks`/masked-output-store call into
-    // `ExitBlock` using the wrong, pre-loop mask (reduced from
-    // `dEQP-VK.glsl.demote.dynamic_loop_always`'s own residual image
-    // mismatch after the rest of this path was otherwise working).
-    // Re-running `applyStageMasks` here with the real, now-fully-updated
-    // `Masks` overrides it: `ExitBlock` is reached directly from `Header`
-    // (this uniform check's own `StructurizeCFG`-relay target), so
-    // `Header`'s own accumulated `Masks` -- unchanged across that
-    // specific edge, since a genuinely uniform branch narrows nothing --
-    // is exactly the mask every lane actually carries there.
-    applyStageMasks(*ExitBlock, Masks);
-    rethreadNestedEntryMasks(ExitBlock, Masks);
+    if (FoldHeaderExitIntoMask) {
+      // Roadmap ENV6(c)(2)(r): `Header`'s own real exit edge is gone now
+      // (folded above) -- `Latch` must become the loop's real,
+      // uniform-gated exit instead, exactly as `closeLatch` already does
+      // for the `HeaderDivergent` case below (this cycle's own `Latch`
+      // has no exit check of its own either way, so only that function's
+      // `else` branch -- `Continue = AnyActive` -- actually applies).
+      Value *PerLaneContinue = nullptr;
+      Value *Continue =
+          closeLatch(Latch, Header, *MasksAtLatch, &PerLaneContinue);
+      CondBrInst::Create(Continue, Header, ExitBlock, Latch);
+      // Roadmap H94a/L292: restore `HeaderExit->RelayBlock`'s own
+      // leftover `ExitBlock` phi value at `Latch`'s own new edge --
+      // copied verbatim from the `HeaderDivergent` case's own identical
+      // loop below (see its own comment for the full reasoning), minus
+      // that loop's own extra "`BodyRegion`-bypass" blend tail: this
+      // path never computes a `BodyRegion` (`DiamondFlattener`'s own
+      // separate, non-`collectUniformPassThroughRegion`-based scan
+      // replaces it), so a block with its own direct, `Latch`-bypassing
+      // edge to `ExitBlock` -- the Clang `Mandelbrot.test`-style
+      // `MaxIteration`-cap shape that bypass blend exists for -- is not
+      // (yet) given the same treatment here if it occurs. Not expected
+      // for `FoldHeaderExitIntoMask`'s own target shape (a resource-load
+      // dependent `Header` exit check, not an extra uniform cap
+      // elsewhere in the body); `diagnose`-caught rather than silently
+      // mishandled if a future case does combine both.
+      Value *HeaderDivergedThisIter = nullptr;
+      auto GetHeaderDivergedThisIter = [&]() -> Value * {
+        if (!HeaderDivergedThisIter) {
+          IRBuilder<> RelayFreezeBuilder(Latch->getTerminator());
+          HeaderDivergedThisIter = RelayFreezeBuilder.CreateAnd(
+              Masks.Live,
+              RelayFreezeBuilder.CreateNot(MasksAtLatch->Live),
+              "exited.via.header.this.iter");
+        }
+        return HeaderDivergedThisIter;
+      };
+      for (auto &[PN, V] : HeaderExitRelayValues) {
+        PHINode *Shadow = nullptr;
+        int LatchIdx = PN->getBasicBlockIndex(Latch);
+        if (LatchIdx == -1) {
+          PN->addIncoming(
+              freezeExitRelayValue(Header, Latch, V,
+                                  GetHeaderDivergedThisIter, &Shadow),
+              Latch);
+        } else if (Value *Frozen = freezeExitRelayValue(
+                       Header, Latch, V, GetHeaderDivergedThisIter, &Shadow);
+                   Frozen != V) {
+          IRBuilder<> LatchBlendBuilder(Latch->getTerminator());
+          Value *DivergedViaHeaderByNow = LatchBlendBuilder.CreateNot(
+              MasksAtLatch->Live, "diverged.via.header.by.now");
+          PN->setIncomingValue(
+              LatchIdx,
+              LatchBlendBuilder.CreateSelect(
+                  DivergedViaHeaderByNow, Frozen,
+                  PN->getIncomingValue(LatchIdx), "exit.relay.latch.blend"));
+        }
+      }
+    } else {
+      // Roadmap L292: `Header`'s own exit edge to `ExitBlock` is untouched
+      // by this path (unlike the `HeaderDivergent` case below, and unlike
+      // `FoldHeaderExitIntoMask` just above, this check really is uniform
+      // and left alone, so every lane takes it together -- no
+      // restructuring into a latch-only exit is needed for correctness
+      // of the *iteration* decision itself). But `DiamondFlattener::
+      // run()` already walked `ExitBlock` as one of its own "cycle exit"
+      // roots *before* this pass ever ran (see its own comment on
+      // `Roots`), seeding that walk with a guess (`CycleBoundaryMasks[
+      // Header]`, the mask reaching `Header` from *outside* the loop,
+      // i.e. the loop's own entry mask, not its *exit* mask) that is
+      // only ever correct when `Header`'s own mask-affecting op decision
+      // cannot differ between entry and exit -- false here, precisely
+      // because the loop's body (just flattened above) can have
+      // narrowed `Masks`'s `SideEffect` field via a `demote` since
+      // entry. That stale guess already baked a wrong `feme.cpu.stage.
+      // return.masks`/masked-output-store call into `ExitBlock` using
+      // the wrong, pre-loop mask (reduced from `dEQP-VK.glsl.demote.
+      // dynamic_loop_always`'s own residual image mismatch after the
+      // rest of this path was otherwise working). Re-running
+      // `applyStageMasks` here with the real, now-fully-updated `Masks`
+      // overrides it: `ExitBlock` is reached directly from `Header`
+      // (this uniform check's own `StructurizeCFG`-relay target), so
+      // `Header`'s own accumulated `Masks` -- unchanged across that
+      // specific edge, since a genuinely uniform branch narrows nothing
+      // -- is exactly the mask every lane actually carries there.
+      applyStageMasks(*ExitBlock, Masks);
+      rethreadNestedEntryMasks(ExitBlock, Masks);
+    }
     // Roadmap L282: see the identical comment at the other two success
     // paths' own `return true`.
     HeaderActiveMasks[Header] = Masks;
