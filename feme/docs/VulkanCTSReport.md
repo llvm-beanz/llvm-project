@@ -11262,3 +11262,101 @@ remains a reproducer-free watch item); `ENV6(c)(3)` (83 cases) /
 `ENV6(d)` (132 cases, both own multi-session architecture efforts);
 `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
 offload-test-suite upstreaming (3 patches, blocked on push access).
+
+## L532: `ENV6(c)(2)(d)` root cause found -- live reproducer for `ENV6(c)(2)(l)`'s long-standing "remaining half" watch item; fix attempted, collides with a nested-cycle regression, reverted
+
+Continued `ENV6(c)(2)(d)`'s (`spv-stable-pillars-O-op-select-to-op-phi`)
+investigation per the prior session's (`L531`) suggested next step:
+with `StructurizeCFG`/`Linearize`'s control-flow-polarity hypothesis
+refuted, pivoted to the *data* side of `reference`'s own linearized IR.
+
+---
+
+Diffed the prior session's saved `/tmp/env6c2d_linearized_ref.ll`
+against `/tmp/env6c2d_linearized_variant2.ll` (correct) at the exact
+`Flow._crit_edge` merge feeding `reference`'s own exit-relay value.
+`variant_2`'s equivalent merge is a hardcoded `i1 false` constant (its
+own SPIR-V loop-break condition happened to fold to a compile-time
+constant); `reference`'s is `%.linearized = select i1 %58, i1 false,
+i1 true` -- a genuine, freshly-recomputed-per-round value. This exactly
+matches the shape `ENV6(c)(2)(l)`'s "remaining half" roadmap entry
+already described as a theoretical, reproducer-free gap:
+`freezeExitRelayValue`'s own sticky-shadow freeze mechanism is only
+applied to some callers of the `ExitBlockRelayValues`/
+`MergedRelayValues` restore loop in `Linearize.cpp`'s `linearizeCycle`,
+not all of them.
+
+Located the exact gap: the restore loop has two branches keyed on
+whether a matching `Latch` incoming edge already exists
+(`LatchIdx != -1`) or this is a brand-new predecessor
+(`LatchIdx == -1`). The `LatchIdx != -1` branch already wraps its
+captured `CheckValue` with `freezeExitRelayValue(..., ForceShadow=true)`
+before using it in a `select`; the `LatchIdx == -1` branch -- exactly
+the one `reference`'s shape hits -- did not, using `CheckValue` raw.
+Any lane that exits this cycle via this check on an earlier group round
+than the eventual final round ends up reading whichever value
+`CheckValue` recomputes on that later round instead of its own: the
+textbook instance of the bug class `ENV6(c)(2)(l)` already named.
+
+**Fix attempted**: mirrored the sibling branch, wrapping the new
+branch's `CheckValue` with the same `freezeExitRelayValue` call.
+Rebuilt (`ninja feme-opt feme_vulkan`) and ran `ninja check-feme`:
+2 regressions out of 3882.
+
+- `Linearize/loop-header-divergent-and-checkblock-divergent-distinct-relay-value.ll`:
+  confirmed to be a second, previously-undetected instance of the exact
+  same bug class in this same existing regression test (an i32 relay
+  value, independent of the i1 one the test was originally written to
+  cover) -- a CHECK-line-update situation, not a correctness problem
+  with the fix.
+- `Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll`: a genuine new
+  regression. This test is itself a deliberately minimal, fragile
+  reduction for a *different*, already-fixed stale-`PostDomTree`
+  use-after-free bug in a nested multi-cycle "chain-gate" shape.
+  `FEME_DEBUG_LINEARIZE_TRACE=1` traced the failure to the *next, outer*
+  cycle being processed after the one whose relay-merge code was
+  touched: the new fix inserts a shadow `phi` into the inner cycle's own
+  `Header`, which remains a body member of the enclosing outer cycle;
+  processing the outer cycle subsequently fails with a generic
+  "internal branch in a body shape this milestone does not yet lower"
+  diagnostic from `DiamondFlattener::flattenLoopBodyRegion`. Confirmed
+  this is *not* `collectUniformPassThroughRegion`'s own
+  `OtherCondBrBlocks` terminator-shape scan rejecting anything -- that
+  scan only inspects terminator kinds (`UncondBr`/`CondBr`) and never
+  looks at a block's other instructions, so it classifies the touched
+  blocks identically with or without the new shadow `phi`/`select`.
+  Narrowing `ForceShadow` to its default `false` (reasoning: this should
+  skip the freeze specifically when `CheckValue` is itself a `Header`
+  phi, on the theory that `freezeLoopCarriedValues`'s own later
+  `Header`-phi scan already handles that case) did make the smaller
+  test's outcome cleaner (only the originally-targeted i1 relay value
+  gets touched now, not the i32 one, since that one happens to be a
+  `Header` phi) but did **not** fix the `env6c2p` regression -- it fails
+  identically either way, confirming the interaction is about the mere
+  presence of new instructions in the touched blocks, not
+  `ForceShadow`'s setting.
+
+The precise mechanism of the outer-cycle interaction was not found this
+session (would need isolating `DiamondFlattener`'s own exact shape
+expectations for an already-processed, now-straight-line inner cycle's
+exit region nested inside an outer one -- likely needs its own minimal
+nested-cycle-only reduction, separate from `env6c2p`'s unrelated
+stale-PDT complexity, to study safely). Rather than land a fix that
+swaps one real bug for a different regression, **reverted the
+`Linearize.cpp` change entirely this session**; `git status` confirms a
+clean tree, and both previously-regressed tests pass again standalone.
+
+`ENV6(c)(2)(d)`/`ENV6(c)(2)(l)` roadmap entries updated with the full
+root cause and the two candidate approaches for a future session:
+(a) root-cause and fix the outer-cycle `DiamondFlattener` interaction
+directly, so the straightforward freeze becomes safe everywhere; or
+(b) give this one call site a narrower mechanism that achieves the same
+per-round stickiness without inserting a new phi into a `Header` that
+might itself be nested inside another cycle.
+
+No CTS re-run this session (no code change landed); no inventory
+changes (internal compiler-correctness investigation only). Open items
+unchanged from the prior session's writeup: `ENV6(c)(3)` (83 cases) /
+`ENV6(d)` (132 cases, own multi-session architecture efforts);
+`ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
+offload-test-suite upstreaming (3 patches, blocked on push access).
