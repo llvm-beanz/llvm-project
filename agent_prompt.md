@@ -70,23 +70,17 @@ Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
 **Fastest next concrete action** (under two minutes): open
-`feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and read this session's recommendation
-to abandon the local-guard-at-peel-site strategy in favor of a function-wide
-precomputed exit-check-gateway set, OR open `ENV6(c)(2)(q)`'s new entry and
-`/tmp/env6c2l/repro.ll` to start integrating `freezeExitRelayValue`'s
-sticky-shadow-phi technique into the `ExitBlockRelayValues` restore path.
+`feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and re-read the two listed
+next-direction options (semantic `ExitBlock`-reachability vs. a `L377(a)`-style
+repair-matcher extension) -- commit to one, do not design a 7th local syntactic
+guard.
 
 1. **`ENV6(c)(2)(o)`** (needs its own full session, 6 failed guard attempts so
-   far): do not design a 7th local guard without first seriously weighing the
-   structural alternative (precompute a stable, function-wide set of
-   exit-check-gateway blocks once, before any peeling begins) documented this
-   session in the roadmap and `.instructions.md`.
-2. **`ENV6(c)(2)(q)`** (new, needs its own full session): integrate
-   `freezeExitRelayValue`'s sticky shadow-phi technique into the
-   `ExitBlockRelayValues` restore loop to correctly handle genuine dual-exit
-   loops. Repro already captured at `/tmp/env6c2l/repro.ll` -- no re-derivation
-   needed. The incomplete `select`-based first attempt and its symbolic-trace
-   disproof are fully documented in the roadmap entry; don't repeat it.
+   far): pick direction (a) or (b) above and commit to it.
+2. **`ENV6(c)(2)(l)`** (small audit, down to 2 unaudited call sites now that
+   `MergedRelayValues` is confirmed fixed and `HeaderExitRelayValues` was
+   already correct): check the remaining 2
+   `closeLatch`/`freezeLoopCarriedValues` call sites for a similar latent gap.
 3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
    architecture efforts, not quick fixes.
