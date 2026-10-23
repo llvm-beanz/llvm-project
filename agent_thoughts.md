@@ -130663,3 +130663,81 @@ None — no code change shipped, so nothing to re-measure.
    multi-session architecture efforts.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
 6. offload-test-suite upstreaming (3 patches): blocked on push access.
+
+# Session: `ENV6(c)(2)(r)` fixed — in-place fold, not a reroute
+
+**Start**: `vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device`.
+
+## What shipped (4 commits, in order)
+
+1. `dependsOnResourceOrImageLoadInCycle` gained an opt-in
+   `AlsoCheckAncestorCycles` parameter — pure helper extension, all 3
+   existing call sites unchanged.
+2. `linearizeCycle` gained a `FoldHeaderExitIntoMask` sub-path inside the
+   existing `!HeaderDivergent && !LatchDivergent && !LatchWasPromoted`
+   branch — the actual fix. Reuses `stayInLoop`/`closeLatch`/
+   `freezeLoopCarriedValues`, the same calls the general
+   `HeaderDivergent=true` path already uses, instead of rerouting the
+   whole cycle through that heavier path (which is what regressed last
+   session's attempt 2).
+3. New lit test:
+   `loop-exit-check-depends-on-ancestor-cycle-resource-load.ll`.
+4. Docs: `Roadmap.md` struck through, `.instructions.md` got 2 new
+   lessons, `VulkanCTSReport.md` got `L528`.
+
+## Why this attempt worked where last session's two didn't
+
+Last session tried forcing `HeaderDivergent=true` for the whole cycle —
+that reroutes through `CheckBlock`/`collectUniformPassThroughRegion`,
+built for a simpler shape with no other internal branches, and broke on
+this case's own `switch`-case body. This session instead stayed inside
+the *already-working* `CycleHasMaskOps=true` sub-path and only touched
+the one thing that was actually wrong: `HeaderExit->Br` itself. Same
+machinery the `HeaderDivergent=true` path already calls, just invoked
+narrowly instead of wholesale.
+
+## The regression-test detour (useful lesson, cost ~40 min)
+
+1. `llvm-reduce --test=interesting.sh` on the real 153KB repro looked
+   like it worked (converged to 35 lines in minutes) — but the reduced
+   file *still failed even with the fix applied*. It had converged on a
+   **different, unrelated** divergent-branch bug sharing the same
+   diagnostic text. Abandoned; don't trust a reduction against a generic
+   "any divergent branch" predicate without also checking the fixed
+   binary doesn't still fail on the reduced output.
+2. Hand-crafting one instead: a uniform, loop-counter-derived condition
+   (`icmp eq i32 %outer.i, 0`) never reproduced the bug in *either* build
+   — no real divergence existed anywhere, so `UniformityInfo` was
+   correct both times. Switched to `atomicrmw` (FeMe's own
+   `NeverUniform` convention) as the root cause — reproduced immediately.
+3. A single-block self-loop (`Header == Latch`) takes a *completely
+   different*, much earlier bail in `linearizeCycle` and can never reach
+   this fix's code at all. Needed a real header/body/latch shape for the
+   inner loop.
+
+Both lessons are now in `.instructions.md` so the next session doesn't
+rediscover them from scratch.
+
+## Verification
+
+- Real repro (`/tmp/env6c2o_simdize/full_module.ll`): `linearize` +
+  `simdize` both clean, both outputs verify.
+- `check-feme`: 3876/3880 pass (4 unsupported), 0 failures.
+- `dEQP-VK.graphicsfuzz.cov-two-nested-loops-switch-case-matrix-array-increment`
+  standalone: now **Pass**.
+- 105-case graphicsfuzz corpus re-run: 24 Pass / 81 Fail — matches the
+  prior 23/82 baseline plus this one newly-fixed case, no regressions.
+
+## Next steps (ranked)
+
+1. **`ENV6(c)(2)(l)`** (~30 min): audit the 2 remaining
+   `closeLatch`/`freezeLoopCarriedValues` call sites — still no live
+   repro across several sessions, pure watch item, lowest-effort thing
+   left on the list.
+2. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not
+   started.
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
+5. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
