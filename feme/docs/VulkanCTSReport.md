@@ -11360,3 +11360,89 @@ unchanged from the prior session's writeup: `ENV6(c)(3)` (83 cases) /
 `ENV6(d)` (132 cases, own multi-session architecture efforts);
 `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
 offload-test-suite upstreaming (3 patches, blocked on push access).
+
+## L533: `ENV6(c)(2)(d)`/`ENV6(c)(2)(l)` fix landed and verified live -- `spv-stable-pillars-O-op-select-to-op-phi` now Passes
+
+Picked this bug back up and root-caused the outer-cycle `DiamondFlattener`
+interaction flagged at the end of `L532`: it was never a genuine
+structural invariant violation at all. Confirmed empirically (direct
+`feme-opt -S ... > stdout 2>stderr; wc -l` experiments) that **any**
+`diagnose()` call anywhere in `LoopLinearizer::linearizeCycle` makes the
+whole pass emit zero bytes of stdout, regardless of how much in-memory IR
+mutation already happened for this or an earlier sibling cycle -- so an
+over-permissive precheck can only ever *defer* discovery of a genuinely
+unsupported shape to a later, independent check, never let a
+miscompiled/partially-masked module escape to the real output. This
+turned the problem from "find a perfectly narrow structural predicate"
+into "find a safe-to-relax precheck", landed in two commits:
+
+1. Wrap `CheckValue` with `freezeExitRelayValue(..., ForceShadow=true)`
+   in `linearizeCycle`'s `MergedRelayValues` restore loop's
+   `LatchIdx == -1` branch (mirroring its sibling branch) -- the fix
+   `L532` already knew was correct for the target bug.
+2. Generalize `DiamondFlattener::canFlattenLoopBodyRegion`'s precheck
+   (previously an unconditional `CycleBoundaryBlocks.empty()`) to a new
+   shared `allBoundariesTolerable`/`reachesThroughUncondChain` helper
+   pair that tolerates a boundary block's branch reaching the cycle's
+   `End` dispatch block through a chain of plain `UncondBrInst` hops, not
+   just a direct successor. (An intermediate escape-topology-based
+   tightening attempt -- requiring exactly one of a boundary block's two
+   successors to be a genuine cycle-escape edge -- was tried and
+   discarded: `env6c2p`'s own *outer* cycle has a boundary block whose
+   "escaping" arm can *also* legitimately reach the same shared `End`,
+   so the XOR invariant is not actually universal.)
+
+`ninja check-feme` after both commits: 3878/3882 Passed, 4 Unsupported,
+0 regressions (`env6c2p-linearize-cycle-stale-pdt-uaf.ll` fully succeeds
+now; `nested-loop-abandoned-child-exit-block-merged.ll` still fails
+cleanly, just with a different, more specific diagnostic from an
+unrelated, independent check further downstream -- its "clean bailout,
+no crash" guarantee is unaffected).
+
+**Then re-ran the live CTS case and found the fix was still incomplete.**
+`dEQP-VK.graphicsfuzz.spv-stable-pillars-O-op-select-to-op-phi` still
+failed identically (`Histogram EMD value of 0.193642 is greater than
+tolerance of 0.005000` -- the exact same number as before any of this
+session's fixes). A `FEME_DUMP_IR_PRESIMD=1` live `deqp-vk` run (dumping
+IR immediately after `feme-cpu-linearize`, before `feme-cpu-simdize`)
+showed **no `exit.relay.shadow.frozen` phi anywhere** in any of the
+case's 3 variants' IR -- meaning neither of the two already-frozen
+restore-loop branches was ever reached for this real shader. Tracing the
+actual output (`%.exit.merge8 = select i1 %exited.via.check.next, i1
+%.linearized, i1 true`, named exactly per `RelayRestoreBuilder.
+CreateSelect(..., PN->getName() + ".exit.merge")`) back to the source
+identified a **third** restore-loop branch -- `HeaderValue && CheckValue
+&& HeaderValue != CheckValue`, which builds its own `select` directly at
+`Latch`'s terminator -- that had never been frozen at all, in any prior
+session's fix. Applied the identical `freezeExitRelayValue(...,
+ForceShadow=true)` wrap to this third branch (third commit); updated
+`loop-header-divergent-and-checkblock-divergent-distinct-relay-value.ll`
+(which exercises exactly this branch) to the new frozen-shadow CHECK
+shape. `ninja check-feme`: 3878/3882 Passed, 4 Unsupported, 0
+regressions, same totals as before (this branch's fix only changes which
+value a merge reads, not whether the merge exists).
+
+**Live CTS re-verification**: rebuilt `deqp-vk` (`ninja deqp-vk` in
+`/home/dev/dev/VK-GL-CTS/build`) and `libfeme_vulkan.so` (`ninja
+libfeme_vulkan.so`), then ran
+`VK_ICD_FILENAMES=.../feme_icd.json ./deqp-vk
+--deqp-case=dEQP-VK.graphicsfuzz.spv-stable-pillars-O-op-select-to-op-phi
+--deqp-log-images=disable` from `external/vulkancts/modules/vulkan`
+(per `.instructions.md`'s standing CTS-invocation rules): **Pass**
+(1/1, 100%) -- confirmed fixed end-to-end, not just in the standalone
+`feme-opt` reduction. `Roadmap.md`'s `ENV6(c)(2)(d)`/`ENV6(c)(2)(l)`
+entries updated with this correction.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+needed (internal compiler-correctness fix, no new feature/extension
+surface). No broader CTS sweep run this session (time-boxed to the
+specific targeted case this fix was aimed at); a future session should
+consider a fuller re-triage sweep now that three `ENV6(c)(2)(d)`-era
+commits have landed, in case any other still-open bucket shares the
+same root cause.
+
+Open items unchanged from the prior session's writeup: `ENV6(c)(2)(c)`
+(status unclear, needs re-checking); `ENV6(c)(3)` (83 cases) /
+`ENV6(d)` (132 cases, own multi-session architecture efforts);
+`ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
+offload-test-suite upstreaming (3 patches, blocked on push access).
