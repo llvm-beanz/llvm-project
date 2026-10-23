@@ -10,20 +10,27 @@
 
 ; Two *independent* dynamic indices in the same access chain (here, a
 ; further dynamic byte-index chained onto an already-dynamically-indexed
-; GEP) remain out of this pass's scope (see the file comment's "at most
-; one independent dynamic term" note) -- reasoning about two
-; simultaneously-runtime-computed offsets to derive a safe `MaxOffset`
-; bound is a meaningfully harder problem this pass does not attempt, and
-; no real shader shape needing it has been observed. Left entirely alone,
-; exactly like the single-dynamic-index case used to be. Printed first,
-; before every lowered function below: a function this pass leaves
-; unmodified keeps its original module position, unlike a lowered one
-; (its signature grows, so it is rebuilt and moved to the module's end --
-; see `SPIRVPushConstantLoweringPass::run`).
+; GEP) -- roadmap `ENV6(c)(2)(c)`: before this fix, out of this pass's
+; scope entirely (reasoning about two simultaneously-runtime-computed
+; offsets to derive a safe `MaxOffset` bound was judged a meaningfully
+; harder problem this pass did not attempt), leaving the whole function,
+; and so `@pc` itself, unconverted -- surfacing only as a
+; `JIT session error: Symbols not found: [ pc ]` at run time with no
+; earlier diagnostic, the exact shape
+; `dEQP-VK.graphicsfuzz.cov-read-matrix-push-constant`'s own
+; `matrix[dynamicRow][dynamicCol]` read hit. Now recognized: both dynamic
+; terms are folded into a single combined 64-bit byte-offset value
+; (`i*4 + j*4`, each index's own stride before folding), carried forward
+; at stride 1, rather than the first dynamic term alone.
 ; CHECK-LABEL: define i32 @two_dynamic_indices(
-; CHECK-SAME: i32 %i, i32 %j)
-; CHECK-NOT: root_constants
-; CHECK: getelementptr {{.*}} @pc
+; CHECK-SAME: i32 %i, i32 %j, ptr %root_constants, i32 %root_constant_size)
+; CHECK: %[[I64:[0-9]+]] = sext i32 %i to i64
+; CHECK: %push_const.dyn_term = mul i64 %[[I64]], 4
+; CHECK: %[[J64:[0-9]+]] = sext i32 %j to i64
+; CHECK: %push_const.dyn_term1 = mul i64 %[[J64]], 4
+; CHECK: %push_const.dyn_combined = add i64 %push_const.dyn_term, %push_const.dyn_term1
+; CHECK: %push_const.dyn_offset = mul i64 %push_const.dyn_combined, 1
+; CHECK: %push_const.byte_offset = add i64 %push_const.dyn_offset, 8
 define i32 @two_dynamic_indices(i32 %i, i32 %j) {
   %base = getelementptr inbounds %PushConstants, ptr addrspace(13) @pc, i32 0, i32 2, i32 %i
   %p = getelementptr i32, ptr addrspace(13) %base, i32 %j
