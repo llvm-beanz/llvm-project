@@ -234,6 +234,56 @@ Clang-offload-failures bar are not yet addressed. No feature/extension
 change; no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 update needed.
 
+### Update: `ENV6(c)(2)(o)` fixed; `cov-two-nested-loops-switch-case-matrix-array-increment` moves one stage further
+
+Fixed `ENV6(c)(2)(o)` (see [Roadmap.md](Roadmap.md) for the full
+mechanism): a provably-constant-edge peel inside
+`peelConstantFlowPredecessorsInCycle` could leave a loop's
+`CheckExit->StayInLoop` continuation with two real predecessors,
+breaking the single-entry invariant the rest of `LoopLinearizer` depends
+on. Fixed by physically restoring single-entry dominance via
+`SplitBlockPredecessors`, with three follow-on fixes (`CycleInfo`
+registration, a redirect-silently-undoing-the-split bug, and a deferred
+cross-cycle SSA-repair sweep for a sibling cycle's own later-created
+merge construct).
+
+Re-ran the case this bug's own standalone repro
+(`/tmp/env6c2m/full_module.ll`) was extracted from,
+`graphicsfuzz.cov-two-nested-loops-switch-case-matrix-array-increment`
+(tracked as `ENV6(c)(2)(m)` in [Roadmap.md](Roadmap.md)), plus its five
+`loop_control`/`cov-loop-condition-divide-by-uniform-always-false`
+siblings from `assertion-crash-cases.txt`, against a freshly rebuilt
+`libfeme_vulkan.so`:
+
+```
+dEQP-VK.graphicsfuzz.cov-two-nested-loops-switch-case-matrix-array-increment  Fail
+dEQP-VK.graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false ..... Fail
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.iteration_multiple  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.max_iterations ...  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.min_iterations ...  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.partial_count ....  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.peel_count .......  Pass
+```
+
+`cov-two-nested-loops-switch-case-matrix-array-increment` remains
+`Fail`, but its own diagnostic changed in a way that confirms real
+forward progress: it no longer bails out inside
+`feme-cpu-linearize` at all (the exact bailout this session's fix
+removes) -- it now gets one full pass stage further and fails inside
+`feme-cpu-simdize` instead (`function 'main' has a divergent branch;
+the divergence transform (feme::cpu::LinearizePass) did not remove it,
+or produced a shape this pass cannot widen`). This is a genuinely
+different, downstream limitation, not yet investigated, and is recorded
+as a new, separate residual in `ENV6(c)(2)(m)`'s own roadmap entry
+rather than closed. The other five cases are unaffected (all still
+`Pass`/`Fail` exactly as `L463` left them) -- no regressions.
+
+`check-feme`: 3,874 -> 3,875 Passed (`env6c2p`'s own expected output
+updated in place, no net new test count change), 4 Unsupported, 0
+regressions. No feature/extension change; no
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed.
+
 ## Historical full-run baseline (2026-10-12)
 
 The remainder records the earlier complete re-triage and its subsequent
