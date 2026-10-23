@@ -245,6 +245,43 @@ func.func @extract_insert(%composite: !spirv.array<1xvector<2xf32>>, %val: f32) 
 
 // -----
 
+// Extracting through an insert whose own index list is a strict prefix of
+// the extract's index list must not be folded by naively walking past the
+// insert: the insert may have overwritten a value nested inside the region
+// being extracted, so the fold must be declined (not collapsed to the
+// pre-insert composite).
+
+// CHECK-LABEL: extract_insert_overlap_prefix
+//  CHECK-SAME: (%[[OUTER:.+]]: !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>, %[[INNER:.+]]: !spirv.struct<(i32, i32)>)
+func.func @extract_insert_overlap_prefix(%outer: !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>, %inner: !spirv.struct<(i32, i32)>) -> i32 {
+  // CHECK: %[[INSERT:.+]] = spirv.CompositeInsert %[[INNER]], %[[OUTER]]
+  %insert = spirv.CompositeInsert %inner, %outer[0 : i32] : !spirv.struct<(i32, i32)> into !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>
+  // CHECK: %[[RES:.+]] = spirv.CompositeExtract %[[INSERT]][0 : i32, 1 : i32]
+  %extract = spirv.CompositeExtract %insert[0 : i32, 1 : i32] : !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>
+  // CHECK: return %[[RES]]
+  return %extract : i32
+}
+
+// -----
+
+// Extracting through a chain of two inserts, where the outer insert's index
+// list is a strict prefix of the extract's own index list, is safe to
+// resolve by continuing to walk the chain using the remaining (unconsumed)
+// suffix of indices -- here that remaining suffix then exactly matches the
+// inner insert, so the whole chain folds to the inner inserted value.
+
+// CHECK-LABEL: extract_insert_overlap_descend
+//  CHECK-SAME: (%[[OUTER:.+]]: !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>, %[[INNER:.+]]: !spirv.struct<(i32, i32)>, %[[VAL:.+]]: i32)
+func.func @extract_insert_overlap_descend(%outer: !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>, %inner: !spirv.struct<(i32, i32)>, %val: i32) -> i32 {
+  %inner_insert = spirv.CompositeInsert %val, %inner[1 : i32] : i32 into !spirv.struct<(i32, i32)>
+  %insert = spirv.CompositeInsert %inner_insert, %outer[0 : i32] : !spirv.struct<(i32, i32)> into !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>
+  %extract = spirv.CompositeExtract %insert[0 : i32, 1 : i32] : !spirv.struct<(!spirv.struct<(i32, i32)>, i32)>
+  // CHECK: return %[[VAL]]
+  return %extract : i32
+}
+
+// -----
+
 // CHECK-LABEL: extract_construct
 //  CHECK-SAME: (%[[VAL1:.+]]: vector<2xf32>, %[[VAL2:.+]]: vector<2xf32>)
 func.func @extract_construct(%val1: vector<2xf32>, %val2: vector<2xf32>) -> (vector<2xf32>, vector<2xf32>) {

@@ -446,20 +446,53 @@ OpFoldResult spirv::BitcastOp::fold(FoldAdaptor /*adaptor*/) {
 
 OpFoldResult spirv::CompositeExtractOp::fold(FoldAdaptor adaptor) {
   Value compositeOp = getComposite();
+  ArrayRef<Attribute> extractIndices = getIndices().getValue();
 
   while (auto insertOp =
              compositeOp.getDefiningOp<spirv::CompositeInsertOp>()) {
-    if (getIndices() == insertOp.getIndices())
+    ArrayRef<Attribute> insertIndices = insertOp.getIndices().getValue();
+
+    // Case 1: the two index lists match exactly -- this extract reads
+    // precisely the member that insertOp just wrote.
+    if (extractIndices == insertIndices)
       return insertOp.getObject();
+
+    // Case 2: insertOp's index list is a strict prefix of this extract's --
+    // insertOp replaced the whole sub-aggregate this extract is reading
+    // *through*, so keep resolving against the newly-inserted object with
+    // the remaining (unconsumed) suffix of indices.
+    if (insertIndices.size() < extractIndices.size() &&
+        extractIndices.take_front(insertIndices.size()) == insertIndices) {
+      compositeOp = insertOp.getObject();
+      extractIndices = extractIndices.drop_front(insertIndices.size());
+      continue;
+    }
+
+    // Case 3: this extract's index list is a strict prefix of insertOp's --
+    // insertOp only overwrote a member nested *inside* the sub-aggregate
+    // this extract reads as a whole, so the result still depends on that
+    // write. Neither returning insertOp's object (too narrow: it wrote
+    // only part of what this extract returns) nor walking past insertOp to
+    // its own composite (would silently drop insertOp's write, as it is
+    // still within the extracted range) is sound -- stop looking further
+    // up the insert chain and fall through to the composite-construct
+    // check/constant-folding below using insertOp's own result.
+    if (extractIndices.size() < insertIndices.size() &&
+        insertIndices.take_front(extractIndices.size()) == extractIndices)
+      break;
+
+    // Otherwise the two index lists are disjoint (neither is a prefix of
+    // the other): insertOp cannot have touched the member this extract
+    // reads, so it is safe to keep looking further up the chain.
     compositeOp = insertOp.getComposite();
   }
 
   if (auto constructOp =
           compositeOp.getDefiningOp<spirv::CompositeConstructOp>()) {
     auto type = cast<spirv::CompositeType>(constructOp.getType());
-    if (getIndices().size() == 1 &&
+    if (extractIndices.size() == 1 &&
         constructOp.getConstituents().size() == type.getNumElements()) {
-      auto i = cast<IntegerAttr>(*getIndices().begin());
+      auto i = cast<IntegerAttr>(extractIndices.front());
       if (i.getValue().getSExtValue() <
           static_cast<int64_t>(constructOp.getConstituents().size()))
         return constructOp.getConstituents()[i.getValue().getSExtValue()];
