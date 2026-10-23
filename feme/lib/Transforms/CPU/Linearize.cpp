@@ -6210,6 +6210,25 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // instead wherever it applies.
   SmallPtrSet<BasicBlock *, 2> PeeledFrom;
   SmallPtrSet<BasicBlock *, 2> RelayCandidates;
+  // Roadmap ENV6(c)(2)(p): `DT`/`PDT` must be fresh immediately before
+  // this call -- `peelConstantFlowPredecessorsInCycle`'s own
+  // `peelWouldExposeSiblingDiamondToSharedMerge` helper looks up each
+  // candidate's immediate post-dominator via `PDT` *before* doing its own
+  // speculative recalculate, so a stale `PDT` here can hand it a
+  // `BasicBlock*` some earlier fold already `eraseFromParent()`'d --
+  // confirmed via a real, reproduced crash (`llvm::Value::
+  // assertModuleIsMaterializedImpl` deep inside `DiamondFlattener::
+  // validate`, via a dangling post-dominator pointer) once this cycle's
+  // own second call to this same function below (after `mergeTrivial
+  // RelayBlocksInCycle` erases a block) ran on a `PDT` nothing had
+  // recalculated since. Recalculating immediately before every call
+  // (cheap relative to the crash it prevents, and the exact pattern this
+  // file already uses everywhere else dominance-sensitive logic runs --
+  // see `L377`'s own `DT.recalculate(F)` just below, for instance) keeps
+  // this call's own internal assumption ("PDT reflects the CFG as of
+  // right now") actually true.
+  DT.recalculate(F);
+  PDT.recalculate(F);
   peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom, DT,
                                       PDT, UI, &RelayCandidates);
 
@@ -6235,6 +6254,16 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                                                      RelayCandidates);
     if (CollapsedRelay) {
       foldRedundantFlowBlocksInCycle(CI, C, Header, Latch);
+      // Roadmap ENV6(c)(2)(p): same reasoning as the first call above --
+      // `collapseTriviallyRedundantPhisInCycle`/
+      // `mergeTrivialRelayBlocksInCycle` (just above) and
+      // `foldRedundantFlowBlocksInCycle` can each physically erase a
+      // block (`MergeBlockIntoPredecessor`'s own "`BB` itself is erased"
+      // case, confirmed the real one that triggers this), so `DT`/`PDT`
+      // must be recalculated again before this loop's own repeat call,
+      // not just before the first one above.
+      DT.recalculate(F);
+      PDT.recalculate(F);
       peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom,
                                           DT, PDT, UI, &RelayCandidates);
     }
