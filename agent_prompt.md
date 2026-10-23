@@ -69,16 +69,20 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`feme-cpu-simdize`'s new residual on `cov-two-nested-loops-switch-case-matrix-array-increment`** (new, ~1 session): the case now reaches
-   simdize and fails there with "divergent branch ... did not remove it, or
-   produced a shape this pass cannot widen." Start from a fresh IR dump for
-   this exact case (post-linearize, pre-simdize) rather than reusing
-   `/tmp/env6c2m/full_module.ll` verbatim — the new `.o.merge` block changes
-   the shape simdize now sees.
-2. **`ENV6(c)(2)(l)`** (small audit, ~30 min): check the remaining 2
-   `closeLatch`/`freezeLoopCarriedValues` call sites for a similar latent
-   `BodyMask`-vs-`NaturalContinue` gap. Not started this session either —
-   deprioritized in favor of finishing `(o)` end-to-end.
+1. **`ENV6(c)(2)(r)`** (new, needs its own full session): design and land
+   the deferred-sweep extension described in the roadmap entry -- track
+   "left alone" cycle headers during `LoopLinearizer::run`, recompute
+   `UniformityInfo` fresh after all cycles are processed, and re-run
+   `linearizeCycle` for any one whose exit check is now genuinely
+   divergent. Repro preserved, reusable without re-extraction:
+   `/tmp/env6c2o_simdize/full_module.ll` (pre-linearize) and
+   `/tmp/env6c2o_simdize/linearized.ll` (post-linearize, pre-simdize).
+2. **`ENV6(c)(2)(l)`**: both halves of this audit (the `FeedsUniformBranch`/
+   `HeaderExitRelayValues` constant-only gap, and now the `closeLatch`
+   `OutPerLaneContinue` gap) remain reproducer-free after real attempts to
+   find one. Treat as a pure watch item unless a new failing case surfaces
+   naturally during other work -- don't spend another session hunting for a
+   synthetic repro with no real-case signal.
 3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not started.
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
    architecture efforts.
@@ -86,10 +90,3 @@ the next steps:
    unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
-
-**Fastest next concrete action (under two minutes)**: open
-`feme/docs/VulkanCTSReport.md`'s newest "Update" section (this session's) and
-`ENV6(c)(2)(m)`'s roadmap entry, then dump
-`cov-two-nested-loops-switch-case-matrix-array-increment`'s post-linearize IR
-fresh (`FEME_DUMP_IR_POSTOPT=1`, per `.instructions.md`) to find the specific
-branch `feme-cpu-simdize` considers unremoved.
