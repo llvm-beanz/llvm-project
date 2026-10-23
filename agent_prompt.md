@@ -69,18 +69,16 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-**Fastest next concrete action** (under two minutes): open
-`feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and re-read the two listed
-next-direction options (semantic `ExitBlock`-reachability vs. a `L377(a)`-style
-repair-matcher extension) -- commit to one, do not design a 7th local syntactic
-guard.
-
-1. **`ENV6(c)(2)(o)`** (needs its own full session, 6 failed guard attempts so
-   far): pick direction (a) or (b) above and commit to it.
-2. **`ENV6(c)(2)(l)`** (small audit, down to 2 unaudited call sites now that
-   `MergedRelayValues` is confirmed fixed and `HeaderExitRelayValues` was
-   already correct): check the remaining 2
-   `closeLatch`/`freezeLoopCarriedValues` call sites for a similar latent gap.
+1. **`ENV6(c)(2)(o)`** (still needs its own full session): re-apply
+   `/tmp/env6c2o_attempt7/attempt7-chaingate-stayinloop.patch` (known-good as
+   far as it goes), then investigate why the matcher only fires once per
+   function — likely needs to iterate until no more `StayInLoop`-extra-predecessor
+   shapes remain, OR the `Flow237` occurrence has a subtly different shape that
+   needs its own case. Do not re-derive the trace from scratch — the shape at
+   `Flow227`/`StayInLoop` is now confirmed stable and solved; only `Flow237` is
+   open.
+2. **`ENV6(c)(2)(l)`** (small audit, down to 2 unaudited call sites): unchanged,
+   not started this session.
 3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
    architecture efforts, not quick fixes.
@@ -88,3 +86,7 @@ guard.
    unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
    for many sessions.
+
+No CTS re-run this session (no code landed, so no behavior change to
+re-measure) — `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` untouched, consistent with "nothing shipped."
