@@ -2472,10 +2472,53 @@ public:
   }
 };
 
+/// Builds an `llvm.intr.umin(ShiftAmount, Size - 1)` clamp of a shift-amount
+/// operand already converted to `DstType` (the shift's own operand/result
+/// type) -- shared by `ShiftPattern` below. Splats the `Size - 1` constant
+/// across every lane if `DstType` is a vector, matching `ShiftAmount`'s own
+/// shape.
+static Value clampShiftAmountToOperandWidth(Location loc, Type dstType,
+                                            Value shiftAmount,
+                                            ConversionPatternRewriter &rewriter) {
+  auto vecType = dyn_cast<VectorType>(dstType);
+  auto elementType =
+      cast<IntegerType>(vecType ? vecType.getElementType() : dstType);
+  auto maxShiftAttr =
+      rewriter.getIntegerAttr(elementType, elementType.getWidth() - 1);
+  Value maxShift =
+      vecType ? LLVM::ConstantOp::create(
+                    rewriter, loc, dstType,
+                    SplatElementsAttr::get(vecType, maxShiftAttr))
+              : LLVM::ConstantOp::create(rewriter, loc, dstType, maxShiftAttr);
+  return LLVM::UMinOp::create(rewriter, loc, dstType, shiftAmount, maxShift);
+}
+
 /// Converts SPIR-V shift ops to LLVM shift ops. Since LLVM dialect
 /// puts a restriction on `Shift` and `Base` to have the same bit width,
 /// `Shift` is zero or sign extended to match this specification. Cases when
 /// `Shift` bit width > `Base` bit width are considered to be illegal.
+///
+/// Per the SPIR-V spec (`OpShiftRightLogical`/`OpShiftLeftLogical`/
+/// `OpShiftRightArithmetic`): "Shift is consumed as an unsigned integer. ...
+/// Results are undefined if Shift is greater than or equal to the bit width
+/// of the components of Base" -- a spec-legal, if unusual, shift amount a
+/// real shader may still pass (e.g. a GLSL constant-folding-defeating idiom
+/// deliberately computing a >= 32 shift whose *result* the rest of the
+/// shader never actually depends on). LLVM's own shift instructions treat
+/// any such out-of-range shift amount as outright *poison*, a strictly
+/// stronger, UB-carrying property than SPIR-V's own "the value is merely
+/// unspecified": a poison value that reaches a branch condition (even
+/// transitively, through otherwise ordinary arithmetic) makes the branch
+/// itself undefined behavior, which LLVM's optimizer is entitled to exploit
+/// by deleting everything that branch could reach -- silently discarding
+/// unrelated, perfectly well-defined code elsewhere in the same function
+/// with no diagnostic anywhere in the pipeline. Clamping `Shift` to
+/// `[0, Size - 1]` before it is ever used as the actual `llvm.shl`/
+/// `llvm.lshr`/`llvm.ashr` shift amount keeps every in-range `Shift`
+/// unaffected (the clamp is a no-op whenever `Shift < Size` already) while
+/// turning the out-of-range case into some ordinary, still-SPIR-V-spec-
+/// undefined but no-longer-poison value, matching the spec's own weaker
+/// guarantee instead of silently strengthening it into IR-level UB.
 template <typename SPIRVOp, typename LLVMOp>
 class ShiftPattern : public SPIRVToLLVMConversion<SPIRVOp> {
 public:
@@ -2492,38 +2535,38 @@ public:
     Type op1Type = op.getOperand1().getType();
     Type op2Type = op.getOperand2().getType();
 
-    if (op1Type == op2Type) {
-      rewriter.template replaceOpWithNewOp<LLVMOp>(op, dstType,
-                                                   adaptor.getOperands());
-      return success();
-    }
-
-    std::optional<uint64_t> dstTypeWidth =
-        getIntegerOrVectorElementWidth(dstType);
-    std::optional<uint64_t> op2TypeWidth =
-        getIntegerOrVectorElementWidth(op2Type);
-
-    if (!dstTypeWidth || !op2TypeWidth)
-      return failure();
-
     Location loc = op.getLoc();
-    Value extended;
-    if (op2TypeWidth < dstTypeWidth) {
-      if (isUnsignedIntegerOrVector(op2Type)) {
-        extended =
-            LLVM::ZExtOp::create(rewriter, loc, dstType, adaptor.getOperand2());
-      } else {
-        extended =
-            LLVM::SExtOp::create(rewriter, loc, dstType, adaptor.getOperand2());
-      }
-    } else if (op2TypeWidth == dstTypeWidth) {
-      extended = adaptor.getOperand2();
+    Value shiftAmount;
+    if (op1Type == op2Type) {
+      shiftAmount = adaptor.getOperand2();
     } else {
-      return failure();
+      std::optional<uint64_t> dstTypeWidth =
+          getIntegerOrVectorElementWidth(dstType);
+      std::optional<uint64_t> op2TypeWidth =
+          getIntegerOrVectorElementWidth(op2Type);
+
+      if (!dstTypeWidth || !op2TypeWidth)
+        return failure();
+
+      if (op2TypeWidth < dstTypeWidth) {
+        if (isUnsignedIntegerOrVector(op2Type)) {
+          shiftAmount = LLVM::ZExtOp::create(rewriter, loc, dstType,
+                                             adaptor.getOperand2());
+        } else {
+          shiftAmount = LLVM::SExtOp::create(rewriter, loc, dstType,
+                                             adaptor.getOperand2());
+        }
+      } else if (op2TypeWidth == dstTypeWidth) {
+        shiftAmount = adaptor.getOperand2();
+      } else {
+        return failure();
+      }
     }
 
-    Value result =
-        LLVMOp::create(rewriter, loc, dstType, adaptor.getOperand1(), extended);
+    Value clampedShiftAmount =
+        clampShiftAmountToOperandWidth(loc, dstType, shiftAmount, rewriter);
+    Value result = LLVMOp::create(rewriter, loc, dstType,
+                                  adaptor.getOperand1(), clampedShiftAmount);
     rewriter.replaceOp(op, result);
     return success();
   }
