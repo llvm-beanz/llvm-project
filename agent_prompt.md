@@ -69,16 +69,31 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`ENV6(c)(2)(c)`/`(d)`** (~do next, not started across many
-   sessions): two isolated 1-case issues — open `Roadmap.md`, search
-   `ENV6(c)(2)(c)` for the specifics.
+1. **`ENV6(c)(2)(d)`** (~1-2 hours): compile each of the 3 extracted
+   fragment shaders (`/tmp/ref_frag.spvasm`, `/tmp/variant_frag.spvasm`,
+   `/tmp/variant2_frag.spvasm`) through FeMe's SPIR-V import +
+   normalization pipeline **in isolation** (no image rendering needed)
+   to find which control-flow shape the compiler lowers incorrectly.
+   `variant`'s nested double-diamond-then-phi shape is the prime
+   suspect (structurally the most complex of the 3, with an
+   intermediate `OpPhi` `%312` whose use doesn't obviously show up in
+   the visible excerpt — worth checking whether it's dead or whether
+   something drops it). Likely needs a minimal synthetic SPIR-V module
+   wrapping just the fragment entry point to drive it through
+   `feme_vulkan`'s actual pipeline-creation path (where
+   `FEME_DUMP_IR_PRENORM=1`/`FEME_DUMP_IR_POSTOPT=1` apply), since
+   `feme-translate` alone can't go all the way to LLVM IR text (see
+   `.instructions.md`'s existing note on that limitation).
 2. **`ENV6(c)(2)(l)` remaining half**: `FeedsUniformBranch`/
    `HeaderExitRelayValues` constant-only-capture gap — still no live
-   reproducer after multiple sessions, pure watch item, don't spend a
-   whole session hunting for a synthetic repro unless a real case
-   surfaces naturally.
+   reproducer after multiple sessions, pure watch item.
 3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
    multi-session architecture efforts.
-4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
+   priority.
 5. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+6. (Separate, outside-FeMe, optional): the VK-GL-CTS standalone `amber`
+   sample's Vulkan-header macro-redefinition conflict — a real,
+   reproducible bug in that vendored checkout, but only worth fixing
+   if a future session actually needs the standalone `amber` tool.
