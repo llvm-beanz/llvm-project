@@ -70,26 +70,27 @@ Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
 **Fastest next concrete action** (under two minutes): open
-`feme/docs/Roadmap.md` at `ENV6(c)(2)(n)` and run
-`cov-nested-structs-function-set-inner-struct-field-return` with
-`FEME_VULKAN_LOG_CREATION_ERRORS=1`/`FEME_DUMP_IR_PRELINEARIZE=1` to get its
-first diagnostic/IR dump -- no theory yet.
+`feme/docs/Roadmap.md` at `ENV6(c)(2)(m)` and re-read `ENV6(c)(2)(k)`'s own
+methodology section before starting a standalone (non-`deqp-vk`) repro of the
+hang.
 
-1. **`ENV6(c)(2)(n)`** (1 case, small session):
-   `cov-nested-structs-function-set-inner-struct-field-return`'s own
-   confirmed-separate root cause, not yet investigated at all.
-2. **Audit the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites**
-   (small-to-medium session): check whether they have a similar latent
-   `BodyMask`-vs-`NaturalContinue` gap, now that the bug class from this session
-   is understood -- no known failing case yet, a preventive audit.
-3. **`ENV6(c)(2)(m)`** (needs its own session): the
-   `cov-two-nested-loops-switch-case-matrix-array-increment` runtime hang, found
-   two sessions ago, still unstarted. Use `ENV6(c)(2)(k)`'s own proven
-   methodology: standalone non-`deqp-vk` repro first.
-4. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
-5. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
+1. **`ENV6(c)(2)(m)`** (needs its own full session):
+   `cov-two-nested-loops-switch-case-matrix-array-increment`'s runtime hang,
+   found two sessions ago, still unstarted. Use `ENV6(c)(2)(k)`'s own proven
+   methodology: standalone non-`deqp-vk` repro first (CPU-side interpreter trace
+   or manual step-through),
+   `FEME_DUMP_IR_PRELINEARIZE`/`FEME_DEBUG_LINEARIZE_TRACE` next, live-attach
+   register sampling only as a last resort -- avoid triggering the un-killable
+   `deqp-vk` process hang while investigating.
+2. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the
+   other 3 `closeLatch`/`freezeLoopCarriedValues` call sites (left untouched by
+   `L521`'s fix, used by already-separately-tested paths like the Mandelbrot
+   `HeaderDivergent=true` branch) have a similar latent
+   `BodyMask`-vs-`NaturalContinue` gap now that the bug class is understood.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
    architecture efforts, not quick fixes.
-
-Lower priority, unchanged for many sessions: `ENV5(c)(7)(b)` (hull lockstep
-barrier, 3 cases); offload-test-suite upstreaming (3 patches, blocked on push
-access).
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
+   unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
+   for many sessions.
