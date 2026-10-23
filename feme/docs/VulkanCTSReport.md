@@ -10624,3 +10624,69 @@ Picked up `ENV6(c)(2)(p)` (the `P1` latent crash found while investigating `ENV6
 **105-case graphicsfuzz corpus re-run** (`cov-two-nested-loops-switch-case-matrix-array-increment`, `ENV6(c)(2)(m)`'s own unresolved diagnostic case, excluded as before -- it is a fast, clean diagnostic now, not a hang, but still out of scope for this fix): **23 Pass / 82 Fail**, matching the documented history's own pass set plus no new regressions; this fix's own affected code path (`linearizeCycle`'s fixed-point loop) is exercised by cases that already bail out cleanly via `ENV6(c)(2)(o)`'s diagnostic both before and after, so no corpus-visible behavior change was expected or observed -- the value of this fix is eliminating a rare crash risk, not changing any case's pass/fail outcome.
 
 **Next steps**: `ENV6(c)(2)(o)` needs a completely fresh investigation next session, starting from this session's own `FEME_DEBUG_ENV6C2O` trace (reproducible verbatim from the roadmap entry) rather than reusing any earlier session's point-fix draft, since the exact dominance-failure shape keeps shifting underneath fixes to its own blockers. Otherwise unchanged from prior sessions: `ENV6(c)(2)(l)` (watch item, no known failing case, audit the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites); `ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues, not started); `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases, both own multi-session efforts); `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority); offload-test-suite upstreaming (3 patches, blocked on push access).
+
+## `ENV6(c)(2)(o)`: mechanism confirmed via direct trace, fourth guard-function attempt still fails `check-feme`
+
+Picked up `ENV6(c)(2)(o)` again. Re-derived the standalone repro
+(`/tmp/env6c2m/full_module.ll`) fresh rather than trusting any prior
+session's (or this session's own earlier, now-superseded) theory about
+the shape. Instrumented every `setSuccessor(0, ...)` call site in
+`Linearize.cpp` with an env-var-gated, pointer-identity trace and, for
+the first time, **directly confirmed** (not just theorized) the real
+mutating mechanism: `peelConstantFlowPredecessors` peels
+`.Flow227_crit_edge` **twice** in the same `linearizeCycle` fixed-point
+loop -- first bypassing `Flow227` into `loop.exit.guard120`, then (since
+that update makes `loop.exit.guard120`'s own exit-check phi constant for
+the same edge too) bypassing `loop.exit.guard120` itself straight into
+its `StayInLoop` successor, which is what later breaks a different
+cycle's `DT.dominates(CheckBlock, CheckExit->StayInLoop)` precondition
+once `loop.exit.guard120` is selected as *that* cycle's own `CheckBlock`.
+
+Designed and built a new guard (`peelWouldBypassOwnExitCheckGateway`):
+decline the second peel when the bypassed block's own "other" successor
+is a synthetic exit-check relay (`isSyntheticRelayBlockName`) with that
+block as its sole predecessor. The standalone repro passed 20/20 runs
+with this guard in place (clean, no crash, `opt -passes=verify` clean),
+but `ninja check-feme` showed **6 regressions**
+(`loop-break-structurized.ll`,
+`loop-header-divergent-and-checkblock-divergent-distinct-relay-value.ll`,
+`loop-nested-exit-check-cond-is-nested-exit-block-phi.ll`,
+`loop-nested-switch-diamond-with-header-resource-check.ll`,
+`env6c2p-linearize-cycle-stale-pdt-uaf.ll`, and unit test
+`LinearizesUniformInnerCondGatingDivergentCheck`): the naming heuristic
+used to detect "exit-check-shaped" also matches ordinary, legitimate
+single-cycle exit checks that this same fold is supposed to simplify.
+**Reverted** (`git diff --stat` confirmed clean) rather than land an
+over-broad fix -- this is the fourth distinct guard-function design to
+fail this way across sessions.
+
+**No net code changes this session.** `feme/.instructions.md` gained two
+new lessons: (1) confirm a hypothesized bad mutation via a direct
+before/after trace before building a guard against it, and (2) this
+specific invariant may not belong in `peelConstantFlowPredecessors` at
+all -- extending the `L377(a)` repair mechanism instead (recognizing two
+live predecessors where one is a straight-line descendant of the other
+via a plain relay chain) is the recommended next direction, now that
+four syntactic-guard attempts have all failed the same way.
+
+No Vulkan CTS corpus re-run performed this session (no functional code
+change landed; the standalone-repro-only verification above is the full
+extent of this session's own testing). `Vulkan14FeatureInventory.md` and
+`VulkanExtensionInventory.md`: no changes needed, confirmed.
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start of
+this session.
+
+**Next steps**: do not attempt a fifth syntactic guard without first
+re-reading why the fourth one failed (above). Either (a) make the
+exit-check detection semantic (confirm the candidate relay actually
+reaches *this cycle's* `ExitBlock`, not just match a name), or (b)
+pursue the roadmap entry's own original direction and extend `L377(a)`'s
+repair matcher with a third case recognizing this exact
+straight-line-descendant shape. Otherwise unchanged from prior sessions:
+`ENV6(c)(2)(l)` (watch item, no known failing case); `ENV6(c)(2)(c)`/`(d)`
+(two isolated 1-case issues, not started); `ENV6(c)(3)` (83 cases) and
+`ENV6(d)` (132 cases, both own multi-session efforts); `ENV5(c)(7)(b)`
+(hull lockstep barrier, 3 cases, lowest priority); offload-test-suite
+upstreaming (3 patches, blocked on push access).
