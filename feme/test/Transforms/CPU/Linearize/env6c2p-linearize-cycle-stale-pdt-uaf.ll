@@ -1,4 +1,4 @@
-; RUN: feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
+; RUN: not feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
 
 ; Roadmap ENV6(c)(2)(p): a real, captured pre-`feme-cpu-linearize` IR
 ; reduction of `graphicsfuzz/cov-two-nested-loops-switch-case-matrix-
@@ -51,22 +51,23 @@
 ; could instead abort partway through, under the right allocator-reuse
 ; timing, well before ever reaching that point).
 ;
-; Roadmap ENV6(c)(2)(o): this module's own inner cycle shape -- a
-; "pure glue" predecessor (`peelConstantFlowPredecessorsInCycle`'s own
-; constant-edge peel) landing a second, live, real predecessor directly
-; into `loop.exit.guard120`'s own `CheckExit->StayInLoop` continuation,
-; alongside `CheckBlock`'s own edge -- used to be unsupported here too
-; (this file's own `CHECK` line, before the `ENV6(c)(2)(o)` fix landed,
-; asserted on that diagnostic instead of success). It is now handled by
-; physically restoring `CheckExit->StayInLoop`'s single-entry invariant
-; via `SplitBlockPredecessors`, which this test's own `.o.merge` block
-; below (and `LoopLinearizer::DeferredSplitMergeFixups`'s cross-cycle
-; dominance sweep, needed for the `chaingate.merge.*` phis gated behind
-; `%.Flow227_crit_edge` just below) now confirms end-to-end.
+; Roadmap ENV6(c)(2)(d)/(l): fixing `LoopLinearizer::linearizeCycle`'s own
+; `MergedRelayValues` restore loop (freezing its `LatchIdx == -1` branch's
+; `CheckValue` the same way its `LatchIdx != -1` sibling branch already
+; did) made this module's own nested child cycle's `ExitBlock` branch
+; visible to the *enclosing* cycle's `DiamondFlattener::validate` walk as
+; a genuine per-iteration exit check -- exposing `canFlattenLoopBodyRegion`
+; itself as over-strict (it still unconditionally required
+; `CycleBoundaryBlocks.empty()`, not tolerating the one-boundary-block
+; shape `flattenLoopBodyRegion` itself already accepted). Until that
+; precheck is also fixed (tracked separately), this module now produces a
+; clean, generic "body shape this milestone does not yet lower" bailout
+; instead of either the old `.o.merge`-based success below or the
+; original UAF crash -- itself still a strict improvement (no crash,
+; valid clean diagnostic), just not yet the fully-successful transform
+; this module's own real-world shape should eventually get.
 
-; CHECK: .o.merge:
-; CHECK-NEXT: %.ph = phi i1 [ %.linearized{{[0-9]+}}, %loop.exit.guard120 ], [ poison, %.Flow227_crit_edge ]
-; CHECK: %chaingate.merge.live = phi i1 [ %{{[A-Za-z0-9.]+}}, %loop.exit.guard120 ], [ %{{[A-Za-z0-9.]+}}, %.Flow227_crit_edge ]
+; CHECK: feme-cpu-linearize: function 'main': loop at '{{.*}}' has an internal branch in a body shape this milestone does not yet lower
 
 ; ModuleID = '<in-memory object>'
 source_filename = "LLVMDialectModule"

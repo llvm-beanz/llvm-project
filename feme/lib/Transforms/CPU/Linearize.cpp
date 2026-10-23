@@ -8121,8 +8121,28 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         Restored = RelayRestoreBuilder.CreateSelect(
             EffectiveExitedViaCheckNext, CheckValue, HeaderValue,
             PN->getName() + ".exit.merge");
-      else
+      else {
+        // Roadmap ENV6(c)(2)(d)/(l): mirrors the `LatchIdx != -1` branch's
+        // own identical `freezeExitRelayValue` wrap just above -- this
+        // `addIncoming` still adds the incoming value for the edge from
+        // `Latch` (i.e. still *inside* the loop, for any lane that
+        // continues around again), so a non-constant, freshly
+        // recomputed-per-round `CheckValue` needs the same sticky shadow
+        // freeze, or a lane that took this cycle's own divergent exit on
+        // an earlier round reads whichever value `CheckValue` recomputes
+        // on the group's eventual final round instead of its own.
+        // Confirmed via `dEQP-VK.graphicsfuzz.spv-stable-pillars-O-op-
+        // select-to-op-phi`'s own `reference` variant, whose
+        // `Flow._crit_edge` exit relay merge hits exactly this branch
+        // with a `CheckValue` that is a fresh per-round `select`, not a
+        // compile-time constant.
+        if (CheckValue)
+          CheckValue = freezeExitRelayValue(
+              Header, Latch, CheckValue,
+              [&] { return EffectiveDivergedViaCheckThisIter; },
+              /*OutShadow=*/nullptr, /*ForceShadow=*/true);
         Restored = CheckValue ? CheckValue : HeaderValue;
+      }
       PN->addIncoming(Restored, Latch);
     }
     // Replace (not add to) `Latch`'s already-seeded poison placeholder
