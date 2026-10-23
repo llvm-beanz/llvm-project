@@ -130076,3 +130076,36 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed --
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(m)` re-triaged -- no longer a hang, root cause found, fix deferred
+
+**Win (safety, not a fix)**: `cov-two-nested-loops-switch-case-matrix-array-increment` no longer hangs at runtime. It now fails in ~0.1s with a clean, deterministic compile-time diagnostic. Any future full-corpus run no longer risks an un-killable `deqp-vk` process on this case.
+
+**Why**: two intervening sessions' unrelated fixes (`ENV6(c)(2)(a)` remainder, `ENV6(c)(2)(n)`'s upstream MLIR fix) changed this shader's codegen enough to make it fail earlier and safer. Lesson for future sessions, now in `.instructions.md`: always re-run a case fresh before trusting a roadmap entry's documented symptom -- it can silently change.
+
+**Root cause (found, not fixed)**: the shader is a 4-level nested loop with a switch-case. For the outermost affected cycle, the existing `L377(a)` mechanism (`Linearize.cpp`, handles "a second divergent check immediately upstream of the real exit check, with a trivial bypass") misidentifies an *inner* cycle's own already-resolved exit-guard block as this kind of extraneous check. Its "bypass" arm isn't trivial glue here -- it's the next outer-loop iteration's real switch-case body -- so `L377(a)`'s own safety check (every bypass block must be pure single-pred glue) correctly refuses to fold it, and the pre-existing "unsupported" diagnostic fires exactly as designed. This is the mechanism being too narrow for this shape, not broken.
+
+**Why no fix this session**: extending the matcher for "inner cycle's own exit-guard as ChainGate predecessor, non-trivial bypass region" is a different, bigger change than patching the existing mechanism -- likely needs the outer cycle's mask computation to directly account for the inner cycle's exit-guard semantics. Scoping this correctly needs its own session, not a rushed patch to delicate masking logic whose own comments already warn against exactly that risk ("rather than risk silently dropping a live computation").
+
+**Artifacts saved for next session** (not in the repo, `/tmp/env6c2m/`):
+- `full_module.ll`: standalone, `feme-opt`-reproducible LLVM IR (no `deqp-vk` needed) showing the exact diagnostic.
+- `linearize_trace.log`: full `FEME_DEBUG_LINEARIZE_TRACE=1` output showing every cycle's `Header`/`Latch`/`ExitBlock`/`OtherCondBrBlocks` identity, pinpointing which cycle and which block triggers the diagnostic.
+
+**No `feme/` code changes this session** -- pure investigation + documentation. `git status` was clean before and after the investigation itself; only doc commits landed.
+
+**Commits** (2, each isolated):
+1. `feme: ENV6(c)(2)(m) re-triage -- no longer a hang, root cause found` -- `Roadmap.md`/`VulkanCTSReport.md`/`.instructions.md`.
+2. This `agent_thoughts.md` entry.
+
+**Mandatory device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at session start and end.
+
+## Next steps (pick one, all independent)
+
+**Fastest next concrete action** (under two minutes): read `/tmp/env6c2m/linearize_trace.log`'s last ~15 lines alongside `Linearize.cpp`'s `L377(a)` comment block (~line 7100) to start designing the third-case extension for `ENV6(c)(2)(o)`.
+
+1. **`ENV6(c)(2)(o)`** (new this session, needs its own full session): design and implement the `L377(a)` matcher extension (or an alternative mask-computation approach) for an inner cycle's own exit-guard-as-`ChainGate`-predecessor shape. Start from `/tmp/env6c2m/` -- both the standalone repro and the full trace are already captured, no re-derivation needed.
+2. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites have a similar latent `BodyMask`-vs-`NaturalContinue` gap, now that `L521`'s bug class is understood.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
