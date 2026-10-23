@@ -130935,3 +130935,86 @@ bundled into a FeMe debugging session).
    sample's Vulkan-header macro-redefinition conflict — a real,
    reproducible bug in that vendored checkout, but only worth fixing
    if a future session actually needs the standalone `amber` tool.
+
+# Session: `ENV6(c)(2)(d)` — StructurizeCFG-polarity hypothesis built, then refuted; new debug aid landed, root cause still open
+
+**Status: no fix landed this session. Root cause of the pixel divergence
+is still unknown. 3 docs/debug-aid commits made; nothing reverted.**
+
+## What I did
+
+1. Confirmed env: `vulkaninfo --summary | grep deviceName` →
+   `FeMe CPU Vulkan Device`. ✅
+2. Patched the failing test's build-dir `.amber` copy to use
+   `EQ_BUFFER` instead of `EQ_HISTOGRAM_EMD_BUFFER`, ran it 3x (one
+   pairwise comparison per run, since Amber halts on first failure).
+   Result: `reference` differs from both `variant`/`variant_2`
+   (795/2048 bytes, first diff at byte 12). `variant`/`variant_2` agree
+   byte-for-byte. Restored both `.amber` copies after, confirmed clean.
+3. Suspected `StructurizeCFG` mishandles `reference`'s divergent
+   loop-break phi (computed deep in the loop body, not header-resident
+   — looked like `ENV6(c)(2)(l)`'s open gap). Built 3 standalone
+   `opt -passes=structurizecfg` repros of increasing fidelity — none
+   reproduced a bug.
+4. Added a new debug dump (`FEME_DEBUG_DUMP_PRESTRUCTURIZE=1` in
+   `Prepare.cpp`) to capture the *real* pre-structurize IR from the
+   actual failing pipeline, since no existing dump sits between
+   `UnifyLoopExits` and `StructurizeCFG`. Extracted the real function,
+   ran it standalone through `opt -passes=structurizecfg,break-crit-edges`
+   — **this did reproduce the exact `Flow`-block shape**.
+5. On close inspection, the "asymmetric-looking" `Flow`-phi (one arm
+   `xor`, one arm raw `icmp`) turned out to be **correctly negated on
+   both sides** — `StructurizeCFG`'s `InvertCondition` flips a bare
+   `icmp`'s predicate (`sgt`→`sle`) instead of inserting an `xor` when
+   that's cheaper. I'd missed this the first time through.
+   **Hypothesis refuted.** `Linearize`'s handling of the same value,
+   hand-verified separately, is also correct.
+6. Kept the `FEME_DEBUG_DUMP_PRESTRUCTURIZE` dump as a permanent aid
+   (it's genuinely useful, fills a real gap in the existing
+   `FEME_DUMP_IR_*` family) rather than reverting the instrumentation.
+   `check-feme`: 3878/3882 Passed, 4 unsupported, **0 regressions**.
+7. Re-ran the 105-case graphicsfuzz corpus after the `Prepare.cpp`
+   change: **25/105 Pass**, matching the already-recorded baseline
+   exactly — confirms the refactor is behavior-preserving.
+8. Wrote up `VulkanCTSReport.md` `L531`, rewrote `Roadmap.md`'s
+   `ENV6(c)(2)(d)` entry, and added two `.instructions.md` lessons
+   (the `EQ_BUFFER` differential-testing technique, and the
+   `InvertCondition` predicate-flip trap that caused my false alarm).
+9. 3 commits made: (1) `Prepare.cpp` debug aid, (2) `Roadmap.md` +
+   `VulkanCTSReport.md`, (3) `.instructions.md`. This is commit 4
+   (`agent_thoughts.md`).
+
+## Why no fix
+
+Both halves of the control-flow translation I suspected
+(`StructurizeCFG`'s phi-merge polarity, `Linearize`'s handling of the
+resulting masked boolean) are now hand-verified correct for this exact
+shape. The remaining candidate is the **data** side of `reference`'s
+specific construct, not control flow at all.
+
+## Next action (under two minutes)
+
+Open `/tmp/env6c2d_linearized_ref.ll` (saved from this session, full
+post-`feme-cpu-linearize` IR for `reference`) and search for the
+palette-lookup scratch-array accesses (`alloca [256 x i32]`) feeding
+`%57`/`%58`/`%62`/`%63`/`%64` and the final `select i1
+%.not.not.lcssa.frozen, <0,0,0,1>, %88` color choice — compare against
+the same region in `/tmp/env6c2d_linearized_variant2.ll`
+(`variant_2`'s known-correct equivalent) line-by-line.
+
+## Suggested next steps (ranked)
+
+1. **`ENV6(c)(2)(d)` continued, ~1 session**: data-side diff per above
+   — this is the concrete unblock for the next session, don't re-derive
+   the control-flow side (already closed out this session).
+2. **`ENV6(c)(2)(l)` remaining half**: still a pure watch item, no live
+   repro across many sessions now including this one's near-miss. Don't
+   spend another dedicated session hunting without a new natural lead.
+3. **`ENV6(c)(2)(c)`/`(d)` triage bucket**: `(c)` was fixed a few
+   sessions back; `(d)` is this entry — bucket is now just `(d)`.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, unchanged.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
+   priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
