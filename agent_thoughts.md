@@ -131092,3 +131092,115 @@ scratch.
    priority, unchanged for many sessions.
 4. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+# Session: ENV6(c)(2)(d)/(l) retried, landed partway, found a second regression, reverted again
+
+**Bottom line up front: no code shipped. Tree is clean at the same
+commit the previous session's revert left it at. `check-feme` and the
+targeted CTS case both confirmed clean.**
+
+## What happened (fast version)
+
+1. Picked up the previous session's exact suggested next step: fix the
+   `LatchIdx == -1` `MergedRelayValues` branch's unfrozen `CheckValue`,
+   landed it (Part A), plus the `canFlattenLoopBodyRegion` boundary
+   relaxation needed to stop it regressing `env6c2p` (Part B). Both
+   committed, `check-feme` clean (3878/3882, 0 regressions).
+2. Live-tested the actual targeted CTS case
+   (`spv-stable-pillars-O-op-select-to-op-phi`): still **Fail**, same
+   histogram mismatch as before any fix. Dug in with
+   `FEME_DUMP_IR_PRESIMD=1` on a live `deqp-vk` run and found a
+   **third**, previously-unknown unfrozen branch in the same restore
+   loop (`if (HeaderValue && CheckValue && HeaderValue != CheckValue)`,
+   builds a `select` directly, never calls `freezeExitRelayValue` at
+   all). Fixed it too (Part C, 3rd commit). Rebuilt, reran: the real
+   CTS case now **Passes**. Documented all 3 in `Roadmap.md` and
+   `VulkanCTSReport.md` (2 more commits, 5 total).
+3. **Per standing instructions ("run Vulkan CTS after each change"),
+   went beyond the single targeted case** and ran the full 757-case
+   `dEQP-VK.graphicsfuzz.*` sweep with `run_vulkan_cts.py`'s
+   crash-tolerant harness. Hit and correctly recovered from exactly the
+   "stalled, uncrashed `deqp-vk` process after its batch's cases were
+   already recorded" scenario the original standing instructions warned
+   about (40+ minutes at 100% CPU, all results already in the QPA log;
+   `kill -9`'d it, harness's recovery round picked it back up cleanly).
+4. Diffed the 90 failures against the stale `env4-full-corpus-...txt`
+   baseline, found 17 not on that list, cross-referenced one
+   (`complex-nested-loops-and-call`) against `Roadmap.md`'s own `L191`
+   entry (previously fixed and confirmed Pass), and directly
+   reconfirmed it **currently Fails** live. **A genuine regression this
+   session's "complete" 5-commit fix introduced, caught only by the
+   full sweep — `check-feme` never saw it.**
+5. Bisected file-by-file (`git checkout <commit> -- Linearize.cpp`,
+   rebuild, retest just this one case): **Part A alone already causes
+   it.** Part B (the boundary relaxation) does not fix or touch it —
+   same diagnostic with A+B as with A alone.
+6. Extracted a fast, standalone, non-CTS reproducer
+   (`FEME_DUMP_IR_PRELINEARIZE=1` dump of the real shader, sliced to
+   one module, 2 missing `declare`s added) — confirmed it reproduces
+   the exact failure via `feme-opt --llvm -passes=feme-cpu-linearize`
+   in ~1 second instead of a multi-minute CTS round-trip. Started
+   reading `collectUniformPassThroughRegion` to find exactly why it now
+   rejects this shape's `loop.exit.guard1` CheckBlock, where it used to
+   accept it — ran out of session time before finishing that read.
+7. **Reverted all 5 commits** (clean, no conflicts; diff against the
+   true pre-session parent commit is empty for every touched file).
+   Saved the reproducer to this session's workspace
+   (`env6c2d-complex-nested-loops-regression-repro.ll`, not the repo —
+   it reproduces a *bug*, not a fix, so it isn't a lit test yet).
+   Rebuilt, reconfirmed `complex-nested-loops-and-call` **Pass** and
+   `spv-stable-pillars-O-op-select-to-op-phi` **Fail** again (back to
+   the known, stable, pre-session state) and `check-feme` clean
+   (3878/3882, 0 regressions).
+
+## Why reverted again, not patched further
+
+Same call as last session, same reasoning: a fix that trades one
+verified-real bug for a different verified-real regression is a net
+loss, not a net fix, and root-causing `collectUniformPassThroughRegion`
+rejecting a shape it used to accept — one call deep into a ~170-line
+diagnostic path, in a 3rd nested-loop shape — is its own dedicated
+session's work, not something to rush at the end of this one.
+
+**This is now the second session in a row where the "obvious,
+confirmed-correct-for-its-target" fix for `ENV6(c)(2)(d)`/`(l)` has
+been fully reverted after a broader CTS sweep (not `check-feme`,
+specifically the full 757-case sweep) caught a different regression
+each time.** That is a strong, repeated signal that any future attempt
+at this fix needs the full sweep run *before* considering it done, not
+just the single targeted case — `check-feme`'s 0-regressions result has
+now been wrong twice in exactly this way.
+
+## State restated
+
+- `ENV6(c)(2)(d)`/`ENV6(c)(2)(l)` (remaining half): **still open**,
+  Roadmap/CTS-report text unchanged by this session (the revert
+  restored it to the exact pre-session wording — confirmed via empty
+  diff against the true parent commit).
+- Two known, confirmed-correct-for-their-target, confirmed-regressing
+  fix attempts now exist in history (`b65b708086ca`'s parent session,
+  and this session's `1166d56be1fa` revert commit) — both explain their
+  regression precisely. A third attempt should budget time to chase the
+  regression to its root cause rather than bisect-and-stop again,
+  or it will likely find a fourth variant of the same problem.
+- No inventory-file changes needed (no feature/extension landed).
+- `vulkaninfo --summary | grep deviceName`: confirmed `FeMe CPU Vulkan
+  Device` at session start (per standing instructions).
+
+## Suggested next steps (ranked)
+
+1. **`ENV6(c)(2)(d)`/`(l)`, dedicated session, budget the full chase
+   (~half a day)**: don't bisect-and-revert a third time. Use the saved
+   reproducer (`env6c2d-complex-nested-loops-regression-repro.ll` in
+   this session's workspace — move it into
+   `/tmp/complex_frag.ll` or similar to resume) and actually finish
+   reading `collectUniformPassThroughRegion` to find the precise
+   precondition the Part-A shadow-phi insertion breaks for
+   `loop.exit.guard1`'s shape. Once known, the fix is probably small;
+   the cost so far has all been in diagnosis, not implementation.
+2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, unchanged.
+3. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
+   priority, unchanged for many sessions.
+4. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
