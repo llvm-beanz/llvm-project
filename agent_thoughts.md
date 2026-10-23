@@ -130486,3 +130486,94 @@ any of the six prevention attempts.
 `cov-two-nested-loops-switch-case-matrix-array-increment`'s post-linearize IR
 fresh (`FEME_DUMP_IR_POSTOPT=1`, per `.instructions.md`) to find the specific
 branch `feme-cpu-simdize` considers unremoved.
+
+# Session: `ENV6(c)(2)(r)` root cause confirmed (post-order "left alone" cycle gap) -- no fix yet; `ENV6(c)(2)(l)` audit extended, still no live repro
+
+**Status check first**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU
+Vulkan Device`. Confirmed.
+
+## Next action (under 2 minutes)
+
+Open `feme/docs/Roadmap.md` at `ENV6(c)(2)(r)` (brand new this session) and
+re-read its "Recommended fix direction" paragraph before writing any code --
+it names the exact extension point (`LinearizePass::run`'s existing
+end-of-function deferred sweep) and the exact data structure analog to copy
+(`DeferredSplitMergeFixups` from `ENV6(c)(2)(o)`).
+
+## What happened this session
+
+1. **Picked up where last session left off**: finishing the interrupted
+   verification trace for `ENV6(c)(2)(m)`'s `feme-cpu-simdize` residual on
+   `cov-two-nested-loops-switch-case-matrix-array-increment`.
+2. One `grep` closed the loop: `%live.t79 = and i1 %live.merge75, %1284`
+   where `%1284 = fcmp uge float ...` -- a genuine data comparison, matching
+   the shader's own switch-case dispatch. This confirms the divergent mask
+   feeding the inner loop's exit check really was synthesized by the *outer*
+   cycle's own masking, after the inner cycle had already been finalized as
+   "left alone."
+3. **Wrote this up as a brand-new roadmap entry, `ENV6(c)(2)(r)`** (not
+   folded into `(m)`, since it's architecturally distinct: a post-order
+   processing-order gap, not a second instance of `K6s`'s or `ENV6(c)(2)(j)`'s
+   own fixes). Full mechanism, evidence chain, and a concretely-scoped fix
+   direction are in the roadmap entry itself -- not duplicating it here.
+4. **No fix attempted.** This is explicitly an architecture-level gap (how
+   `LoopLinearizer`'s post-order walk finalizes "no masking needed" decisions
+   using a single whole-function snapshot), and the project has an 8-attempt
+   scar tissue (`ENV6(c)(2)(o)`) from under-designing fixes to processing-order
+   bugs like this. Scoped as its own full session, same as `(m)` already was.
+5. **Picked up the deprioritized `ENV6(c)(2)(l)` audit** (checking
+   `closeLatch`'s 2 call sites for the same `BodyMask`-vs-`NaturalContinue`
+   gap `L521` fixed at a third). Found a structurally-matching gap at the
+   `OtherCondBrBlocks`/`CheckBlock`-relay call site (~L7994: no
+   `OutPerLaneContinue` passed), but `closeLatch` only triggers this bug if
+   `Latch`'s own natural condition is *still physically on its terminator*
+   when `closeLatch` runs -- not guaranteed just because the gap exists in
+   the code. Identified the closest-matching real CTS shape
+   (`{for,while,do_while}_dynamic_iterations.conditional_break_{fragment,vertex}`,
+   6 cases: Latch's own genuine uniform-but-dynamic trip count, plus a
+   separate divergent body break) and ran all 6 live. **All 6 Pass.** No live
+   repro found -- documented the negative result in the roadmap entry so a
+   future session doesn't re-derive the same dead end.
+
+## Why no fix landed this session
+
+Both open items (`r` and the `l` audit) are watch-items/architecture problems
+by nature, not quick patches:
+- `(r)` needs a real design for "revisit a previously-finalized cycle
+  decision" -- the existing deferred-sweep pattern only handles flat diamonds
+  outside cycles, never cycles themselves.
+- `(l)`'s second gap has no live reproducer after two sessions of looking,
+  so there's nothing to fix yet without risking an unverified, un-tested
+  change (exactly the trap `ENV6(c)(2)(o)`'s first 6 attempts fell into).
+
+## Vulkan CTS / doc updates
+
+No CTS re-run beyond the 6 single-case runs for the `(l)` audit (all
+pre-existing Pass, used only to check for a regression/repro, not a broad
+sweep) -- no code changed, so `VulkanCTSReport.md`'s overall tallies and
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` are untouched,
+consistent with "nothing shipped."
+
+## Next steps (ranked)
+
+1. **`ENV6(c)(2)(r)`** (new, needs its own full session): design and land
+   the deferred-sweep extension described in the roadmap entry -- track
+   "left alone" cycle headers during `LoopLinearizer::run`, recompute
+   `UniformityInfo` fresh after all cycles are processed, and re-run
+   `linearizeCycle` for any one whose exit check is now genuinely
+   divergent. Repro preserved, reusable without re-extraction:
+   `/tmp/env6c2o_simdize/full_module.ll` (pre-linearize) and
+   `/tmp/env6c2o_simdize/linearized.ll` (post-linearize, pre-simdize).
+2. **`ENV6(c)(2)(l)`**: both halves of this audit (the `FeedsUniformBranch`/
+   `HeaderExitRelayValues` constant-only gap, and now the `closeLatch`
+   `OutPerLaneContinue` gap) remain reproducer-free after real attempts to
+   find one. Treat as a pure watch item unless a new failing case surfaces
+   naturally during other work -- don't spend another session hunting for a
+   synthetic repro with no real-case signal.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
+   architecture efforts.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
+   unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
