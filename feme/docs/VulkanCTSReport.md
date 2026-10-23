@@ -11053,3 +11053,109 @@ again mid-session, and once more before these CTS spot checks.
 architecture efforts); `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases,
 lowest priority); offload-test-suite upstreaming (3 patches, blocked on
 push access).
+
+## L530: `ENV6(c)(2)(c)` fixed -- `SPIRVPushConstantLowering` bailed entirely on a two-dynamic-index push-constant GEP chain
+
+Resolved `ENV6(c)(2)(c)` (`cov-read-matrix-push-constant`'s own
+`JIT session error: Symbols not found: [ spirv_var_11 ]`), one of the two
+"isolated 1-case issues" left over from the `ENV6(c)(2)` triage bucket.
+
+Root cause: `SPIRVPushConstantLowering.cpp`'s `visitPushConstantUsers`
+walks every user of a push-constant global through its GEP chain,
+decomposing each GEP into a constant byte offset plus any non-constant
+("dynamic") index terms. The original code tracked only the *first*
+dynamic term ever found and deliberately bailed (`return false`) the
+moment a second one appeared anywhere in the chain -- leaving the whole
+function, and the push-constant global itself, entirely unconverted.
+The real shader's `matrix[row][col]` read (`row` and `col` both loaded
+from a uniform buffer, i.e. two independent dynamic GEP indices chained
+through the same global) hit exactly this bail-out path, which is why
+the failure surfaced as an opaque JIT-link-time missing-symbol error
+rather than any compile-time diagnostic -- the global was simply never
+lowered out of its original SPIR-V-style representation.
+
+Fixed by generalizing the single-dynamic-term extraction into a loop:
+for each `(Index, Stride)` pair found, if no dynamic index is tracked
+yet, start tracking it; otherwise fold it into the one already tracked
+via `Combined = OldIndex*OldStride + Index*Stride` (built with an
+`IRBuilder` positioned immediately before the GEP where the additional
+term is discovered -- safe, since both operands necessarily dominate
+that GEP in valid IR), then continue carrying `Combined` forward at
+stride 1. This is a loop-based generalization, not a 2-term special
+case, so it naturally extends to 3+ independent dynamic terms as well.
+Required zero changes to `emitBoundsCheckedLoad` or to the
+`SPIRVPushConstantLoad`/`SPIRVPushConstantPhiEdge`/
+`SPIRVPushConstantSelectEdge` data structures (all still carry a single
+`(DynamicIndex, DynamicStride)` pair -- the combining happens entirely
+inside the pre-existing single-term plumbing). Updated the stale
+scope-limit comments in `SPIRVPushConstantLowering.h`'s header doc and
+`dynamicAccessMemberEndByte`'s in-file comment, both of which previously
+documented "at most one independent dynamic term" as a hard limit.
+
+Updated the pre-existing `spirv-push-constant-lowering.ll` lit test's
+`two_dynamic_indices` function (previously asserted the old "left
+entirely alone" behavior) to expect the new combined-offset lowering,
+and added a new dedicated regression test
+`spirv-push-constant-lowering-matrix-dynamic-row-col.ll`, reduced to
+match the real shader's byte-granular GEP shape (`[16 x i8]` row stride,
+`[4 x i8]` col stride).
+
+**Gotcha discovered while verifying**: `ninja feme_vulkan` does not
+relink the separate `feme-opt` tool target even though both depend on
+the same static libraries -- an initial `feme-opt --llvm
+-passes=feme-cpu-lower-spirv-push-constants` verification pass showed no
+change at all because the CLI binary was stale. `ninja check-feme`'s own
+build step gets this right; a standalone `feme-opt` CLI check after a
+lib-only change needs an explicit `ninja feme-opt` first. Codified in
+`feme/.instructions.md`.
+
+Full `check-feme`: 3878/3882 discovered tests pass (4 unsupported), 0
+regressions (+1 new test).
+
+**CTS spot checks**: the targeted case
+(`dEQP-VK.graphicsfuzz.cov-read-matrix-push-constant`) now **Pass**
+(previously `Fail`). Re-ran the established 105-case graphicsfuzz corpus
+(`/tmp/env6c2q_corpus.txt`, used by several prior sessions' spot checks):
+**25 Pass / 80 Fail**, up from the long-standing 23/105 baseline, zero
+regressions -- exactly the targeted case newly passing, nothing else
+shifted. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+changes needed (internal compiler correctness fix only, no
+feature/extension surface change).
+
+**`ENV6(c)(2)(d)` investigation** (`spv-stable-pillars-O-op-select-to-
+op-phi`'s histogram-tolerance failure): investigated but not resolved
+this session. Confirmed no per-image debug output is available via
+standard `deqp-vk` flags for this amber `SelfValidate`-type test
+(`--deqp-log-images=enable` produces no `<Image...>` entries). Extracted
+and diffed all 3 embedded fragment shaders' SPIR-V assembly: this is the
+"transform an `OpSelect` into an equivalent `OpPhi`" GraphicsFuzz family
+-- `reference` computes the relevant boolean via a direct `OpPhi`,
+`variant` recomputes the same value through an extra diamond feeding a
+second `OpPhi`, `variant_2` computes it via a literal `OpSelect` -- all
+3 spec-equivalent and expected to render identically. Attempted to build
+VK-GL-CTS's vendored standalone `amber` CLI sample (which supports
+per-pipeline `-i <file.ppm>` image dumps) to render and compare each
+variant in isolation; abandoned after the VK-GL-CTS wrapper's deliberate
+`AMBER_SKIP_SAMPLES=TRUE` override (a plain, not cached, variable that
+shadows any `-D`-based reconfigure) and a subsequent, unrelated,
+pre-existing macro-redefinition conflict between VK-GL-CTS's generated
+Vulkan headers and the system `/usr/include/vulkan/vulkan_core.h` made
+this disproportionate effort for a debug aid alone. All VK-GL-CTS
+build-config edits were reverted and confirmed clean via `diff` against
+the pre-edit originals -- no VK-GL-CTS checkout changes remain. See
+`Roadmap.md`'s `ENV6(c)(2)(d)` entry for the concrete next step
+(isolate each of the 3 fragment shaders through `feme-translate`'s own
+IR dumps, no image rendering needed, to find which control-flow shape
+the compiler lowers incorrectly).
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start
+of this session.
+
+**Next steps**: `ENV6(c)(2)(d)` (SPIR-V-level IR-dump diffing of the 3
+fragment shaders in isolation, per the concrete next step above);
+`ENV6(c)(2)(l)` (remaining `FeedsUniformBranch`/`HeaderExitRelayValues`
+half, pure watch item, no reproducer); `ENV6(c)(3)` (83 cases) /
+`ENV6(d)` (132 cases, both own multi-session architecture efforts);
+`ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
+offload-test-suite upstreaming (3 patches, blocked on push access).
