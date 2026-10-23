@@ -2158,9 +2158,50 @@ public:
   /// one incoming value for its parent's two predecessors -- once this
   /// check was added to let a previously-untested failure path through
   /// that branch actually get exercised).
+  ///
+  /// Roadmap ENV6(c)(2)(d)/(l): must mirror `flattenLoopBodyRegion`'s own
+  /// post-`validate` tolerance exactly (see `allBoundariesTolerable`,
+  /// shared by both), not just its `validate` call. An earlier version of
+  /// this precheck required `CycleBoundaryBlocks.empty()` unconditionally
+  /// instead, silently rejecting the exact single-tolerable-boundary shape
+  /// the real `flattenLoopBodyRegion` call always accepts. That mismatch
+  /// was latent (every previously-known case either had zero boundary
+  /// blocks, or already failed the real call too for an unrelated reason)
+  /// until fixing `ENV6(c)(2)(d)`/`ENV6(c)(2)(l)` (freezing a
+  /// `MergedRelayValues` restore loop's own `CheckValue`, see
+  /// `LoopLinearizer::linearizeCycle`) started making a nested child
+  /// cycle's own `ExitBlock` branch visible to an *enclosing* cycle's
+  /// uniformity analysis as a genuine (and entirely legitimate, per
+  /// `flattenLoopBodyRegion`'s own tolerance) per-iteration exit check --
+  /// exposing this precheck's own over-strict requirement as a real
+  /// regression (`env6c2p-linearize-cycle-stale-pdt-uaf.ll`) rather than
+  /// the data-flow fix itself being wrong.
+  ///
+  /// Roadmap ENV6(c)(2)(d): tolerating a boundary block whose branch
+  /// is *not* this loop's own uniform exit check at all (confirmed via
+  /// `nested-loop-abandoned-child-exit-block-merged.ll`'s own inner
+  /// loop, whose genuinely divergent `fdiv`-guarded interior `if`
+  /// structurally happens to reach the same `End` through one harmless
+  /// uncond hop too) does not, on its own, ever let an incorrectly-
+  /// masked module escape to this pass's actual output: every path that
+  /// reaches `diagnose` anywhere in `LoopLinearizer::linearizeCycle` --
+  /// whether discovered by *this* precheck, by `flattenLoopBodyRegion`'s
+  /// own later, independent walk of the region's interior, or by an
+  /// entirely different, later check such as
+  /// `collectUniformPassThroughRegion`'s own -- aborts the whole pass
+  /// before any IR is ever printed (confirmed: `feme-opt -S` emits zero
+  /// stdout bytes on any such diagnostic, regardless of how much of this
+  /// one cycle, or an earlier sibling cycle, had already been mutated in
+  /// memory first). So an over-*permissive* precheck here can only ever
+  /// at worst defer discovery of a genuinely unsupported shape to one of
+  /// those later, independent checks instead -- never let it silently
+  /// miscompile -- while an over-*strict* one actively regresses a
+  /// previously-working case. Kept intentionally permissive here for
+  /// exactly that reason.
   bool canFlattenLoopBodyRegion(BasicBlock *Start, BasicBlock *End) {
     CycleBoundaryBlocks.clear();
-    return validate(Start, End, /*Quiet=*/true) && CycleBoundaryBlocks.empty();
+    return validate(Start, End, /*Quiet=*/true) &&
+           allBoundariesTolerable(End);
   }
 
   /// Roadmap L452(h): a read-only `validate` probe for a caller that, unlike
@@ -2585,6 +2626,76 @@ private:
   /// to a single top-level call's own arms.
   bool validate(BasicBlock *Start, BasicBlock *End, bool Quiet = false,
                unsigned Depth = 0);
+
+  /// Roadmap ENV6(c)(2)(d)/(l): a bounded, unconditional-branch-only chase
+  /// from \p From towards \p End, tolerating any number of plain
+  /// `UncondBrInst` hops regardless of what each hop itself computes
+  /// (unlike `isLoopControlEdgeThroughRelay`'s own `isPureRelayBlock`-
+  /// gated chase, deliberately *not* restricted to content-free relay
+  /// blocks here) -- a chain of unconditional branches can never itself
+  /// introduce a new decision point before `End`, so whatever each hop
+  /// computes along the way is exactly as safe as if it were simply
+  /// merged into the boundary block's own fall-through arm; only an
+  /// intervening `CondBrInst` (a genuine further branch before `End`)
+  /// disqualifies the chain. Used by `allBoundariesTolerable` below to
+  /// answer a narrower question than `isLoopControlEdgeThroughRelay`
+  /// does (does *this one already-identified* boundary block's branch
+  /// reach the walk's own, single, already-known `End` through nothing
+  /// but a deterministic straight-line hop sequence), so it is usable
+  /// from any block, not just a cycle header's own branch. Confirmed
+  /// needed (not just direct-successor equality, nor a pure-relay-only
+  /// chase) via `dEQP-VK.graphicsfuzz.spv-stable-pillars-O-op-select-to-
+  /// op-phi`'s own `reference` variant, whose exit-guard block's two-way
+  /// branch reaches `End` only after one hop through a block that also
+  /// increments this loop's own induction variable, not a content-free
+  /// relay block.
+  bool reachesThroughUncondChain(BasicBlock *From, BasicBlock *End,
+                                 unsigned Depth = 0) {
+    if (From == End)
+      return true;
+    if (Depth >= 8)
+      return false;
+    auto *UBr = dyn_cast<UncondBrInst>(From->getTerminator());
+    return UBr &&
+           reachesThroughUncondChain(UBr->getSuccessor(0), End, Depth + 1);
+  }
+
+  /// Roadmap ENV6(c)(2)(d)/(l): shared by `canFlattenLoopBodyRegion` and
+  /// `flattenLoopBodyRegion` so the two can never again silently drift
+  /// apart on what counts as a tolerable single cycle-boundary block (see
+  /// `flattenLoopBodyRegion`'s own comment for the full rationale this
+  /// tolerance exists at all, and `canFlattenLoopBodyRegion`'s own
+  /// comment for why staying permissive here is safe). Must be called
+  /// right after a `validate` call that populated `CycleBoundaryBlocks`
+  /// for this same \p End, before anything else clears or mutates it.
+  /// Every block `validate` stopped at must itself branch, directly or
+  /// via `reachesThroughUncondChain`, to \p End along one of its two
+  /// arms, and must be the exact boundary block `CycleBoundaryEnd`
+  /// recorded as validating towards this same \p End (not some other,
+  /// unrelated walk's own, different reconvergence point) -- more than
+  /// one such block, or one that does not, is the genuinely unsupported
+  /// shape (multiple nested cycles' own exits interleaved in the same
+  /// region, or a boundary this walk only reached incidentally while
+  /// validating towards something else). This deliberately does *not*
+  /// also require the boundary block's *other* arm to be a genuine
+  /// cycle-escape (`isLoopControlEdge`): `env6c2p-linearize-cycle-stale-
+  /// pdt-uaf.ll`'s own outer cycle has a tolerable boundary whose
+  /// "escaping" arm, per that purely topological test, itself still
+  /// funnels back into this same shared structurizer dispatch `End` --
+  /// an escape-vs-stay split that useful-sounding in principle does not
+  /// actually hold for every real structurizer-generated CFG shape.
+  bool allBoundariesTolerable(BasicBlock *End) {
+    for (BasicBlock *BB : CycleBoundaryBlocks) {
+      auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
+      bool Tolerable =
+          Br && CycleBoundaryEnd.lookup(BB) == End &&
+          (reachesThroughUncondChain(Br->getSuccessor(0), End) ||
+           reachesThroughUncondChain(Br->getSuccessor(1), End));
+      if (!Tolerable)
+        return false;
+    }
+    return true;
+  }
 
   /// Mutates the region \p validate already approved, threading \p Masks
   /// (the live/side-effect mask pair describing whether -- and how -- the
@@ -3149,13 +3260,8 @@ DiamondFlattener::flattenLoopBodyRegion(BasicBlock *Start, BasicBlock *End,
   LastRegionVisited.clear();
   if (!validate(Start, End, /*Quiet=*/true))
     return std::nullopt;
-  for (BasicBlock *BB : CycleBoundaryBlocks) {
-    auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
-    bool Tolerable = Br && CycleBoundaryEnd.lookup(BB) == End &&
-                      (Br->getSuccessor(0) == End || Br->getSuccessor(1) == End);
-    if (!Tolerable)
-      return std::nullopt;
-  }
+  if (!allBoundariesTolerable(End))
+    return std::nullopt;
   // Roadmap L425: see `ResolvedBlocks`'s own comment -- this region is now
   // fully validated and about to be committed by `flatten` below; release
   // every block this call's own walk visited for any later, separate

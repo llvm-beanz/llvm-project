@@ -42,8 +42,31 @@
 ; Confirmed to abort (`SIGABRT`, `getTerminator`'s "Block does not have a
 ; terminator set!" assertion) without the fix, and to produce this clean
 ; diagnostic instead with it.
+;
+; Roadmap ENV6(c)(2)(d)/(l): the specific diagnostic text below changed
+; (though the overall "clean bailout, no crash, no module ever printed"
+; outcome this test exists to confirm did not) once
+; `DiamondFlattener::canFlattenLoopBodyRegion`'s own precheck started
+; tolerating a single cycle-boundary block whose non-escaping arm reaches
+; `End` via one or more unconditional hops (see `allBoundariesTolerable`'s
+; own comment) -- this inner loop's own genuinely divergent `fdiv`-guarded
+; `if` (`Flow4`'s branch) happens to structurally qualify for that same
+; tolerance now, so this inner cycle's own `linearizeCycle` call no
+; longer bails out at that earlier precheck; it instead proceeds one step
+; further and bails, just as cleanly, at a later, independent check
+; (`collectUniformPassThroughRegion`) that still correctly rejects
+; `Flow4`'s own interior branch as an unsupported shape. Whether or not
+; the *outer* loop's own call (the one this test's `ExitBlocksByCycle`
+; `WeakTrackingVH` fix specifically guards) still gets reached for this
+; exact input is no longer load-bearing for what this test confirms --
+; every `diagnose()` call anywhere in this pass aborts the whole run
+; before any IR is ever printed (confirmed: `feme-opt -S` emits zero
+; stdout bytes either way), so this remains a faithful regression test
+; for the original dangling-`BasicBlock *` bug class in general, even if
+; this particular input's own control flow no longer happens to reach
+; that exact call site first.
 
-; CHECK: feme-cpu-linearize: function 'main': loop at '{{.*}}' has an internal branch in a body shape this milestone does not yet lower
+; CHECK: feme-cpu-linearize: function 'main': loop at '{{.*}}' has an internal branch in '{{.*}}'; only a uniform pass-through region to/from the exit check is supported yet
 
 declare i1 @llvm.is.fpclass.f32(float, i32 immarg)
 declare float @llvm.copysign.f32(float, float)

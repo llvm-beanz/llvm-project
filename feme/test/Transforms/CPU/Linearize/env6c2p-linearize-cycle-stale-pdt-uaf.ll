@@ -1,4 +1,4 @@
-; RUN: not feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
+; RUN: feme-opt --llvm -passes=feme-cpu-linearize -S %s | opt -passes=verify -S | FileCheck %s
 
 ; Roadmap ENV6(c)(2)(p): a real, captured pre-`feme-cpu-linearize` IR
 ; reduction of `graphicsfuzz/cov-two-nested-loops-switch-case-matrix-
@@ -59,15 +59,21 @@
 ; a genuine per-iteration exit check -- exposing `canFlattenLoopBodyRegion`
 ; itself as over-strict (it still unconditionally required
 ; `CycleBoundaryBlocks.empty()`, not tolerating the one-boundary-block
-; shape `flattenLoopBodyRegion` itself already accepted). Until that
-; precheck is also fixed (tracked separately), this module now produces a
-; clean, generic "body shape this milestone does not yet lower" bailout
-; instead of either the old `.o.merge`-based success below or the
-; original UAF crash -- itself still a strict improvement (no crash,
-; valid clean diagnostic), just not yet the fully-successful transform
-; this module's own real-world shape should eventually get.
+; shape `flattenLoopBodyRegion` itself already accepted). Fixing that too
+; (see `allBoundariesTolerable`'s own comment) lets the whole outer
+; region (including `loop.exit.guard120`'s own `CheckExit->StayInLoop`
+; continuation) flatten by the normal recursive descent instead of the
+; old `SplitBlockPredecessors`-based `.o.merge`/`chaingate.merge.*` path
+; below, merging directly into block `57` via plain, frozen
+; `exit.relay.shadow.frozen*` phis -- still confirming the same
+; end-to-end outcome this test exists for (a clean, verifier-valid
+; module, not a crash or an unsupported-shape bailout), just via a
+; simpler final shape.
 
-; CHECK: feme-cpu-linearize: function 'main': loop at '{{.*}}' has an internal branch in a body shape this milestone does not yet lower
+; CHECK: 57:
+; CHECK-NEXT: phi i1 [ poison, %.Flow227_crit_edge ], [ %exit.relay.shadow.frozen{{[0-9]+}}, %loop.exit.guard120 ]
+; CHECK: loop.exit.guard120:
+; CHECK-NEXT: br i1 %exit.relay.shadow.frozen{{[0-9]+}}, label %57, label %loop.exit.guard120.Flow{{[0-9]+}}_crit_edge
 
 ; ModuleID = '<in-memory object>'
 source_filename = "LLVMDialectModule"
