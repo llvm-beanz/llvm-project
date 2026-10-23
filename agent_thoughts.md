@@ -130280,3 +130280,50 @@ No Vulkan CTS corpus re-run this session (no functional code change landed). No 
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(q)` fixed -- dual-exit loop's `MergedRelayValues` restore loop no longer drops a divergent check's captured value
+
+**Picked up `ENV6(c)(2)(q)`** (the prior session's top-priority new finding) rather than `ENV6(c)(2)(o)` (6 straight failed guard attempts, needs a structural redesign before another attempt is worth trying).
+
+**Reused the existing repro, no re-derivation**: `/tmp/env6c2l/repro.ll` (a synthetic loop with both a genuine uniform `Latch` trip-count check *and* a separate divergent body-level break, both targeting the same `ExitBlock`). Confirmed the exact documented bug: `%v.exit`'s phi collapsed to `phi i32 [ %v.next, %latch ]`, silently dropping the `%body`-sourced, Check-captured edge.
+
+**Root cause** (confirmed via code reading, not guessed): the `MergedRelayValues` restore loop unconditionally `continue`d past any `ExitBlock` phi that already had its own pre-existing `Latch`-incoming entry -- an assumption false for this genuine "two real, independent exits" shape.
+
+**Designed the fix by reusing an existing, already-correct pattern** (not inventing a new mechanism): the analogous `HeaderExitRelayValues` restore loop already handles this exact symmetric case correctly, via `freezeExitRelayValue`'s sticky shadow-phi + a blend `select`. Applied the same technique here:
+1. Freeze the captured `CheckValue` via `freezeExitRelayValue`, now with a new `ForceShadow` parameter -- necessary because this call site's new use lives *inside* the loop (at `Latch`'s terminator), invisible to `freezeLoopCarriedValues`'s own later outside-use scan (which only checks `!InLoop(...)`, and `Latch` is always in-loop).
+2. Added `EffectiveDivergedViaCheckThisIter` (a per-round, non-accumulated divergence signal, mirroring the existing accumulated `EffectiveExitedViaCheckNext`'s own `ChainGateMergeBlock` merge) -- needed as `freezeExitRelayValue`'s own "did this round cause the transition" input.
+3. Final merge: `select(EffectiveExitedViaCheckNext, FrozenCheckValue, NaturalValue)`.
+
+**Verified correctness the hard way, not just "it builds"**: learned from last session's incomplete attempt (which *looked* right but was disproved by a multi-round trace), I hand-traced 4 lanes (breaking on rounds 0, 1, 2, and never) across a 3-round loop, computing every intermediate SSA value round-by-round. Result: `[0, 1, 2, 3]` -- exactly correct, unlike last session's `[2, 2, 2, 3]`.
+
+**Deliberately scoped out** one rare, unconfirmed edge case: a phi with *both* a `HeaderValue` capture and its own pre-existing `Latch` entry simultaneously. No known test exercises it; documented inline as a known limitation rather than guessed at.
+
+**Verification**:
+- `opt -passes=verify` clean; 20x nondeterminism-loop run, identical IR every time.
+- New regression tests: `loop-dual-exit-divergent-check-and-uniform-latch-both-capture-carried-value.ll` (lit, FileCheck'd against the sticky-shadow IR shape) and `LinearizeTest.FreezesDivergentCheckCapturedValueAcrossMultipleRoundsForDualExitLoop` (unit test). Both pass standalone.
+- Full `ninja check-feme`: 3875/3879 Passed, 4 Unsupported, 0 regressions (3877 pre-existing + 2 new).
+- Sanity-checked no interaction with the unrelated, still-open `ENV6(c)(2)(o)`: ran `/tmp/env6c2m/full_module.ll` 10x, still the same clean "unsupported" bailout, not a crash.
+- **105-case graphicsfuzz corpus re-run** (same list as `L525`'s own, saved as `/tmp/env6c2q_corpus.txt`): **23 Pass / 82 Fail**, exactly matching the documented baseline, 0 regressions. This bug has 0 currently-known real CTS/`graphicsfuzz` failing cases, so no pass/fail delta was expected or observed -- this closes a confirmed, reproducible bug before it was ever hit in practice.
+
+**New `.instructions.md` lesson** (1 entry, follow-up to the existing `ENV6(c)(2)(q)` discovery entry): `freezeExitRelayValue`'s own early-return shortcut ("already a `Header` phi, the outside-use scan will catch it") is unsound for a new use built *inside* the loop body -- document the `ForceShadow` parameter and when a future caller needs it.
+
+**Commits** (4, isolated):
+1. `[feme] ENV6(c)(2)(q): fix dual-exit loop silently dropping a divergent check's captured value` -- `Linearize.cpp` + both new tests + `Roadmap.md` (struck through).
+2. `[feme] docs: record ENV6(c)(2)(q) fix + CTS re-verification in VulkanCTSReport.md`.
+3. `[feme] .instructions.md: document the ForceShadow outside-use-scan blind spot`.
+4. This `agent_thoughts.md` entry.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no changes needed, confirmed (internal compiler correctness fix only, no feature/extension surface change).
+
+**Mandatory device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at session start and before the CTS re-run.
+
+## Next steps (pick one, all independent)
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and re-read the two listed next-direction options (semantic `ExitBlock`-reachability vs. a `L377(a)`-style repair-matcher extension) -- commit to one, do not design a 7th local syntactic guard.
+
+1. **`ENV6(c)(2)(o)`** (needs its own full session, 6 failed guard attempts so far): pick direction (a) or (b) above and commit to it.
+2. **`ENV6(c)(2)(l)`** (small audit, down to 2 unaudited call sites now that `MergedRelayValues` is confirmed fixed and `HeaderExitRelayValues` was already correct): check the remaining 2 `closeLatch`/`freezeLoopCarriedValues` call sites for a similar latent gap.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
