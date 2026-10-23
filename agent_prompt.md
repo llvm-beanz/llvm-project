@@ -69,17 +69,17 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`ENV6(c)(2)(d)` continued, ~1 session**: data-side diff per above
-   — this is the concrete unblock for the next session, don't re-derive
-   the control-flow side (already closed out this session).
-2. **`ENV6(c)(2)(l)` remaining half**: still a pure watch item, no live
-   repro across many sessions now including this one's near-miss. Don't
-   spend another dedicated session hunting without a new natural lead.
-3. **`ENV6(c)(2)(c)`/`(d)` triage bucket**: `(c)` was fixed a few
-   sessions back; `(d)` is this entry — bucket is now just `(d)`.
-4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+1. **`ENV6(c)(2)(d)`/`ENV6(c)(2)(l)` fix, own session (~2-4 hours)**:
+   root-cause the outer-cycle `DiamondFlattener::flattenLoopBodyRegion`
+   interaction. Start by building a minimal, from-scratch nested-cycle
+   reduction (inner cycle with a `LatchIdx == -1` relay merge, wrapped
+   in one outer cycle) rather than fighting `env6c2p`'s own unrelated
+   history directly — much smaller surface to reason about. Once the
+   invariant `DiamondFlattener` expects is known, pick approach (a) fix
+   it directly, or (b) scope the freeze to skip nested `Header`s.
+2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
    multi-session architecture efforts, unchanged.
-5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
+3. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
    priority, unchanged for many sessions.
-6. offload-test-suite upstreaming (3 patches): blocked on push access,
+4. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
