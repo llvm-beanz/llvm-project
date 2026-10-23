@@ -80,9 +80,33 @@ void prepareFunction(Function &F, FunctionAnalysisManager &FAM) {
   if (unifyDivergentExitNodes(F))
     FAM.invalidate(F, PreservedAnalyses::none());
 
+  FunctionPassManager PreStructurizeFPM;
+  PreStructurizeFPM.addPass(FixIrreduciblePass());
+  PreStructurizeFPM.addPass(UnifyLoopExitsPass());
+  PreStructurizeFPM.run(F, FAM);
+
+  // Debug aid: with `FEME_DEBUG_DUMP_PRESTRUCTURIZE` set in the
+  // environment, print this function right after `FixIrreducible`/
+  // `UnifyLoopExits` finish but before `StructurizeCFG` runs -- the exact
+  // input `StructurizeCFG` itself sees. Added while root-causing
+  // `ENV6(c)(2)(d)`'s `spv-stable-pillars` divergence (see
+  // `VulkanCTSReport.md`): splitting a single incoming divergent branch
+  // condition across two already-duplicated predecessor blocks (rather
+  // than a single pre-existing merge `phi`) is exactly the shape
+  // `StructurizeCFG` needs this snapshot to debug, and no existing
+  // `FEME_DUMP_IR_*` dump point (`Pipeline.cpp`'s own `PRENORM`/
+  // `PRELINEARIZE`) sits between `UnifyLoopExits` and `StructurizeCFG`
+  // specifically -- `PRENORM` is one `Normalize`-group pass group later,
+  // after `StructurizeCFG`'s own `Flow`-block restructuring has already
+  // happened. Piping this standalone function (plus the small `declare`
+  // header its intrinsic calls need, since `F.print` only prints one
+  // function) straight into `opt -passes=structurizecfg,break-crit-edges`
+  // reproduces the pipeline's exact post-structurize shape without the
+  // full `deqp-vk` test harness in the loop.
+  if (::getenv("FEME_DEBUG_DUMP_PRESTRUCTURIZE"))
+    F.print(errs());
+
   FunctionPassManager LateFPM;
-  LateFPM.addPass(FixIrreduciblePass());
-  LateFPM.addPass(UnifyLoopExitsPass());
   LateFPM.addPass(StructurizeCFGPass());
   LateFPM.addPass(BreakCriticalEdgesPass());
   LateFPM.run(F, FAM);
