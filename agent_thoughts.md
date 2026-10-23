@@ -131018,3 +131018,77 @@ the same region in `/tmp/env6c2d_linearized_variant2.ll`
    priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(d)` root cause found — live `ENV6(c)(2)(l)` reproducer confirmed, fix attempted and reverted (collides with nested-cycle shape)
+
+**Next action (under two minutes):** open `feme/docs/Roadmap.md`,
+search `ENV6(c)(2)(d)` (also updated: `ENV6(c)(2)(l)` remaining half),
+read the new writeup, then open `Linearize.cpp`'s
+`DiamondFlattener::flattenLoopBodyRegion` to start the outer-cycle
+root-cause hunt.
+
+## What happened (1-2-3)
+
+1. Picked up the prior session's own suggested next step: stop looking
+   at control flow (already refuted the `StructurizeCFG`-polarity
+   hypothesis last session), diff the *data* side instead.
+2. Diffed saved IR dumps (`/tmp/env6c2d_linearized_ref.ll` vs.
+   `/tmp/env6c2d_linearized_variant2.ll`), found the smoking gun: a
+   `Flow._crit_edge` relay merge using an unfrozen, freshly-recomputed
+   per-round value instead of a frozen one. **This is a real,
+   naturally-occurring reproducer for `ENV6(c)(2)(l)`'s long-standing
+   "remaining half" watch item** — the first one found across many
+   sessions of looking.
+3. Fixed the gap (mirrored an existing sibling code path). It works —
+   confirmed via standalone IR dumps. But `ninja check-feme` found it
+   regresses a different, unrelated, deliberately-fragile nested-cycle
+   test (`env6c2p-linearize-cycle-stale-pdt-uaf.ll`). Spent the rest of
+   the session trying to root-cause *that* interaction, did not find it
+   in the time available, **reverted the fix** rather than ship a
+   trade-one-bug-for-another change. Tree is clean.
+
+## State restated
+
+- ✅ `ENV6(c)(2)(d)`'s root cause: **found and confirmed** (not fixed).
+- ✅ `ENV6(c)(2)(l)`'s "remaining half": **no longer reproducer-free** —
+  `ENV6(c)(2)(d)` *is* its reproducer now. Both roadmap entries updated
+  with full technical detail and two candidate fix approaches.
+- ❌ Fix: attempted, works for the target bug, reverted because it
+  regresses `env6c2p-linearize-cycle-stale-pdt-uaf.ll`.
+- ✅ `check-feme`: confirmed clean (0 regressions) after the revert —
+  verified by re-running both the previously-regressed tests standalone
+  post-revert, not just trusting the `git checkout`.
+- No code shipped this session. No CTS re-run (no code change to
+  validate). No inventory-file changes (none needed — pure internal
+  compiler-correctness investigation, no feature/extension change).
+
+## Why I reverted instead of pushing through
+
+Two thought budget markers hit at the same time: (a) the fix is
+correct for its target but the regression's root cause needed its own
+deep-dive (likely its own minimal nested-cycle-only reduction, isolated
+from `env6c2p`'s own unrelated stale-PDT-UAF history, to study safely
+without fighting two confounded bugs in one 3269-line test), and (b)
+landing a fix that trades a known real bug for a new unknown one is
+worse than landing nothing. Documented the exact blocker precisely
+enough that a future session can pick either candidate approach (fix
+the outer-cycle interaction directly, or scope this one call site to
+skip nested `Header`s) without re-deriving today's diagnosis from
+scratch.
+
+## Suggested next steps (ranked)
+
+1. **`ENV6(c)(2)(d)`/`ENV6(c)(2)(l)` fix, own session (~2-4 hours)**:
+   root-cause the outer-cycle `DiamondFlattener::flattenLoopBodyRegion`
+   interaction. Start by building a minimal, from-scratch nested-cycle
+   reduction (inner cycle with a `LatchIdx == -1` relay merge, wrapped
+   in one outer cycle) rather than fighting `env6c2p`'s own unrelated
+   history directly — much smaller surface to reason about. Once the
+   invariant `DiamondFlattener` expects is known, pick approach (a) fix
+   it directly, or (b) scope the freeze to skip nested `Header`s.
+2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, unchanged.
+3. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
+   priority, unchanged for many sessions.
+4. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
