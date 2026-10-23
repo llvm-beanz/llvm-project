@@ -130402,3 +130402,87 @@ landed this session.
 No CTS re-run this session (no code landed, so no behavior change to
 re-measure) — `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` untouched, consistent with "nothing shipped."
+
+# Session: ENV6(c)(2)(o) fixed via SplitBlockPredecessors (attempt 8, landed)
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+## What shipped this session
+
+1. **`ENV6(c)(2)(o)` fixed and committed** (`2346fd9`). Picked up attempt 8
+   from last session's handoff (`SplitBlockPredecessors` to physically
+   restore `CheckExit->StayInLoop`'s single-entry invariant) and pushed it
+   all the way to a clean, verified landing. Three follow-on bugs found and
+   fixed along the way, all via direct evidence, not guessing:
+   - `SplitBlockPredecessors` doesn't update this pass's own `CycleInfo` →
+     `CI.addBlockToCycle` needed explicitly.
+   - A pre-existing, unconditional `UncondBrInst::Create` was silently
+     recreating the very edge the split had just removed → made it
+     target-aware via a new `ChainGateMergeCheckPred` variable.
+   - A **sibling cycle's own, pre-existing** merge construct (processed by a
+     *later* `linearizeCycle` call) referenced one of the split
+     predecessors' original values directly → fixed with a new
+     function-scoped `LoopLinearizer::DeferredSplitMergeFixups` sweep, run
+     once at the very end of `LoopLinearizer::run()` after a final, fresh
+     `DT` recalculation.
+2. **Verified**: 30+ clean standalone repro runs (`/tmp/env6c2m/full_module.ll`),
+   full `check-feme` 3875/3875 passed (4 unsupported, 0 regressions).
+   Updated the `env6c2p` regression test to assert successful linearization
+   instead of the old bailout diagnostic (that test's whole shape is the one
+   this fix now handles).
+3. **Roadmap struck through** (`05d2a74`) — `ENV6(c)(2)(o)` is done.
+4. **CTS measured impact, not skipped** (`762f9c6`): re-ran
+   `cov-two-nested-loops-switch-case-matrix-array-increment` (the case this
+   bug's own repro came from) plus its five `assertion-crash-cases.txt`
+   siblings against a freshly rebuilt `libfeme_vulkan.so`. Real, measured
+   result: **the case no longer bails out inside `feme-cpu-linearize` at
+   all** — it gets one full pass stage further and now fails inside
+   `feme-cpu-simdize` instead (a different, not-yet-investigated divergent-
+   branch-widening gap). The five siblings are unaffected — no regressions.
+   Updated `VulkanCTSReport.md` and `ENV6(c)(2)(m)`'s own roadmap entry with
+   this precise, honest result (not closed — still `Fail`, just a different
+   `Fail`).
+5. **`.instructions.md` updated** (`ee8718b`): codified both `CycleInfo`/
+   `SplitBlockPredecessors` gaps as their own dedicated entry, so no future
+   session re-derives them from scratch.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes —
+this is a compiler-correctness fix, not a new feature/extension.
+
+## Why this took 8 attempts across sessions (short version)
+
+Every earlier attempt tried to **prevent** the bad peel syntactically or
+semantically at the peel site itself (`peelConstantFlowPredecessors`). All
+six of those failed because the invariant being protected ("don't create a
+second real predecessor into `StayInLoop`") isn't visible as a local,
+syntactic property at that site — it's a downstream consequence. This
+session's fix instead let the peel happen and **repaired the CFG
+afterward**, which is a smaller, more mechanical, more testable change than
+any of the six prevention attempts.
+
+## Next steps (ranked)
+
+1. **`feme-cpu-simdize`'s new residual on `cov-two-nested-loops-switch-case-matrix-array-increment`** (new, ~1 session): the case now reaches
+   simdize and fails there with "divergent branch ... did not remove it, or
+   produced a shape this pass cannot widen." Start from a fresh IR dump for
+   this exact case (post-linearize, pre-simdize) rather than reusing
+   `/tmp/env6c2m/full_module.ll` verbatim — the new `.o.merge` block changes
+   the shape simdize now sees.
+2. **`ENV6(c)(2)(l)`** (small audit, ~30 min): check the remaining 2
+   `closeLatch`/`freezeLoopCarriedValues` call sites for a similar latent
+   `BodyMask`-vs-`NaturalContinue` gap. Not started this session either —
+   deprioritized in favor of finishing `(o)` end-to-end.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
+   architecture efforts.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
+   unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
+
+**Fastest next concrete action (under two minutes)**: open
+`feme/docs/VulkanCTSReport.md`'s newest "Update" section (this session's) and
+`ENV6(c)(2)(m)`'s roadmap entry, then dump
+`cov-two-nested-loops-switch-case-matrix-array-increment`'s post-linearize IR
+fresh (`FEME_DUMP_IR_POSTOPT=1`, per `.instructions.md`) to find the specific
+branch `feme-cpu-simdize` considers unremoved.
