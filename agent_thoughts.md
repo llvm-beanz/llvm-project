@@ -130811,3 +130811,127 @@ match just because they look superficially similar.
 4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
 5. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(c)` fixed — push-constant two-dynamic-index bail-out; `ENV6(c)(2)(d)` investigated, not yet resolved
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU
+Vulkan Device`, confirmed at start and again before ending.
+
+## Done this session
+
+1. **Fixed `ENV6(c)(2)(c)`**: `cov-read-matrix-push-constant`'s
+   `JIT session error: Symbols not found: [ spirv_var_11 ]`.
+   - Root cause: `SPIRVPushConstantLowering.cpp` bailed entirely
+     (`return false`, leaving the global un-lowered) the moment it saw
+     a *second* independent dynamic GEP index anywhere in a
+     push-constant chain. The real shader's `matrix[row][col]` (both
+     indices loaded from a UBO) hit exactly this bail-out.
+   - Fix: generalized single-term tracking into a loop that folds
+     every dynamic term into one combined byte offset
+     (`Combined = Idx1*Stride1 + Idx2*Stride2 + ...`, built via
+     `IRBuilder` right before the GEP). No changes needed to
+     `emitBoundsCheckedLoad` or the existing data structures.
+   - Tests: updated `spirv-push-constant-lowering.ll`'s
+     `two_dynamic_indices` expectation, added new
+     `spirv-push-constant-lowering-matrix-dynamic-row-col.ll`.
+   - `check-feme`: 3878/3882 pass (4 unsupported), 0 regressions.
+   - CTS: targeted case now **Pass**. Re-ran the 105-case graphicsfuzz
+     corpus (`/tmp/env6c2q_corpus.txt`): **25 Pass / 80 Fail**, up from
+     the 23/105 baseline — zero regressions, exactly the targeted case
+     newly passing.
+   - 3 commits: fix (`.cpp`/`.h`), tests, docs (Roadmap + CTS report +
+     `.instructions.md` gotcha).
+
+2. **Gotcha codified in `.instructions.md`**: `ninja feme_vulkan` does
+   **not** relink the separate `feme-opt` tool target. A `feme-opt`
+   CLI-based verification of a lib-only change needs an explicit
+   `ninja feme-opt` first, or it silently runs against a stale binary
+   (bit me once this session before I caught it).
+
+3. **Investigated `ENV6(c)(2)(d)`** (`spv-stable-pillars-O-op-select-
+   to-op-phi`'s `Histogram EMD value 0.193642 > 0.005`) — not resolved.
+   - Confirmed `--deqp-log-images=enable` produces zero `<Image...>`
+     entries for this amber `SelfValidate`-type test — no per-image
+     debug output available via standard `deqp-vk` flags.
+   - Extracted and diffed all 3 embedded fragment shaders' SPIR-V
+     assembly. This is the "transform `OpSelect` into an equivalent
+     `OpPhi`" GraphicsFuzz family: `reference` computes a boolean via
+     a direct `OpPhi`; `variant` recomputes the *same* value through
+     an extra diamond (`%516`/`%518`, itself containing a nested
+     `OpSelectionMerge` pair) feeding a second `OpPhi`; `variant_2`
+     computes it via a literal `OpSelect`. All 3 are SPIR-V-spec-
+     equivalent and must render identically.
+   - Tried to build VK-GL-CTS's vendored standalone `amber` CLI
+     sample (`-i <file.ppm>` per-pipeline image dump support) to
+     render/compare each variant directly. Spent real effort here:
+     - Found the VK-GL-CTS wrapper (`external/amber/CMakeLists.txt`)
+       hard-sets `AMBER_SKIP_SAMPLES TRUE` as a plain (non-cache)
+       variable, which shadows any `-D`-based CMake reconfigure
+       override (CMP0077 semantics) — had to edit the wrapper file
+       directly (not just pass `-D` flags) to actually flip it.
+     - Hit a second blocker: the `lodepng` third-party submodule isn't
+       checked out in this environment (`AMBER_ENABLE_LODEPNG` only
+       matters when samples are on) — worked around with
+       `AMBER_SKIP_LODEPNG=TRUE` (the CLI's `-i` flag falls back to
+       PPM output without it).
+     - Hit a third, unrelated, pre-existing blocker: the sample fails
+       to compile due to a macro-redefinition conflict between
+       VK-GL-CTS's generated Vulkan headers and the system
+       `/usr/include/vulkan/vulkan_core.h`
+       (`VK_DEFINE_NON_DISPATCHABLE_HANDLE` double-included with
+       different definitions in `config_helper_vulkan.cc`). This is a
+       real, reproducible VK-GL-CTS integration bug, but fixing it is
+       its own rabbit hole with no payoff for the actual task at hand.
+     - **Decision**: abandoned this path as disproportionate effort
+       for a debug aid alone. Reverted both edited `CMakeLists.txt`
+       files, confirmed clean via `diff` against saved originals
+       before reconfiguring cmake back to the original state. `git
+       status --short` in the VK-GL-CTS checkout shows no tracked-file
+       changes.
+
+## Key lesson this session
+
+**Before spending real effort standing up a new debug tool
+(standalone `amber`, in this case), check whether the harness
+deliberately disabled it and why.** The VK-GL-CTS wrapper's
+`AMBER_SKIP_SAMPLES`/missing `lodepng` submodule were both clearly
+intentional trims for a CI-focused checkout, not oversights — the
+third blocker (actual header conflict) that surfaced only after
+working around the first two was the real signal that this path
+wasn't going to be cheap. Worth noting for next session: don't retry
+the standalone-`amber` route without first fixing the header conflict
+specifically, which is itself untouched, isolated scope outside FeMe
+(if ever pursued, treat as its own "issue outside FeMe" with its own
+isolated reproducer/fix/commit, per the standing instructions — not
+bundled into a FeMe debugging session).
+
+## Next steps (ranked)
+
+1. **`ENV6(c)(2)(d)`** (~1-2 hours): compile each of the 3 extracted
+   fragment shaders (`/tmp/ref_frag.spvasm`, `/tmp/variant_frag.spvasm`,
+   `/tmp/variant2_frag.spvasm`) through FeMe's SPIR-V import +
+   normalization pipeline **in isolation** (no image rendering needed)
+   to find which control-flow shape the compiler lowers incorrectly.
+   `variant`'s nested double-diamond-then-phi shape is the prime
+   suspect (structurally the most complex of the 3, with an
+   intermediate `OpPhi` `%312` whose use doesn't obviously show up in
+   the visible excerpt — worth checking whether it's dead or whether
+   something drops it). Likely needs a minimal synthetic SPIR-V module
+   wrapping just the fragment entry point to drive it through
+   `feme_vulkan`'s actual pipeline-creation path (where
+   `FEME_DUMP_IR_PRENORM=1`/`FEME_DUMP_IR_POSTOPT=1` apply), since
+   `feme-translate` alone can't go all the way to LLVM IR text (see
+   `.instructions.md`'s existing note on that limitation).
+2. **`ENV6(c)(2)(l)` remaining half**: `FeedsUniformBranch`/
+   `HeaderExitRelayValues` constant-only-capture gap — still no live
+   reproducer after multiple sessions, pure watch item.
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
+   priority.
+5. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
+6. (Separate, outside-FeMe, optional): the VK-GL-CTS standalone `amber`
+   sample's Vulkan-header macro-redefinition conflict — a real,
+   reproducible bug in that vendored checkout, but only worth fixing
+   if a future session actually needs the standalone `amber` tool.
