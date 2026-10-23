@@ -10903,3 +10903,80 @@ sites -- now fully resolved for `MergedRelayValues`/`HeaderExitRelayValues`,
 cases, both own multi-session efforts); `ENV5(c)(7)(b)` (hull lockstep
 barrier, 3 cases, lowest priority); offload-test-suite upstreaming (3
 patches, blocked on push access).
+
+## L528: `ENV6(c)(2)(r)` fixed -- `LoopLinearizer` post-order staleness when a cycle's own exit check depends on an ancestor cycle's not-yet-masked resource load
+
+Root cause (full trace already recorded in the prior session's own entry
+above): `inner`'s own header exit check (`icmp slt i32 %.0.150, 1`) reads
+a value fed by a `feme.cpu.resource.load.raw.i32` call sitting in
+`outer`'s own body, not `inner`'s. `LoopLinearizer::run` processes cycles
+in post-order, so `inner` is finalized -- using a `UniformityInfo`
+snapshot computed before `outer`'s own masking exists at all -- strictly
+before `outer` is ever attempted. By the time `outer`'s own masking later
+narrows that same load's mask operand in place to something genuinely
+per-lane divergent (driven by a `switch`-case dispatch comparison in this
+real case), `inner`'s header exit branch has already been finalized as
+"uniform, left alone" and is never revisited -- `feme-cpu-simdize`'s own
+later, fresh `UniformityInfo` recomputation then correctly, but too late,
+rejects it as an unremoved divergent branch.
+
+Both directions the prior session tried and reverted (a post-hoc
+deferred-sweep re-invocation of `linearizeCycle`; forcing
+`HeaderDivergent=true` to reroute through the heavier
+`CheckBlock`/`collectUniformPassThroughRegion` machinery) were
+deliberately **not** retried this session, per the prior session's own
+explicit recommendation. Instead: `dependsOnResourceOrImageLoadInCycle`
+gained a new, opt-in `AlsoCheckAncestorCycles` parameter (default
+`false`, all 3 pre-existing call sites byte-for-byte unchanged) that
+predicts this staleness *ahead of time*, by recognizing a resource/image
+load sitting in any cycle that strictly contains the one being examined.
+`linearizeCycle`'s existing `!HeaderDivergent && !LatchDivergent &&
+!LatchWasPromoted` branch gained a new `FoldHeaderExitIntoMask` sub-path,
+gated on that predicate (and `OtherCondBrBlocks.empty()`, to stay clear of
+any shape with other internal branches), that folds the header's own exit
+decision into the loop-carried mask immediately -- reusing the exact
+`stayInLoop`/`closeLatch`/`freezeLoopCarriedValues` sequence the general
+`HeaderDivergent=true` path already uses, rather than rerouting through
+it wholesale. The `BodyRegion`-bypass blend tail that general path also
+performs is deliberately omitted (this path has no `BodyRegion`/
+`collectUniformPassThroughRegion` set to blend against) -- a known,
+documented, scoped-out limitation.
+
+**Verification**: re-ran the preserved real repro
+(`/tmp/env6c2o_simdize/full_module.ll`/`linearized.ll`) -- both
+`feme-cpu-linearize` and `feme-cpu-simdize` now succeed cleanly, both
+outputs pass `opt -passes=verify`. New lit regression test added:
+`feme/test/Transforms/CPU/Linearize/loop-exit-check-depends-on-ancestor-cycle-resource-load.ll`,
+a minimal hand-crafted repro (outer loop with an `atomicrmw`-rooted
+genuinely-divergent discard guard, resource load in `outer`'s body feeding
+`inner`'s own exit check) -- confirmed it reproduces the original
+diagnostic with the fix reverted and passes with it applied. An
+`llvm-reduce`-based reduction of the real repro was tried first and
+abandoned: given only a generic "has a divergent branch" interestingness
+predicate, it converged on a *different*, unrelated divergent-branch bug
+(see this session's new `.instructions.md` entry). Full `check-feme`:
+3876/3880 discovered tests pass (4 unsupported), 0 failures -- no
+regressions (3875 pre-existing + 1 new test).
+
+**CTS spot checks**: `dEQP-VK.graphicsfuzz.cov-two-nested-loops-switch-case-matrix-array-increment`
+run standalone -- now **Pass** (previously failed one stage later in
+`feme-cpu-simdize`, per `ENV6(c)(2)(m)`'s own prior-session entry). Re-ran
+`L525`'s/`L527`'s own 105-case graphicsfuzz corpus
+(`/tmp/env6c2q_corpus.txt`, which already excludes this now-fixed case):
+**24 Pass / 81 Fail**, i.e. the same `23 Pass / 82 Fail` baseline plus this
+session's one newly-passing case counted separately above -- no new
+regressions, no unexpected deltas. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no changes needed (internal compiler
+correctness fix only, no feature/extension surface change).
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start and
+again mid-session before the CTS spot checks above.
+
+**Next steps**: `ENV6(c)(2)(l)` (small audit, 2 unaudited
+`closeLatch`/`freezeLoopCarriedValues` call sites, no live reproducer
+found across several sessions -- pure watch item); `ENV6(c)(2)(c)`/`(d)`
+(two isolated 1-case issues, still not started); `ENV6(c)(3)` (83 cases)
+/ `ENV6(d)` (132 cases, both own multi-session architecture efforts);
+`ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
+offload-test-suite upstreaming (3 patches, blocked on push access).
