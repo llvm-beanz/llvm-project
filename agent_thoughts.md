@@ -130149,3 +130149,49 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed --
 5. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 6. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 7. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(p)` fixed (real crash, not just a bailout) -- `ENV6(c)(2)(o)` re-tried, still blocked by a new shape
+
+**Win**: found and fixed the real root cause of `ENV6(c)(2)(p)`, the `P1` nondeterministic crash from last session. Landed, tested, verified against the exact debug-build configuration that reliably crashed before the fix (0/10 after vs. 5/5-15/15 before). This is a genuine bug fix, not a deferred/reverted attempt like last session.
+
+**Root cause**: `LoopLinearizer::linearizeCycle`'s own `while (CollapsedRelay)` fixed-point loop calls `peelConstantFlowPredecessorsInCycle` (uses `DT`/`PDT`) twice -- once up front, once after `mergeTrivialRelayBlocksInCycle` (which physically erases blocks) -- without ever recalculating `DT`/`PDT` between the two calls. The second call's own internal helper, `peelWouldExposeSiblingDiamondToSharedMerge`, looks up a candidate's post-dominator via the stale `PDT` *before* its own later speculative recalculate, so it could get handed a pointer to a block the first call's own erase had already freed -- passed straight into `DiamondFlattener::validate` and dereferenced there, segfaulting.
+
+**Fix**: two `DT.recalculate(F); PDT.recalculate(F);` insertions, one before each call site, matching this file's own established idiom used everywhere else dominance-sensitive logic runs.
+
+**How I confirmed it, step by step**:
+1. Looped the stock repro 90 times -- 0 crashes. Confirms the bug is genuinely rare on its own, not a cheap one-shot repro.
+2. Re-applied last session's draft `ENV6(c)(2)(o)` point fix purely as a debugging aid (not for landing) -- made the crash deterministic (5/5 under `gdb`) again, same as last session found.
+3. Built a `gdb`-with-debug-symbols side build (same `ar`-splice methodology from last session) and got a full, symbolicated backtrace pinning the exact crash chain and line numbers.
+4. Added a temporary, memory-safe trace: compared the suspect `BasicBlock*` by raw address only (never dereferenced) against every block still live in the function. Confirmed directly: the pointer was already-erased.
+5. Read the surrounding source to find *why* it was stale -- found the missing recalculate in the fixed-point loop.
+6. Reverted all debugging scaffolding (`git diff --stat` empty check before applying the real fix).
+7. Applied the real fix, rebuilt, and re-verified against a **third** debug side-build -- the one built with the exact same config that crashed before -- now 0/10 crashes.
+8. Wrote a regression lit test. Tried `llvm-reduce` with a "crash" interestingness test first -- didn't work, the bug's too rare for that to converge reliably (0 crashes across 120+ combined trials this session). Switched the interestingness test to "the diagnostic text is still present" instead -- reduced 3199 lines down to 30 in under 3 minutes, but confirmed (100 trials) that tiny file no longer exercises the crash-prone path at all, so kept the **full** 3199-line module as the actual test input instead (same large-real-repro precedent this test directory already uses for a similar bug class).
+
+**`ENV6(c)(2)(o)` re-tried, still blocked -- but by a *new* shape now**: once `(p)` was fixed, re-applied last session's `ENV6(c)(2)(o)` point fix expecting it to finally land cleanly. It doesn't: tracing showed `.Flow227_crit_edge` (the predecessor last session's fix targeted) now has a real, reachable predecessor of its own -- not `pred_empty()` as before. This isn't a mistake in either session's analysis; it's a real side effect of `(p)`'s own fix: feeding `peelConstantFlowPredecessorsInCycle`'s second call a *freshly* recalculated `PDT` (instead of a stale one) changes its own peel decisions, so the whole fixed-point loop now converges to a genuinely different residual CFG shape. Reverted the speculative re-application cleanly (`git diff --stat` empty again), and updated the roadmap entry with the fresh trace so next session doesn't waste time re-trying the now-stale draft.
+
+**New lessons, now in `.instructions.md`** (3 new entries): pointer-identity-only tracing for use-after-free bugs without needing to re-trigger the crash; the `gdb -batch -ex run -ex "bt full"` single-invocation false-negative quirk (use a proper script file with separate lines instead); a fix inside a fixed-point loop can shift an unrelated already-diagnosed shape out from under someone else's draft fix, and `llvm-reduce` can preserve one diagnostic while silently failing to preserve an unrelated, rarer crash from the same original file.
+
+**Verification**: `check-feme` 3873/3877 Passed, 4 Unsupported, 0 regressions (one new lit test added, net +1 pass). Vulkan CTS: 105-case graphicsfuzz corpus re-run, 23 Pass / 82 Fail, no regressions (expected -- this fix's own affected code path is only reached by cases that already bail out cleanly via `ENV6(c)(2)(o)`'s diagnostic both before and after, so no corpus-visible change).
+
+**Commits** (4, each isolated):
+1. `feme: fix ENV6(c)(2)(p) stale-PDT dangling-pointer crash in linearizeCycle` -- the real fix + regression test.
+2. `feme: update Roadmap for ENV6(c)(2)(p) fix and ENV6(c)(2)(o) re-investigation`.
+3. `feme: codify ENV6(c)(2)(p) debugging lessons in .instructions.md`.
+4. `feme: VulkanCTSReport L525 -- ENV6(c)(2)(p) fix verification`.
+5. This `agent_thoughts.md` entry.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed -- no feature/extension surface changed, this is a correctness/crash fix only.
+
+**Mandatory device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at session start and end.
+
+## Next steps (pick one, all independent)
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and re-read this session's fresh `FEME_DEBUG_ENV6C2O` trace findings (`.Flow227_crit_edge` has one real reachable predecessor; `loop.exit.guard120` is also its own predecessor via a genuine self-loop back edge) before designing a new matcher case -- do not reuse any earlier session's draft point fix, it no longer applies.
+
+1. **`ENV6(c)(2)(o)`** (needs its own full session): design a fresh fix for the now-current dominance-failure shape (two live, non-stale predecessors into `CheckExit->StayInLoop`, not a stale/unreachable one) -- a genuinely different case from both this session's and last session's drafts.
+2. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites have a similar latent `BodyMask`-vs-`NaturalContinue` gap, now that `L521`'s bug class is understood.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
