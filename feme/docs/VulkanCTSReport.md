@@ -11159,3 +11159,106 @@ half, pure watch item, no reproducer); `ENV6(c)(3)` (83 cases) /
 `ENV6(d)` (132 cases, both own multi-session architecture efforts);
 `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
 offload-test-suite upstreaming (3 patches, blocked on push access).
+
+## L531: `ENV6(c)(2)(d)` narrowed further -- pixel-exact diff isolates `reference`; `StructurizeCFG`-polarity hypothesis formed, then refuted
+
+Continued the prior session's `ENV6(c)(2)(d)` investigation
+(`spv-stable-pillars-O-op-select-to-op-phi`'s histogram-tolerance
+failure). No fix this session; the real root cause remains open, but
+two significant things are now settled and should not be re-derived
+from scratch by a future session.
+
+**New technique: pixel-exact `EQ_BUFFER` differential testing.** The
+amber test's own `EQ_HISTOGRAM_EMD_BUFFER` only reports one scalar EMD
+value across all 3 rendered variants, with no way to tell which pair
+diverged. Patched the test's *build-directory* runtime copies (both
+`build/external/vulkancts/modules/vulkan/{vulkan,amber}/amber/
+graphicsfuzz/spv-stable-pillars-O-op-select-to-op-phi.amber` -- plain,
+untracked, build-time-generated copies of the real, git-tracked
+`external/vulkancts/data/.../*.amber` source, safe to edit/restore
+without touching the VK-GL-CTS checkout) to use `EXPECT <A> EQ_BUFFER
+<B>` instead, an exact byte-for-byte comparison
+(`external/amber/src/src/buffer.cc`'s `IsEqual`). Discovered along the
+way that Amber's executor (`executor.cc`'s `ExecuteCommand` loop)
+halts on the *first* failing command, so a script needs exactly one
+`EXPECT` statement per run to get a diagnostic for it -- ran the
+patched `.amber` three separate times, one comparison each:
+`reference` vs `variant` (**Fail**, 795/2048 bytes differ, first diff
+at byte 12, 0 != 51), `reference` vs `variant_2` (**Fail**, identical
+795-byte/first-diff signature), `variant` vs `variant_2` (**Pass**,
+byte-identical). Conclusion: `reference` alone renders wrong;
+`variant`/`variant_2` (despite very different SPIR-V shapes) agree
+exactly. Both `.amber` copies restored and confirmed clean via `diff`
+against a manual backup before this session ended.
+
+**Hypothesis formed, then refuted: `StructurizeCFG` boolean-polarity
+bug.** `reference`'s suspect construct is an if-without-else whose
+merge produces `%316 = OpPhi %26 %305 %297 %314 %306`, immediately
+re-branched on (`OpBranchConditional %316 %317(break) %333(continue)`)
+-- i.e. a divergent loop-break condition computed via a `phi` deep in
+the loop body, not Header-resident, closely resembling the long-open
+`ENV6(c)(2)(l)` `FeedsUniformBranch`/`HeaderExitRelayValues` gap. Dumped
+the real pipeline's own pre-/post-`StructurizeCFG` IR
+(`FEME_DUMP_IR_PRENORM=1`, plus a new `FEME_DEBUG_DUMP_PRESTRUCTURIZE=1`
+dump point added this session, see below) and found the corresponding
+LLVM `Flow`-block phi's two incoming values looked asymmetric: one arm
+an explicit `xor ..., true`, the other a raw, seemingly-unnegated
+`icmp`. Built an isolated reproducer by extracting the real
+pre-`StructurizeCFG` function (with its own `declare`s reconstructed by
+hand) and running `opt -passes=structurizecfg,break-crit-edges` on it
+standalone -- reproduced the identical `Flow`-phi shape outside the
+feme pipeline entirely, confirming (at first) that `StructurizeCFG`
+itself produces this pattern. Several from-scratch, hand-built minimal
+`opt -passes=structurizecfg` reproducers of the same topology (loop
+with an inner if-without-else, immediately re-branched on by the merge)
+all came back *correct*, forcing a closer look at the "raw-looking"
+arm: it turns out `StructurizeCFG`'s own `InvertCondition` logic
+prefers flipping a comparison's predicate (`sgt`→`sle`) over inserting
+an explicit `xor` wherever the value being negated is itself a bare
+`icmp` -- the "unnegated" arm had, in fact, already been negated via
+predicate flip, not left alone. Once that is accounted for, both arms
+of the real `Flow`-phi are in the same, consistent "continue" polarity.
+`StructurizeCFG` is **not** buggy for this shape; hand-verified
+`Linearize`'s own handling of the resulting masked value immediately
+afterward is correspondingly consistent too. Treat the
+`StructurizeCFG`-polarity hypothesis as closed/refuted.
+
+**New permanent debug aid**: `FEME_DEBUG_DUMP_PRESTRUCTURIZE=1`
+(`feme/lib/Transforms/CPU/Prepare.cpp`) dumps a function immediately
+before `StructurizeCFGPass` runs -- no existing `FEME_DUMP_IR_*` dump
+point in `Pipeline.cpp` sits between `UnifyLoopExits` and
+`StructurizeCFG` specifically (`PRENORM` is one whole `Normalize`-group
+pass group later, after `StructurizeCFG` has already restructured the
+function). Implemented as a pure refactor of `prepareFunction`'s single
+`LateFPM` into two sequential `FunctionPassManager`s with the same pass
+order; `check-feme` 3878/3882 Passed, 4 unsupported, 0 regressions.
+Piping the dumped function (plus a small hand-written `declare` header
+for its intrinsic calls, since `F.print` only prints one function, not
+the enclosing module's metadata/declarations) straight into
+`opt -passes=structurizecfg,break-crit-edges` reproduces the pipeline's
+exact post-structurize shape without the full `deqp-vk` harness in the
+loop -- documented in `.instructions.md`.
+
+With both the polarity hypothesis and the original `OtherCondBrBlocks`/
+`FeedsUniformBranch` suspicion addressed, the actual root cause is still
+unknown. Next step: shift from the *boolean/control-flow* side (now
+confirmed clean) to the *data* side of `reference`'s shape -- the two
+palette-lookup array reads/writes (`%1`/`%2`/`%3`-addressed scratch
+arrays in the linearized IR) feeding the two comparisons, and the final
+`select i1 %.not.not.lcssa.frozen, <0,0,0,1>, %88` choosing the output
+color -- for a masking/ordering bug unrelated to which lane takes which
+branch.
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start
+of this session.
+
+**Next steps**: `ENV6(c)(2)(d)` (data-side investigation per the above,
+own session); `ENV6(c)(2)(l)` (remaining `FeedsUniformBranch`/
+`HeaderExitRelayValues` half, pure watch item, no reproducer --
+`reference`'s shape above was a strong *candidate* but turned out not
+to implicate this gap once the polarity hypothesis was refuted, so this
+remains a reproducer-free watch item); `ENV6(c)(3)` (83 cases) /
+`ENV6(d)` (132 cases, both own multi-session architecture efforts);
+`ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
+offload-test-suite upstreaming (3 patches, blocked on push access).
