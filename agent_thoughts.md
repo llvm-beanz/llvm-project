@@ -130195,3 +130195,45 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed --
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(o)` mechanism finally confirmed via direct trace -- 4th guard attempt still too broad, reverted
+
+**Win**: for the first time, *directly confirmed* (not theorized) the exact mechanism breaking `ENV6(c)(2)(o)`'s dominance precondition, by instrumenting every `setSuccessor(0, ...)` call site in `Linearize.cpp` with a pointer-identity trace instead of reasoning forward from a plausible theory. This disproves this session's own earlier (also this-session) negative conclusion that `peelConstantFlowPredecessors` wasn't responsible -- that conclusion came from a flawed guard-function test, not direct evidence.
+
+**Confirmed root cause**: `peelConstantFlowPredecessors` peels `.Flow227_crit_edge` *twice* in the same `linearizeCycle` fixed-point loop:
+1. First peel bypasses `Flow227` straight into `loop.exit.guard120`.
+2. That update makes `loop.exit.guard120`'s own exit-check phi constant for the same edge too, so a second peel then bypasses `loop.exit.guard120` itself straight into its `StayInLoop` successor.
+
+The second peel is what breaks a *later*, different cycle's `DT.dominates(CheckBlock, CheckExit->StayInLoop)` check once `loop.exit.guard120` is selected as *that* cycle's own `CheckBlock`.
+
+**Attempted fix #4 (this session)**: a new guard, `peelWouldBypassOwnExitCheckGateway`, declining a peel when the bypassed block's "other" successor is a synthetic exit-check relay (`isSyntheticRelayBlockName`) with that block as its sole predecessor.
+- Standalone repro: 20/20 clean runs, no crash, verifier-clean IR. Looked like a win.
+- `ninja check-feme`: **6 regressions**. The naming heuristic also matches ordinary, legitimate single-cycle exit checks (e.g. `loop-break-structurized.ll`), which this same fold is supposed to simplify -- too broad, same failure class as 3 earlier session attempts.
+- **Reverted** (`git diff --stat` confirmed clean). Did not land an unvalidated/over-broad fix.
+
+**Why I stopped here instead of trying a 5th guard**: four straight guard-function designs (two from a prior session, two from this one) have now failed the same way -- either not triggering, or triggering too broadly. That's a strong signal the invariant doesn't belong as a syntactic check inside `peelConstantFlowPredecessors` at all. Documented two concrete alternative directions in the roadmap instead of guessing again: (a) make the check semantic (confirm the candidate relay actually reaches *this cycle's* `ExitBlock`, not just match a name), or (b) extend `L377(a)`'s own repair matcher with a third case recognizing "two live predecessors where one is a straight-line descendant of the other via a plain relay chain" -- which matches this roadmap entry's own originally-stated goal.
+
+**New `.instructions.md` lessons** (2 new entries): (1) confirm a hypothesized bad mutation via direct before/after tracing *before* building a guard against it -- cheaper and higher-confidence than guard-first reasoning; (2) this specific invariant may not belong in `peelConstantFlowPredecessors` at all, given four straight guard failures -- consider the repair-matcher-extension direction instead.
+
+**No net code change this session.** `feme/lib/Transforms/CPU/Linearize.cpp` is back to a clean, unmodified state (`git diff --stat` empty). Only docs changed.
+
+**Verification**: standalone repro 20/20 clean with the (now-reverted) guard in place; `check-feme` run showed the 6 regressions that caused the revert; after reverting, no further `check-feme` run was needed since the file is byte-identical to the last-known-good commit.
+
+**Commits** (2, isolated):
+1. `docs(feme): record ENV6(c)(2)(o) direct-trace findings and 4th guard failure` -- Roadmap.md, VulkanCTSReport.md, .instructions.md.
+2. This `agent_thoughts.md` entry.
+
+No Vulkan CTS corpus re-run this session (no functional code change landed). No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed.
+
+**Mandatory device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at session start and end.
+
+## Next steps (pick one, all independent)
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and re-read this session's confirmed mechanism (the `.Flow227_crit_edge` double-peel via `loop.exit.guard120`) plus the two listed next-direction options, before picking (a) semantic `ExitBlock`-reachability or (b) `L377(a)` repair-matcher extension.
+
+1. **`ENV6(c)(2)(o)`** (needs its own full session): pick direction (a) or (b) above and commit to it -- do not design a fifth syntactic guard inside `peelConstantFlowPredecessors` without first re-reading why all four prior attempts failed.
+2. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites have a similar latent `BodyMask`-vs-`NaturalContinue` gap, now that `L521`'s bug class is understood.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
