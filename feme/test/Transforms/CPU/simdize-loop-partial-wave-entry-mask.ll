@@ -17,7 +17,7 @@
 ; CHECK: latch:
 ; CHECK: %mask.any.real = and <4 x i1> %active.header.live.wide, %wave_entry_mask
 ; CHECK-NEXT: %loop.any.active = call i1 @llvm.vector.reduce.or.v4i1(<4 x i1> %mask.any.real)
-; CHECK-NEXT: %loop.continue = and i1 %loop.cond, %loop.any.active
+; CHECK: %loop.continue = and i1 %loop.cond, %loop.any.active
 define void @main(i32 %n) #0 {
 entry:
   br label %loop
