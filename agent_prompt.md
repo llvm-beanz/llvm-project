@@ -69,17 +69,14 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`ENV6(c)(2)(r)`** (own full session): design a true in-place fix for
-   `HeaderExit->Br`'s own condition inside the `CycleHasMaskOps=true` sub-
-   path — likely a forward-reference/fixup value (à la
-   `DeferredSplitMergeFixups`, but for a *value*, not a block) patched in
-   once the ancestor cycle's masking later computes the real narrowed
-   mask. Do not retry either of this session's two reverted directions.
-2. **`ENV6(c)(2)(l)`**: unchanged, two unaudited call sites, no live repro
-   found yet across several sessions — pure watch item.
-3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not
+1. **`ENV6(c)(2)(l)`** (~30 min): audit the 2 remaining
+   `closeLatch`/`freezeLoopCarriedValues` call sites — still no live
+   repro across several sessions, pure watch item, lowest-effort thing
+   left on the list.
+2. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not
    started.
-4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
    multi-session architecture efforts.
-5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
-6. offload-test-suite upstreaming (3 patches): blocked on push access.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
+5. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
