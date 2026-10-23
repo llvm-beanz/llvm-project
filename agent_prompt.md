@@ -69,12 +69,14 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`ENV6(c)(2)(l)`** (~30 min): audit the 2 remaining
-   `closeLatch`/`freezeLoopCarriedValues` call sites — still no live
-   repro across several sessions, pure watch item, lowest-effort thing
-   left on the list.
-2. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not
-   started.
+1. **`ENV6(c)(2)(c)`/`(d)`** (~do next, not started across many
+   sessions): two isolated 1-case issues — open `Roadmap.md`, search
+   `ENV6(c)(2)(c)` for the specifics.
+2. **`ENV6(c)(2)(l)` remaining half**: `FeedsUniformBranch`/
+   `HeaderExitRelayValues` constant-only-capture gap — still no live
+   reproducer after multiple sessions, pure watch item, don't spend a
+   whole session hunting for a synthetic repro unless a real case
+   surfaces naturally.
 3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
    multi-session architecture efforts.
 4. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
