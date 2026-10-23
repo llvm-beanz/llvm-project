@@ -70,16 +70,15 @@ Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
 **Fastest next concrete action** (under two minutes): open
-`feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and re-read this session's fresh
-`FEME_DEBUG_ENV6C2O` trace findings (`.Flow227_crit_edge` has one real reachable
-predecessor; `loop.exit.guard120` is also its own predecessor via a genuine
-self-loop back edge) before designing a new matcher case -- do not reuse any
-earlier session's draft point fix, it no longer applies.
+`feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and re-read this session's confirmed
+mechanism (the `.Flow227_crit_edge` double-peel via `loop.exit.guard120`) plus
+the two listed next-direction options, before picking (a) semantic
+`ExitBlock`-reachability or (b) `L377(a)` repair-matcher extension.
 
-1. **`ENV6(c)(2)(o)`** (needs its own full session): design a fresh fix for the
-   now-current dominance-failure shape (two live, non-stale predecessors into
-   `CheckExit->StayInLoop`, not a stale/unreachable one) -- a genuinely
-   different case from both this session's and last session's drafts.
+1. **`ENV6(c)(2)(o)`** (needs its own full session): pick direction (a) or (b)
+   above and commit to it -- do not design a fifth syntactic guard inside
+   `peelConstantFlowPredecessors` without first re-reading why all four prior
+   attempts failed.
 2. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the
    other 3 `closeLatch`/`freezeLoopCarriedValues` call sites have a similar
    latent `BodyMask`-vs-`NaturalContinue` gap, now that `L521`'s bug class is
