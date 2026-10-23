@@ -2269,6 +2269,45 @@ static mlir::Value createBitFieldLowMask(mlir::ConversionPatternRewriter &Rewrit
                                       MinusOne, LowMask);
 }
 
+/// Clamps a `BitField*` shift-amount operand (`Offset`, or an `Offset`-
+/// derived amount such as `BitFieldSExtractPattern`'s own
+/// `AmountToShiftLeft`/`AmountToShiftRight`) to `[0, Size - 1]` so it can
+/// never make the `llvm.shl`/`llvm.lshr`/`llvm.ashr` it feeds poison.
+///
+/// Per the SPIR-V spec, `BitField*`'s `Offset` (and `Offset + Count`) is
+/// only required to be `<= Size`; a shader may legally pass an `Offset`
+/// (or an `Offset`/`Count` combination) *greater* than `Size` -- the spec
+/// then says the *result* is undefined, not that the shader itself is
+/// malformed. `BitFieldUExtractPattern` (below) and
+/// `BitFieldInsertPattern`'s own `Offset`-shifted mask/`Insert` terms used
+/// to feed such an `Offset` straight into an `llvm.lshr`/`llvm.shl` as its
+/// shift-amount operand: an out-of-range shift amount (`>= Size`) is
+/// poison per the LLVM LangRef, not merely some unspecified *value* the
+/// way SPIR-V's own "undefined result" means. A `br i1` (or any other use)
+/// that is even transitively poisoned this way is itself undefined
+/// behavior LLVM is free to exploit -- e.g. `InstCombine`/`SimplifyCFG`
+/// folding a branch that can only ever evaluate to poison into
+/// `unreachable`, silently discarding everything that branch could ever
+/// have reached (roadmap ENV6(c)(2)(a)'s own
+/// `cov-bitfieldExtract-undefined`: `bitfieldExtract(a, -1, 1)`'s `Offset
+/// = -1` is `4294967295` once reinterpreted as `Offset`'s always-unsigned
+/// consumption, already `>= 32` on its own). Clamping the shift amount to
+/// `Size - 1` (exactly `createBitFieldLowMask`'s own existing clamp, reused
+/// here for `Offset` rather than `Count`) keeps every in-range `Offset`
+/// untouched (`UMin` is a no-op whenever `Offset < Size` already) while
+/// turning the out-of-range case into some ordinary, still-spec-undefined
+/// but no-longer-poison value -- sidestepping the whole hazard without
+/// having to characterize what that undefined result *should* be.
+static mlir::Value clampBitFieldShiftAmount(mlir::ConversionPatternRewriter &Rewriter,
+                                            mlir::Location Loc, mlir::Type DstType,
+                                            mlir::Value Amount) {
+  unsigned Size = getBitFieldElementBitWidth(DstType);
+  mlir::Value SizeMinusOne =
+      createBitFieldConstant(Rewriter, Loc, DstType, Size - 1);
+  return mlir::LLVM::UMinOp::create(Rewriter, Loc, DstType, Amount,
+                                    SizeMinusOne);
+}
+
 /// Converts `spirv.BitFieldInsert` -- overriding MLIR's own pattern (see
 /// `processBitFieldCountOrOffset` above for why: it feeds `Base`/`Insert`/
 /// `Offset`/`Count` from the op's own raw accessors into the final
@@ -2297,18 +2336,25 @@ public:
         Rewriter, Loc, Adaptor.getOffset(), DstType);
     mlir::Value Count = processBitFieldCountOrOffset(Rewriter, Loc,
                                                      Adaptor.getCount(), DstType);
+    // (ENV6(c)(2)(a)) Clamp `Offset` before using it as a shift amount --
+    // see `clampBitFieldShiftAmount`'s own comment and
+    // `BitFieldUExtractPattern`'s identical fix just below: an unclamped,
+    // spec-legal-but-out-of-range `Offset` makes either `llvm.shl` below
+    // poison, not merely the spec's own "undefined result".
+    mlir::Value ClampedOffset =
+        clampBitFieldShiftAmount(Rewriter, Loc, DstType, Offset);
 
     mlir::Value MinusOne = createBitFieldConstant(Rewriter, Loc, DstType, -1);
     mlir::Value Negated = createBitFieldLowMask(Rewriter, Loc, DstType, Count);
-    mlir::Value MaskShiftedByCountAndOffset =
-        mlir::LLVM::ShlOp::create(Rewriter, Loc, DstType, Negated, Offset);
+    mlir::Value MaskShiftedByCountAndOffset = mlir::LLVM::ShlOp::create(
+        Rewriter, Loc, DstType, Negated, ClampedOffset);
     mlir::Value Mask = mlir::LLVM::XOrOp::create(
         Rewriter, Loc, DstType, MaskShiftedByCountAndOffset, MinusOne);
 
     mlir::Value BaseAndMask = mlir::LLVM::AndOp::create(
         Rewriter, Loc, DstType, Adaptor.getBase(), Mask);
     mlir::Value InsertShiftedByOffset = mlir::LLVM::ShlOp::create(
-        Rewriter, Loc, DstType, Adaptor.getInsert(), Offset);
+        Rewriter, Loc, DstType, Adaptor.getInsert(), ClampedOffset);
     // L263 fix: `Insert` is a full-width operand whose bits above the
     // `Count`-wide field being inserted are unspecified by the SPIR-V spec
     // (only its low `Count` bits are meaningful) -- so `InsertShiftedByOffset`
@@ -2359,11 +2405,24 @@ public:
         mlir::LLVM::AddOp::create(Rewriter, Loc, DstType, Count, Offset);
     mlir::Value AmountToShiftLeft = mlir::LLVM::SubOp::create(
         Rewriter, Loc, DstType, Size, CountPlusOffset);
+    // (ENV6(c)(2)(a)) `AmountToShiftLeft`/`AmountToShiftRight` are both
+    // derived arithmetically from `Offset`, so an out-of-range (spec-legal)
+    // `Offset` can make either land outside `[0, Size)` just as easily as
+    // using `Offset` itself as a shift amount directly would (see
+    // `clampBitFieldShiftAmount`'s own comment) -- clamp both before they
+    // ever reach an `llvm.shl`/`llvm.ashr`. This is in addition to (not a
+    // replacement for) the existing `Count == 0` select below, which
+    // overrides the *result* rather than the shift amount for that one
+    // case; clamping here keeps every other out-of-range `Offset`/`Count`
+    // combination from ever computing a poison intermediate shift amount
+    // in the first place.
+    mlir::Value ClampedAmountToShiftLeft =
+        clampBitFieldShiftAmount(Rewriter, Loc, DstType, AmountToShiftLeft);
     mlir::Value BaseShiftedLeft = mlir::LLVM::ShlOp::create(
-        Rewriter, Loc, DstType, Adaptor.getBase(), AmountToShiftLeft);
+        Rewriter, Loc, DstType, Adaptor.getBase(), ClampedAmountToShiftLeft);
 
     mlir::Value AmountToShiftRight = mlir::LLVM::AddOp::create(
-        Rewriter, Loc, DstType, Offset, AmountToShiftLeft);
+        Rewriter, Loc, DstType, Offset, ClampedAmountToShiftLeft);
     // L263 fix: per the SPIR-V/GLSL spec, `Count == 0` must yield a result of
     // `0`, but `AmountToShiftRight` reduces to exactly `Size` whenever
     // `Count == 0` (`Offset + (Size - (0 + Offset)) == Size`) regardless of
@@ -2377,7 +2436,8 @@ public:
         Rewriter, Loc, getBoolTypeLike(DstType), mlir::LLVM::ICmpPredicate::eq,
         Count, Zero);
     mlir::Value SafeAmountToShiftRight = mlir::LLVM::SelectOp::create(
-        Rewriter, Loc, CountIsZero, Zero, AmountToShiftRight);
+        Rewriter, Loc, CountIsZero, Zero,
+        clampBitFieldShiftAmount(Rewriter, Loc, DstType, AmountToShiftRight));
     mlir::Value ExtractedBits = mlir::LLVM::AShrOp::create(
         Rewriter, Loc, DstType, BaseShiftedLeft, SafeAmountToShiftRight);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::SelectOp>(Op, DstType, CountIsZero,
@@ -2390,6 +2450,20 @@ public:
 /// why this overrides MLIR's own pattern. Mirrors upstream's own
 /// mask-and-shift construction verbatim: shift `Base` right by `Offset`,
 /// then mask off everything above bit `Count - 1`.
+///
+/// (ENV6(c)(2)(a)) `Offset` itself must be clamped
+/// (`clampBitFieldShiftAmount`) before it is ever used as the `llvm.lshr`
+/// shift amount below: `Offset` is "always consumed as an unsigned value"
+/// per the SPIR-V spec, so a negative-literal `Offset` (spec-legal --
+/// `dEQP-VK.graphicsfuzz.cov-bitfieldExtract-undefined`'s own
+/// `bitfieldExtract(a, -1, 1)`) is already `>= Size` once reinterpreted
+/// unsigned, making the unclamped `llvm.lshr` below poison rather than
+/// merely the spec-sanctioned "undefined result" value this op's result is
+/// otherwise allowed to be -- see `clampBitFieldShiftAmount`'s own comment
+/// for the full mechanism (a poisoned branch condition several
+/// instructions downstream silently collapsing this op's entire shader
+/// entry point to `unreachable`, with no diagnostic at any point in the
+/// pipeline).
 class BitFieldUExtractPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::BitFieldUExtractOp> {
 public:
@@ -2408,11 +2482,13 @@ public:
         Rewriter, Loc, Adaptor.getOffset(), DstType);
     mlir::Value Count = processBitFieldCountOrOffset(Rewriter, Loc,
                                                      Adaptor.getCount(), DstType);
+    mlir::Value ClampedOffset =
+        clampBitFieldShiftAmount(Rewriter, Loc, DstType, Offset);
 
     mlir::Value Mask = createBitFieldLowMask(Rewriter, Loc, DstType, Count);
 
     mlir::Value ShiftedBase = mlir::LLVM::LShrOp::create(
-        Rewriter, Loc, DstType, Adaptor.getBase(), Offset);
+        Rewriter, Loc, DstType, Adaptor.getBase(), ClampedOffset);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::AndOp>(Op, DstType, ShiftedBase,
                                                    Mask);
     return mlir::success();
