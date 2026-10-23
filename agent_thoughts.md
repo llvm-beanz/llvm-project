@@ -130327,3 +130327,78 @@ No Vulkan CTS corpus re-run this session (no functional code change landed). No 
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: ENV6(c)(2)(o) seventh attempt — direction (b) partially works, unmasks a second bug
+
+**Fastest next concrete action** (under two minutes): read `ENV6(c)(2)(o)`'s
+latest roadmap paragraph, then open `/tmp/env6c2o_attempt7/attempt7-chaingate-stayinloop.patch`
+and `env6c2o_fixed_dump.log` — don't re-derive, the fix direction is confirmed
+sound, only the second unmasked bug needs solving.
+
+## What I did
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. ✅
+2. Committed to direction (b) per the prior session's instruction: extend
+   `L377(a)`'s repair matcher with a third case.
+3. Re-derived a fresh trace (always required — this bug's shape shifts across
+   rebuilds). Confirmed shape: `CheckBlock=loop.exit.guard120`,
+   `CheckExit->StayInLoop` has 2 real predecessors — `CheckBlock` itself
+   (self-loop) and `.Flow227_crit_edge` (a "pure glue" ancestor block reached
+   via the known "double peel" mechanism).
+4. **Key design insight**: the existing `recognizeUniformChainGateMergeBypass`
+   merge-phi machinery is reusable verbatim by setting
+   `ChainGateMergeBlock = CheckExit->StayInLoop` directly — no need to design a
+   new repair mechanism from scratch.
+5. Implemented it. First build: verifier failure
+   (`PHI node entries do not match predecessors!`). Root cause: the reused
+   code unconditionally labels one incoming edge `CheckExit->StayInLoop`
+   (correct for its *original* use case, where the merge block is downstream
+   of `StayInLoop`) — but here `ChainGateMergeBlock IS StayInLoop`, so that
+   label is self-referential nonsense. **Fixed**: pick `CheckBlock` as the
+   label instead, when `ChainGateMergeBlock == CheckExit->StayInLoop`.
+6. Rebuilt. This got the repro **past the original bailout for the first time
+   across all 7 attempts** on this bug. 🎉 But:
+7. **New problem found**: a *second*, structurally identical dominance failure
+   appeared elsewhere in the same function (`Flow237`/`.Flow237_crit_edge`
+   pair), previously masked because the pass always aborted at the first
+   occurrence. Confirmed via `git stash` A/B this is not a fix-introduced
+   regression — it's a second instance of the same bug family, only reachable
+   once the first is resolved.
+8. Given this makes the fix **not yet sufficient to produce valid IR
+   end-to-end**, reverted all code changes (`git diff --stat` empty).
+   Preserved the diff and all debug dumps in `/tmp/env6c2o_attempt7/` for the
+   next session.
+9. Updated the `ENV6(c)(2)(o)` roadmap entry with full findings (what's fixed,
+   what's not, exact file paths to resume from).
+
+## Why I stopped here
+
+The matcher+label-fix is a real, verified-sound piece of progress (first time
+past the bailout in 7 attempts), but committing code that still produces
+invalid IR on the standing repro would be a regression (clean bailout → opt
+verifier crash), which violates "preserve existing behavior." No code was
+landed this session.
+
+## Next steps
+
+1. **`ENV6(c)(2)(o)`** (still needs its own full session): re-apply
+   `/tmp/env6c2o_attempt7/attempt7-chaingate-stayinloop.patch` (known-good as
+   far as it goes), then investigate why the matcher only fires once per
+   function — likely needs to iterate until no more `StayInLoop`-extra-predecessor
+   shapes remain, OR the `Flow237` occurrence has a subtly different shape that
+   needs its own case. Do not re-derive the trace from scratch — the shape at
+   `Flow227`/`StayInLoop` is now confirmed stable and solved; only `Flow237` is
+   open.
+2. **`ENV6(c)(2)(l)`** (small audit, down to 2 unaudited call sites): unchanged,
+   not started this session.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
+   architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
+   unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
+   for many sessions.
+
+No CTS re-run this session (no code landed, so no behavior change to
+re-measure) — `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` untouched, consistent with "nothing shipped."
