@@ -129990,3 +129990,53 @@ The full-corpus re-run turned up `cov-two-nested-loops-switch-case-matrix-array-
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(a)` remainder resolved -- two stacked `Linearize.cpp` bugs, 5 of 7 cases now Pass, 1 left
+
+`vulkaninfo --summary | grep deviceName`: **confirmed `FeMe CPU Vulkan Device`** (start and end of session).
+
+**Done.** Found and fixed two distinct, stacked bugs behind `cov-basic-block-discard-in-function` (and incidentally 4 more cases). `ENV6(c)(2)(a)`'s 7-case bucket is now down to 1 case with its own separate, not-yet-investigated root cause (`cov-nested-structs-function-set-inner-struct-field-return`, broken out as `ENV6(c)(2)(n)`). Full graphicsfuzz corpus: 22 Pass (up from 17), zero regressions.
+
+## What broke it, in one sentence each
+
+1. **Mask corruption**: a uniform `discard`-guard diamond sitting directly in `Header` (`if (x == 10) discard;`) wasn't flattened with a proper per-arm mask merge before the "promoted-Latch general fallback" masking path's naive flat walk, so the `discard` in one arm permanently corrupted the loop's *shared* mask to a compile-time-constant `false` even though that arm could never actually fire for the real shader.
+2. **Off-by-one freeze**: once bug 1 was fixed, the case still failed -- rendering the wrong uniform color. `freezeLoopCarriedValues`'s `BodyMask` was fed only the divergent-discard liveness mask, never combined with `Latch`'s own separate uniform natural-trip-count condition, so an after-the-loop-exit value read landed one iteration ahead of the true final value.
+
+## How I found it
+
+1. Picked `cov-basic-block-discard-in-function` first of the 3 remaining unexplored cases (name genuinely predicted the cause this time).
+2. Dumped real IR (`FEME_DUMP_IR_PRELINEARIZE=1`), built a standalone `feme-opt` repro, confirmed `call i1 @feme.cpu.mask.any(i1 false)` -- the mask corruption, bug 1.
+3. Traced the shader's real GLSL semantics from the `.amber` source comment (`do { a = func(b); b++; } while (b < 4); if (a == 3) red; else black;`) and fixed bug 1 first.
+4. Re-ran the real `deqp-vk` case: still `Fail`, now wrong-color not all-black. Hand-traced the IR's `.frozen`/`.frozen.shadow` tracking across all 4 loop iterations algebraically and found the after-loop value landed at `4` not `3` -- bug 2.
+5. Fixed bug 2 via a new `closeLatch` `OutPerLaneContinue` out-parameter, scoped to the single relevant call site.
+
+## Commits (6, in order)
+
+1. `[feme] Fix two stacked Linearize.cpp bugs in promoted-Latch loop masking` -- the actual fix (both bugs, interleaved in the same function; splitting further would create non-buildable intermediate commits).
+2. `[feme] Add regression test for promoted-Latch header-diamond mask fix` -- bug 1's lit test.
+3. `[feme] Add regression test for off-by-one loop-carried-value freeze fix` -- bug 2's lit test, isolated from bug 1 entirely (a plain uniform loop with no discard), plus one pre-existing test's `CHECK-NEXT` relaxed to `CHECK`.
+4. `[feme] Update Roadmap/VulkanCTSReport for ENV6(c)(2)(a) resolution` -- docs.
+5. `[feme] Document promoted-Latch masking gotchas in .instructions.md` -- lessons for future sessions.
+6. This entry (final commit).
+
+## Verification
+
+- Both new lit tests confirmed to fail (`git stash`/rebuild round-trip) without their respective fix, pass with it.
+- `check-feme`: 3872/3876 Passed, 4 Unsupported, 0 regressions.
+- Real `deqp-vk`, proper before/after baseline diff (`git stash` vs. fix, both through the real ICD, excluding the still-hanging `ENV6(c)(2)(m)` case): 17 Pass -> 22 Pass / 88 Fail -> 83 Fail, zero regressions. 5 newly-passing: `cov-basic-block-discard-in-function`, `cov-wrap-op-kill-for-loop` (both targeted) plus 3 incidental (`cov-color-output-undefined-in-unexecuted-branch`, `cov-fragcoord-loop-limit-negative-decrease-sum-first-iteration`, `cov-global-loop-counter-texture-sample-loop-condition-set-array-element`).
+
+## Scope note
+
+Both fixes touch only the one general-fallback, non-`LatchDivergent` call site. The file's other 3 `closeLatch`/`freezeLoopCarriedValues` call sites (used by already-separately-tested paths, e.g. the Mandelbrot-validated `HeaderDivergent=true` branch) were deliberately left untouched -- worth an audit in a future session (see next steps).
+
+## Next steps
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(n)` and run `cov-nested-structs-function-set-inner-struct-field-return` with `FEME_VULKAN_LOG_CREATION_ERRORS=1`/`FEME_DUMP_IR_PRELINEARIZE=1` to get its first diagnostic/IR dump -- no theory yet.
+
+1. **`ENV6(c)(2)(n)`** (1 case, small session): `cov-nested-structs-function-set-inner-struct-field-return`'s own confirmed-separate root cause, not yet investigated at all.
+2. **Audit the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites** (small-to-medium session): check whether they have a similar latent `BodyMask`-vs-`NaturalContinue` gap, now that the bug class from this session is understood -- no known failing case yet, a preventive audit.
+3. **`ENV6(c)(2)(m)`** (needs its own session): the `cov-two-nested-loops-switch-case-matrix-array-increment` runtime hang, found two sessions ago, still unstarted. Use `ENV6(c)(2)(k)`'s own proven methodology: standalone non-`deqp-vk` repro first.
+4. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+5. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+
+Lower priority, unchanged for many sessions: `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases); offload-test-suite upstreaming (3 patches, blocked on push access).
