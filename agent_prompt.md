@@ -69,24 +69,27 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`ENV6(c)(2)(o)`** (still needs its own full session): re-apply
-   `/tmp/env6c2o_attempt7/attempt7-chaingate-stayinloop.patch` (known-good as
-   far as it goes), then investigate why the matcher only fires once per
-   function — likely needs to iterate until no more `StayInLoop`-extra-predecessor
-   shapes remain, OR the `Flow237` occurrence has a subtly different shape that
-   needs its own case. Do not re-derive the trace from scratch — the shape at
-   `Flow227`/`StayInLoop` is now confirmed stable and solved; only `Flow237` is
-   open.
-2. **`ENV6(c)(2)(l)`** (small audit, down to 2 unaudited call sites): unchanged,
-   not started this session.
-3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+1. **`feme-cpu-simdize`'s new residual on `cov-two-nested-loops-switch-case-matrix-array-increment`** (new, ~1 session): the case now reaches
+   simdize and fails there with "divergent branch ... did not remove it, or
+   produced a shape this pass cannot widen." Start from a fresh IR dump for
+   this exact case (post-linearize, pre-simdize) rather than reusing
+   `/tmp/env6c2m/full_module.ll` verbatim — the new `.o.merge` block changes
+   the shape simdize now sees.
+2. **`ENV6(c)(2)(l)`** (small audit, ~30 min): check the remaining 2
+   `closeLatch`/`freezeLoopCarriedValues` call sites for a similar latent
+   `BodyMask`-vs-`NaturalContinue` gap. Not started this session either —
+   deprioritized in favor of finishing `(o)` end-to-end.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not started.
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
-   architecture efforts, not quick fixes.
+   architecture efforts.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
    unchanged for many sessions.
-6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
-   for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access,
+   unchanged for many sessions.
 
-No CTS re-run this session (no code landed, so no behavior change to
-re-measure) — `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
-`VulkanExtensionInventory.md` untouched, consistent with "nothing shipped."
+**Fastest next concrete action (under two minutes)**: open
+`feme/docs/VulkanCTSReport.md`'s newest "Update" section (this session's) and
+`ENV6(c)(2)(m)`'s roadmap entry, then dump
+`cov-two-nested-loops-switch-case-matrix-array-increment`'s post-linearize IR
+fresh (`FEME_DUMP_IR_POSTOPT=1`, per `.instructions.md`) to find the specific
+branch `feme-cpu-simdize` considers unremoved.
