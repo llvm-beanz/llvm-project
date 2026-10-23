@@ -568,24 +568,64 @@ static bool isResourceOrImageLoad(const CallInst *CI) {
 /// reading a resource whose mask only becomes genuinely per-lane once
 /// this cycle's own body mask-ops (a *separate* resource load elsewhere
 /// in the loop) force `CycleNeedsRealMasking` regardless.
-static bool dependsOnResourceOrImageLoadInCycle(Value *V, CycleRef C,
-                                                CycleInfo &CI,
-                                                SmallPtrSetImpl<Value *> &Visited) {
+///
+/// \p AlsoCheckAncestorCycles (Roadmap ENV6(c)(2)(r), default `false` --
+/// every pre-existing call site deliberately keeps the original,
+/// narrower in-cycle-only behavior; only a new, tightly-scoped
+/// `linearizeCycle` check opts into this) additionally recognizes a
+/// resource/image load sitting in some *ancestor* cycle that strictly
+/// contains \p C (`CI.contains(BBCycle, C)`, non-strict -- true for
+/// `BBCycle == C` too, already covered above, or any cycle properly
+/// containing it). This matters because `LoopLinearizer::run` processes
+/// cycles in post-order: every descendant of \p C is fully attempted
+/// (and, if it has any mask-affecting op, fully mask-narrowed) *before*
+/// \p C itself is, but every *ancestor* of \p C is instead attempted
+/// strictly *after* it. A resource/image load in such an ancestor's own
+/// body is therefore not yet mask-narrowed at the point this prediction
+/// runs for \p C -- it still looks exactly as uniform/constant-masked as
+/// one that never gets touched at all -- but it is not safe to assume it
+/// stays that way: the ancestor's own later masking can narrow that same
+/// load's mask to something genuinely divergent, which would otherwise
+/// leave \p C's own exit check silently stale once `feme-cpu-simdize`
+/// freshly reclassifies it against the fully-processed module. Excluding
+/// a *descendant* (child) cycle's own loads (not reachable here anyway,
+/// unless \p V happens to flow through one of its already-linearized
+/// results, in which case that result is just an ordinary operand this
+/// walk already traverses) and unrelated sibling cycles' own loads is
+/// deliberate: both are either already fully settled by post-order
+/// (descendants) or structurally unable to feed \p C's own exit check
+/// without passing through a block \p C itself or some shared ancestor
+/// already dominates (siblings) -- see
+/// `GenericCycleInfo::contains(CycleRef, CycleRef)` for the "does Outer
+/// contain Inner" query this relies on. Found reducing
+/// `cov-two-nested-loops-switch-case-matrix-array-increment`'s own
+/// `feme-cpu-simdize` residual: the inner loop's own exit check reads a
+/// `phi` fed (among other, genuinely loop-invariant, operands) by a
+/// resource load that sits in the *outer*, enclosing loop's own body,
+/// not the inner loop's own body at all.
+static bool
+dependsOnResourceOrImageLoadInCycle(Value *V, CycleRef C, CycleInfo &CI,
+                                    SmallPtrSetImpl<Value *> &Visited,
+                                    bool AlsoCheckAncestorCycles = false) {
   auto *I = dyn_cast<Instruction>(V);
   if (!I || !Visited.insert(V).second)
     return false;
   if (auto *Call = dyn_cast<CallInst>(I)) {
     if (isResourceOrImageLoad(Call)) {
       BasicBlock *BB = Call->getParent();
+      CycleRef BBCycle = CI.getCycle(BB);
       if (CI.contains(C, BB)) {
-        CycleRef BBCycle = CI.getCycle(BB);
         if (!BBCycle.isValid() || BBCycle == C)
           return true;
+      } else if (AlsoCheckAncestorCycles && BBCycle.isValid() &&
+                CI.contains(BBCycle, C)) {
+        return true;
       }
     }
   }
   for (Value *Op : I->operands())
-    if (dependsOnResourceOrImageLoadInCycle(Op, C, CI, Visited))
+    if (dependsOnResourceOrImageLoadInCycle(Op, C, CI, Visited,
+                                            AlsoCheckAncestorCycles))
       return true;
   return false;
 }
