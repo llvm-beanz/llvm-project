@@ -27,22 +27,26 @@
 // itself, or a load through a chain of `getelementptr`s into it whose
 // indices are all compile-time constants (the common "read one
 // push-constant member" shape a real shader compiles down to), or --
-// roadmap L131 -- the same, except for a *single* index anywhere in that
-// chain that is a runtime-computed (non-constant) value, e.g. a
+// roadmap L131 -- the same, except for one or more indices anywhere in
+// that chain that are a runtime-computed (non-constant) value, e.g. a
 // dynamically-uniform expression a shader uses to index a push-constant
 // array, vector, or matrix column, such as
 // `dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline.
-// dynamic_index_vert`'s `pc.arrType[dynamicIndex]`. A second, independent
-// dynamic index anywhere in the same chain (e.g. a doubly-nested dynamic
-// array access), a dynamic *struct member* index (GLSL/SPIR-V never
-// generates one -- only array/vector/matrix indices are ever
-// runtime-computed), or any other use (a store, a GEP result used as
-// anything but a load or a further GEP), is left entirely alone -- the
-// whole function is skipped, for `feme::cpu::checkSupportedRaisedOps` to
-// reject exactly as if this pass did not exist, rather than partially
-// rewritten. This mirrors `feme::cpu::SPIRVResourceLoweringPass::
-// hasOnlySupportedUses`'s own "leave it alone rather than partially lower
-// it" contract.
+// dynamic_index_vert`'s `pc.arrType[dynamicIndex]`. Roadmap
+// `ENV6(c)(2)(c)`: more than one such dynamic index anywhere in the same
+// chain (e.g. `matrix[dynamicRow][dynamicCol]`, the shape
+// `dEQP-VK.graphicsfuzz.cov-read-matrix-push-constant` compiles down to)
+// is also recognized -- every dynamic term found is folded into a single
+// combined 64-bit byte-offset value (see `visitPushConstantUsers`'s own
+// comment), not just the first one found. A dynamic *struct member*
+// index (GLSL/SPIR-V never generates one -- only array/vector/matrix
+// indices are ever runtime-computed), or any other use (a store, a GEP
+// result used as anything but a load or a further GEP), is left entirely
+// alone -- the whole function is skipped, for
+// `feme::cpu::checkSupportedRaisedOps` to reject exactly as if this pass
+// did not exist, rather than partially rewritten. This mirrors
+// `feme::cpu::SPIRVResourceLoweringPass::hasOnlySupportedUses`'s own
+// "leave it alone rather than partially lower it" contract.
 //
 // roadmap L386: one further shape is recognized -- a `phi` merging two or
 // more push-constant pointers that each resolve (by the same rules as

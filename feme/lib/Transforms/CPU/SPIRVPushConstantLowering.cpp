@@ -164,16 +164,52 @@ bool visitPushConstantUsers(
     APInt ConstantOffset(BitWidth, 0);
     if (!GEP->collectOffset(DL, BitWidth, VariableOffsets, ConstantOffset))
       return false;
-    if (VariableOffsets.size() + (DynamicIndex ? 1 : 0) > 1)
-      return false; // A second, independent dynamic term: out of scope.
 
     uint64_t NewBaseOffset = BaseOffset + ConstantOffset.getZExtValue();
     Value *NewDynamicIndex = DynamicIndex;
     uint64_t NewDynamicStride = DynamicStride;
-    if (!VariableOffsets.empty()) {
-      auto &[Index, Stride] = *VariableOffsets.begin();
-      NewDynamicIndex = Index;
-      NewDynamicStride = Stride.getZExtValue();
+    for (auto &[Index, Stride] : VariableOffsets) {
+      if (!NewDynamicIndex) {
+        NewDynamicIndex = Index;
+        NewDynamicStride = Stride.getZExtValue();
+        continue;
+      }
+      // Roadmap ENV6(c)(2)(c): a *second*, independent dynamic term --
+      // e.g. a `matrix[row][col]` push-constant read's own dynamic
+      // `col` index, found here on top of an already-tracked dynamic
+      // `row` index resolved against an *enclosing* GEP an earlier call
+      // to this same function already walked. Rather than declining
+      // this shape outright (this pass's own prior behavior, which left
+      // the whole access -- and so the global itself -- unconverted,
+      // surfacing only as a `JIT session error: Symbols not found` at
+      // link time, with no earlier diagnostic at all), fold the two
+      // terms into a single combined 64-bit byte-offset value (itself
+      // carried forward with stride 1): `Combined = OldIndex *
+      // OldStride + Index * Stride`, which is arithmetically identical
+      // to the two terms' own separate contributions to the final
+      // address. Built immediately before `GEP` itself, which both
+      // terms already dominate -- `Index` is literally one of `GEP`'s
+      // own operands, and `NewDynamicIndex` was already resolved
+      // against an enclosing GEP this same recursive walk visited
+      // before ever reaching `GEP`, so it necessarily dominates every
+      // further GEP reached from it in valid IR. `GEP` is a real
+      // `GetElementPtrInst`, not a `ConstantExpr`, whenever this branch
+      // runs: a `ConstantExpr` GEP's every operand is itself a
+      // `Constant`, so `VariableOffsets` is always empty for one,
+      // meaning this loop body never executes for it.
+      auto *GEPInst = cast<Instruction>(GEP);
+      IRBuilder<> Builder(GEPInst);
+      Type *I64Ty = Builder.getInt64Ty();
+      Value *OldTerm = Builder.CreateMul(
+          Builder.CreateSExtOrTrunc(NewDynamicIndex, I64Ty),
+          ConstantInt::get(I64Ty, NewDynamicStride), "push_const.dyn_term");
+      Value *NewTerm = Builder.CreateMul(
+          Builder.CreateSExtOrTrunc(Index, I64Ty),
+          ConstantInt::get(I64Ty, Stride.getZExtValue()),
+          "push_const.dyn_term");
+      NewDynamicIndex =
+          Builder.CreateAdd(OldTerm, NewTerm, "push_const.dyn_combined");
+      NewDynamicStride = 1;
     }
     if (!visitPushConstantUsers(GEP, NewBaseOffset, NewDynamicIndex,
                                 NewDynamicStride, F, DL, Loads, PhiEdges,
@@ -190,11 +226,14 @@ bool visitPushConstantUsers(
 /// own runtime range is not known statically, but it can never carry a
 /// load past the end of the single declared array/vector/matrix member
 /// \p BaseOffset itself already pins down (every access this pass
-/// recognizes reaches its dynamic index through exactly one member, per
-/// the file comment's "one independent dynamic term" scope). Falls back to
-/// \p PC's own full declared-type store size if \p PC is not (as it always
-/// is for every real SPIR-V push-constant block, but a unit test may use a
-/// bare scalar or array global directly) a `StructType`.
+/// recognizes -- even one combining more than one dynamic term, per
+/// roadmap `ENV6(c)(2)(c)` -- reaches every one of its dynamic indices
+/// through the *same* single member \p BaseOffset identifies, since
+/// `BaseOffset` itself is never adjusted by any dynamic term, only by
+/// compile-time-constant ones). Falls back to \p PC's own full
+/// declared-type store size if \p PC is not (as it always is for every
+/// real SPIR-V push-constant block, but a unit test may use a bare
+/// scalar or array global directly) a `StructType`.
 uint64_t dynamicAccessMemberEndByte(GlobalVariable *PC, uint64_t BaseOffset,
                                    const DataLayout &DL) {
   Type *ValueTy = PC->getValueType();
