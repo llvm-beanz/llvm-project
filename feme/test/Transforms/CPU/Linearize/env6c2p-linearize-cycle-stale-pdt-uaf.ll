@@ -1,4 +1,4 @@
-; RUN: not feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
+; RUN: feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
 
 ; Roadmap ENV6(c)(2)(p): a real, captured pre-`feme-cpu-linearize` IR
 ; reduction of `graphicsfuzz/cov-two-nested-loops-switch-case-matrix-
@@ -46,15 +46,27 @@
 ;
 ; This test does not assert on the crash itself (inherently
 ; nondeterministic, and this lit test runs without `gdb`/ASLR
-; instrumentation, and in any case this module's own inner cycle shape
-; is independently unsupported -- see `ENV6(c)(2)(o)`, still blocked on
-; a *different*, not-yet-landed fix) -- it instead confirms the pass
-; completes cleanly and emits exactly the expected `ENV6(c)(2)(o)`
-; diagnostic (a pre-fix build could instead abort partway through, under
-; the right allocator-reuse timing, well before ever reaching this
-; diagnostic).
+; instrumentation) -- it instead confirms the pass completes cleanly and
+; produces valid, verifier-clean IR (a pre-`ENV6(c)(2)(p)`-fix build
+; could instead abort partway through, under the right allocator-reuse
+; timing, well before ever reaching that point).
 ;
-; CHECK: error: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'loop.exit.guard120' whose own check is not the sole entry into its 'stay in loop' continuation (e.g. a peeled predecessor bypassing the check directly); unsupported (roadmap milestone 6 deviation)
+; Roadmap ENV6(c)(2)(o): this module's own inner cycle shape -- a
+; "pure glue" predecessor (`peelConstantFlowPredecessorsInCycle`'s own
+; constant-edge peel) landing a second, live, real predecessor directly
+; into `loop.exit.guard120`'s own `CheckExit->StayInLoop` continuation,
+; alongside `CheckBlock`'s own edge -- used to be unsupported here too
+; (this file's own `CHECK` line, before the `ENV6(c)(2)(o)` fix landed,
+; asserted on that diagnostic instead of success). It is now handled by
+; physically restoring `CheckExit->StayInLoop`'s single-entry invariant
+; via `SplitBlockPredecessors`, which this test's own `.o.merge` block
+; below (and `LoopLinearizer::DeferredSplitMergeFixups`'s cross-cycle
+; dominance sweep, needed for the `chaingate.merge.*` phis gated behind
+; `%.Flow227_crit_edge` just below) now confirms end-to-end.
+
+; CHECK: .o.merge:
+; CHECK-NEXT: %.ph = phi i1 [ %.linearized{{[0-9]+}}, %loop.exit.guard120 ], [ poison, %.Flow227_crit_edge ]
+; CHECK: %chaingate.merge.live = phi i1 [ %{{[A-Za-z0-9.]+}}, %loop.exit.guard120 ], [ %{{[A-Za-z0-9.]+}}, %.Flow227_crit_edge ]
 
 ; ModuleID = '<in-memory object>'
 source_filename = "LLVMDialectModule"

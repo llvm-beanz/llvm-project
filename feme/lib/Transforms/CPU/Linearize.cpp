@@ -3707,6 +3707,21 @@ public:
   bool run();
 
 private:
+  /// Roadmap ENV6(c)(2)(o): `SplitBlockPredecessors` migrates
+  /// `CheckExit->StayInLoop`'s own pre-existing phis into the new merge
+  /// block it creates, but has no notion of *other*, not-yet-created
+  /// downstream uses of one of those phis' own per-predecessor operands
+  /// (see the matcher's own comment for the concrete shape this fixes).
+  /// Redirecting such a use the moment the split happens only catches
+  /// uses that already exist then -- a *sibling* cycle's own, otherwise
+  /// entirely unrelated merge-phi construct, processed by a *later*
+  /// `linearizeCycle` call, can create a brand new non-dominated use of
+  /// the same original value afterward. Recorded here (original value,
+  /// its dominating replacement) and swept once, after every cycle in
+  /// `F` has been attempted and `DT` reflects the final CFG, so every
+  /// such use -- whenever it was created -- gets caught.
+  SmallVector<std::pair<Value *, PHINode *>, 4> DeferredSplitMergeFixups;
+
   Function &F;
   DominatorTree &DT;
   PostDominatorTree &PDT;
@@ -7182,7 +7197,157 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // still bailing out, diagnosed, for anything else rather than
     // silently producing invalid IR for a not-yet-understood shape.
     DT.recalculate(F);
+    // Roadmap ENV6(c)(2)(g)/(o): declared here, ahead of the dominance
+    // check just below, so the new `ENV6(c)(2)(o)` case inside it (see
+    // that case's own comment) can set these directly -- shared with the
+    // pre-existing `recognizeUniformChainGateMergeBypass`-based
+    // assignment further below, which only ever fires when `PreRegion`
+    // itself failed and is therefore mutually exclusive with this case
+    // (this case leaves `PreRegion`'s own walk, which never passes
+    // through `CheckExit->StayInLoop` at all, completely unaffected).
+    BasicBlock *ChainGateMergeBlock = nullptr;
+    BasicBlock *ChainGateBypassPred = nullptr;
+    // Roadmap ENV6(c)(2)(o): which predecessor of `ChainGateMergeBlock`
+    // represents "a lane that genuinely ran `CheckBlock`'s own check" --
+    // see the merge-phi insertion site far below for why this cannot
+    // always just be `CheckExit->StayInLoop` itself.
+    BasicBlock *ChainGateMergeCheckPred = nullptr;
     if (!DT.dominates(CheckBlock, CheckExit->StayInLoop)) {
+      // Roadmap ENV6(c)(2)(o): a second, narrower repair case, distinct
+      // from (and checked before) `L377(a)`'s own `ChainGate` case just
+      // below: `peelConstantFlowPredecessorsInCycle` can, for a provably
+      // constant edge, redirect some *other*, pure-glue relay block
+      // directly into `CheckExit->StayInLoop` itself -- not into
+      // `CheckBlock`, and not via a genuinely divergent `ChainGate` --
+      // in parallel with `CheckBlock`'s own edge into the same
+      // continuation. Confirmed via a direct, temporary
+      // `errs()`-predecessor-dump trace against the real
+      // `ENV6(c)(2)(m)`/`(o)` repro (`/tmp/env6c2m/full_module.ll`):
+      // `CheckExit->StayInLoop` gained a second live (`DT.
+      // isReachableFromEntry()`-true, not stale/erased), non-`CheckBlock`
+      // predecessor -- a bare single-instruction relay block whose own
+      // sole predecessor is some earlier point in the same cycle, with
+      // its own terminator rewritten by that double-peel to branch
+      // straight here. Because `peelConstantFlowPredecessorsInCycle`
+      // only ever performs this kind of peel when the bypassed edge is
+      // *provably* going to land on exactly this target, every lane
+      // reaching `CheckExit->StayInLoop` via this second predecessor is,
+      // by construction, guaranteed to have never run `CheckBlock`'s own
+      // check at all this iteration -- exactly the same "never ran the
+      // check" guarantee `recognizeUniformChainGateMergeBypass`'s own
+      // `ChainGateBypassPred` shape already relies on below.
+      //
+      // An eighth-attempt discovery (see the roadmap entry's own history
+      // for the first seven): simply leaving `CheckExit->StayInLoop`
+      // with two real predecessors and patching only the four
+      // mask/relay values this function threads explicitly is *not*
+      // sufficient -- the rest of this pass (in particular
+      // `flattenTaintedBranchesInRegion`'s own generic 2-predecessor
+      // diamond-flatten, and implicitly everything downstream in
+      // `PostRegion`) is built on the invariant that `CheckBlock`
+      // dominates its own continuation, exactly like `L377(a)`'s own
+      // case restores physically below. Verified via a real,
+      // reproduced `verifyModule` dominance failure the first time this
+      // fix was attempted that way (an unrelated switch-dispatch value
+      // computed before the loop no longer dominated a later per-
+      // iteration use once `StayInLoop` silently kept two real
+      // predecessors). Restore the same single-entry invariant here
+      // too, the same way `L377(a)` does, but without needing to prove
+      // the bypass chain is deletable (unlike `L377(a)`'s `ChainGate`,
+      // this predecessor's edge is already fully unconditional -- there
+      // is no real branch left to eliminate, just two edges to merge):
+      // physically insert a new, genuine merge block upstream of
+      // `CheckExit->StayInLoop` via `SplitBlockPredecessors`, redirecting
+      // both `CheckBlock`'s and the bypass predecessor's edges to flow
+      // through it first. This keeps `DT` (and everything computed from
+      // it afterward, including `PreRegion`/`PostRegion` and the generic
+      // diamond-flatten) in exactly the single-entry shape it already
+      // assumes everywhere else -- the *only* 2-real-predecessor block
+      // in the whole repaired region is the new merge block itself,
+      // which this function already knows how to handle correctly via
+      // the pre-existing `ChainGateMergeBlock`/`ChainGateBypassPred`
+      // merge-phi mechanism just below (reused here, as before, by
+      // pointing those two variables at the new block instead of trying
+      // to repurpose `CheckExit->StayInLoop` itself as the merge point).
+      BasicBlock *DirectBypassPred = nullptr;
+      for (BasicBlock *Pred : predecessors(CheckExit->StayInLoop)) {
+        if (Pred == CheckBlock)
+          continue;
+        if (DirectBypassPred) {
+          DirectBypassPred = nullptr; // More than one extra predecessor:
+          break;                     // not this narrow, single-pred shape.
+        }
+        DirectBypassPred = Pred;
+      }
+      // Purity/safety requirements mirror `L377(a)`'s own
+      // `ChainBypassRegion` check just below verbatim (see its own
+      // comment for the full reasoning): a bare, single-instruction
+      // relay with no predecessor of its own besides the single link
+      // feeding it computes nothing live that could be lost by treating
+      // its lanes as "never ran the check".
+      if (DirectBypassPred && DT.isReachableFromEntry(DirectBypassPred) &&
+          CI.contains(C, DirectBypassPred) && DirectBypassPred != Header &&
+          DirectBypassPred != Latch && DirectBypassPred->size() == 1 &&
+          isa<UncondBrInst>(DirectBypassPred->getTerminator()) &&
+          llvm::hasSingleElement(predecessors(DirectBypassPred))) {
+        BasicBlock *MergedEntry = llvm::SplitBlockPredecessors(
+            CheckExit->StayInLoop, {CheckBlock, DirectBypassPred},
+            ".o.merge", &DT);
+        // `SplitBlockPredecessors` only updates `DominatorTree`/`LoopInfo`
+        // (and `LoopInfo` only when given one, which this call does not)
+        // -- it has no notion of this pass's own `CycleInfo`. Register
+        // the new block with it explicitly, or every later
+        // `CI.contains(C, ...)` query that walks through it (e.g.
+        // `collectUniformPassThroughRegion`'s own forward walk computing
+        // `PostRegion` just below) wrongly concludes it has "escaped the
+        // cycle" and bails out -- confirmed via a real, reproduced
+        // `FEME_DEBUG_PASSTHROUGH=1` trace the first time this fix was
+        // attempted without this call.
+        CI.addBlockToCycle(MergedEntry, C);
+        // `SplitBlockPredecessors` only rewrites `CheckExit->StayInLoop`'s
+        // own pre-existing `PHINode`s into new migrated phis here in
+        // `MergedEntry` (named with this utility's own `.ph` suffix
+        // convention) -- it has no notion of, and does not repair, any
+        // *other* downstream use of one of those phis' own original
+        // per-predecessor operands (e.g. a value like `CheckBlock`'s own
+        // `.linearizedNNN` that used to dominate every use because
+        // `CheckBlock` dominated `CheckExit->StayInLoop` directly; now
+        // that `MergedEntry` -- not `CheckBlock` -- is `StayInLoop`'s
+        // sole real predecessor, any such use reachable only via
+        // `ChainGateBypassPred`'s own edge into `MergedEntry` is no
+        // longer dominated). Each migrated phi already names, as its
+        // `CheckBlock`-incoming operand, exactly the value whose other
+        // uses may need redirecting to the phi itself.
+        //
+        // Deferred, not done immediately: a genuinely *later* sibling
+        // cycle's own merge construct (`recognizeUniformChainGateMergeBypass`,
+        // below) can create a brand-new such use of the very same
+        // original value well after this split runs -- confirmed via a
+        // real, reproduced "does not dominate all uses" verifier failure
+        // (on `.linearized533`/`534`/`535`, used downstream by exactly
+        // such a later, otherwise-correct sibling construct) the first
+        // time this redirection was done eagerly here instead. See
+        // `DeferredSplitMergeFixups`'s own comment for where the sweep
+        // actually happens.
+        for (PHINode &MigratedPN : MergedEntry->phis()) {
+          Value *CheckSideVal = MigratedPN.getIncomingValueForBlock(CheckBlock);
+          auto *CheckSideInst = dyn_cast<Instruction>(CheckSideVal);
+          if (!CheckSideInst || CheckSideInst == &MigratedPN)
+            continue;
+          DeferredSplitMergeFixups.emplace_back(CheckSideInst, &MigratedPN);
+        }
+        ChainGateMergeBlock = MergedEntry;
+        ChainGateBypassPred = DirectBypassPred;
+        ChainGateMergeCheckPred = CheckBlock;
+      }
+    }
+    if (ChainGateMergeBlock) {
+      // Resolved by the `ENV6(c)(2)(o)` case just above: nothing further
+      // to do here, `CheckBlock` need not dominate `CheckExit->StayInLoop`
+      // on its own any more -- the merge-phi mechanism further below,
+      // keyed on `ChainGateMergeBlock`/`ChainGateBypassPred`, repairs
+      // every downstream use instead.
+    } else if (!DT.dominates(CheckBlock, CheckExit->StayInLoop)) {
       // Roadmap L377(a): the common, safe shape this is (confirmed via a
       // real IR dump of `dEQP-VK.pipeline.monolithic.image...
       // 127x1_compute`'s own doubly-nested barycentric/degenerate-
@@ -7444,9 +7609,14 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // staying null is the overwhelmingly common case (this shape is rare):
     // every other `PreRegion`/`PostRegion` failure falls straight through
     // to the existing diagnostic exactly as before.
-    BasicBlock *ChainGateMergeBlock = nullptr;
-    BasicBlock *ChainGateBypassPred = nullptr;
-    if (!PreRegion && PostRegion) {
+    //
+    // `ChainGateMergeBlock`/`ChainGateBypassPred` themselves are declared
+    // earlier now (alongside the dominance check above), so the
+    // `ENV6(c)(2)(o)` case there can set them directly; this is purely
+    // an additional, mutually-exclusive way to populate the same two
+    // variables (see that case's own comment for why), not a fresh
+    // declaration.
+    if (!ChainGateMergeBlock && !PreRegion && PostRegion) {
       if (std::optional<ChainGateMergeBypass> ChainGateFix =
               recognizeUniformChainGateMergeBypass(
                   PreRegionStart, CheckBlock, Latch, ExitBlock,
@@ -7454,6 +7624,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         PreRegion = std::move(ChainGateFix->PreRegionBlocks);
         ChainGateMergeBlock = ChainGateFix->MergeBlock;
         ChainGateBypassPred = ChainGateFix->BypassPred;
+        ChainGateMergeCheckPred = CheckExit->StayInLoop;
       }
     }
     if (!PreRegion || !PostRegion) {
@@ -7705,7 +7876,25 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                                RelayCapturedHeaderPhis);
     if (llvm::is_contained(predecessors(ExitBlock), CheckBlock))
       ExitBlock->removePredecessor(CheckBlock, /*KeepOneInputPHIs=*/true);
-    UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
+    // Roadmap ENV6(c)(2)(o): ordinarily `CheckBlock`'s own continuation,
+    // once the check collapses to always-continue, really is
+    // `CheckExit->StayInLoop` directly -- that *is* the single-entry
+    // invariant `recognizeUniformChainGateMergeBypass`'s own case
+    // depends on. But the `ENV6(c)(2)(o)` case above has already
+    // physically redirected `CheckBlock`'s edge through a new
+    // `SplitBlockPredecessors`-inserted block (`ChainGateMergeBlock`,
+    // with `ChainGateMergeCheckPred == CheckBlock`) precisely so that
+    // `CheckExit->StayInLoop` keeps a single real predecessor. Recreating
+    // a direct edge straight to `CheckExit->StayInLoop` here would
+    // silently undo that split and reintroduce the very two-predecessor
+    // shape it exists to remove -- confirmed via a real, reproduced
+    // "phi node does not have one entry per predecessor" verifier
+    // failure the first time this call ignored the split.
+    BasicBlock *CheckBlockContinuation =
+        (ChainGateMergeBlock && ChainGateMergeCheckPred == CheckBlock)
+            ? ChainGateMergeBlock
+            : CheckExit->StayInLoop;
+    UncondBrInst::Create(CheckBlockContinuation, CheckExit->Br->getIterator());
     CheckExit->Br->eraseFromParent();
 
     // Roadmap ENV6(c)(2)(g): `MasksAfterCheck`/`ExitedViaCheckNext` only
@@ -7738,6 +7927,19 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // edge).
     Value *EffectiveDivergedViaCheckThisIter = DivergedViaCheckThisIter;
     if (ChainGateMergeBlock) {
+      // Roadmap ENV6(c)(2)(o): in the ordinary (`recognizeUniformChainGateMergeBypass`)
+      // case, `ChainGateMergeBlock` is some block strictly downstream of
+      // `CheckExit->StayInLoop`, which really is one of its two real
+      // predecessors (`ChainGateMergeCheckPred`). The `ENV6(c)(2)(o)`
+      // case above instead sets `ChainGateMergeBlock` to a brand-new
+      // `SplitBlockPredecessors`-inserted block whose two real
+      // predecessors are `CheckBlock` and `ChainGateBypassPred` --
+      // `ChainGateMergeCheckPred` is `CheckBlock` for that case. Using
+      // `CheckExit->StayInLoop` unconditionally here (an earlier,
+      // reverted draft of this fix) is self-referential nonsense for
+      // the second case and did in fact produce exactly the "phi node
+      // entries do not match predecessors" verifier failure this
+      // comment is warning against.
       IRBuilder<> MergeBuilder(&*ChainGateMergeBlock->getFirstNonPHIIt());
       PHINode *MergedLive =
           MergeBuilder.CreatePHI(I1Ty, 2, "chaingate.merge.live");
@@ -7747,16 +7949,16 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
           MergeBuilder.CreatePHI(I1Ty, 2, "chaingate.merge.exited.via.check");
       PHINode *MergedDivergedViaCheckThisIter = MergeBuilder.CreatePHI(
           I1Ty, 2, "chaingate.merge.diverged.via.check.this.iter");
-      MergedLive->addIncoming(MasksAfterCheck.Live, CheckExit->StayInLoop);
+      MergedLive->addIncoming(MasksAfterCheck.Live, ChainGateMergeCheckPred);
       MergedLive->addIncoming(Masks.Live, ChainGateBypassPred);
       MergedSideEffect->addIncoming(MasksAfterCheck.SideEffect,
-                                    CheckExit->StayInLoop);
+                                    ChainGateMergeCheckPred);
       MergedSideEffect->addIncoming(Masks.SideEffect, ChainGateBypassPred);
       MergedExitedViaCheck->addIncoming(ExitedViaCheckNext,
-                                        CheckExit->StayInLoop);
+                                        ChainGateMergeCheckPred);
       MergedExitedViaCheck->addIncoming(ExitedViaCheck, ChainGateBypassPred);
       MergedDivergedViaCheckThisIter->addIncoming(DivergedViaCheckThisIter,
-                                                  CheckExit->StayInLoop);
+                                                  ChainGateMergeCheckPred);
       MergedDivergedViaCheckThisIter->addIncoming(
           ConstantInt::getFalse(I1Ty), ChainGateBypassPred);
       EffectiveMasksAfterCheck = {MergedLive, MergedSideEffect};
@@ -7770,6 +7972,18 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                                  : MasksAfterCheck;
       applyStageMasks(*BB, BlockMasks);
       rethreadNestedEntryMasks(BB, BlockMasks);
+    }
+    // Roadmap ENV6(c)(2)(o): the `recognizeUniformChainGateMergeBypass`
+    // case's own `MergeBlock` is always strictly downstream of
+    // `CheckExit->StayInLoop`, i.e. always itself a `PostRegion` member
+    // already handled by the loop just above. The `ENV6(c)(2)(o)` case's
+    // own `SplitBlockPredecessors`-inserted block instead sits strictly
+    // *upstream* of `CheckExit->StayInLoop` (the new sole entry into
+    // `PostRegion`, which the loop above never visits) -- apply the same
+    // mask substitution to it explicitly here.
+    if (ChainGateMergeBlock && !PostRegion->contains(ChainGateMergeBlock)) {
+      applyStageMasks(*ChainGateMergeBlock, EffectiveMasksAfterCheck);
+      rethreadNestedEntryMasks(ChainGateMergeBlock, EffectiveMasksAfterCheck);
     }
     // Roadmap L419(w): see the identical `PreRegion` call above.
     if (!flattenTaintedBranchesInRegion(*PostRegion, MasksAfterCheck, C))
@@ -8646,6 +8860,32 @@ bool LoopLinearizer::run() {
   bool Changed = false;
   for (CycleRef C : CI.toplevel_cycles())
     Changed |= linearizeCyclePostOrder(C);
+  // Roadmap ENV6(c)(2)(o): sweep `DeferredSplitMergeFixups` now that every
+  // cycle has had its turn -- see that member's own comment for why this
+  // cannot be done eagerly at each individual split site. `DT` is
+  // recalculated first: many of the cycles just processed erase/insert
+  // blocks of their own (`foldRedundantFlowBlocksInCycle`/
+  // `peelConstantFlowPredecessorsInCycle`/this milestone's own
+  // `SplitBlockPredecessors` calls among them), so the incrementally
+  // `.recalculate()`d `DT` each of those keeps current for its own needs
+  // is not guaranteed to answer a *cross-cycle* dominance question
+  // (original value defined in one cycle's own pre-header region, used
+  // by a sibling cycle's own, later-created merge construct) correctly
+  // unless it is given a final, from-scratch recompute against the
+  // fully-linearized CFG first.
+  if (!DeferredSplitMergeFixups.empty()) {
+    DT.recalculate(F);
+    for (auto &FixupPair : DeferredSplitMergeFixups) {
+      Value *OrigVal = FixupPair.first;
+      PHINode *MigratedPN = FixupPair.second;
+      if (OrigVal == MigratedPN)
+        continue;
+      OrigVal->replaceUsesWithIf(MigratedPN, [&](Use &U) {
+        return !DT.dominates(OrigVal, U);
+      });
+    }
+    Changed = true;
+  }
   return Changed;
 }
 
