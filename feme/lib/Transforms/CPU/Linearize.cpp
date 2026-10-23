@@ -4136,8 +4136,37 @@ private:
   /// continue does not resurrect a lane an earlier divergent check already
   /// deactivated. \p Latch's existing terminator is erased; the caller
   /// installs the real backedge branch using the returned condition.
+  ///
+  /// Roadmap ENV6(c)(2)(a): \p OutPerLaneContinue, when non-null, receives
+  /// a *per-lane* (not yet `feme.cpu.mask.any`-reduced) "will this lane
+  /// get another round" value -- \p MasksAtLatch.Live conjoined with
+  /// \p Latch's own natural condition (if any), mirroring the returned
+  /// scalar `Continue`'s own construction one step earlier, before the
+  /// group-wide reduction. The returned scalar `Continue` is the right
+  /// shape for the loop's own re-entry branch (a single, group-wide
+  /// decision), but `freezeLoopCarriedValues`'s own `BodyMask` -- "whether
+  /// this specific wide iteration was a real one for a given lane" (see
+  /// its own doc comment) -- needs the per-lane version: a lane whose own
+  /// `MasksAtLatch.Live` never goes false (this cycle's own internal
+  /// divergent check never actually fires for it) still stops getting
+  /// real rounds the instant `Latch`'s own natural, uniform condition
+  /// fails, same as every other lane in the group. Feeding raw
+  /// `MasksAtLatch.Live` to that freeze instead silently keeps selecting
+  /// each loop-carried phi's *next*-round value even on the round whose
+  /// own natural condition is what actually ended the loop, one
+  /// iteration ahead of where every after-the-loop reader expects to
+  /// land (reduced from `dEQP-VK.graphicsfuzz.
+  /// cov-basic-block-discard-in-function`'s own inlined `int func(int x)
+  /// { if (x == 10) discard; return x; }`, called from a `do { a =
+  /// func(b); b++; } while (b < 4);`: `a`'s final, after-the-loop value
+  /// came back one too high, always equal to the loop's own exhausted
+  /// trip count instead of the last value `func` actually returned,
+  /// because `b < 4`'s own natural failure -- not `x == 10`'s divergent
+  /// check, which never fires in this case at all -- is what ends the
+  /// loop).
   Value *closeLatch(BasicBlock *Latch, BasicBlock *Header,
-                    const MaskPair &MasksAtLatch);
+                    const MaskPair &MasksAtLatch,
+                    Value **OutPerLaneContinue = nullptr);
 
   bool linearizeCycle(CycleRef C);
 
@@ -6069,7 +6098,8 @@ Value *LoopLinearizer::createUniformMaskAny(IRBuilderBase &B, Value *Mask,
 }
 
 Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
-                                  const MaskPair &MasksAtLatch) {
+                                  const MaskPair &MasksAtLatch,
+                                  Value **OutPerLaneContinue) {
   auto *NaturalBr = dyn_cast<CondBrInst>(Latch->getTerminator());
   IRBuilder<> B(Latch->getTerminator());
   Value *AnyActive = createUniformMaskAny(B, MasksAtLatch.Live, "loop.any.active");
@@ -6081,11 +6111,18 @@ Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
     if (!ContinueOnTrue)
       NaturalContinue = markUniformIfOperandsAreUniform(
           B.CreateNot(NaturalCond), {NaturalCond});
+    if (OutPerLaneContinue)
+      *OutPerLaneContinue = markUniformIfOperandsAreUniform(
+          B.CreateAnd(MasksAtLatch.Live, NaturalContinue,
+                      "active.latch.natural"),
+          {MasksAtLatch.Live, NaturalContinue});
     Continue = markUniformIfOperandsAreUniform(
         B.CreateAnd(NaturalContinue, AnyActive, "loop.continue"),
         {NaturalContinue, AnyActive});
     NaturalBr->eraseFromParent();
   } else {
+    if (OutPerLaneContinue)
+      *OutPerLaneContinue = MasksAtLatch.Live;
     Continue = AnyActive;
     Latch->getTerminator()->eraseFromParent();
   }
@@ -6775,6 +6812,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   if (::getenv("FEME_DEBUG_LINEARIZE_TRACE")) {
     errs() << "L277TRACE: HeaderDivergent=" << HeaderDivergent
            << " LatchDivergent=" << LatchDivergent
+           << " LatchWasPromoted=" << LatchWasPromoted
+           << " HeaderExit=" << (bool)HeaderExit
+           << " HeaderExit.StayInLoop="
+           << (HeaderExit ? HeaderExit->StayInLoop->getName() : "<null>")
+           << " Latch=" << Latch->getName()
            << " OtherCondBrBlocks=[";
     for (BasicBlock *BB : OtherCondBrBlocks) {
       errs() << BB->getName() << " (divergent="
@@ -8037,6 +8079,94 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // predecessor set -- see that check's own comment for why.
   BasicBlock *BodyRegionStart =
       HeaderDivergent ? HeaderExit->StayInLoop : Header;
+  // Roadmap ENV6(c)(2)(a): `Header` itself can still end in a genuine
+  // two-way uniform branch even when it is *not* the loop's own exit
+  // check (`HeaderExit` null, `HeaderDivergent` false) -- a uniform
+  // internal diamond sitting directly in `Header`, reconverging before
+  // the real exit check further forward (e.g. `cov-basic-block-discard-
+  // in-function`'s own `if (x == 10) discard;` guard, whose real loop
+  // trip-count check is a separate, later block that only becomes
+  // `Latch` after the `LatchWasPromoted` fold above). That diamond must
+  // be flattened with a genuine per-arm mask merge (mirroring
+  // `DiamondFlattener::flatten`'s own uniform-branch handling) before any
+  // mask-affecting call inside it is allowed to narrow `MasksAtLatch`.
+  //
+  // Routing this specific case through `DiamondFlattener`/`flatten`
+  // itself (e.g. via `flattenLoopBodyRegion(Header, Latch, ...)`) is
+  // actively wrong: `flatten`'s own cycle-boundary-detection special case
+  // (`isLoopControlOrHeaderRelayEdge`) treats *any* branch starting at a
+  // cycle's own header specially, chasing forward through relay blocks
+  // to see whether it eventually reaches the loop's real exit edge --
+  // which it does here, several hops forward, via the very block
+  // `LatchWasPromoted` just recovered -- and defers the whole diamond as
+  // an unflattened "cycle boundary" instead of actually processing it,
+  // silently reproducing the original bug (confirmed directly: routing
+  // through `flattenLoopBodyRegion(Header, Latch, ...)` left the discard
+  // call entirely un-narrowed, with the merged `active.live` backedge
+  // value folding to a literal `false` constant and no merge `phi` at
+  // all). This bespoke walk never consults that cycle-header special
+  // case: it only ever applies `applyStageMasks` along each arm's own
+  // plain straight-line chain up to `Header`'s immediate post-dominator,
+  // then merges the two results with an ordinary `phi`, exactly
+  // mirroring `flatten`'s own uniform case but scoped to just this one
+  // diamond. Bails out (leaving `BodyRegionStart` as `Header`, for the
+  // existing `collectUniformPassThroughRegion`/flat-walk fallback just
+  // below to handle exactly as before) for anything more complex than
+  // that -- a further internal branch along either arm, an unbounded or
+  // missing reconvergence, or a reconvergence point with more than two
+  // predecessors -- so no previously-handled, simpler case regresses.
+  if (!HeaderDivergent) {
+    if (auto *HeaderBr = dyn_cast<CondBrInst>(Header->getTerminator())) {
+      BasicBlock *HT = HeaderBr->getSuccessor(0);
+      BasicBlock *HF = HeaderBr->getSuccessor(1);
+      BasicBlock *HM = nullptr;
+      if (DomTreeNodeBase<BasicBlock> *Node = PDT.getNode(Header);
+          Node && Node->getIDom())
+        HM = Node->getIDom()->getBlock();
+      auto ChaseToMerge =
+          [&](BasicBlock *ArmStart, MaskPair ArmMasks) -> std::optional<MaskPair> {
+        BasicBlock *Cur = ArmStart;
+        for (unsigned Depth = 0; Depth != 8; ++Depth) {
+          if (Cur == HM)
+            return ArmMasks;
+          if (!CI.contains(C, Cur) || Cur == Latch || Cur == ExitBlock)
+            return std::nullopt;
+          auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
+          if (!UBr)
+            return std::nullopt; // A further branch: too complex for this
+                                 // bespoke walk; fall back below.
+          applyStageMasks(*Cur, ArmMasks);
+          rethreadNestedEntryMasks(Cur, ArmMasks);
+          Cur = UBr->getSuccessor(0);
+        }
+        return std::nullopt;
+      };
+      if (HM && HM != HT && HM != HF && CI.contains(C, HM) &&
+          HM->hasNPredecessors(2)) {
+        std::optional<MaskPair> TExit = ChaseToMerge(HT, MasksAtLatch);
+        std::optional<MaskPair> FExit = ChaseToMerge(HF, MasksAtLatch);
+        if (TExit && FExit) {
+          auto PredIt = pred_begin(HM);
+          BasicBlock *Pred0 = *PredIt++;
+          BasicBlock *Pred1 = *PredIt;
+          BasicBlock *TPred = DT.dominates(HT, Pred0) ? Pred0 : Pred1;
+          BasicBlock *FPred = TPred == Pred0 ? Pred1 : Pred0;
+          IRBuilder<> MergeBuilder(&*HM->getFirstInsertionPt());
+          PHINode *LivePN = MergeBuilder.CreatePHI(
+              MasksAtLatch.Live->getType(), 2, "header.diamond.live.merge");
+          LivePN->addIncoming(TExit->Live, TPred);
+          LivePN->addIncoming(FExit->Live, FPred);
+          PHINode *SideEffectPN = MergeBuilder.CreatePHI(
+              MasksAtLatch.SideEffect->getType(), 2,
+              "header.diamond.sideeffect.merge");
+          SideEffectPN->addIncoming(TExit->SideEffect, TPred);
+          SideEffectPN->addIncoming(FExit->SideEffect, FPred);
+          MasksAtLatch = {LivePN, SideEffectPN};
+          BodyRegionStart = HM;
+        }
+      }
+    }
+  }
   std::optional<SmallPtrSet<BasicBlock *, 8>> BodyRegion =
       collectUniformPassThroughRegion(BodyRegionStart, Latch, ExitBlock, C,
                                        PeeledFrom);
@@ -8121,15 +8251,80 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // dowhile_trap_fragment`) hung until that rethreading was added here,
   // because that shape actually takes *this* branch, not
   // `DivergentCandidates`.
-  for (BasicBlock *BB : *BodyRegion) {
-    applyStageMasks(*BB, MasksAtLatch);
-    rethreadNestedEntryMasks(BB, MasksAtLatch);
+  //
+  // Roadmap ENV6(c)(2)(a): `BodyRegion`'s own membership test above only
+  // confirms this region has no *genuinely divergent* internal branch --
+  // it says nothing about a *uniform* one (e.g. a uniform discard-guard
+  // `if`/`else` reconverging before `Latch`, which is exactly
+  // `cov-basic-block-discard-in-function`'s own shape: a `func(x)` helper
+  // whose `if (x == 10) discard;` sits in `Header` itself, between it and
+  // a `Latch` promoted from a relay block further down). The naive
+  // per-block walk this replaces applied `MasksAtLatch` to every member
+  // in whatever order `BodyRegion`'s own `SmallPtrSet` happens to
+  // iterate, completely ignoring which arm of such an internal diamond a
+  // lane actually took: a `feme.stage.discard` sitting in only one arm
+  // permanently ANDed `MasksAtLatch.Live` to a compile-time-constant
+  // `false` regardless of the real, preserved branch, discarding every
+  // pixel this loop ever produced (confirmed via a standalone
+  // `feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize`
+  // reduction: a `%mask.any.real = and <4 x i1> zeroinitializer, ...`
+  // after `feme-cpu-simdize`). `DiamondFlattener::flattenLoopBodyRegion`
+  // (already used, identically, by the sibling "uniform loop with mask
+  // ops" branch above for the non-promoted-latch shape) correctly
+  // handles exactly this: it keeps a genuinely uniform branch as real
+  // control flow but PHI-merges each arm's own narrower mask at the
+  // reconvergence point, instead of threading one shared,
+  // unconditionally-narrowed value through the whole region. Try it
+  // first; its own `validate` call only ever speculatively claims blocks
+  // in the shared `MergeVisited` and rolls that claim back on failure
+  // (see its own comment), so falling back to the old, naive per-block
+  // walk on a declined region (e.g. one with some other irreducible
+  // merge shape `collectUniformPassThroughRegion` tolerates but
+  // `flatten`'s own stricter two-predecessor reconvergence check does
+  // not) costs nothing and regresses no previously-supported
+  // straight-line-only shape.
+  auto GetAlreadyLinearizedCycleExitForBody =
+      [&](BasicBlock *ChildHeader) -> BasicBlock * {
+    CycleRef ChildCycle = CI.getCycle(ChildHeader);
+    if (!ChildCycle.isValid() || ChildCycle == C ||
+        !CI.contains(C, ChildHeader))
+      return nullptr;
+    ArrayRef<BasicBlock *> Exits = getExitBlocks(ChildCycle);
+    SmallPtrSet<BasicBlock *, 2> UniqueExits(Exits.begin(), Exits.end());
+    if (UniqueExits.size() != 1)
+      return nullptr; // Multiple exits: not yet supported here.
+    return *UniqueExits.begin();
+  };
+  auto NarrowChildEntryMasksForBody = [&](BasicBlock *ChildHeader,
+                                          const MaskPair &ChildMasks) {
+    rethreadNestedEntryMasks(ChildHeader, ChildMasks);
+  };
+  DiamondFlattener BodyDF(F, DT, PDT, CI, UI, MergeVisited, ResolvedBlocks,
+                         GetAlreadyLinearizedCycleExitForBody,
+                         NarrowChildEntryMasksForBody);
+  if (std::optional<MaskPair> FlattenedMasks = BodyDF.flattenLoopBodyRegion(
+          BodyRegionStart, Latch, MasksAtLatch)) {
+    MasksAtLatch = *FlattenedMasks;
+  } else {
+    for (BasicBlock *BB : *BodyRegion) {
+      applyStageMasks(*BB, MasksAtLatch);
+      rethreadNestedEntryMasks(BB, MasksAtLatch);
+    }
   }
 
   applyStageMasks(*Latch, MasksAtLatch);
   rethreadNestedEntryMasks(Latch, MasksAtLatch);
   MaskPair MasksAfterLatchCheck = MasksAtLatch;
   Value *Continue;
+  // Roadmap ENV6(c)(2)(a): per-lane ("will this lane get another round")
+  // version of `Continue`, for `freezeLoopCarriedValues`'s own `BodyMask`
+  // below -- see `closeLatch`'s own doc comment on `OutPerLaneContinue`
+  // for the full root-cause writeup. Left equal to `MasksAtLatch.Live`
+  // (the pre-existing behavior) whenever `LatchDivergent` is true: that
+  // case's own natural condition (if any) is handled by the dedicated
+  // `LatchExit`/`freezeExitRelayValue` machinery just below instead, not
+  // `closeLatch`.
+  Value *PerLaneContinue = MasksAtLatch.Live;
   if (LatchDivergent) {
     IRBuilder<> B(LatchExit->Br);
     Value *Cond = LatchExit->Cond;
@@ -8194,7 +8389,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // active" so a uniform-false natural exit still wins, and so a
     // uniform-true natural continue does not resurrect a lane the header's
     // divergent check already deactivated.
-    Continue = closeLatch(Latch, Header, MasksAtLatch);
+    Continue = closeLatch(Latch, Header, MasksAtLatch, &PerLaneContinue);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
   }
   // Roadmap H94a/L292: `Latch` just became (or already was) a predecessor
@@ -8324,7 +8519,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   }
 
   freezeLoopCarriedValues(
-      Header, Latch, MasksAtLatch.Live,
+      Header, Latch, PerLaneContinue,
       {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
       [&](const BasicBlock *BB) { return CI.contains(C, BB); },
       SmallVector<PHINode *, 4>(RelayCapturedHeaderPhis.begin(),
