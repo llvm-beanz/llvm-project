@@ -8223,11 +8223,34 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         continue;
       }
       Value *Restored;
-      if (HeaderValue && CheckValue && HeaderValue != CheckValue)
+      if (HeaderValue && CheckValue && HeaderValue != CheckValue) {
+        // Roadmap ENV6(c)(2)(d)/(l): this `select` is built at `Latch`'s
+        // own terminator, i.e. still *inside* the loop (the same reason
+        // the `LatchIdx != -1` branch above and the `else` branch below
+        // both freeze their own `CheckValue` first) -- a non-constant,
+        // freshly recomputed-per-round `CheckValue` needs the identical
+        // sticky-shadow freeze here, or a lane that took this cycle's own
+        // divergent exit on an earlier round reads whichever value
+        // `CheckValue` recomputes on the group's eventual final round
+        // instead of its own. This specific branch (both a `HeaderValue`
+        // and a distinct `CheckValue` present) is exactly the one
+        // `dEQP-VK.graphicsfuzz.spv-stable-pillars-O-op-select-to-op-phi`'s
+        // `reference` variant actually hits at its `Flow._crit_edge` exit
+        // relay merge -- the sibling `else` branch's freeze (added
+        // earlier this session) does not cover it, since `HeaderValue` is
+        // a plain `i1 true` constant there and `CheckValue` is the
+        // genuine per-round `%.linearized` recomputation; confirmed via a
+        // live `deqp-vk` run with `FEME_DUMP_IR_PRESIMD=1` that this
+        // branch, not the `else` branch, is the one actually taken for
+        // that case.
+        CheckValue = freezeExitRelayValue(
+            Header, Latch, CheckValue,
+            [&] { return EffectiveDivergedViaCheckThisIter; },
+            /*OutShadow=*/nullptr, /*ForceShadow=*/true);
         Restored = RelayRestoreBuilder.CreateSelect(
             EffectiveExitedViaCheckNext, CheckValue, HeaderValue,
             PN->getName() + ".exit.merge");
-      else {
+      } else {
         // Roadmap ENV6(c)(2)(d)/(l): mirrors the `LatchIdx != -1` branch's
         // own identical `freezeExitRelayValue` wrap just above -- this
         // `addIncoming` still adds the incoming value for the edge from
@@ -8237,11 +8260,6 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         // freeze, or a lane that took this cycle's own divergent exit on
         // an earlier round reads whichever value `CheckValue` recomputes
         // on the group's eventual final round instead of its own.
-        // Confirmed via `dEQP-VK.graphicsfuzz.spv-stable-pillars-O-op-
-        // select-to-op-phi`'s own `reference` variant, whose
-        // `Flow._crit_edge` exit relay merge hits exactly this branch
-        // with a `CheckValue` that is a fresh per-round `select`, not a
-        // compile-time constant.
         if (CheckValue)
           CheckValue = freezeExitRelayValue(
               Header, Latch, CheckValue,
