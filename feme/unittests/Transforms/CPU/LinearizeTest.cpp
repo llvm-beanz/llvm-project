@@ -4132,4 +4132,84 @@ TEST(LinearizeTest,
          "no-op decline";
 }
 
+// Roadmap ENV6(c)(2)(q): a genuine dual-exit loop -- one separate,
+// genuinely uniform `latch`-resident trip-count check *and* one
+// separate, divergent `body`-level `break`, both originally targeting
+// `exit` directly -- with a loop-carried value (`%v`) read after the
+// loop via a phi (`%v.exit`) that already has its own, independent
+// `latch`-incoming entry before `MergedRelayValues`'s own restore loop
+// runs. Before this fix, that pre-existing `latch`-incoming entry caused
+// the restore loop to unconditionally skip restoring any value this
+// cycle's own divergent check had captured for `%v.exit`, silently
+// discarding it: `%v.exit` collapsed to a bare
+// `phi i32 [ %v.next, %latch ]`, with the `%body`-sourced edge's own
+// captured value vanished with no replacement. See
+// `loop-dual-exit-divergent-check-and-uniform-latch-both-capture-carried-value.ll`
+// for the full root-cause writeup and a 3-round, 4-lane by-hand
+// symbolic trace proving the fix (not merely a single-round select)
+// is required.
+TEST(LinearizeTest,
+     FreezesDivergentCheckCapturedValueAcrossMultipleRoundsForDualExitLoop) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%inc, %latch]
+      %v = phi i32 [0, %entry], [%v.next, %latch]
+      br label %body
+    body:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %break.cond = icmp eq i32 %tid, %i
+      br i1 %break.cond, label %exit, label %latch
+    latch:
+      %v.next = add i32 %v, 1
+      %inc = add i32 %i, 1
+      %loop.cond = icmp slt i32 %inc, %n
+      br i1 %loop.cond, label %header, label %exit
+    exit:
+      %v.exit = phi i32 [%v, %body], [%v.next, %latch]
+      %chk = icmp eq i32 %v.exit, 3
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  BasicBlock *Exit = nullptr;
+  for (BasicBlock &BB : *F)
+    if (BB.getName() == "exit")
+      Exit = &BB;
+  ASSERT_TRUE(Exit);
+  auto *ExitPN = dyn_cast<PHINode>(&Exit->front());
+  ASSERT_TRUE(ExitPN) << "exit's own loop-carried value must still be a phi";
+
+  // The merged value feeding `exit`'s phi must be a `select` that itself
+  // depends on a sticky shadow phi (not a bare, directly-recomputed
+  // loop value) -- confirming the fix's sticky-freeze mechanism, rather
+  // than a flat one-shot `select` that would only be correct for the
+  // group's single longest-running divergence round.
+  ASSERT_EQ(ExitPN->getNumIncomingValues(), 1u);
+  auto *Merge = dyn_cast<SelectInst>(ExitPN->getIncomingValue(0));
+  ASSERT_TRUE(Merge) << "exit's own carried value must be merged via a "
+                        "select, not silently dropped";
+  bool FoundShadowPhi = false;
+  for (Value *Op : {Merge->getTrueValue(), Merge->getFalseValue()})
+    if (auto *SelOp = dyn_cast<SelectInst>(Op))
+      for (Value *InnerOp : {SelOp->getTrueValue(), SelOp->getFalseValue()})
+        if (isa<PHINode>(InnerOp))
+          FoundShadowPhi = true;
+  EXPECT_TRUE(FoundShadowPhi)
+      << "the divergent-check-captured value must be routed through a "
+         "sticky, self-referential shadow phi (freezeExitRelayValue's own "
+         "technique) before being merged against the natural latch value, "
+         "not read fresh every round";
+}
+
 } // namespace

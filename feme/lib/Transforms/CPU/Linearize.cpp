@@ -1304,12 +1304,28 @@ static bool feedsInLoopBranchCondition(
 /// directly, rather than reading \p Latch's own `Frozen` result (which
 /// does *not* dominate such a predecessor whenever it is reached without
 /// ever passing through \p Latch at all).
+///
+/// Roadmap ENV6(c)(2)(q): \p ForceShadow, when true, skips the "already
+/// one of \p Header's own phis" early return above even when \p V is
+/// such a phi. That shortcut is only sound when whatever new use this
+/// function's own caller is about to add is itself *outside* the loop
+/// (so `freezeLoopCarriedValues`'s own `Header->phis()` scan, run later,
+/// will see it and apply its own freeze) -- a caller that instead builds
+/// its new use *inside* the loop (e.g. at \p Latch's own terminator, to
+/// merge against a value already resident there) is invisible to that
+/// later scan (`InLoop(Latch)` is true), so would otherwise silently
+/// keep reading \p V's raw, continually-advancing value on every round
+/// after a lane's own divergent exit instead of the sticky, frozen one
+/// (confirmed incomplete via a multi-round symbolic trace of exactly
+/// this shape).
 static Value *
 freezeExitRelayValue(BasicBlock *Header, BasicBlock *Latch, Value *V,
                      function_ref<Value *()> GetDivergedThisIter,
-                     PHINode **OutShadow = nullptr) {
-  if (auto *PN = dyn_cast<PHINode>(V); PN && PN->getParent() == Header)
-    return V; // `freezeLoopCarriedValues` already freezes this case.
+                     PHINode **OutShadow = nullptr,
+                     bool ForceShadow = false) {
+  if (!ForceShadow)
+    if (auto *PN = dyn_cast<PHINode>(V); PN && PN->getParent() == Header)
+      return V; // `freezeLoopCarriedValues` already freezes this case.
   PHINode *Shadow = PHINode::Create(V->getType(), /*NumReservedValues=*/2,
                                      "exit.relay.shadow");
   Shadow->insertBefore(Header->getFirstNonPHIIt());
@@ -7711,6 +7727,16 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // reached via the check having actually run.
     MaskPair EffectiveMasksAfterCheck = MasksAfterCheck;
     Value *EffectiveExitedViaCheckNext = ExitedViaCheckNext;
+    // Roadmap ENV6(c)(2)(q): the "this iteration only" transition signal
+    // (as opposed to `ExitedViaCheckNext`'s own sticky, OR-accumulated
+    // one) that `freezeExitRelayValue`'s own sticky-shadow technique
+    // needs for the restore loop below. A lane reaching `Latch` via
+    // `ChainGateBypassPred` never ran `CheckBlock`'s own check at all
+    // this round, so it cannot possibly be the round of divergence via
+    // this check -- `false`, not `DivergedViaCheckThisIter` (which is
+    // only defined, and only valid, along `CheckExit->StayInLoop`'s own
+    // edge).
+    Value *EffectiveDivergedViaCheckThisIter = DivergedViaCheckThisIter;
     if (ChainGateMergeBlock) {
       IRBuilder<> MergeBuilder(&*ChainGateMergeBlock->getFirstNonPHIIt());
       PHINode *MergedLive =
@@ -7719,6 +7745,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
           MergeBuilder.CreatePHI(I1Ty, 2, "chaingate.merge.sideeffect");
       PHINode *MergedExitedViaCheck =
           MergeBuilder.CreatePHI(I1Ty, 2, "chaingate.merge.exited.via.check");
+      PHINode *MergedDivergedViaCheckThisIter = MergeBuilder.CreatePHI(
+          I1Ty, 2, "chaingate.merge.diverged.via.check.this.iter");
       MergedLive->addIncoming(MasksAfterCheck.Live, CheckExit->StayInLoop);
       MergedLive->addIncoming(Masks.Live, ChainGateBypassPred);
       MergedSideEffect->addIncoming(MasksAfterCheck.SideEffect,
@@ -7727,8 +7755,13 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       MergedExitedViaCheck->addIncoming(ExitedViaCheckNext,
                                         CheckExit->StayInLoop);
       MergedExitedViaCheck->addIncoming(ExitedViaCheck, ChainGateBypassPred);
+      MergedDivergedViaCheckThisIter->addIncoming(DivergedViaCheckThisIter,
+                                                  CheckExit->StayInLoop);
+      MergedDivergedViaCheckThisIter->addIncoming(
+          ConstantInt::getFalse(I1Ty), ChainGateBypassPred);
       EffectiveMasksAfterCheck = {MergedLive, MergedSideEffect};
       EffectiveExitedViaCheckNext = MergedExitedViaCheck;
+      EffectiveDivergedViaCheckThisIter = MergedDivergedViaCheckThisIter;
     }
 
     for (BasicBlock *BB : *PostRegion) {
@@ -7747,12 +7780,23 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     Value *Continue = closeLatch(Latch, Header, EffectiveMasksAfterCheck);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
     // Roadmap H94a: `Latch` just became a brand-new predecessor of
-    // `ExitBlock` (unlike the `HeaderDivergent`/`LatchDivergent` cases
+    // `ExitBlock` for a phi with no pre-existing `Latch`-incoming entry
+    // of its own (unlike the `HeaderDivergent`/`LatchDivergent` cases
     // below, where `Latch` already targeted `ExitBlock` directly before
     // this transform) -- restore the value each of `ExitBlock`'s own
     // leftover phis captured above for this edge too, so every one of
     // `ExitBlock`'s phis still lists exactly one entry per real
     // predecessor.
+    //
+    // Roadmap ENV6(c)(2)(q): a phi *can* already have its own, genuinely
+    // independent `Latch`-incoming entry here -- a real dual-exit loop,
+    // with both a separate uniform `Latch`-resident trip-count check and
+    // this cycle's own separate divergent check, each originally
+    // targeting `ExitBlock` directly. That pre-existing value is this
+    // loop's own *natural* round's value, which still needs merging
+    // against whatever this cycle's divergent check captured -- handled
+    // in the loop's own `LatchIdx != -1` branch below, separately from
+    // the brand-new-predecessor case just below it.
     // Roadmap L297: merge each phi's `Header`- and `Check`-sourced
     // captures (see `ExitBlockRelayValues`'s own declaration comment
     // above) rather than letting whichever happens to run first in this
@@ -7766,9 +7810,45 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
     IRBuilder<> RelayRestoreBuilder(Latch->getTerminator());
     for (auto &[PN, HeaderAndCheck] : MergedRelayValues) {
-      if (PN->getBasicBlockIndex(Latch) != -1)
-        continue;
       auto &[HeaderValue, CheckValue] = HeaderAndCheck;
+      if (int LatchIdx = PN->getBasicBlockIndex(Latch); LatchIdx != -1) {
+        // Roadmap ENV6(c)(2)(q): `PN`'s pre-existing `Latch`-incoming
+        // value (`NaturalValue`) is this loop's own natural, un-captured
+        // round value -- merge the captured `CheckValue` into it, but
+        // only after routing `CheckValue` through `freezeExitRelayValue`'s
+        // own sticky, self-referential shadow-`phi` technique first
+        // (`ForceShadow=true`: the `select` built right below is itself
+        // resident in `Latch`, i.e. *inside* the loop, so
+        // `freezeLoopCarriedValues`'s own later `Header->phis()` scan --
+        // which only ever freezes a value some *outside*-the-loop use
+        // reads -- never sees this particular use at all, and would
+        // otherwise leave `CheckValue` itself, if it happens to already
+        // be one of `Header`'s own phis, un-frozen here). Without this,
+        // every lane that takes this cycle's own divergent exit on an
+        // earlier round than the group's eventual natural last round
+        // ends up reading whichever value `CheckValue` recomputes on
+        // that later, final round instead of its own -- confirmed
+        // incomplete for a plain, unfrozen `select` here via a 3-round,
+        // 4-lane by-hand symbolic trace (see this roadmap entry).
+        //
+        // No currently-known failing case exercises *both* a
+        // Header-divergent capture (`HeaderValue`) and an already-
+        // existing `Latch` edge for the same phi at once -- leave that
+        // narrower combination's `HeaderValue` untouched (dropped, as
+        // before) rather than guess at an unverified merge for it.
+        if (!CheckValue)
+          continue;
+        Value *NaturalValue = PN->getIncomingValue(LatchIdx);
+        Value *FrozenCheckValue = freezeExitRelayValue(
+            Header, Latch, CheckValue,
+            [&] { return EffectiveDivergedViaCheckThisIter; },
+            /*OutShadow=*/nullptr, /*ForceShadow=*/true);
+        PN->setIncomingValue(
+            LatchIdx, RelayRestoreBuilder.CreateSelect(
+                          EffectiveExitedViaCheckNext, FrozenCheckValue,
+                          NaturalValue, PN->getName() + ".exit.merge"));
+        continue;
+      }
       Value *Restored;
       if (HeaderValue && CheckValue && HeaderValue != CheckValue)
         Restored = RelayRestoreBuilder.CreateSelect(
