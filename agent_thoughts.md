@@ -130109,3 +130109,43 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed --
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(o)` root-caused and point-fixed, but deliberately reverted -- unblocks a worse, pre-existing crash
+
+**Non-win (the right call)**: found `ENV6(c)(2)(o)`'s real root cause, wrote and tested a working point fix, then **did not land it** because looping the repro proved it deterministically walks into a separate, pre-existing, nondeterministic crash bug instead of actually fixing anything net-positive. A clean "unsupported" diagnostic beats a crash -- that's this codebase's own stated design priority, so the safe move was to revert and document both findings instead of forcing a merge.
+
+**Root cause (corrected from last session's theory)**: last session guessed the gap was "an inner cycle's own exit-guard acting as a `ChainGate` predecessor." Actual cause, found via targeted debug `errs()` + a side debug-symbol build: `CheckBlock`'s own `getUniquePredecessor()` is already `nullptr` (an unrelated earlier fold gave it 2 real preds), so the `ChainGate` matcher never even engages -- wrong premise entirely. The real gap is on the other side: `StayInLoop` still lists a predecessor that an earlier fold already orphaned (zero real predecessors of its own, confirmed via `pred_empty()`), but never erased -- its stale terminator still counts as a live CFG edge to LLVM's `predecessors()`, so the dominance check sees a "predecessor" that can never actually execute.
+
+**Fix tried (works on the target, but unsafe)**: prune/retarget any `StayInLoop` predecessor that's provably unreachable (`pred_empty()`) before the dominance check. Two variants (`DeleteDeadBlock` vs. retarget-to-`unreachable`) both cleared the diagnostic on a single run. Looping 15x showed **both** deterministically crash instead (`assertModuleIsMaterializedImpl` inside `DiamondFlattener::validate`, called from `peelConstantFlowPredecessorsInCycle`) -- the same crash signature that stock, unmodified `feme-opt` already showed nondeterministically (3/23 trials) on this same repro, before any fix was applied. The fix doesn't cause the crash; it just removes the early `return false` that had been incidentally stopping processing before reaching it.
+
+**New reusable technique**: got a full `gdb bt full` with line numbers/locals on a Release+assertions build (no `-g`) by extracting one file's exact compile command from `compile_commands.json`, adding `-g`, `ar`-splicing the resulting `.o` into a copy of the static lib, and relinking via the real `ninja -t commands` link line with that lib swapped in -- avoids a full slow debug rebuild for a one-file investigation.
+
+**Decision**: reverted `Linearize.cpp` to original (`git diff --stat` empty). Documented both the corrected `ENV6(c)(2)(o)` analysis and a new, higher-priority (`P1`) `ENV6(c)(2)(p)` entry for the crash bug itself, with the exact crash line (`Linearize.cpp:5439`) and repro/debug-build methodology, so next session can start immediately.
+
+**New lesson, now in `.instructions.md`**: always loop a repro 10-20+ times, both before touching code (catches pre-existing nondeterministic bugs so they don't get misattributed to your own change) and after a fix (a single clean run isn't proof of safety) -- a fix that "resolves a diagnostic" can just be opening a door to something worse further down the same pipeline.
+
+**No `feme/` source changes land this session** -- the draft fix was reverted before committing. Only docs landed.
+
+**Verification**: `check-feme` (full `ninja -C build check-feme`): 3872/3876 pass (4 unsupported), 0 regressions -- confirms the repo is in a clean, unmodified-equivalent state, consistent with no code change landing.
+
+**CTS corpus**: not re-run this session -- no functional code change landed (the only candidate fix was deliberately reverted), so there is nothing new to measure; the standing "run CTS after each change" instruction is satisfied vacuously (no change made). Noted explicitly in `VulkanCTSReport.md`'s new entry rather than silently skipped.
+
+**Commits** (2, each isolated):
+1. `feme: document ENV6(c)(2)(o) root cause and new ENV6(c)(2)(p) crash` -- `Roadmap.md`, `.instructions.md`, `VulkanCTSReport.md`.
+2. This `agent_thoughts.md` entry.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed -- no feature/extension surface changed.
+
+**Mandatory device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at session start and end.
+
+## Next steps (pick one, all independent)
+
+**Fastest next concrete action** (under two minutes): read the `ENV6(c)(2)(p)` roadmap entry, then re-run the debug-build methodology (`/tmp/Linearize.debug.o`/`/tmp/feme-opt-debug`, regenerate if `Linearize.cpp` has changed since) against `/tmp/env6c2m/full_module.ll` in a loop until the crash reproduces, and start inspecting what's cached/stale in `peelConstantFlowPredecessorsInCycle` around line 5439.
+
+1. **`ENV6(c)(2)(p)`** (new this session, P1, needs its own full session): the newly-discovered nondeterministic crash in `peelConstantFlowPredecessorsInCycle`/`DiamondFlattener::validate`. Higher priority than surrounding P2 items -- it's a real crash, not just an unsupported bailout, and the repro/debug-build methodology are already captured so the next session can start immediately.
+2. **`ENV6(c)(2)(o)`** (blocked on `(p)`): once `(p)` is fixed, re-apply this session's draft point fix (described in the roadmap entry -- a few lines, not saved as a standalone patch) and re-verify with a 15-20-run loop, not a single run.
+3. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites have a similar latent `BodyMask`-vs-`NaturalContinue` gap, now that `L521`'s bug class is understood.
+4. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+5. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+6. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+7. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
