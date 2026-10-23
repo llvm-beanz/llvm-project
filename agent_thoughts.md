@@ -130237,3 +130237,46 @@ No Vulkan CTS corpus re-run this session (no functional code change landed). No 
 4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(o)` fifth/sixth guard attempts both fail (6 straight now) -- auditing `ENV6(c)(2)(l)` surfaces a genuine new bug (`ENV6(c)(2)(q)`)
+
+**Picked up `ENV6(c)(2)(o)` first**, continuing from the prior session's confirmed direct-trace mechanism (the `.Flow227_crit_edge` double-peel via `loop.exit.guard120`). Tried two more guard-function designs at the peel site:
+
+- **5th attempt**: narrowed the 4th attempt's naming-only heuristic to also require the bypassed block's *other* successor to carry real `phi`s (walking one hop past the bare critical-edge relay to where it actually lands first). Fixed a bug in the walk itself, then confirmed via trace it fires correctly on the real bug (`Flow227`/`Flow237`/`Flow239`/`Flow241`). Standalone repro: 20/20 clean. `check-feme`: **same 6 regressions as the 4th attempt**. Root cause: an ordinary loop header *always* has its own induction-variable `phi`s -- "does the landing block have `phi`s at all" can't tell a genuine cross-cycle merge apart from an everyday loop back-edge (e.g. `loop-break-structurized.ll`'s relay lands on the cycle's own header).
+- **6th attempt**: swapped the phi check for "does the landing block lie outside the current cycle `C`" (`!CI.contains(C, RelayTarget)`). Built, but it **never fired at all** on the real repro -- `CI.contains(C, Flow238)` is `true`: by the time the bug-causing peel runs, `Flow238` genuinely is inside the same cycle `C`, disproving an earlier session's "different cycle" theory for this exact call context.
+- Both **reverted cleanly** (`git diff --stat` empty after each).
+
+**Six straight guard-function designs have now failed** (name-only, reachability, this session's two: phi-presence and cycle-membership, plus two more from even earlier sessions) -- a strong enough signal that I stopped trying a 7th and instead documented a concrete structural alternative in the roadmap and `.instructions.md`: precompute, once per function before any peeling begins, a stable global set of "every block that is some cycle's own sole exit-check gateway," and refuse to ever bypass a member of that set -- rather than continuing to infer the property locally and incrementally as peeling proceeds, which keeps producing either too-broad or never-fires guards.
+
+**Pivoted to the lower-priority `ENV6(c)(2)(l)` audit** (checking the other `closeLatch`/`freezeLoopCarriedValues` call site L521's fix didn't touch, for a similar `BodyMask`-vs-`NaturalContinue` gap). Built a synthetic repro: a loop with its own genuine uniform `Latch` trip-count check *plus* a separate divergent body-level break, both originally targeting the same `ExitBlock`, with a loop-carried value read after the loop. Confirmed via `FEME_DEBUG_LINEARIZE_TRACE=1` this reaches exactly the targeted code path.
+
+**Found a different, more serious bug than the one being audited for** (`ENV6(c)(2)(q)`, new): the output silently collapsed the loop-carried value's `body`-sourced edge to nothing -- no select/freeze inserted at all, just the bare `Latch` value. Root cause: the `ExitBlockRelayValues`/`MergedRelayValues` restore loop unconditionally skips restoring any captured value for an `ExitBlock` phi that **already has** a pre-existing `Latch`-incoming entry -- an assumption that's false for a genuine dual-exit loop (two real, independent, pre-existing exit edges to the same block).
+
+**Attempted a fix**: treat the pre-existing `Latch` value as an implicit `NaturalValue`, `select`ing it against the captured `CheckValue` via `EffectiveExitedViaCheckNext`, mirroring the existing `HeaderValue`/`CheckValue` merge logic already in that loop. Looked correct on first inspection (generated IR had a plausible-looking `select`). **But a careful multi-round symbolic hand-trace disproved it**: I manually simulated 4 lanes breaking on rounds 0, 1, 2, and never, across a 3-round loop -- expected per-lane exit values `[0,1,2,3]`, but the fix's logic actually yields `[2,2,2,3]`. The one-shot `select` reads the raw (unfrozen) `Header` phi fresh every round, so an earlier-breaking lane's captured value keeps getting silently overwritten by the phi's own continued (unmasked) advancement on every subsequent round. This needs `freezeExitRelayValue`'s existing sticky, self-referential shadow-phi technique, not a flat per-round `select`. **Reverted** (`git diff --stat` empty).
+
+**Key reusable lesson this session reinforced**: *never trust a single-round check for a masking/freeze fix in this codebase* -- loop-carried scalar arithmetic is NOT masked on its own definition (only side-effecting ops are), so correctness for an early-exited lane depends entirely on explicit freeze mechanisms, and no verifier catches a semantically-wrong-but-structurally-valid result. Always symbolically trace at least 3 rounds with lanes breaking on different rounds before trusting a fix.
+
+**No net code change this session.** `feme/lib/Transforms/CPU/Linearize.cpp` is unmodified (`git diff --stat` empty, confirmed after each of the three revert cycles). Only docs changed.
+
+**New `.instructions.md` lessons** (2 new entries, appended after the existing peel-site-guard lesson): (1) phi-presence and cycle-membership both fail to discriminate this bug's shape from an ordinary legitimate fold, reinforcing that the invariant likely doesn't belong as a local peel-site check at all; (2) a one-shot `select` rebuilt every round is only correct for the group's single longest-running divergence round -- any fix touching a loop-carried value read after the loop needs the sticky self-referential shadow-phi technique, and must be verified via a genuine multi-round symbolic trace, not just a single-round IR inspection.
+
+**Verification**: standalone repro 20/20 clean for both guard attempts before reverting; `check-feme` run showed the 6 regressions from the 5th guard attempt (0 from the 6th, since it never fired); after all three reverts, a final full `ninja check-feme` confirmed the baseline is unchanged and fully green: 3877 discovered, 3873 passed, 4 unsupported, 0 failed.
+
+**Commits** (2, isolated):
+1. `[feme] ENV6(c)(2)(o)/(q): document two more failed guard attempts and a new dual-exit stale-value bug` -- Roadmap.md, VulkanCTSReport.md, .instructions.md.
+2. This `agent_thoughts.md` entry.
+
+No Vulkan CTS corpus re-run this session (no functional code change landed). No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed, confirmed.
+
+**Mandatory device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at session start, mid-session, and end.
+
+## Next steps (pick one, all independent)
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(o)` and read this session's recommendation to abandon the local-guard-at-peel-site strategy in favor of a function-wide precomputed exit-check-gateway set, OR open `ENV6(c)(2)(q)`'s new entry and `/tmp/env6c2l/repro.ll` to start integrating `freezeExitRelayValue`'s sticky-shadow-phi technique into the `ExitBlockRelayValues` restore path.
+
+1. **`ENV6(c)(2)(o)`** (needs its own full session, 6 failed guard attempts so far): do not design a 7th local guard without first seriously weighing the structural alternative (precompute a stable, function-wide set of exit-check-gateway blocks once, before any peeling begins) documented this session in the roadmap and `.instructions.md`.
+2. **`ENV6(c)(2)(q)`** (new, needs its own full session): integrate `freezeExitRelayValue`'s sticky shadow-phi technique into the `ExitBlockRelayValues` restore loop to correctly handle genuine dual-exit loops. Repro already captured at `/tmp/env6c2l/repro.ll` -- no re-derivation needed. The incomplete `select`-based first attempt and its symbolic-trace disproof are fully documented in the roadmap entry; don't repeat it.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
