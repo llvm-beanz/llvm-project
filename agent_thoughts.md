@@ -130577,3 +130577,89 @@ consistent with "nothing shipped."
    unchanged for many sessions.
 6. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+# Session: `ENV6(c)(2)(r)` — two fix attempts built, tested, and reverted; neither safe
+
+**Mandatory check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**Next action (under two minutes)**: open `feme/.instructions.md`'s newest
+section (the one just added, titled "A cycle `LoopLinearizer` decides is
+'genuinely uniform, left alone' can still be *partially, irreversibly*
+mutated...") and `Linearize.cpp` ~L8118's `!HeaderDivergent &&
+!LatchDivergent && !LatchWasPromoted` branch — that's the exact code a
+third fix attempt needs to touch.
+
+## What happened, in order
+
+1. Picked up last session's recommended fix: a deferred end-of-function
+   sweep that re-runs `linearizeCycle` for any cycle recorded as "left
+   alone, genuinely uniform." Built it (new `LeftAloneCycleHeaders`
+   member, retry sweep in `LinearizePass::run`). **Built clean, but never
+   fired**: debug prints showed `LeftAloneCycleHeaders.size()==0` for the
+   real failing case every time.
+2. Dug into why: the real case has `CycleHasMaskOps=true` (an unrelated
+   resource call elsewhere in its own body), so it never takes the full
+   early-bail path the sweep targeted — it takes a *second* sub-path that
+   still leaves `HeaderExit->Br` untouched but *does* mutate the cycle
+   elsewhere (mask phis, `DiamondFlattener`, `addLatchIncoming`) before
+   returning. Reverted attempt 1 — a retry sweep built for "untouched,
+   safe to redo" cycles is actively unsafe for this sub-path anyway.
+3. Found the real mechanism by reading `dependsOnResourceOrImageLoadInCycle`:
+   it already predicts "will this exit check become mask-dependent?" for
+   loads *inside* the cycle, but not for one in a strictly-*ancestor*
+   cycle (not yet processed, not yet mask-narrowed, by this same
+   post-order walk) — exactly our case's shape. Extended it
+   (`CI.contains(BBCycle, C)` check) — a 15-line, surgical, well-targeted
+   change.
+4. Built and reran the repro. **Regression, not a fix**: forcing
+   `HeaderDivergent=true` reroutes the whole cycle through the
+   `CheckBlock`/`PreRegion`/`PostRegion` machinery (built for
+   `conditional_break`'s simpler shape, no other internal branches), which
+   this case's body (a `switch`-case dispatch) can't satisfy —
+   `feme-cpu-linearize` itself now aborts ("has an internal branch in
+   'loop.exit.guard120'... only a uniform pass-through region ... is
+   supported"), a strictly *earlier and worse* failure than the original
+   (which succeeded at `linearize` and only failed later, at `simdize`).
+   Reverted attempt 2 too.
+
+Both attempts are fully reverted — `git diff feme/lib/Transforms/CPU/Linearize.cpp`
+is clean. No code shipped this session for `ENV6(c)(2)(r)`.
+
+## Why no fix landed (root problem, now well understood)
+
+The case's body already linearizes correctly today via the
+`CycleHasMaskOps=true`/`DiamondFlattener`-based sub-path — that machinery
+already tolerates the real body shape. The bug is narrowly that
+`HeaderExit->Br`'s own condition is never touched by that same sub-path.
+Rerouting the *whole* cycle onto the *other* sub-path's machinery
+(`CheckBlock`-based) to get that one branch masked is too blunt — it loses
+the first sub-path's own, already-working body tolerance. A correct fix
+most likely needs to rewrite just `HeaderExit->Br`'s condition in place,
+inside the already-working path, using some form of deferred/forward-
+reference mask value patched in once the ancestor cycle is processed later
+— not yet designed. Full write-up (with the exact trap each attempt hit)
+is in `feme/docs/Roadmap.md`'s `ENV6(c)(2)(r)` entry and a new
+`feme/.instructions.md` section, both updated this session.
+
+## Vulkan CTS / doc updates
+
+None — no code change shipped, so nothing to re-measure.
+`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` untouched.
+
+## Next steps (ranked)
+
+1. **`ENV6(c)(2)(r)`** (own full session): design a true in-place fix for
+   `HeaderExit->Br`'s own condition inside the `CycleHasMaskOps=true` sub-
+   path — likely a forward-reference/fixup value (à la
+   `DeferredSplitMergeFixups`, but for a *value*, not a block) patched in
+   once the ancestor cycle's masking later computes the real narrowed
+   mask. Do not retry either of this session's two reverted directions.
+2. **`ENV6(c)(2)(l)`**: unchanged, two unaudited call sites, no live repro
+   found yet across several sessions — pure watch item.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, still not
+   started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority.
+6. offload-test-suite upstreaming (3 patches): blocked on push access.
