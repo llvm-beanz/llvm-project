@@ -70,26 +70,21 @@ Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
 **Fastest next concrete action** (under two minutes): open
-`/tmp/env6c2k/module2.s`, locate the `addv`/`cmlt` sequence around lines
-625-665 that produces `d13` (the loop-continuation mask), and cross-
-reference it against `/tmp/env6c2k/module2.ll` to find the IR instruction
-it lowers from.
+`feme/docs/Roadmap.md` at `ENV6(c)(2)(a)` and skim the 7 case names in that
+bucket to pick a first reproducer.
 
-1. **Continue `ENV6(c)(2)(k)`** (needs its own session, now with a
-   narrow, specific target): trace `d13`'s IR origin vs. `w23`'s IR
-   origin in `module2.ll`; find where `Linearize`/`SIMDize` should unify
-   the per-variable "still active" condition with the loop's own exit
-   condition for this nested-loop shape but doesn't. Once found, fix and
-   add an IR-level lit-test regression (reduce from `module2.ll`, which is
-   already standalone-compilable -- no end-to-end execution test needed
-   for the fix itself, though the real `deqp-vk` case should still be
-   re-run to confirm the hang is gone).
-2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render
-   bucket, not discard-centric. Investigate fresh.
+1. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket,
+   not discard-centric, untouched since the original triage pass. Best next
+   target -- largest untriaged cluster that isn't a multi-session architecture
+   effort.
+2. **`ENV6(c)(2)(l)`** (new this session, no known failing case, low urgency):
+   audit `FeedsUniformBranch`/`HeaderExitRelayValues`'s constant-only-capture
+   gap for other instances of this session's bug class before assuming it's
+   unreachable.
 3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
-4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
-   multi-session architecture efforts, not a quick fix.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
+   architecture efforts, not quick fixes.
 5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
    unchanged for many sessions.
-6. offload-test-suite upstreaming (3 patches): blocked on push access,
-   unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
+   for many sessions.
