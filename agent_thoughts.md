@@ -130040,3 +130040,39 @@ Both fixes touch only the one general-fallback, non-`LatchDivergent` call site. 
 5. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
 
 Lower priority, unchanged for many sessions: `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases); offload-test-suite upstreaming (3 patches, blocked on push access).
+
+# Session: `ENV6(c)(2)(n)` fixed -- genuine upstream MLIR `CompositeExtractOp::fold` bug, `ENV6(c)(2)(a)` bucket fully closed (7/7)
+
+**Win**: `cov-nested-structs-function-set-inner-struct-field-return` now **Passes**. `ENV6(c)(2)(a)` (the original 7-case all-black-render bucket) is fully closed -- all 7 cases now `Pass`.
+
+**What it was**: not a FeMe bug at all. `mlir::spirv::CompositeExtractOp::fold` (upstream `mlir/lib/Dialect/SPIRV/IR/SPIRVCanonicalization.cpp`) only checked for an *exact* index-list match between a `CompositeExtract` and a feeding `CompositeInsert`. On any mismatch -- including the common case where the extract's index path is a strict prefix of the insert's deeper path -- it unconditionally walked past the insert, silently discarding a real write. This shader built a nested struct, inserted into a doubly-nested field, then read it back via two chained shallow-then-deep extracts; the bug resolved the shallow extract straight through to the pre-insert value, so the loop's carried field never updated, and legal optimization against the resulting degenerate comparison deleted the whole color-selection branch.
+
+**How it was found** (reusable method, now in `.instructions.md`): the usual `FEME_DUMP_IR_PRESPIRV`-vs-later-dump bisection showed the corruption already present in the very first post-translate dump -- before any FeMe pass runs. That means it's in SPIR-V-to-LLVM-dialect conversion itself. Ran `feme-opt --feme-convert-spirv-to-llvm` standalone with `--debug-only=dialect-conversion` and saw `"* Fold {...} -> SUCCESS"` -- a dialect **fold**, not a conversion pattern. Confirmed as genuinely upstream (zero FeMe code) by hand-writing a minimal pure-SPIR-V-dialect `.mlir` snippet and running it through plain `mlir-opt --canonicalize`.
+
+**Fix**: ported `LLVM::ExtractValueOp::fold`'s already-correct 3-case index-overlap classification (exact match / insert-prefix-of-extract -- descend / extract-prefix-of-insert -- stop, don't fold) into the SPIR-V dialect's fold. Landed in its own commit touching only `mlir/` (per the "issue outside FeMe" protocol), with 2 new MLIR lit test cases.
+
+**Verification**:
+1. `check-mlir-dialect-spirv` (54 tests) and `check-mlir-conversion-spirvtollvm` (24 tests): 100% pass.
+2. `check-feme`: 3872/3876 pass, 4 unsupported, 0 regressions.
+3. Real `deqp-vk` case: `Fail` → `Pass`.
+4. 104-case graphicsfuzz corpus (excludes the known `ENV6(c)(2)(m)` hang): 22 Pass / 82 Fail, exactly +1 over the prior session's 21, zero regressions among the other 21.
+
+**Commits** (3, each isolated):
+1. `[mlir][spirv] Fix CompositeExtractOp::fold discarding overlapping inserts` -- upstream fix + test, `mlir/` only.
+2. `feme: close ENV6(c)(2)(n), document upstream MLIR CompositeExtract fix` -- roadmap strikethrough, `VulkanCTSReport.md` entry, `.instructions.md` lesson.
+3. This `agent_thoughts.md` entry.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed -- this is a correctness fix, not a feature/extension change.
+
+**Mandatory device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at both session start and end.
+
+## Next steps (pick one, all independent)
+
+**Fastest next concrete action** (under two minutes): open `feme/docs/Roadmap.md` at `ENV6(c)(2)(m)` and re-read `ENV6(c)(2)(k)`'s own methodology section before starting a standalone (non-`deqp-vk`) repro of the hang.
+
+1. **`ENV6(c)(2)(m)`** (needs its own full session): `cov-two-nested-loops-switch-case-matrix-array-increment`'s runtime hang, found two sessions ago, still unstarted. Use `ENV6(c)(2)(k)`'s own proven methodology: standalone non-`deqp-vk` repro first (CPU-side interpreter trace or manual step-through), `FEME_DUMP_IR_PRELINEARIZE`/`FEME_DEBUG_LINEARIZE_TRACE` next, live-attach register sampling only as a last resort -- avoid triggering the un-killable `deqp-vk` process hang while investigating.
+2. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the other 3 `closeLatch`/`freezeLoopCarriedValues` call sites (left untouched by `L521`'s fix, used by already-separately-tested paths like the Mandelbrot `HeaderDivergent=true` branch) have a similar latent `BodyMask`-vs-`NaturalContinue` gap now that the bug class is understood.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not quick fixes.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
