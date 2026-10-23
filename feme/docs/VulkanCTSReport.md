@@ -10690,3 +10690,77 @@ straight-line-descendant shape. Otherwise unchanged from prior sessions:
 `ENV6(d)` (132 cases, both own multi-session efforts); `ENV5(c)(7)(b)`
 (hull lockstep barrier, 3 cases, lowest priority); offload-test-suite
 upstreaming (3 patches, blocked on push access).
+
+## L526: `ENV6(c)(2)(o)` fifth/sixth guard attempts both fail; `ENV6(c)(2)(q)` new dual-exit stale-value bug found while auditing `L521`
+
+**`ENV6(c)(2)(o)`**: re-confirmed direction (b) (`L377(a)` extension) is
+architecturally hard for this shape (the bypass edge is already
+unconditional by the time dominance fails; the original peel's
+`SSAUpdater` repair already destroyed `CheckBlock`'s lost
+phi-incoming information), so returned to direction (a) (local guard at
+the peel site). Fifth attempt (`peelWouldBypassOwnExitCheckGateway`,
+narrowed to require the bypassed block's other successor to carry real
+`phi`s, walked one hop past the bare critical-edge relay to where it
+actually lands): fired correctly on the real bug and passed the
+standalone repro 20/20, but `check-feme` still showed the identical 6
+regressions as the fourth attempt -- an ordinary loop header's own
+induction-variable `phi`s make "has `phi`s at all" indistinguishable
+from a genuine cross-cycle merge. Sixth attempt (same base, replaced the
+phi check with "does the landing block lie outside the current cycle
+`C`"): built, but the guard never fired at all on the real repro --
+`CI.contains(C, RelayTarget)` returns true, i.e. the bug's own `Flow238`
+is (at the point the bug-causing peel runs) inside the *same* `C`, not a
+different one as an earlier session's pointer-identity check suggested.
+Both reverted cleanly (`git diff --stat` empty after each). Six straight
+guard-function designs (name, reachability, phi-presence, cycle
+membership) have now failed -- see this session's `Roadmap.md`/
+`.instructions.md` updates for the recommended next direction
+(precompute a stable, function-wide set of exit-check-gateway blocks
+once, rather than inferring the property locally per-peel).
+
+**`ENV6(c)(2)(q)` (new)**: picked up the previously-suggested audit of
+the other `closeLatch`/`freezeLoopCarriedValues` call site `L521`'s fix
+did not touch. Built a standalone synthetic repro (a separate, genuinely
+uniform `Latch` trip-count check coexisting with a separate divergent
+body-level break, both targeting the same `ExitBlock`, plus a
+loop-carried value read after the loop) and found a **different**, newly
+discovered bug (not the `BodyMask`-vs-`NaturalContinue` gap originally
+being audited for): the `ExitBlockRelayValues`/`MergedRelayValues`
+restore loop silently drops a captured `Check`-sourced value whenever the
+target `ExitBlock` phi already had its own, independent `Latch`-incoming
+entry before the restore runs -- true for a genuine two-real-exits loop.
+A first fix (treat the pre-existing `Latch` value as an implicit
+`NaturalValue`, `select` it against the captured `CheckValue`) looked
+correct for a single round, but a careful multi-round by-hand symbolic
+trace (4 lanes breaking on different rounds across a 3-round loop)
+exposed it as incomplete: the one-shot `select` reads the raw, unfrozen
+`Header` phi fresh every round, so an earlier-breaking lane's captured
+value keeps getting silently overwritten by the phi's own continued
+advancement in later rounds -- the same "needs a sticky, self-referential
+freeze" problem `freezeExitRelayValue` already solves elsewhere. Reverted
+the incomplete fix (`git diff --stat` empty). No real corpus case is
+currently known to hit this (requires a fairly specific triple
+combination of shapes) -- documented as a confirmed, reproducible
+synthetic bug needing its own full session, not landed as a quick patch.
+
+**No net code changes this session** (both `ENV6(c)(2)(o)` guard
+attempts and the `ENV6(c)(2)(q)` fix attempt were built, tested, and
+reverted). No Vulkan CTS corpus re-run performed (no functional change
+landed). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+changes needed, confirmed.
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start
+and mid-session.
+
+**Next steps**: `ENV6(c)(2)(o)` -- do not attempt a seventh local
+syntactic/semantic guard at the peel site without first seriously
+weighing the "precompute a stable, function-wide exit-check-gateway set"
+alternative (see `.instructions.md`). `ENV6(c)(2)(q)` -- needs
+`freezeExitRelayValue`'s sticky-shadow-phi technique integrated into the
+`ExitBlockRelayValues` restore path; repro saved at `/tmp/env6c2l/repro.ll`.
+Otherwise unchanged: `ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues,
+not started); `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases, both own
+multi-session efforts); `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases,
+lowest priority); offload-test-suite upstreaming (3 patches, blocked on
+push access).
