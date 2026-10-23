@@ -69,25 +69,31 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-**Fastest next concrete action** (under two minutes): read
-`/tmp/env6c2m/linearize_trace.log`'s last ~15 lines alongside `Linearize.cpp`'s
-`L377(a)` comment block (~line 7100) to start designing the third-case extension
-for `ENV6(c)(2)(o)`.
+**Fastest next concrete action** (under two minutes): read the `ENV6(c)(2)(p)`
+roadmap entry, then re-run the debug-build methodology
+(`/tmp/Linearize.debug.o`/`/tmp/feme-opt-debug`, regenerate if `Linearize.cpp`
+has changed since) against `/tmp/env6c2m/full_module.ll` in a loop until the
+crash reproduces, and start inspecting what's cached/stale in
+`peelConstantFlowPredecessorsInCycle` around line 5439.
 
-1. **`ENV6(c)(2)(o)`** (new this session, needs its own full session): design
-   and implement the `L377(a)` matcher extension (or an alternative
-   mask-computation approach) for an inner cycle's own
-   exit-guard-as-`ChainGate`-predecessor shape. Start from `/tmp/env6c2m/` --
-   both the standalone repro and the full trace are already captured, no
-   re-derivation needed.
-2. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the
+1. **`ENV6(c)(2)(p)`** (new this session, P1, needs its own full session): the
+   newly-discovered nondeterministic crash in
+   `peelConstantFlowPredecessorsInCycle`/`DiamondFlattener::validate`. Higher
+   priority than surrounding P2 items -- it's a real crash, not just an
+   unsupported bailout, and the repro/debug-build methodology are already
+   captured so the next session can start immediately.
+2. **`ENV6(c)(2)(o)`** (blocked on `(p)`): once `(p)` is fixed, re-apply this
+   session's draft point fix (described in the roadmap entry -- a few lines, not
+   saved as a standalone patch) and re-verify with a 15-20-run loop, not a
+   single run.
+3. **`ENV6(c)(2)(l)`** (small audit, no known failing case): check whether the
    other 3 `closeLatch`/`freezeLoopCarriedValues` call sites have a similar
    latent `BodyMask`-vs-`NaturalContinue` gap, now that `L521`'s bug class is
    understood.
-3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
-4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
+4. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+5. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session
    architecture efforts, not quick fixes.
-5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
+6. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority,
    unchanged for many sessions.
-6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
+7. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged
    for many sessions.
