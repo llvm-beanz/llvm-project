@@ -32,7 +32,7 @@ template<typename ValueSubClass, typename ItemParentClass>
 /// for a specific function. When used in the body of said function, the
 /// argument of course represents the value of the actual argument that the
 /// function was called with.
-class Argument : public Value, public ilist_node<Argument> {
+class Argument : public Value, public llvm::ilist_node<Argument> {
   virtual void anchor();
   Function *Parent;
 
@@ -44,7 +44,8 @@ public:
   ///
   /// If \p F is specified, the argument is inserted at the end of the argument
   /// list for \p F.
-  explicit Argument(Type *Ty, const Twine &Name = "", Function *F = nullptr);
+  explicit Argument(Type *Ty, const llvm::Twine &Name = "",
+                    Function *F = nullptr);
 
   inline const Function *getParent() const { return Parent; }
   inline       Function *getParent()       { return Parent; }

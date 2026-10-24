@@ -18,10 +18,14 @@
 #include "dxil/IR/TrackingMDRef.h"
 #include "llvm/Support/DataTypes.h"
 
+namespace llvm {
+class raw_ostream;
+} // namespace llvm
+
 namespace dxil {
 
   class LLVMContext;
-  class raw_ostream;
+
   class DILocation;
 
   /// \brief A debug info location.
@@ -118,7 +122,7 @@ namespace dxil {
     void dump() const;
 
     /// \brief prints source location /path/to/file.exe:line:col @[inlined at]
-    void print(raw_ostream &OS) const;
+    void print(llvm::raw_ostream &OS) const;
   };
 
 } // end namespace llvm

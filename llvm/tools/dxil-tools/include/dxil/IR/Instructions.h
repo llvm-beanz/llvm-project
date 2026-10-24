@@ -358,7 +358,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// getAlignment - Return the alignment of the access that is being performed
   ///
@@ -434,7 +434,7 @@ template <>
 struct OperandTraits<StoreInst> : public FixedNumOperandTraits<StoreInst, 2> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(StoreInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(StoreInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                                FenceInst Class
@@ -563,7 +563,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// Set the ordering constraint on this cmpxchg.
   void setSuccessOrdering(AtomicOrdering Ordering) {
@@ -661,7 +661,7 @@ struct OperandTraits<AtomicCmpXchgInst> :
     public FixedNumOperandTraits<AtomicCmpXchgInst, 3> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(AtomicCmpXchgInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(AtomicCmpXchgInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                                AtomicRMWInst Class
@@ -747,7 +747,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// Set the ordering constraint on this RMW.
   void setOrdering(AtomicOrdering Ordering) {
@@ -810,7 +810,7 @@ struct OperandTraits<AtomicRMWInst>
     : public FixedNumOperandTraits<AtomicRMWInst,2> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(AtomicRMWInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(AtomicRMWInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                             GetElementPtrInst Class
@@ -916,7 +916,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   // getType - Overload to return most specific sequential type.
   SequentialType *getType() const {
@@ -1078,9 +1078,7 @@ GetElementPtrInst::GetElementPtrInst(Type *PointeeType, Value *Ptr,
   init(Ptr, IdxList, NameStr);
 }
 
-
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GetElementPtrInst, Value)
-
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GetElementPtrInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                               ICmpInst Class
@@ -1465,7 +1463,7 @@ public:
   }
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// getNumArgOperands - Return the number of call arguments.
   ///
@@ -1715,7 +1713,7 @@ CallInst::CallInst(FunctionType *Ty, Value *Func, ArrayRef<Value *> Args,
 // Note: if you get compile errors about private methods then
 //       please update your code to use the high-level operand
 //       interfaces. See line 943 above.
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CallInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CallInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                               SelectInst Class
@@ -1774,7 +1772,7 @@ public:
   static const char *areInvalidOperands(Value *Cond, Value *True, Value *False);
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   OtherOps getOpcode() const {
     return static_cast<OtherOps>(Instruction::getOpcode());
@@ -1793,7 +1791,7 @@ template <>
 struct OperandTraits<SelectInst> : public FixedNumOperandTraits<SelectInst, 3> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SelectInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SelectInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                                VAArgInst Class
@@ -1877,7 +1875,7 @@ public:
 
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
@@ -1893,7 +1891,7 @@ struct OperandTraits<ExtractElementInst> :
   public FixedNumOperandTraits<ExtractElementInst, 2> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractElementInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractElementInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                                InsertElementInst Class
@@ -1937,7 +1935,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
@@ -1953,7 +1951,7 @@ struct OperandTraits<InsertElementInst> :
   public FixedNumOperandTraits<InsertElementInst, 3> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertElementInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertElementInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                           ShuffleVectorInst Class
@@ -1991,7 +1989,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   Constant *getMask() const {
     return cast<Constant>(getOperand(2));
@@ -2035,7 +2033,7 @@ struct OperandTraits<ShuffleVectorInst> :
   public FixedNumOperandTraits<ShuffleVectorInst, 3> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                                ExtractValueInst Class
@@ -2207,7 +2205,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   typedef const unsigned* idx_iterator;
   inline idx_iterator idx_begin() const { return Indices.begin(); }
@@ -2283,7 +2281,7 @@ InsertValueInst::InsertValueInst(Value *Agg,
   init(Agg, Val, Idxs, NameStr);
 }
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertValueInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertValueInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                               PHINode Class
@@ -2345,7 +2343,7 @@ public:
   }
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   // Block iterator interface. This provides access to the list of incoming
   // basic blocks, which parallels the list of incoming values.
@@ -2487,7 +2485,7 @@ template <>
 struct OperandTraits<PHINode> : public HungoffOperandTraits<2> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(PHINode, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(PHINode, Value)
 
 //===----------------------------------------------------------------------===//
 //                           LandingPadInst Class
@@ -2537,7 +2535,7 @@ public:
                                 const Twine &NameStr, BasicBlock *InsertAtEnd);
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// isCleanup - Return 'true' if this landingpad instruction is a
   /// cleanup. I.e., it should be run when unwinding even if its landing pad
@@ -2589,7 +2587,7 @@ template <>
 struct OperandTraits<LandingPadInst> : public HungoffOperandTraits<1> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(LandingPadInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(LandingPadInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                               ReturnInst Class
@@ -2638,7 +2636,7 @@ public:
   ~ReturnInst() override;
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// Convenience accessor. Returns null if there is no return value.
   Value *getReturnValue() const {
@@ -2664,7 +2662,7 @@ template <>
 struct OperandTraits<ReturnInst> : public VariadicOperandTraits<ReturnInst> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ReturnInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ReturnInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                               BranchInst Class
@@ -2716,7 +2714,7 @@ public:
   }
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   bool isUnconditional() const { return getNumOperands() == 1; }
   bool isConditional()   const { return getNumOperands() == 3; }
@@ -2767,7 +2765,7 @@ template <>
 struct OperandTraits<BranchInst> : public VariadicOperandTraits<BranchInst, 1> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BranchInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BranchInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                               SwitchInst Class
@@ -2939,7 +2937,7 @@ public:
   }
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   // Accessor Methods for Switch stmt
   Value *getCondition() const { return getOperand(0); }
@@ -3076,8 +3074,7 @@ template <>
 struct OperandTraits<SwitchInst> : public HungoffOperandTraits<2> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SwitchInst, Value)
-
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SwitchInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                             IndirectBrInst Class
@@ -3127,7 +3124,7 @@ public:
   }
 
   /// Provide fast operand accessors.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   // Accessor Methods for IndirectBrInst instruction.
   Value *getAddress() { return getOperand(0); }
@@ -3176,8 +3173,7 @@ template <>
 struct OperandTraits<IndirectBrInst> : public HungoffOperandTraits<1> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(IndirectBrInst, Value)
-
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(IndirectBrInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                               InvokeInst Class
@@ -3253,7 +3249,7 @@ public:
   }
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   FunctionType *getFunctionType() const { return FTy; }
 
@@ -3514,7 +3510,7 @@ InvokeInst::InvokeInst(Value *Func,
   init(Func, IfNormal, IfException, Args, NameStr);
 }
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InvokeInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InvokeInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                              ResumeInst Class
@@ -3542,7 +3538,7 @@ public:
   }
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// Convenience accessor.
   Value *getValue() const { return Op<0>(); }
@@ -3567,7 +3563,7 @@ struct OperandTraits<ResumeInst> :
     public FixedNumOperandTraits<ResumeInst, 1> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ResumeInst, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ResumeInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                           UnreachableInst Class

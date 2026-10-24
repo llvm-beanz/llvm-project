@@ -19,6 +19,8 @@
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
 
+namespace dxil {
+
 #define DEBUG_TYPE "valuesymtab"
 
 // Class destructor
@@ -47,7 +49,7 @@ void ValueSymbolTable::reinsertValue(Value* V) {
   SmallString<256> UniqueName(V->getName().begin(), V->getName().end());
 
   // The name is too already used, just free it so we can allocate a new name.
-  V->getValueName()->Destroy();
+  V->getValueName()->Destroy(vmap.getAllocator());
 
   unsigned BaseSize = UniqueName.size();
   while (1) {
@@ -112,4 +114,6 @@ void ValueSymbolTable::dump() const {
     I->getValue()->dump();
     //DEBUG(dbgs() << "\n");
   }
-}
+
+} // namespace dxil
+} // namespace dxil

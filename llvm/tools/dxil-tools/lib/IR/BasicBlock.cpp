@@ -23,6 +23,8 @@
 #include <algorithm>
 using namespace llvm;
 
+namespace dxil {
+
 ValueSymbolTable *BasicBlock::getValueSymbolTable() {
   if (Function *F = getParent())
     return &F->getValueSymbolTable();
@@ -35,18 +37,11 @@ LLVMContext &BasicBlock::getContext() const {
 
 // Explicit instantiation of SymbolTableListTraits since some of the methods
 // are not in the public header file...
-template class llvm::SymbolTableListTraits<Instruction, BasicBlock>;
+template class SymbolTableListTraits<Instruction, BasicBlock>;
 
 BasicBlock::BasicBlock(LLVMContext &C, const Twine &Name, Function *NewParent,
                        BasicBlock *InsertBefore)
     : Value(Type::getLabelTy(C), Value::BasicBlockVal),
-      // HLSL Change Starts
-      // Use a real instruction as the sentinel. Transfer ownership to InstList.
-      // The sentinel only needs to participate in the intrusive list of
-      // instructions. Any instruction kind will do, but UnreachableInst is
-      // small and simple.
-      InstList(std::unique_ptr<Instruction>(new UnreachableInst(C))),
-      // HLSL Change Ends
       Parent(nullptr) {
 
   // HLSL Change Begin
@@ -69,7 +64,8 @@ void BasicBlock::insertInto(Function *NewParent, BasicBlock *InsertBefore) {
   assert(!Parent && "Already has a parent");
 
   if (InsertBefore)
-    NewParent->getBasicBlockList().insert(InsertBefore, this);
+    NewParent->getBasicBlockList().insert(Function::iterator(InsertBefore),
+                                          this);
   else
     NewParent->getBasicBlockList().push_back(this);
 }
@@ -83,8 +79,7 @@ BasicBlock::~BasicBlock() {
   // nodes.  There are no other possible uses at this point.
   if (hasAddressTaken()) {
     assert(!use_empty() && "There should be at least one blockaddress!");
-    Constant *Replacement =
-      ConstantInt::get(llvm::Type::getInt32Ty(getContext()), 1);
+    Constant *Replacement = ConstantInt::get(Type::getInt32Ty(getContext()), 1);
     while (!use_empty()) {
       BlockAddress *BA = cast<BlockAddress>(user_back());
       BA->replaceAllUsesWith(ConstantExpr::getIntToPtr(Replacement,
@@ -107,23 +102,24 @@ void BasicBlock::removeFromParent() {
   getParent()->getBasicBlockList().remove(this);
 }
 
-iplist<BasicBlock>::iterator BasicBlock::eraseFromParent() {
+SymbolTableList<BasicBlock, Function>::iterator BasicBlock::eraseFromParent() {
   return getParent()->getBasicBlockList().erase(this);
 }
 
 /// Unlink this basic block from its current function and
 /// insert it into the function that MovePos lives in, right before MovePos.
 void BasicBlock::moveBefore(BasicBlock *MovePos) {
-  MovePos->getParent()->getBasicBlockList().splice(MovePos,
-                       getParent()->getBasicBlockList(), this);
+  MovePos->getParent()->getBasicBlockList().splice(
+      Function::iterator(MovePos), getParent()->getBasicBlockList(),
+      Function::iterator(this));
 }
 
 /// Unlink this basic block from its current function and
 /// insert it into the function that MovePos lives in, right after MovePos.
 void BasicBlock::moveAfter(BasicBlock *MovePos) {
-  Function::iterator I = MovePos;
-  MovePos->getParent()->getBasicBlockList().splice(++I,
-                                       getParent()->getBasicBlockList(), this);
+  Function::iterator I(MovePos);
+  MovePos->getParent()->getBasicBlockList().splice(
+      ++I, getParent()->getBasicBlockList(), Function::iterator(this));
 }
 
 const Module *BasicBlock::getModule() const {
@@ -221,8 +217,9 @@ BasicBlock::iterator BasicBlock::getFirstInsertionPt() {
   if (!FirstNonPHI)
     return end();
 
-  iterator InsertPt = FirstNonPHI;
-  if (isa<LandingPadInst>(InsertPt)) ++InsertPt;
+  iterator InsertPt(FirstNonPHI);
+  if (isa<LandingPadInst>(&*InsertPt))
+    ++InsertPt;
   return InsertPt;
 }
 
@@ -446,3 +443,5 @@ LandingPadInst *BasicBlock::getLandingPadInst() {
 const LandingPadInst *BasicBlock::getLandingPadInst() const {
   return dyn_cast<LandingPadInst>(getFirstNonPHI());
 }
+
+} // namespace dxil

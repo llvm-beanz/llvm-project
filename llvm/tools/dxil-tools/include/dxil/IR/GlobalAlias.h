@@ -26,14 +26,14 @@ class Module;
 template<typename ValueSubClass, typename ItemParentClass>
   class SymbolTableListTraits;
 
-class GlobalAlias : public GlobalValue, public ilist_node<GlobalAlias> {
+class GlobalAlias : public GlobalValue, public llvm::ilist_node<GlobalAlias> {
   friend class SymbolTableListTraits<GlobalAlias, Module>;
   void operator=(const GlobalAlias &) = delete;
   GlobalAlias(const GlobalAlias &) = delete;
 
   void setParent(Module *parent);
 
-  GlobalAlias(PointerType *Ty, LinkageTypes Linkage, const Twine &Name,
+  GlobalAlias(PointerType *Ty, LinkageTypes Linkage, const llvm::Twine &Name,
               Constant *Aliasee, Module *Parent);
 
 public:
@@ -45,26 +45,26 @@ public:
   /// If a parent module is specified, the alias is automatically inserted into
   /// the end of the specified module's alias list.
   static GlobalAlias *create(PointerType *Ty, LinkageTypes Linkage,
-                             const Twine &Name, Constant *Aliasee,
+                             const llvm::Twine &Name, Constant *Aliasee,
                              Module *Parent);
 
   // Without the Aliasee.
   static GlobalAlias *create(PointerType *Ty, LinkageTypes Linkage,
-                             const Twine &Name, Module *Parent);
+                             const llvm::Twine &Name, Module *Parent);
 
   // The module is taken from the Aliasee.
   static GlobalAlias *create(PointerType *Ty, LinkageTypes Linkage,
-                             const Twine &Name, GlobalValue *Aliasee);
+                             const llvm::Twine &Name, GlobalValue *Aliasee);
 
   // Type, Parent and AddressSpace taken from the Aliasee.
-  static GlobalAlias *create(LinkageTypes Linkage, const Twine &Name,
+  static GlobalAlias *create(LinkageTypes Linkage, const llvm::Twine &Name,
                              GlobalValue *Aliasee);
 
   // Linkage, Type, Parent and AddressSpace taken from the Aliasee.
-  static GlobalAlias *create(const Twine &Name, GlobalValue *Aliasee);
+  static GlobalAlias *create(const llvm::Twine &Name, GlobalValue *Aliasee);
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
 
   /// removeFromParent - This method unlinks 'this' from the containing module,
   /// but does not delete it.
@@ -89,14 +89,15 @@ public:
     return const_cast<GlobalAlias *>(this)->getBaseObject();
   }
   GlobalObject *getBaseObject() {
-    return dyn_cast<GlobalObject>(getAliasee()->stripInBoundsOffsets());
+    return llvm::dyn_cast<GlobalObject>(getAliasee()->stripInBoundsOffsets());
   }
 
-  const GlobalObject *getBaseObject(const DataLayout &DL, APInt &Offset) const {
+  const GlobalObject *getBaseObject(const DataLayout &DL,
+                                    llvm::APInt &Offset) const {
     return const_cast<GlobalAlias *>(this)->getBaseObject(DL, Offset);
   }
-  GlobalObject *getBaseObject(const DataLayout &DL, APInt &Offset) {
-    return dyn_cast<GlobalObject>(
+  GlobalObject *getBaseObject(const DataLayout &DL, llvm::APInt &Offset) {
+    return llvm::dyn_cast<GlobalObject>(
         getAliasee()->stripAndAccumulateInBoundsConstantOffsets(DL, Offset));
   }
 
@@ -116,7 +117,7 @@ struct OperandTraits<GlobalAlias> :
   public FixedNumOperandTraits<GlobalAlias, 1> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GlobalAlias, Constant)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GlobalAlias, Constant)
 
 } // End llvm namespace
 

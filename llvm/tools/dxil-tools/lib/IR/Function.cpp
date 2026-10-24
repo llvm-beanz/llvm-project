@@ -33,10 +33,12 @@
 #include "llvm/Support/Threading.h"
 using namespace llvm;
 
+namespace dxil {
+
 // Explicit instantiations of SymbolTableListTraits since some of the methods
 // are not in the public header file...
-template class llvm::SymbolTableListTraits<Argument, Function>;
-template class llvm::SymbolTableListTraits<BasicBlock, Function>;
+template class SymbolTableListTraits<Argument, Function>;
+template class SymbolTableListTraits<BasicBlock, Function>;
 
 //===----------------------------------------------------------------------===//
 // Argument Implementation
@@ -1035,3 +1037,5 @@ void Function::setPersonalityFn(Constant *C) {
     Op<0>().set(C);
   }
 }
+
+} // namespace dxil

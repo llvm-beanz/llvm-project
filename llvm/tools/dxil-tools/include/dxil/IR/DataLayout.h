@@ -20,16 +20,20 @@
 #ifndef DXIL_IR_DATALAYOUT_H
 #define DXIL_IR_DATALAYOUT_H
 
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallVector.h"
 #include "dxil/IR/DerivedTypes.h"
 #include "dxil/IR/Type.h"
-#include "llvm/Pass.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/DataTypes.h"
+#include "llvm/Support/MathExtras.h"
 
 // This needs to be outside of the namespace, to avoid conflict with llvm-c
 // decl.
 typedef struct LLVMOpaqueTargetData *LLVMTargetDataRef;
+
+namespace llvm {
+class Triple;
+} // namespace llvm
 
 namespace dxil {
 
@@ -38,11 +42,8 @@ class Type;
 class IntegerType;
 class StructType;
 class StructLayout;
-class Triple;
 class GlobalVariable;
 class LLVMContext;
-template<typename T>
-class ArrayRef;
 
 /// Enum used to categorize the alignment types stored by LayoutAlignElem
 enum AlignTypeEnum {
@@ -118,15 +119,15 @@ private:
   };
   ManglingModeT ManglingMode;
 
-  SmallVector<unsigned char, 8> LegalIntWidths;
+  llvm::SmallVector<unsigned char, 8> LegalIntWidths;
 
   /// \brief Primitive type alignment data.
-  SmallVector<LayoutAlignElem, 16> Alignments;
+  llvm::SmallVector<LayoutAlignElem, 16> Alignments;
 
   /// \brief The string representation used to create this DataLayout
   std::string StringRepresentation;
 
-  typedef SmallVector<PointerAlignElem, 8> PointersTy;
+  typedef llvm::SmallVector<PointerAlignElem, 8> PointersTy;
   PointersTy Pointers;
 
   PointersTy::const_iterator
@@ -137,7 +138,7 @@ private:
   PointersTy::iterator findPointerLowerBound(uint32_t AddressSpace);
 
   /// This member is a signal that a requested alignment type and bit width were
-  /// not found in the SmallVector.
+  /// not found in the llvm::SmallVector.
   static const LayoutAlignElem InvalidAlignmentElem;
 
   /// This member is a signal that a requested pointer type and bit width were
@@ -175,14 +176,14 @@ private:
 
   /// Parses a target data specification string. Assert if the string is
   /// malformed.
-  void parseSpecifier(StringRef LayoutDescription);
+  void parseSpecifier(llvm::StringRef LayoutDescription);
 
   // Free all internal data structures.
   void clear();
 
 public:
   /// Constructs a DataLayout from a specification string. See reset().
-  explicit DataLayout(StringRef LayoutDescription) : LayoutMap(nullptr) {
+  explicit DataLayout(llvm::StringRef LayoutDescription) : LayoutMap(nullptr) {
     reset(LayoutDescription);
   }
 
@@ -211,7 +212,7 @@ public:
   ~DataLayout(); // Not virtual, do not subclass this class
 
   /// Parse a data layout string (with fallback to default values).
-  void reset(StringRef LayoutDescription);
+  void reset(llvm::StringRef LayoutDescription);
 
   /// Layout endianness...
   bool isLittleEndian() const { return !BigEndian; }
@@ -294,7 +295,7 @@ public:
     llvm_unreachable("invalid mangling mode");
   }
 
-  static const char *getManglingComponent(const Triple &T);
+  static const char *getManglingComponent(const llvm::Triple &T);
 
   /// \brief Returns true if the specified type fits in a native integer type
   /// supported by the CPU.
@@ -387,7 +388,7 @@ public:
   /// returns 12 or 16 for x86_fp80, depending on alignment.
   uint64_t getTypeAllocSize(Type *Ty) const {
     // Round up to the next alignment boundary.
-    return RoundUpToAlignment(getTypeStoreSize(Ty), getABITypeAlignment(Ty));
+    return llvm::alignTo(getTypeStoreSize(Ty), getABITypeAlignment(Ty));
   }
 
   /// \brief Returns the offset in bits between successive objects of the
@@ -442,7 +443,7 @@ public:
   /// indices.
   ///
   /// This is used to implement getelementptr.
-  uint64_t getIndexedOffset(Type *Ty, ArrayRef<Value *> Indices) const;
+  uint64_t getIndexedOffset(Type *Ty, llvm::ArrayRef<Value *> Indices) const;
 
   /// \brief Returns a StructLayout object, indicating the alignment of the
   /// struct, its size, and the offsets of its fields.

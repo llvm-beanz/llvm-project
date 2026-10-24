@@ -25,7 +25,6 @@ namespace dxil {
   class Function;
   class NamedMDNode;
   class Module;
-  class StringRef;
 
 /// This class provides a symbol table of name/value pairs. It is essentially
 /// a std::map<std::string,Value*> but has a controlled interface provided by
@@ -43,7 +42,7 @@ class ValueSymbolTable {
 /// @{
 public:
   /// @brief A mapping of names to values.
-  typedef StringMap<Value*> ValueMap;
+  typedef llvm::StringMap<Value *> ValueMap;
 
   /// @brief An iterator over a ValueMap.
   typedef ValueMap::iterator iterator;
@@ -68,7 +67,7 @@ public:
   /// the symbol table. 
   /// @returns the value associated with the \p Name
   /// @brief Lookup a named Value.
-  Value *lookup(StringRef Name) const { return vmap.lookup(Name); }
+  Value *lookup(llvm::StringRef Name) const { return vmap.lookup(Name); }
 
   /// @returns true iff the symbol table is empty
   /// @brief Determine if the symbol table is empty
@@ -111,8 +110,8 @@ private:
   /// createValueName - This method attempts to create a value name and insert
   /// it into the symbol table with the specified name.  If it conflicts, it
   /// auto-renames the name and returns that instead.
-  ValueName *createValueName(StringRef Name, Value *V);
-  
+  ValueName *createValueName(llvm::StringRef Name, Value *V);
+
   /// This method removes a value from the symbol table.  It leaves the
   /// ValueName attached to the value, but it is no longer inserted in the
   /// symtab.

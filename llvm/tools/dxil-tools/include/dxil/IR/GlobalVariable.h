@@ -32,7 +32,8 @@ class Constant;
 template<typename ValueSubClass, typename ItemParentClass>
   class SymbolTableListTraits;
 
-class GlobalVariable : public GlobalObject, public ilist_node<GlobalVariable> {
+class GlobalVariable : public GlobalObject,
+                       public llvm::ilist_node<GlobalVariable> {
   friend class SymbolTableListTraits<GlobalVariable, Module>;
   void *operator new(size_t, unsigned) = delete;
   void operator=(const GlobalVariable &) = delete;
@@ -60,14 +61,14 @@ public:
   /// GlobalVariable ctor - If a parent module is specified, the global is
   /// automatically inserted into the end of the specified modules global list.
   GlobalVariable(Type *Ty, bool isConstant, LinkageTypes Linkage,
-                 Constant *Initializer = nullptr, const Twine &Name = "",
+                 Constant *Initializer = nullptr, const llvm::Twine &Name = "",
                  ThreadLocalMode = NotThreadLocal, unsigned AddressSpace = 0,
                  bool isExternallyInitialized = false);
   /// GlobalVariable ctor - This creates a global and inserts it before the
   /// specified other global.
-  GlobalVariable(Module &M, Type *Ty, bool isConstant,
-                 LinkageTypes Linkage, Constant *Initializer,
-                 const Twine &Name = "", GlobalVariable *InsertBefore = nullptr,
+  GlobalVariable(Module &M, Type *Ty, bool isConstant, LinkageTypes Linkage,
+                 Constant *Initializer, const llvm::Twine &Name = "",
+                 GlobalVariable *InsertBefore = nullptr,
                  ThreadLocalMode = NotThreadLocal, unsigned AddressSpace = 0,
                  bool isExternallyInitialized = false);
 
@@ -77,7 +78,7 @@ public:
   }
 
   /// Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// Definitions have initializers, declarations don't.
   ///
@@ -182,7 +183,7 @@ struct OperandTraits<GlobalVariable> :
   public OptionalOperandTraits<GlobalVariable> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GlobalVariable, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GlobalVariable, Value)
 
 } // End llvm namespace
 

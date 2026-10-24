@@ -15,11 +15,12 @@
 #ifndef DXIL_IR_INSTRUCTION_H
 #define DXIL_IR_INSTRUCTION_H
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/ilist_node.h"
 #include "dxil/IR/DebugLoc.h"
 #include "dxil/IR/SymbolTableListTraits.h"
 #include "dxil/IR/User.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/ilist_node.h"
 #include <memory>  // HLSL Change
 #include <utility> // HLSL Change
 
@@ -31,36 +32,7 @@ class MDNode;
 class BasicBlock;
 struct AAMDNodes;
 
-template <>
-struct ilist_traits<Instruction>
-    : public SymbolTableListTraits<Instruction, BasicBlock> {
-
-  /// \brief Return a node that marks the end of a list.
-  ///
-  /// The sentinel is relative to this instance, so we use a non-static
-  /// method.
-  // HLSL Change Starts
-  Instruction *createSentinel() const { return Sentinel.get(); }
-  static void destroySentinel(Instruction *) {}
-
-  Instruction *provideInitialHead() const { return Sentinel.get(); }
-  Instruction *ensureHead(Instruction *) const { return Sentinel.get(); }
-  static void noteHead(Instruction *, Instruction *) {}
-
-public:
-  // Saves and takes ownership of the sentinel.
-  // Must be called before the other accessors above.
-  // HLSL Change start: definition moved out-of-line because Instruction must be
-  // a complete type when ~unique_ptr<Instruction> is instantiated in C++23.
-  inline void setSentinel(std::unique_ptr<Instruction> &&s);
-  // HLSL Change Ends
-
-private:
-  std::unique_ptr<Instruction> Sentinel;
-  // HLSL Change Ends
-};
-
-class Instruction : public User, public ilist_node<Instruction> {
+class Instruction : public User, public llvm::ilist_node<Instruction> {
   void operator=(const Instruction &) = delete;
   Instruction(const Instruction &) = delete;
 
@@ -101,7 +73,7 @@ public:
   /// block and deletes it.
   ///
   /// \returns an iterator pointing to the element after the erased one
-  iplist<Instruction>::iterator eraseFromParent();
+  SymbolTableList<Instruction, BasicBlock>::iterator eraseFromParent();
 
   /// Insert an unlinked instruction into a basic block immediately before
   /// the specified instruction.
@@ -183,7 +155,7 @@ public:
 
   /// getMetadata - Get the metadata of given kind attached to this Instruction.
   /// If the metadata is not found then return null.
-  MDNode *getMetadata(StringRef Kind) const {
+  MDNode *getMetadata(llvm::StringRef Kind) const {
     if (!hasMetadata()) return nullptr;
     return getMetadataImpl(Kind);
   }
@@ -191,8 +163,8 @@ public:
   /// getAllMetadata - Get all metadata attached to this Instruction.  The first
   /// element of each pair returned is the KindID, the second element is the
   /// metadata value.  This list is returned sorted by the KindID.
-  void
-  getAllMetadata(SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const {
+  void getAllMetadata(
+      llvm::SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const {
     if (hasMetadata())
       getAllMetadataImpl(MDs);
   }
@@ -200,7 +172,7 @@ public:
   /// getAllMetadataOtherThanDebugLoc - This does the same thing as
   /// getAllMetadata, except that it filters out the debug location.
   void getAllMetadataOtherThanDebugLoc(
-      SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const {
+      llvm::SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const {
     if (hasMetadataOtherThanDebugLoc())
       getAllMetadataOtherThanDebugLocImpl(MDs);
   }
@@ -214,17 +186,17 @@ public:
   /// node.  This updates/replaces metadata if already present, or removes it if
   /// Node is null.
   void setMetadata(unsigned KindID, MDNode *Node);
-  void setMetadata(StringRef Kind, MDNode *Node);
+  void setMetadata(llvm::StringRef Kind, MDNode *Node);
 
   /// \brief Drop unknown metadata.
   /// Passes are required to drop metadata they don't understand. This is a
   /// convenience method for passes to do so.
-  void dropUnknownMetadata(ArrayRef<unsigned> KnownIDs);
+  void dropUnknownMetadata(llvm::ArrayRef<unsigned> KnownIDs);
   void dropUnknownMetadata() {
-    return dropUnknownMetadata(None);
+    return dropUnknownMetadata(llvm::ArrayRef<unsigned>());
   }
   void dropUnknownMetadata(unsigned ID1) {
-    return dropUnknownMetadata(makeArrayRef(ID1));
+    return dropUnknownMetadata(llvm::ArrayRef(ID1));
   }
   void dropUnknownMetadata(unsigned ID1, unsigned ID2) {
     unsigned IDs[] = {ID1, ID2};
@@ -308,11 +280,11 @@ private:
 
   // These are all implemented in Metadata.cpp.
   MDNode *getMetadataImpl(unsigned KindID) const;
-  MDNode *getMetadataImpl(StringRef Kind) const;
-  void
-  getAllMetadataImpl(SmallVectorImpl<std::pair<unsigned, MDNode *>> &) const;
+  MDNode *getMetadataImpl(llvm::StringRef Kind) const;
+  void getAllMetadataImpl(
+      llvm::SmallVectorImpl<std::pair<unsigned, MDNode *>> &) const;
   void getAllMetadataOtherThanDebugLocImpl(
-      SmallVectorImpl<std::pair<unsigned, MDNode *>> &) const;
+      llvm::SmallVectorImpl<std::pair<unsigned, MDNode *>> &) const;
   void clearMetadataHashEntries();
 public:
   //===--------------------------------------------------------------------===//
@@ -527,35 +499,14 @@ private:
   Instruction *cloneImpl() const;
 };
 
-// HLSL Change start: definition moved out-of-line because Instruction must be
-// a complete type when ~unique_ptr<Instruction> is instantiated in C++23.
-void ilist_traits<Instruction>::setSentinel(std::unique_ptr<Instruction> &&s) {
-  Sentinel = std::move(s);
-}
-// HLSL Change end
+} // namespace dxil
 
-// HLSL Change Starts
-// Temporarily disable "downcast of address" UBSAN runtime error
-// https://github.com/microsoft/DirectXShaderCompiler/issues/6446
-#if 0
-inline Instruction *
-ilist_traits<Instruction>::createSentinel() const {
-  // Since i(p)lists always publicly derive from their corresponding traits,
-  // placing a data member in this class will augment the i(p)list.  But since
-  // the NodeTy is expected to be publicly derive from ilist_node<NodeTy>,
-  // there is a legal viable downcast from it to NodeTy. We use this trick to
-  // superimpose an i(p)list with a "ghostly" NodeTy, which becomes the
-  // sentinel. Dereferencing the sentinel is forbidden (save the
-  // ilist_node<NodeTy>), so no one will ever notice the superposition.
-  return static_cast<Instruction *>(&Sentinel);
-}
-#endif
-// HLSL Change Ends
+namespace llvm {
 
 // Instruction* is only 4-byte aligned.
-template<>
-class PointerLikeTypeTraits<Instruction*> {
-  typedef Instruction* PT;
+template <> struct PointerLikeTypeTraits<dxil::Instruction *> {
+  typedef dxil::Instruction *PT;
+
 public:
   static inline void *getAsVoidPointer(PT P) { return P; }
   static inline PT getFromVoidPointer(void *P) {
@@ -564,6 +515,6 @@ public:
   enum { NumLowBitsAvailable = 2 };
 };
 
-} // End llvm namespace
+} // namespace llvm
 
 #endif

@@ -20,6 +20,8 @@
 #include "dxil/IR/Type.h"
 using namespace llvm;
 
+namespace dxil {
+
 Instruction::Instruction(Type *ty, unsigned it, Use *Ops, unsigned NumOps,
                          Instruction *InsertBefore)
   : User(ty, Value::InstructionVal + it, Ops, NumOps), Parent(nullptr) {
@@ -28,7 +30,7 @@ Instruction::Instruction(Type *ty, unsigned it, Use *Ops, unsigned NumOps,
   if (InsertBefore) {
     BasicBlock *BB = InsertBefore->getParent();
     assert(BB && "Instruction to insert before is not in a basic block!");
-    BB->getInstList().insert(InsertBefore, this);
+    BB->getInstList().insert(BasicBlock::iterator(InsertBefore), this);
   }
 }
 
@@ -67,28 +69,32 @@ void Instruction::removeFromParent() {
   getParent()->getInstList().remove(this);
 }
 
-iplist<Instruction>::iterator Instruction::eraseFromParent() {
+SymbolTableList<Instruction, BasicBlock>::iterator
+Instruction::eraseFromParent() {
   return getParent()->getInstList().erase(this);
 }
 
 /// insertBefore - Insert an unlinked instructions into a basic block
 /// immediately before the specified instruction.
 void Instruction::insertBefore(Instruction *InsertPos) {
-  InsertPos->getParent()->getInstList().insert(InsertPos, this);
+  InsertPos->getParent()->getInstList().insert(BasicBlock::iterator(InsertPos),
+                                               this);
 }
 
 /// insertAfter - Insert an unlinked instructions into a basic block
 /// immediately after the specified instruction.
 void Instruction::insertAfter(Instruction *InsertPos) {
-  InsertPos->getParent()->getInstList().insertAfter(InsertPos, this);
+  InsertPos->getParent()->getInstList().insertAfter(
+      BasicBlock::iterator(InsertPos), this);
 }
 
 /// moveBefore - Unlink this instruction from its current basic block and
 /// insert it into the basic block that MovePos lives in, right before
 /// MovePos.
 void Instruction::moveBefore(Instruction *MovePos) {
-  MovePos->getParent()->getInstList().splice(MovePos,getParent()->getInstList(),
-                                             this);
+  MovePos->getParent()->getInstList().splice(BasicBlock::iterator(MovePos),
+                                             getParent()->getInstList(),
+                                             BasicBlock::iterator(this));
 }
 
 /// Set or clear the unsafe-algebra flag on this instruction, which must be an
@@ -565,3 +571,5 @@ Instruction *Instruction::clone() const {
   New->setDebugLoc(getDebugLoc());
   return New;
 }
+
+} // namespace dxil

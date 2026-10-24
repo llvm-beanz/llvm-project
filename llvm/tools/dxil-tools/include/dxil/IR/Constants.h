@@ -372,7 +372,7 @@ private:
 
 public:
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
 
   /// getType - Specialize the getType() method to always return an ArrayType,
   /// which reduces the amount of casting needed in parts of the compiler.
@@ -392,7 +392,7 @@ struct OperandTraits<ConstantArray> :
   public VariadicOperandTraits<ConstantArray> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantArray, Constant)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantArray, Constant)
 
 //===----------------------------------------------------------------------===//
 // ConstantStruct - Constant Struct Declarations
@@ -433,7 +433,7 @@ public:
                                         bool Packed = false);
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
 
   /// getType() specialization - Reduce amount of casting...
   ///
@@ -452,8 +452,7 @@ struct OperandTraits<ConstantStruct> :
   public VariadicOperandTraits<ConstantStruct> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantStruct, Constant)
-
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantStruct, Constant)
 
 //===----------------------------------------------------------------------===//
 /// ConstantVector - Constant Vector Declarations
@@ -481,7 +480,7 @@ public:
   static Constant *getSplat(unsigned NumElts, Constant *Elt);
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
 
   /// getType - Specialize the getType() method to always return a VectorType,
   /// which reduces the amount of casting needed in parts of the compiler.
@@ -505,7 +504,7 @@ struct OperandTraits<ConstantVector> :
   public VariadicOperandTraits<ConstantVector> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantVector, Constant)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantVector, Constant)
 
 //===----------------------------------------------------------------------===//
 /// ConstantPointerNull - a constant pointer value that points to null
@@ -823,7 +822,7 @@ public:
   static BlockAddress *lookup(const BasicBlock *BB);
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   Function *getFunction() const { return (Function*)Op<0>().get(); }
   BasicBlock *getBasicBlock() const { return (BasicBlock*)Op<1>().get(); }
@@ -839,8 +838,7 @@ struct OperandTraits<BlockAddress> :
   public FixedNumOperandTraits<BlockAddress, 2> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BlockAddress, Value)
-
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BlockAddress, Value)
 
 //===----------------------------------------------------------------------===//
 /// ConstantExpr - a constant value that is initialized with an expression using
@@ -985,7 +983,7 @@ public:
   static Constant *getBinOpAbsorber(unsigned Opcode, Type *Ty);
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Constant);
 
   /// \brief Convenience function for getting a Cast operation.
   ///
@@ -1205,7 +1203,7 @@ struct OperandTraits<ConstantExpr> :
   public VariadicOperandTraits<ConstantExpr, 1> {
 };
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantExpr, Constant)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ConstantExpr, Constant)
 //                                                                           //
 ///////////////////////////////////////////////////////////////////////////////
 /// UndefValue - 'undef' values are things that do not have specified contents.

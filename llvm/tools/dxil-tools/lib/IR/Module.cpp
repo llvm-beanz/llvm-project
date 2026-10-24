@@ -31,15 +31,17 @@
 #include <cstdlib>
 using namespace llvm;
 
+namespace dxil {
+
 //===----------------------------------------------------------------------===//
 // Methods to implement the globals and functions lists.
 //
 
 // Explicit instantiations of SymbolTableListTraits since some of the methods
 // are not in the public header file.
-template class llvm::SymbolTableListTraits<Function, Module>;
-template class llvm::SymbolTableListTraits<GlobalVariable, Module>;
-template class llvm::SymbolTableListTraits<GlobalAlias, Module>;
+template class SymbolTableListTraits<Function, Module>;
+template class SymbolTableListTraits<GlobalVariable, Module>;
+template class SymbolTableListTraits<GlobalAlias, Module>;
 
 //===----------------------------------------------------------------------===//
 // Primitive Module methods.
@@ -494,3 +496,5 @@ PICLevel::Level Module::getPICLevel() const {
 void Module::setPICLevel(PICLevel::Level PL) {
   addModuleFlag(ModFlagBehavior::Error, "PIC Level", PL);
 }
+
+} // namespace dxil

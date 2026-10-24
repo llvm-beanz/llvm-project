@@ -138,29 +138,35 @@ public:
 typedef TypedTrackingMDRef<MDNode> TrackingMDNodeRef;
 typedef TypedTrackingMDRef<ValueAsMetadata> TrackingValueAsMetadataRef;
 
+} // namespace dxil
+
+namespace llvm {
+
 // Expose the underlying metadata to casting.
-template <> struct simplify_type<TrackingMDRef> {
-  typedef Metadata *SimpleType;
-  static SimpleType getSimplifiedValue(TrackingMDRef &MD) { return MD.get(); }
-};
-
-template <> struct simplify_type<const TrackingMDRef> {
-  typedef Metadata *SimpleType;
-  static SimpleType getSimplifiedValue(const TrackingMDRef &MD) {
+template <> struct simplify_type<dxil::TrackingMDRef> {
+  typedef dxil::Metadata *SimpleType;
+  static SimpleType getSimplifiedValue(dxil::TrackingMDRef &MD) {
     return MD.get();
   }
 };
 
-template <class T> struct simplify_type<TypedTrackingMDRef<T>> {
-  typedef T *SimpleType;
-  static SimpleType getSimplifiedValue(TypedTrackingMDRef<T> &MD) {
+template <> struct simplify_type<const dxil::TrackingMDRef> {
+  typedef dxil::Metadata *SimpleType;
+  static SimpleType getSimplifiedValue(const dxil::TrackingMDRef &MD) {
     return MD.get();
   }
 };
 
-template <class T> struct simplify_type<const TypedTrackingMDRef<T>> {
+template <class T> struct simplify_type<dxil::TypedTrackingMDRef<T>> {
   typedef T *SimpleType;
-  static SimpleType getSimplifiedValue(const TypedTrackingMDRef<T> &MD) {
+  static SimpleType getSimplifiedValue(dxil::TypedTrackingMDRef<T> &MD) {
+    return MD.get();
+  }
+};
+
+template <class T> struct simplify_type<const dxil::TypedTrackingMDRef<T>> {
+  typedef T *SimpleType;
+  static SimpleType getSimplifiedValue(const dxil::TypedTrackingMDRef<T> &MD) {
     return MD.get();
   }
 };

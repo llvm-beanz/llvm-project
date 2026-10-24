@@ -15,13 +15,14 @@
 #ifndef DXIL_IR_MODULE_H
 #define DXIL_IR_MODULE_H
 
-#include "llvm/ADT/iterator_range.h"
 #include "dxil/IR/Comdat.h"
 #include "dxil/IR/DataLayout.h"
 #include "dxil/IR/Function.h"
 #include "dxil/IR/GlobalAlias.h"
 #include "dxil/IR/GlobalVariable.h"
 #include "dxil/IR/Metadata.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/iterator_range.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/DataTypes.h"
@@ -34,118 +35,16 @@ class HLModule;
 }
 // HLSL Change end
 
+namespace llvm {
+class RandomNumberGenerator;
+} // namespace llvm
+
 namespace dxil {
+class Pass;
 class FunctionType;
 class GVMaterializer;
 class LLVMContext;
-class RandomNumberGenerator;
 class StructType;
-
-template<> struct ilist_traits<Function>
-  : public SymbolTableListTraits<Function, Module> {
-
-  // createSentinel is used to get hold of the node that marks the end of the
-  // list... (same trick used here as in ilist_traits<Instruction>)
-// HLSL Change Starts
-// Temporarily disable "downcast of address" UBSAN runtime error
-// https://github.com/microsoft/DirectXShaderCompiler/issues/6446
-#ifdef __has_feature
-#if __has_feature(undefined_behavior_sanitizer)
-  __attribute__((no_sanitize("undefined")))
-#endif // __has_feature(address_sanitizer)
-#endif // defined(__has_feature)
-       // HLSL Change Ends
-  Function *
-  createSentinel() const {
-    return static_cast<Function*>(&Sentinel);
-  }
-  static void destroySentinel(Function*) {}
-
-  Function *provideInitialHead() const { return createSentinel(); }
-  Function *ensureHead(Function*) const { return createSentinel(); }
-  static void noteHead(Function*, Function*) {}
-
-private:
-  mutable ilist_node<Function> Sentinel;
-};
-
-template<> struct ilist_traits<GlobalVariable>
-  : public SymbolTableListTraits<GlobalVariable, Module> {
-  // createSentinel is used to create a node that marks the end of the list.
-// HLSL Change Starts
-// Temporarily disable "downcast of address" UBSAN runtime error
-// https://github.com/microsoft/DirectXShaderCompiler/issues/6446
-#ifdef __has_feature
-#if __has_feature(undefined_behavior_sanitizer)
-  __attribute__((no_sanitize("undefined")))
-#endif // __has_feature(address_sanitizer)
-#endif // defined(__has_feature)
-       // HLSL Change Ends
-  GlobalVariable *
-  createSentinel() const {
-    return static_cast<GlobalVariable*>(&Sentinel);
-  }
-  static void destroySentinel(GlobalVariable*) {}
-
-  GlobalVariable *provideInitialHead() const { return createSentinel(); }
-  GlobalVariable *ensureHead(GlobalVariable*) const { return createSentinel(); }
-  static void noteHead(GlobalVariable*, GlobalVariable*) {}
-private:
-  mutable ilist_node<GlobalVariable> Sentinel;
-};
-
-template<> struct ilist_traits<GlobalAlias>
-  : public SymbolTableListTraits<GlobalAlias, Module> {
-  // createSentinel is used to create a node that marks the end of the list.
-// HLSL Change Starts
-// Temporarily disable "downcast of address" UBSAN runtime error
-// https://github.com/microsoft/DirectXShaderCompiler/issues/6446
-#ifdef __has_feature
-#if __has_feature(undefined_behavior_sanitizer)
-  __attribute__((no_sanitize("undefined")))
-#endif // __has_feature(address_sanitizer)
-#endif // defined(__has_feature)
-       // HLSL Change Ends
-  GlobalAlias *
-  createSentinel() const {
-    return static_cast<GlobalAlias*>(&Sentinel);
-  }
-  static void destroySentinel(GlobalAlias*) {}
-
-  GlobalAlias *provideInitialHead() const { return createSentinel(); }
-  GlobalAlias *ensureHead(GlobalAlias*) const { return createSentinel(); }
-  static void noteHead(GlobalAlias*, GlobalAlias*) {}
-private:
-  mutable ilist_node<GlobalAlias> Sentinel;
-};
-
-template<> struct ilist_traits<NamedMDNode>
-  : public ilist_default_traits<NamedMDNode> {
-  // createSentinel is used to get hold of a node that marks the end of
-  // the list...
-// HLSL Change Starts
-// Temporarily disable "downcast of address" UBSAN runtime error
-// https://github.com/microsoft/DirectXShaderCompiler/issues/6446
-#ifdef __has_feature
-#if __has_feature(undefined_behavior_sanitizer)
-  __attribute__((no_sanitize("undefined")))
-#endif // __has_feature(address_sanitizer)
-#endif // defined(__has_feature)
-       // HLSL Change Ends
-  NamedMDNode *
-  createSentinel() const {
-    return static_cast<NamedMDNode*>(&Sentinel);
-  }
-  static void destroySentinel(NamedMDNode*) {}
-
-  NamedMDNode *provideInitialHead() const { return createSentinel(); }
-  NamedMDNode *ensureHead(NamedMDNode*) const { return createSentinel(); }
-  static void noteHead(NamedMDNode*, NamedMDNode*) {}
-  void addNodeToList(NamedMDNode *) {}
-  void removeNodeFromList(NamedMDNode *) {}
-private:
-  mutable ilist_node<NamedMDNode> Sentinel;
-};
 
 /// A Module instance is used to store all the information related to an
 /// LLVM module. Modules are the top level container of all other LLVM
@@ -163,15 +62,15 @@ class Module {
 /// @{
 public:
   /// The type for the list of global variables.
-  typedef iplist<GlobalVariable> GlobalListType;
+  typedef SymbolTableList<GlobalVariable, Module> GlobalListType;
   /// The type for the list of functions.
-  typedef iplist<Function> FunctionListType;
+  typedef SymbolTableList<Function, Module> FunctionListType;
   /// The type for the list of aliases.
-  typedef iplist<GlobalAlias> AliasListType;
+  typedef SymbolTableList<GlobalAlias, Module> AliasListType;
   /// The type for the list of named metadata.
-  typedef ilist<NamedMDNode> NamedMDListType;
+  typedef llvm::ilist<NamedMDNode> NamedMDListType;
   /// The type of the comdat "symbol" table.
-  typedef StringMap<Comdat> ComdatSymTabType;
+  typedef llvm::StringMap<Comdat> ComdatSymTabType;
 
   /// The Global Variable iterator.
   typedef GlobalListType::iterator                      global_iterator;
@@ -281,7 +180,7 @@ private:
 public:
   /// The Module constructor. Note that there is no default constructor. You
   /// must provide a name for the module upon construction.
-  explicit Module(StringRef ModuleID, LLVMContext& C);
+  explicit Module(llvm::StringRef ModuleID, LLVMContext &C);
   /// The module destructor. This will dropAllReferences.
   ~Module();
 
@@ -297,7 +196,7 @@ public:
   ///
   /// This is useful for debugging or logging. It is essentially a convenience
   /// wrapper around getModuleIdentifier().
-  StringRef getName() const { return ModuleID; }
+  llvm::StringRef getName() const { return ModuleID; }
 
   /// Get the data layout string for the module's target platform. This is
   /// equivalent to getDataLayout()->getStringRepresentation().
@@ -320,7 +219,7 @@ public:
   /// @returns a string containing the module-scope inline assembly blocks.
   const std::string &getModuleInlineAsm() const { return GlobalScopeAsm; }
 
-  /// Get a RandomNumberGenerator salted for use with this module. The
+  /// Get a llvm::RandomNumberGenerator salted for use with this module. The
   /// RNG can be seeded via -rng-seed=<uint64> and is salted with the
   /// ModuleID and the provided pass salt. The returned RNG should not
   /// be shared across threads or passes.
@@ -329,25 +228,25 @@ public:
   /// when other randomness consuming passes are added or removed. In
   /// addition, the random stream will be reproducible across LLVM
   /// versions when the pass does not change.
-  RandomNumberGenerator *createRNG(const Pass* P) const;
+  llvm::RandomNumberGenerator *createRNG(const Pass *P) const;
 
-/// @}
-/// @name Module Level Mutators
-/// @{
+  /// @}
+  /// @name Module Level Mutators
+  /// @{
 
   /// Set the module identifier.
-  void setModuleIdentifier(StringRef ID) { ModuleID = ID; }
+  void setModuleIdentifier(llvm::StringRef ID) { ModuleID = ID; }
 
   /// Set the data layout
-  void setDataLayout(StringRef Desc);
+  void setDataLayout(llvm::StringRef Desc);
   void setDataLayout(const DataLayout &Other);
 
   /// Set the target triple.
-  void setTargetTriple(StringRef T) { TargetTriple = T; }
+  void setTargetTriple(llvm::StringRef T) { TargetTriple = T; }
 
   /// Set the module-scope inline assembly blocks.
   /// A trailing newline is added if the input doesn't have one.
-  void setModuleInlineAsm(StringRef Asm) {
+  void setModuleInlineAsm(llvm::StringRef Asm) {
     GlobalScopeAsm = Asm;
     if (!GlobalScopeAsm.empty() &&
         GlobalScopeAsm[GlobalScopeAsm.size()-1] != '\n')
@@ -356,7 +255,7 @@ public:
 
   /// Append to the module-scope inline assembly blocks.
   /// A trailing newline is added if the input doesn't have one.
-  void appendModuleInlineAsm(StringRef Asm) {
+  void appendModuleInlineAsm(llvm::StringRef Asm) {
     GlobalScopeAsm += Asm;
     if (!GlobalScopeAsm.empty() &&
         GlobalScopeAsm[GlobalScopeAsm.size()-1] != '\n')
@@ -370,19 +269,19 @@ public:
   /// Return the global value in the module with the specified name, of
   /// arbitrary type. This method returns null if a global with the specified
   /// name is not found.
-  GlobalValue *getNamedValue(StringRef Name) const;
+  GlobalValue *getNamedValue(llvm::StringRef Name) const;
 
   /// Return a unique non-zero ID for the specified metadata kind. This ID is
   /// uniqued across modules in the current LLVMContext.
-  unsigned getMDKindID(StringRef Name) const;
+  unsigned getMDKindID(llvm::StringRef Name) const;
 
   /// Populate client supplied SmallVector with the name for custom metadata IDs
   /// registered in this LLVMContext.
-  void getMDKindNames(SmallVectorImpl<StringRef> &Result) const;
+  void getMDKindNames(llvm::SmallVectorImpl<llvm::StringRef> &Result) const;
 
   /// Return the type with the specified name, or null if there is none by that
   /// name.
-  StructType *getTypeByName(StringRef Name) const;
+  StructType *getTypeByName(llvm::StringRef Name) const;
 
   std::vector<StructType *> getIdentifiedStructTypes() const;
 
@@ -399,10 +298,10 @@ public:
   ///      the existing function.
   ///   4. Finally, the function exists but has the wrong prototype: return the
   ///      function with a constantexpr cast to the right prototype.
-  Constant *getOrInsertFunction(StringRef Name, FunctionType *T,
+  Constant *getOrInsertFunction(llvm::StringRef Name, FunctionType *T,
                                 AttributeSet AttributeList);
 
-  Constant *getOrInsertFunction(StringRef Name, FunctionType *T);
+  Constant *getOrInsertFunction(llvm::StringRef Name, FunctionType *T);
 
   /// Look up the specified function in the module symbol table. If it does not
   /// exist, add a prototype for the function and return it. This function
@@ -410,43 +309,43 @@ public:
   /// or a ConstantExpr BitCast of that type if the named function has a
   /// different type. This version of the method takes a null terminated list of
   /// function arguments, which makes it easier for clients to use.
-  Constant *getOrInsertFunction(StringRef Name,
-                                AttributeSet AttributeList,
-                                Type *RetTy, ...) LLVM_END_WITH_NULL;
+  Constant *getOrInsertFunction(llvm::StringRef Name,
+                                AttributeSet AttributeList, Type *RetTy, ...);
 
   /// Same as above, but without the attributes.
-  Constant *getOrInsertFunction(StringRef Name, Type *RetTy, ...)
-    LLVM_END_WITH_NULL;
+  Constant *getOrInsertFunction(llvm::StringRef Name, Type *RetTy, ...);
 
   /// Look up the specified function in the module symbol table. If it does not
   /// exist, return null.
-  Function *getFunction(StringRef Name) const;
+  Function *getFunction(llvm::StringRef Name) const;
 
-/// @}
-/// @name Global Variable Accessors
-/// @{
+  /// @}
+  /// @name Global Variable Accessors
+  /// @{
 
   /// Look up the specified global variable in the module symbol table. If it
   /// does not exist, return null. If AllowInternal is set to true, this
   /// function will return types that have InternalLinkage. By default, these
   /// types are not returned.
-  GlobalVariable *getGlobalVariable(StringRef Name) const {
+  GlobalVariable *getGlobalVariable(llvm::StringRef Name) const {
     return getGlobalVariable(Name, false);
   }
 
-  GlobalVariable *getGlobalVariable(StringRef Name, bool AllowInternal) const {
+  GlobalVariable *getGlobalVariable(llvm::StringRef Name,
+                                    bool AllowInternal) const {
     return const_cast<Module *>(this)->getGlobalVariable(Name, AllowInternal);
   }
 
-  GlobalVariable *getGlobalVariable(StringRef Name, bool AllowInternal = false);
+  GlobalVariable *getGlobalVariable(llvm::StringRef Name,
+                                    bool AllowInternal = false);
 
   /// Return the global variable in the module with the specified name, of
   /// arbitrary type. This method returns null if a global with the specified
   /// name is not found.
-  GlobalVariable *getNamedGlobal(StringRef Name) {
+  GlobalVariable *getNamedGlobal(llvm::StringRef Name) {
     return getGlobalVariable(Name, true);
   }
-  const GlobalVariable *getNamedGlobal(StringRef Name) const {
+  const GlobalVariable *getNamedGlobal(llvm::StringRef Name) const {
     return const_cast<Module *>(this)->getNamedGlobal(Name);
   }
 
@@ -456,29 +355,29 @@ public:
   ///      with a constantexpr cast to the right type.
   ///   3. Finally, if the existing global is the correct declaration, return
   ///      the existing global.
-  Constant *getOrInsertGlobal(StringRef Name, Type *Ty);
+  Constant *getOrInsertGlobal(llvm::StringRef Name, Type *Ty);
 
-/// @}
-/// @name Global Alias Accessors
-/// @{
+  /// @}
+  /// @name Global Alias Accessors
+  /// @{
 
   /// Return the global alias in the module with the specified name, of
   /// arbitrary type. This method returns null if a global with the specified
   /// name is not found.
-  GlobalAlias *getNamedAlias(StringRef Name) const;
+  GlobalAlias *getNamedAlias(llvm::StringRef Name) const;
 
-/// @}
-/// @name Named Metadata Accessors
-/// @{
+  /// @}
+  /// @name Named Metadata Accessors
+  /// @{
 
   /// Return the first NamedMDNode in the module with the specified name. This
   /// method returns null if a NamedMDNode with the specified name is not found.
-  NamedMDNode *getNamedMetadata(const Twine &Name) const;
+  NamedMDNode *getNamedMetadata(const llvm::Twine &Name) const;
 
   /// Return the named MDNode in the module with the specified name. This method
   /// returns a new NamedMDNode if a NamedMDNode with the specified name is not
   /// found.
-  NamedMDNode *getOrInsertNamedMetadata(StringRef Name);
+  NamedMDNode *getOrInsertNamedMetadata(llvm::StringRef Name);
 
   /// Remove the given NamedMDNode from this module and delete it.
   void eraseNamedMetadata(NamedMDNode *NMD);
@@ -489,18 +388,19 @@ public:
 
   /// Return the Comdat in the module with the specified name. It is created
   /// if it didn't already exist.
-  Comdat *getOrInsertComdat(StringRef Name);
+  Comdat *getOrInsertComdat(llvm::StringRef Name);
 
-/// @}
-/// @name Module Flags Accessors
-/// @{
+  /// @}
+  /// @name Module Flags Accessors
+  /// @{
 
   /// Returns the module flags in the provided vector.
-  void getModuleFlagsMetadata(SmallVectorImpl<ModuleFlagEntry> &Flags) const;
+  void
+  getModuleFlagsMetadata(llvm::SmallVectorImpl<ModuleFlagEntry> &Flags) const;
 
   /// Return the corresponding value if Key appears in module flags, otherwise
   /// return null.
-  Metadata *getModuleFlag(StringRef Key) const;
+  Metadata *getModuleFlag(llvm::StringRef Key) const;
 
   /// Returns the NamedMDNode in the module that represents module-level flags.
   /// This method returns null if there are no module-level flags.
@@ -513,9 +413,12 @@ public:
 
   /// Add a module-level flag to the module-level flags metadata. It will create
   /// the module-level flags named metadata if it doesn't already exist.
-  void addModuleFlag(ModFlagBehavior Behavior, StringRef Key, Metadata *Val);
-  void addModuleFlag(ModFlagBehavior Behavior, StringRef Key, Constant *Val);
-  void addModuleFlag(ModFlagBehavior Behavior, StringRef Key, uint32_t Val);
+  void addModuleFlag(ModFlagBehavior Behavior, llvm::StringRef Key,
+                     Metadata *Val);
+  void addModuleFlag(ModFlagBehavior Behavior, llvm::StringRef Key,
+                     Constant *Val);
+  void addModuleFlag(ModFlagBehavior Behavior, llvm::StringRef Key,
+                     uint32_t Val);
   void addModuleFlag(MDNode *Node);
 
 /// @}
@@ -555,11 +458,12 @@ public:
   std::error_code materializeAllPermanently();
 
   std::error_code materializeMetadata();
-  std::error_code materializeSelectNamedMetadata(ArrayRef<StringRef> NamedMetadata); // HLSL Change
+  std::error_code materializeSelectNamedMetadata(
+      llvm::ArrayRef<llvm::StringRef> NamedMetadata); // HLSL Change
 
-/// @}
-/// @name Direct access to the globals list, functions list, and symbol table
-/// @{
+  /// @}
+  /// @name Direct access to the globals list, functions list, and symbol table
+  /// @{
 
   /// Get the Module's list of global variables (constant).
   const GlobalListType   &getGlobalList() const       { return GlobalList; }
@@ -608,11 +512,12 @@ public:
   const_global_iterator global_end  () const { return GlobalList.end(); }
   bool                  global_empty() const { return GlobalList.empty(); }
 
-  iterator_range<global_iterator> globals() {
-    return iterator_range<global_iterator>(global_begin(), global_end());
+  llvm::iterator_range<global_iterator> globals() {
+    return llvm::iterator_range<global_iterator>(global_begin(), global_end());
   }
-  iterator_range<const_global_iterator> globals() const {
-    return iterator_range<const_global_iterator>(global_begin(), global_end());
+  llvm::iterator_range<const_global_iterator> globals() const {
+    return llvm::iterator_range<const_global_iterator>(global_begin(),
+                                                       global_end());
   }
 
 /// @}
@@ -630,11 +535,11 @@ public:
   size_t                  size() const  { return FunctionList.size(); }
   bool                    empty() const { return FunctionList.empty(); }
 
-  iterator_range<iterator> functions() {
-    return iterator_range<iterator>(begin(), end());
+  llvm::iterator_range<iterator> functions() {
+    return llvm::iterator_range<iterator>(begin(), end());
   }
-  iterator_range<const_iterator> functions() const {
-    return iterator_range<const_iterator>(begin(), end());
+  llvm::iterator_range<const_iterator> functions() const {
+    return llvm::iterator_range<const_iterator>(begin(), end());
   }
 
 /// @}
@@ -648,11 +553,12 @@ public:
   size_t               alias_size () const      { return AliasList.size();  }
   bool                 alias_empty() const      { return AliasList.empty(); }
 
-  iterator_range<alias_iterator> aliases() {
-    return iterator_range<alias_iterator>(alias_begin(), alias_end());
+  llvm::iterator_range<alias_iterator> aliases() {
+    return llvm::iterator_range<alias_iterator>(alias_begin(), alias_end());
   }
-  iterator_range<const_alias_iterator> aliases() const {
-    return iterator_range<const_alias_iterator>(alias_begin(), alias_end());
+  llvm::iterator_range<const_alias_iterator> aliases() const {
+    return llvm::iterator_range<const_alias_iterator>(alias_begin(),
+                                                      alias_end());
   }
 
 /// @}
@@ -672,13 +578,13 @@ public:
   size_t named_metadata_size() const { return NamedMDList.size();  }
   bool named_metadata_empty() const { return NamedMDList.empty(); }
 
-  iterator_range<named_metadata_iterator> named_metadata() {
-    return iterator_range<named_metadata_iterator>(named_metadata_begin(),
-                                                   named_metadata_end());
-  }
-  iterator_range<const_named_metadata_iterator> named_metadata() const {
-    return iterator_range<const_named_metadata_iterator>(named_metadata_begin(),
+  llvm::iterator_range<named_metadata_iterator> named_metadata() {
+    return llvm::iterator_range<named_metadata_iterator>(named_metadata_begin(),
                                                          named_metadata_end());
+  }
+  llvm::iterator_range<const_named_metadata_iterator> named_metadata() const {
+    return llvm::iterator_range<const_named_metadata_iterator>(
+        named_metadata_begin(), named_metadata_end());
   }
 
   /// Destroy ConstantArrays in LLVMContext if they are not used.
@@ -698,7 +604,7 @@ public:
   /// AssemblyAnnotationWriter.  If \c ShouldPreserveUseListOrder, then include
   /// uselistorder directives so that use-lists can be recreated when reading
   /// the assembly.
-  void print(raw_ostream &OS, AssemblyAnnotationWriter *AAW,
+  void print(llvm::raw_ostream &OS, AssemblyAnnotationWriter *AAW,
              bool ShouldPreserveUseListOrder = false) const;
 
   /// Dump the module to stderr (for debugging).
@@ -724,17 +630,17 @@ public:
 /// @{
 
   /// \brief Returns the PIC level (small or large model)
-  PICLevel::Level getPICLevel() const;
+  llvm::PICLevel::Level getPICLevel() const;
 
   /// \brief Set the PIC level (small or large model)
-  void setPICLevel(PICLevel::Level PL);
-/// @}
+  void setPICLevel(llvm::PICLevel::Level PL);
+  /// @}
 
   // HLSL Change start
-  typedef void (*RemoveGlobalCallback)(llvm::Module*, llvm::GlobalObject*);
-  typedef void(*ResetModuleCallback)(llvm::Module*);
+  typedef void (*RemoveGlobalCallback)(Module *, GlobalObject *);
+  typedef void (*ResetModuleCallback)(Module *);
   RemoveGlobalCallback pfnRemoveGlobal = nullptr;
-  void CallRemoveGlobalHook(llvm::GlobalObject* G) {
+  void CallRemoveGlobalHook(GlobalObject *G) {
     if (pfnRemoveGlobal) (*pfnRemoveGlobal)(this, G);
   }
   bool HasHLModule() const { return TheHLModule != nullptr; }
@@ -752,8 +658,8 @@ public:
   // HLSL Change end
 };
 
-/// An raw_ostream inserter for modules.
-inline raw_ostream &operator<<(raw_ostream &O, const Module &M) {
+/// An llvm::raw_ostream inserter for modules.
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &O, const Module &M) {
   M.print(O, nullptr);
   return O;
 }

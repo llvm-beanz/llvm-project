@@ -28,7 +28,7 @@ class GlobalObject : public GlobalValue {
 
 protected:
   GlobalObject(PointerType *Ty, ValueTy VTy, Use *Ops, unsigned NumOps,
-               LinkageTypes Linkage, const Twine &Name)
+               LinkageTypes Linkage, const llvm::Twine &Name)
       : GlobalValue(Ty, VTy, Ops, NumOps, Linkage, Name), ObjComdat(nullptr) {
     setGlobalValueSubClassData(0);
   }
@@ -53,9 +53,9 @@ public:
   unsigned getGlobalObjectSubClassData() const;
   void setGlobalObjectSubClassData(unsigned Val);
 
-  bool hasSection() const { return !StringRef(getSection()).empty(); }
+  bool hasSection() const { return !llvm::StringRef(getSection()).empty(); }
   const char *getSection() const { return Section.c_str(); }
-  void setSection(StringRef S);
+  void setSection(llvm::StringRef S);
 
   bool hasComdat() const { return getComdat() != nullptr; }
   const Comdat *getComdat() const { return ObjComdat; }

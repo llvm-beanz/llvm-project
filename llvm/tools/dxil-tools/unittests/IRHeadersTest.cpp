@@ -10,15 +10,24 @@
 #include "dxil/IR/Attributes.h"
 #include "dxil/IR/Comdat.h"
 #include "dxil/IR/DerivedTypes.h"
+#include "dxil/IR/Function.h"
 #include "dxil/IR/GlobalValue.h"
 #include "dxil/IR/InlineAsm.h"
+#include "dxil/IR/InstrTypes.h"
+#include "dxil/IR/InstIterator.h"
 #include "dxil/IR/LLVMContext.h"
+#include "dxil/IR/Metadata.h"
+#include "dxil/IR/Module.h"
+#include "dxil/IR/TrackingMDRef.h"
 #include "dxil/IR/User.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Comdat.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/User.h"
 #include "gtest/gtest.h"
 #include <type_traits>
@@ -38,6 +47,31 @@ static_assert(!std::is_same_v<dxil::Value, llvm::Value>);
 static_assert(!std::is_same_v<dxil::Use, llvm::Use>);
 static_assert(!std::is_same_v<dxil::User, llvm::User>);
 static_assert(!std::is_same_v<dxil::Comdat, llvm::Comdat>);
+static_assert(!std::is_same_v<dxil::Function, llvm::Function>);
+static_assert(!std::is_same_v<dxil::BasicBlock, llvm::BasicBlock>);
+static_assert(!std::is_same_v<dxil::Instruction, llvm::Instruction>);
+static_assert(!std::is_same_v<dxil::Metadata, llvm::Metadata>);
+static_assert(!std::is_same_v<dxil::Module, llvm::Module>);
+static_assert(std::is_base_of_v<
+              llvm::iplist_impl<llvm::simple_ilist<dxil::Instruction>,
+                                dxil::SymbolTableListTraits<dxil::Instruction,
+                                                            dxil::BasicBlock>>,
+              dxil::BasicBlock::InstListType>);
+static_assert(std::is_same_v<dxil::Function::BasicBlockListType::iterator,
+                             llvm::simple_ilist<dxil::BasicBlock>::iterator>);
+static_assert(
+    std::is_same_v<dxil::Module::FunctionListType::const_iterator,
+                   llvm::simple_ilist<dxil::Function>::const_iterator>);
+static_assert(
+    llvm::PointerLikeTypeTraits<dxil::Instruction *>::NumLowBitsAvailable == 2);
+static_assert(
+    std::is_same_v<llvm::simplify_type<dxil::TrackingMDRef>::SimpleType,
+                   dxil::Metadata *>);
+static_assert(
+    std::is_same_v<llvm::simplify_type<dxil::TrackingMDNodeRef>::SimpleType,
+                   dxil::MDNode *>);
+static_assert(std::is_same_v<llvm::simplify_type<dxil::MDOperand>::SimpleType,
+                             dxil::Metadata *>);
 static_assert(
     std::is_same_v<llvm::simplify_type<dxil::Use>::SimpleType, dxil::Value *>);
 static_assert(
@@ -69,6 +103,16 @@ TEST(IRHeaders, AttributeSetSupportsModernDenseMap) {
   EXPECT_FALSE(Map.try_emplace(dxil::AttributeSet(), 0).second);
   EXPECT_EQ(42u, Map.lookup(Empty));
   EXPECT_EQ(1u, Map.size());
+  EXPECT_TRUE(Map.erase(Empty));
+  EXPECT_TRUE(Map.empty());
+}
+
+TEST(IRHeaders, AAMDNodesSupportsModernDenseMap) {
+  llvm::DenseMap<dxil::AAMDNodes, unsigned> Map;
+  dxil::AAMDNodes Empty;
+  EXPECT_TRUE(Map.try_emplace(Empty, 42).second);
+  EXPECT_FALSE(Map.try_emplace(dxil::AAMDNodes(), 0).second);
+  EXPECT_EQ(42u, Map.lookup(Empty));
   EXPECT_TRUE(Map.erase(Empty));
   EXPECT_TRUE(Map.empty());
 }

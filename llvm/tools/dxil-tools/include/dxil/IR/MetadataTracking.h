@@ -41,27 +41,21 @@ public:
   /// If tracking isn't supported, \c *MD will not change.
   ///
   /// \return true iff tracking is supported by \c MD.
-  static bool track(Metadata *&MD) {
-    return track(&MD, *MD, static_cast<Metadata *>(nullptr));
-  }
+  static bool track(Metadata *&MD);
 
   /// \brief Track the reference to metadata for \a Metadata.
   ///
   /// As \a track(Metadata*&), but with support for calling back to \c Owner to
   /// tell it that its operand changed.  This could trigger \c Owner being
   /// re-uniqued.
-  static bool track(void *Ref, Metadata &MD, Metadata &Owner) {
-    return track(Ref, MD, &Owner);
-  }
+  static bool track(void *Ref, Metadata &MD, Metadata &Owner);
 
   /// \brief Track the reference to metadata for \a MetadataAsValue.
   ///
   /// As \a track(Metadata*&), but with support for calling back to \c Owner to
   /// tell it that its operand changed.  This could trigger \c Owner being
   /// re-uniqued.
-  static bool track(void *Ref, Metadata &MD, MetadataAsValue &Owner) {
-    return track(Ref, MD, &Owner);
-  }
+  static bool track(void *Ref, Metadata &MD, MetadataAsValue &Owner);
 
   /// \brief Stop tracking a reference to metadata.
   ///
@@ -85,7 +79,7 @@ public:
   /// \brief Check whether metadata is replaceable.
   static bool isReplaceable(const Metadata &MD);
 
-  typedef PointerUnion<MetadataAsValue *, Metadata *> OwnerTy;
+  typedef llvm::PointerUnion<MetadataAsValue *, Metadata *> OwnerTy;
 
 private:
   /// \brief Track a reference to metadata for an owner.

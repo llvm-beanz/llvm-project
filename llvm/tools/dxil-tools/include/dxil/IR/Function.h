@@ -33,37 +33,10 @@ namespace dxil {
 class FunctionType;
 class LLVMContext;
 
-template<> struct ilist_traits<Argument>
-  : public SymbolTableListTraits<Argument, Function> {
-
-// HLSL Change Starts
-// Temporarily disable "downcast of address" UBSAN runtime error
-// https://github.com/microsoft/DirectXShaderCompiler/issues/6446
-#ifdef __has_feature
-#if __has_feature(undefined_behavior_sanitizer)
-  __attribute__((no_sanitize("undefined")))
-#endif // __has_feature(address_sanitizer)
-#endif // defined(__has_feature)
-       // HLSL Change Ends
-  Argument *
-  createSentinel() const {
-    return static_cast<Argument*>(&Sentinel);
-  }
-  static void destroySentinel(Argument*) {}
-
-  Argument *provideInitialHead() const { return createSentinel(); }
-  Argument *ensureHead(Argument*) const { return createSentinel(); }
-  static void noteHead(Argument*, Argument*) {}
-
-  static ValueSymbolTable *getSymTab(Function *ItemParent);
-private:
-  mutable ilist_half_node<Argument> Sentinel;
-};
-
-class Function : public GlobalObject, public ilist_node<Function> {
+class Function : public GlobalObject, public llvm::ilist_node<Function> {
 public:
-  typedef iplist<Argument> ArgumentListType;
-  typedef iplist<BasicBlock> BasicBlockListType;
+  typedef SymbolTableList<Argument, Function> ArgumentListType;
+  typedef SymbolTableList<BasicBlock, Function> BasicBlockListType;
 
   // BasicBlock iterators...
   typedef BasicBlockListType::iterator iterator;
@@ -124,19 +97,19 @@ private:
   /// function is automatically inserted into the end of the function list for
   /// the module.
   ///
-  Function(FunctionType *Ty, LinkageTypes Linkage,
-           const Twine &N = "", Module *M = nullptr);
+  Function(FunctionType *Ty, LinkageTypes Linkage, const llvm::Twine &N = "",
+           Module *M = nullptr);
 
 public:
   static Function *Create(FunctionType *Ty, LinkageTypes Linkage,
-                          const Twine &N = "", Module *M = nullptr) {
+                          const llvm::Twine &N = "", Module *M = nullptr) {
     return new(1) Function(Ty, Linkage, N, M);
   }
 
   ~Function() override;
 
   /// \brief Provide fast operand accessors
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
   /// \brief Get the personality function associated with this function.
   bool hasPersonalityFn() const { return getNumOperands() != 0; }
@@ -167,7 +140,7 @@ public:
   /// The particular intrinsic functions which correspond to this value are
   /// defined in llvm/Intrinsics.h.
   Intrinsic::ID getIntrinsicID() const LLVM_READONLY { return IntID; }
-  bool isIntrinsic() const { return getName().startswith("llvm."); }
+  bool isIntrinsic() const { return getName().starts_with("llvm."); }
 
   /// \brief Recalculate the ID for this function if it is an Intrinsic defined
   /// in llvm/Intrinsics.h.  Sets the intrinsic ID to Intrinsic::not_intrinsic
@@ -206,12 +179,12 @@ public:
   }
 
   /// @brief Add function attributes to this function.
-  void addFnAttr(StringRef Kind) {
+  void addFnAttr(llvm::StringRef Kind) {
     setAttributes(
       AttributeSets.addAttribute(getContext(),
                                  AttributeSet::FunctionIndex, Kind));
   }
-  void addFnAttr(StringRef Kind, StringRef Value) {
+  void addFnAttr(llvm::StringRef Kind, llvm::StringRef Value) {
     setAttributes(
       AttributeSets.addAttribute(getContext(),
                                  AttributeSet::FunctionIndex, Kind, Value));
@@ -227,7 +200,7 @@ public:
   bool hasFnAttribute(Attribute::AttrKind Kind) const {
     return AttributeSets.hasAttribute(AttributeSet::FunctionIndex, Kind);
   }
-  bool hasFnAttribute(StringRef Kind) const {
+  bool hasFnAttribute(llvm::StringRef Kind) const {
     return AttributeSets.hasAttribute(AttributeSet::FunctionIndex, Kind);
   }
 
@@ -235,7 +208,7 @@ public:
   Attribute getFnAttribute(Attribute::AttrKind Kind) const {
     return AttributeSets.getAttribute(AttributeSet::FunctionIndex, Kind);
   }
-  Attribute getFnAttribute(StringRef Kind) const {
+  Attribute getFnAttribute(llvm::StringRef Kind) const {
     return AttributeSets.getAttribute(AttributeSet::FunctionIndex, Kind);
   }
 
@@ -439,15 +412,17 @@ public:
     CheckLazyArguments();
     return ArgumentList;
   }
-  static iplist<Argument> Function::*getSublistAccess(Argument*) {
+  static SymbolTableList<Argument, Function> Function::*
+  getSublistAccess(Argument *) {
     return &Function::ArgumentList;
   }
 
   const BasicBlockListType &getBasicBlockList() const { return BasicBlocks; }
         BasicBlockListType &getBasicBlockList()       { return BasicBlocks; }
-  static iplist<BasicBlock> Function::*getSublistAccess(BasicBlock*) {
-    return &Function::BasicBlocks;
-  }
+        static SymbolTableList<BasicBlock, Function> Function::*
+        getSublistAccess(BasicBlock *) {
+          return &Function::BasicBlocks;
+        }
 
   const BasicBlock       &getEntryBlock() const   { return front(); }
         BasicBlock       &getEntryBlock()         { return front(); }
@@ -496,12 +471,12 @@ public:
     return ArgumentList.end();
   }
 
-  iterator_range<arg_iterator> args() {
-    return iterator_range<arg_iterator>(arg_begin(), arg_end());
+  llvm::iterator_range<arg_iterator> args() {
+    return llvm::iterator_range<arg_iterator>(arg_begin(), arg_end());
   }
 
-  iterator_range<const_arg_iterator> args() const {
-    return iterator_range<const_arg_iterator>(arg_begin(), arg_end());
+  llvm::iterator_range<const_arg_iterator> args() const {
+    return llvm::iterator_range<const_arg_iterator>(arg_begin(), arg_end());
   }
 
 /// @}
@@ -525,7 +500,8 @@ public:
 
   /// Print the function to an output stream with an optional
   /// AssemblyAnnotationWriter.
-  void print(raw_ostream &OS, AssemblyAnnotationWriter *AAW = nullptr) const;
+  void print(llvm::raw_ostream &OS,
+             AssemblyAnnotationWriter *AAW = nullptr) const;
 
   /// viewCFG - This function is meant for use from the debugger.  You can just
   /// say 'call F->viewCFG()' and a ghostview window should pop up from the
@@ -586,7 +562,7 @@ public:
   /// Returns \c nullptr if such an attachment is missing.
   /// @{
   MDNode *getMetadata(unsigned KindID) const;
-  MDNode *getMetadata(StringRef Kind) const;
+  MDNode *getMetadata(llvm::StringRef Kind) const;
   /// @}
 
   /// \brief Set a particular kind of metadata attachment.
@@ -595,17 +571,17 @@ public:
   /// replacing it if it already exists.
   /// @{
   void setMetadata(unsigned KindID, MDNode *MD);
-  void setMetadata(StringRef Kind, MDNode *MD);
+  void setMetadata(llvm::StringRef Kind, MDNode *MD);
   /// @}
 
   /// \brief Get all current metadata attachments.
-  void
-  getAllMetadata(SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const;
+  void getAllMetadata(
+      llvm::SmallVectorImpl<std::pair<unsigned, MDNode *>> &MDs) const;
 
   /// \brief Drop metadata not in the given list.
   ///
   /// Drop all metadata from \c this not included in \c KnownIDs.
-  void dropUnknownMetadata(ArrayRef<unsigned> KnownIDs);
+  void dropUnknownMetadata(llvm::ArrayRef<unsigned> KnownIDs);
 
 private:
   // Shadow Value::setValueSubclassData with a private forwarding method so that
@@ -624,20 +600,10 @@ private:
   void clearMetadata();
 };
 
-inline ValueSymbolTable *
-ilist_traits<BasicBlock>::getSymTab(Function *F) {
-  return F ? &F->getValueSymbolTable() : nullptr;
-}
-
-inline ValueSymbolTable *
-ilist_traits<Argument>::getSymTab(Function *F) {
-  return F ? &F->getValueSymbolTable() : nullptr;
-}
-
 template <>
 struct OperandTraits<Function> : public OptionalOperandTraits<Function> {};
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(Function, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(Function, Value)
 
 } // End llvm namespace
 

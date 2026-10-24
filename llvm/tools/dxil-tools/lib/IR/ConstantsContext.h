@@ -44,7 +44,7 @@ public:
     : ConstantExpr(Ty, Opcode, &Op<0>(), 1) {
     Op<0>() = C;
   }
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// BinaryConstantExpr - This class is private to Constants.cpp, and is used
@@ -65,7 +65,7 @@ public:
     SubclassOptionalData = Flags;
   }
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// SelectConstantExpr - This class is private to Constants.cpp, and is used
@@ -85,7 +85,7 @@ public:
     Op<2>() = C3;
   }
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// ExtractElementConstantExpr - This class is private to
@@ -106,7 +106,7 @@ public:
     Op<1>() = C2;
   }
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// InsertElementConstantExpr - This class is private to
@@ -128,7 +128,7 @@ public:
     Op<2>() = C3;
   }
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// ShuffleVectorConstantExpr - This class is private to
@@ -153,7 +153,7 @@ public:
     Op<2>() = C3;
   }
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// ExtractValueConstantExpr - This class is private to
@@ -178,7 +178,7 @@ public:
   const SmallVector<unsigned, 4> Indices;
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// InsertValueConstantExpr - This class is private to
@@ -204,7 +204,7 @@ public:
   const SmallVector<unsigned, 4> Indices;
 
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 /// GetElementPtrConstantExpr - This class is private to Constants.cpp, and is
@@ -234,7 +234,7 @@ public:
   }
   Type *getSourceElementType() const;
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 // CompareConstantExpr - This class is private to Constants.cpp, and is used
@@ -256,59 +256,59 @@ public:
     Op<1>() = RHS;
   }
   /// Transparently provide more efficient getOperand methods.
-  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+  DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 };
 
 template <>
 struct OperandTraits<UnaryConstantExpr>
     : public FixedNumOperandTraits<UnaryConstantExpr, 1> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(UnaryConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(UnaryConstantExpr, Value)
 
 template <>
 struct OperandTraits<BinaryConstantExpr>
     : public FixedNumOperandTraits<BinaryConstantExpr, 2> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BinaryConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(BinaryConstantExpr, Value)
 
 template <>
 struct OperandTraits<SelectConstantExpr>
     : public FixedNumOperandTraits<SelectConstantExpr, 3> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SelectConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SelectConstantExpr, Value)
 
 template <>
 struct OperandTraits<ExtractElementConstantExpr>
     : public FixedNumOperandTraits<ExtractElementConstantExpr, 2> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractElementConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractElementConstantExpr, Value)
 
 template <>
 struct OperandTraits<InsertElementConstantExpr>
     : public FixedNumOperandTraits<InsertElementConstantExpr, 3> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertElementConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertElementConstantExpr, Value)
 
 template <>
 struct OperandTraits<ShuffleVectorConstantExpr>
     : public FixedNumOperandTraits<ShuffleVectorConstantExpr, 3> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorConstantExpr, Value)
 
 template <>
 struct OperandTraits<ExtractValueConstantExpr>
     : public FixedNumOperandTraits<ExtractValueConstantExpr, 1> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractValueConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractValueConstantExpr, Value)
 
 template <>
 struct OperandTraits<InsertValueConstantExpr>
     : public FixedNumOperandTraits<InsertValueConstantExpr, 2> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertValueConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(InsertValueConstantExpr, Value)
 
 template <>
 struct OperandTraits<GetElementPtrConstantExpr>
     : public VariadicOperandTraits<GetElementPtrConstantExpr, 1> {};
 
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GetElementPtrConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(GetElementPtrConstantExpr, Value)
 
 template <>
 struct OperandTraits<CompareConstantExpr>
     : public FixedNumOperandTraits<CompareConstantExpr, 2> {};
-DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CompareConstantExpr, Value)
+DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(CompareConstantExpr, Value)
 
 template <class ConstantClass> struct ConstantAggrKeyType;
 struct InlineAsmKeyType;

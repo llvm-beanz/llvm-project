@@ -16,6 +16,20 @@
 
 using namespace llvm;
 
+namespace dxil {
+
+bool MetadataTracking::track(Metadata *&MD) {
+  return track(&MD, *MD, static_cast<Metadata *>(nullptr));
+}
+
+bool MetadataTracking::track(void *Ref, Metadata &MD, Metadata &Owner) {
+  return track(Ref, MD, &Owner);
+}
+
+bool MetadataTracking::track(void *Ref, Metadata &MD, MetadataAsValue &Owner) {
+  return track(Ref, MD, &Owner);
+}
+
 ReplaceableMetadataImpl *ReplaceableMetadataImpl::get(Metadata &MD) {
   if (auto *N = dyn_cast<MDNode>(&MD))
     return N->Context.getReplaceableUses();
@@ -53,3 +67,5 @@ bool MetadataTracking::retrack(void *Ref, Metadata &MD, void *New) {
 bool MetadataTracking::isReplaceable(const Metadata &MD) {
   return ReplaceableMetadataImpl::get(const_cast<Metadata &>(MD));
 }
+
+} // namespace dxil

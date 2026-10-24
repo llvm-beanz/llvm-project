@@ -29,17 +29,17 @@
 
 namespace dxil {
 class ValueSymbolTable;
-  
-template<typename NodeTy> class ilist_iterator;
-template<typename NodeTy, typename Traits> class iplist;
-template<typename Ty> struct ilist_traits;
+
+template <typename NodeTy, typename ParentTy> class SymbolTableList;
 
 // ValueSubClass   - The type of objects that I hold, e.g. Instruction.
 // ItemParentClass - The type of object that owns the list, e.g. BasicBlock.
 //
-template<typename ValueSubClass, typename ItemParentClass>
-class SymbolTableListTraits : public ilist_default_traits<ValueSubClass> {
-  typedef ilist_traits<ValueSubClass> TraitsClass;
+template <typename ValueSubClass, typename ItemParentClass>
+class SymbolTableListTraits : public llvm::ilist_alloc_traits<ValueSubClass> {
+  using ListTy = SymbolTableList<ValueSubClass, ItemParentClass>;
+  using iterator = typename llvm::simple_ilist<ValueSubClass>::iterator;
+
 public:
   SymbolTableListTraits() {}
 
@@ -48,12 +48,12 @@ public:
   ItemParentClass *getListOwner() {
     size_t Offset(size_t(&((ItemParentClass*)nullptr->*ItemParentClass::
                            getSublistAccess(static_cast<ValueSubClass*>(nullptr)))));
-    iplist<ValueSubClass>* Anchor(static_cast<iplist<ValueSubClass>*>(this));
+    ListTy *Anchor = static_cast<ListTy *>(this);
     return reinterpret_cast<ItemParentClass*>(reinterpret_cast<char*>(Anchor)-
                                               Offset);
   }
 
-  static iplist<ValueSubClass> &getList(ItemParentClass *Par) {
+  static ListTy &getList(ItemParentClass *Par) {
     return Par->*(Par->getSublistAccess((ValueSubClass*)nullptr));
   }
 
@@ -63,15 +63,19 @@ public:
 
   void addNodeToList(ValueSubClass *V);
   void removeNodeFromList(ValueSubClass *V);
-  void transferNodesFromList(ilist_traits<ValueSubClass> &L2,
-                             ilist_iterator<ValueSubClass> first,
-                             ilist_iterator<ValueSubClass> last);
-//private:
+  void transferNodesFromList(SymbolTableListTraits &L2, iterator first,
+                             iterator last);
+  // private:
   template<typename TPtr>
   void setSymTabObject(TPtr *, TPtr);
   static ValueSymbolTable *toPtr(ValueSymbolTable *P) { return P; }
   static ValueSymbolTable *toPtr(ValueSymbolTable &R) { return &R; }
 };
+
+template <typename NodeTy, typename ParentTy>
+class SymbolTableList
+    : public llvm::iplist_impl<llvm::simple_ilist<NodeTy>,
+                               SymbolTableListTraits<NodeTy, ParentTy>> {};
 
 } // End llvm namespace
 
