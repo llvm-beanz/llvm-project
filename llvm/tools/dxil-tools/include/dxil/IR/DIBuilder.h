@@ -15,11 +15,13 @@
 #ifndef DXIL_IR_DIBUILDER_H
 #define DXIL_IR_DIBUILDER_H
 
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
 #include "dxil/IR/DebugInfo.h"
 #include "dxil/IR/TrackingMDRef.h"
 #include "dxil/IR/ValueHandle.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DataTypes.h"
 
 namespace dxil {
@@ -30,7 +32,6 @@ namespace dxil {
   class Value;
   class Constant;
   class LLVMContext;
-  class StringRef;
 
   class DIBuilder {
     Module &M;
@@ -40,19 +41,19 @@ namespace dxil {
     Function *DeclareFn;     ///< llvm.dbg.declare
     Function *ValueFn;       ///< llvm.dbg.value
 
-    SmallVector<Metadata *, 4> AllEnumTypes;
+    llvm::SmallVector<Metadata *, 4> AllEnumTypes;
     /// Track the RetainTypes, since they can be updated later on.
-    SmallVector<TrackingMDNodeRef, 4> AllRetainTypes;
-    SmallVector<Metadata *, 4> AllSubprograms;
-    SmallVector<Metadata *, 4> AllGVs;
-    SmallVector<TrackingMDNodeRef, 4> AllImportedModules;
+    llvm::SmallVector<TrackingMDNodeRef, 4> AllRetainTypes;
+    llvm::SmallVector<Metadata *, 4> AllSubprograms;
+    llvm::SmallVector<Metadata *, 4> AllGVs;
+    llvm::SmallVector<TrackingMDNodeRef, 4> AllImportedModules;
 
     /// Track nodes that may be unresolved.
-    SmallVector<TrackingMDNodeRef, 4> UnresolvedNodes;
+    llvm::SmallVector<TrackingMDNodeRef, 4> UnresolvedNodes;
     bool AllowUnresolvedNodes;
 
     /// Each subprogram's preserved local variables.
-    DenseMap<MDNode *, std::vector<TrackingMDNodeRef>> PreservedVariables;
+    llvm::DenseMap<MDNode *, std::vector<TrackingMDNodeRef>> PreservedVariables;
 
     DIBuilder(const DIBuilder &) = delete;
     void operator=(const DIBuilder &) = delete;
@@ -104,21 +105,22 @@ namespace dxil {
     ///                      without actually changing the output
     ///                      (e.g., when using optimization remarks).
     DICompileUnit *
-    createCompileUnit(unsigned Lang, StringRef File, StringRef Dir,
-                      StringRef Producer, bool isOptimized, StringRef Flags,
-                      unsigned RV, StringRef SplitName = StringRef(),
+    createCompileUnit(unsigned Lang, llvm::StringRef File, llvm::StringRef Dir,
+                      llvm::StringRef Producer, bool isOptimized,
+                      llvm::StringRef Flags, unsigned RV,
+                      llvm::StringRef SplitName = llvm::StringRef(),
                       DebugEmissionKind Kind = FullDebug, uint64_t DWOId = 0,
                       bool EmitDebugInfo = true);
 
     /// Create a file descriptor to hold debugging information
     /// for a file.
-    DIFile *createFile(StringRef Filename, StringRef Directory);
+    DIFile *createFile(llvm::StringRef Filename, llvm::StringRef Directory);
 
     /// Create a single enumerator value.
-    DIEnumerator *createEnumerator(StringRef Name, int64_t Val);
+    DIEnumerator *createEnumerator(llvm::StringRef Name, int64_t Val);
 
     /// Create a DWARF unspecified type.
-    DIBasicType *createUnspecifiedType(StringRef Name);
+    DIBasicType *createUnspecifiedType(llvm::StringRef Name);
 
     /// Create C++11 nullptr type.
     DIBasicType *createNullPtrType();
@@ -129,7 +131,7 @@ namespace dxil {
     /// \param SizeInBits  Size of the type.
     /// \param AlignInBits Type alignment.
     /// \param Encoding    DWARF encoding code, e.g. dwarf::DW_ATE_float.
-    DIBasicType *createBasicType(StringRef Name, uint64_t SizeInBits,
+    DIBasicType *createBasicType(llvm::StringRef Name, uint64_t SizeInBits,
                                  uint64_t AlignInBits, unsigned Encoding);
 
     /// Create debugging information entry for a qualified
@@ -145,7 +147,7 @@ namespace dxil {
     /// \param Name        Pointer type name. (optional)
     DIDerivedType *createPointerType(DIType *PointeeTy, uint64_t SizeInBits,
                                      uint64_t AlignInBits = 0,
-                                     StringRef Name = "");
+                                     llvm::StringRef Name = "");
 
     /// Create debugging information entry for a pointer to member.
     /// \param PointeeTy Type pointed to by this pointer.
@@ -166,7 +168,7 @@ namespace dxil {
     /// \param File        File where this type is defined.
     /// \param LineNo      Line number.
     /// \param Context     The surrounding context for the typedef.
-    DIDerivedType *createTypedef(DIType *Ty, StringRef Name, DIFile *File,
+    DIDerivedType *createTypedef(DIType *Ty, llvm::StringRef Name, DIFile *File,
                                  unsigned LineNo, DIScope *Context);
 
     /// Create debugging information entry for a 'friend'.
@@ -192,7 +194,7 @@ namespace dxil {
     /// \param OffsetInBits Member offset.
     /// \param Flags        Flags to encode member attribute, e.g. private
     /// \param Ty           Parent type.
-    DIDerivedType *createMemberType(DIScope *Scope, StringRef Name,
+    DIDerivedType *createMemberType(DIScope *Scope, llvm::StringRef Name,
                                     DIFile *File, unsigned LineNo,
                                     uint64_t SizeInBits, uint64_t AlignInBits,
                                     uint64_t OffsetInBits, unsigned Flags,
@@ -207,10 +209,10 @@ namespace dxil {
     /// \param Ty         Type of the static member.
     /// \param Flags      Flags to encode member attribute, e.g. private.
     /// \param Val        Const initializer of the member.
-    DIDerivedType *createStaticMemberType(DIScope *Scope, StringRef Name,
+    DIDerivedType *createStaticMemberType(DIScope *Scope, llvm::StringRef Name,
                                           DIFile *File, unsigned LineNo,
                                           DIType *Ty, unsigned Flags,
-                                          llvm::Constant *Val);
+                                          Constant *Val);
 
     /// Create debugging information entry for Objective-C
     /// instance variable.
@@ -223,10 +225,11 @@ namespace dxil {
     /// \param Flags        Flags to encode member attribute, e.g. private
     /// \param Ty           Parent type.
     /// \param PropertyNode Property associated with this ivar.
-    DIDerivedType *createObjCIVar(StringRef Name, DIFile *File, unsigned LineNo,
-                                  uint64_t SizeInBits, uint64_t AlignInBits,
-                                  uint64_t OffsetInBits, unsigned Flags,
-                                  DIType *Ty, MDNode *PropertyNode);
+    DIDerivedType *createObjCIVar(llvm::StringRef Name, DIFile *File,
+                                  unsigned LineNo, uint64_t SizeInBits,
+                                  uint64_t AlignInBits, uint64_t OffsetInBits,
+                                  unsigned Flags, DIType *Ty,
+                                  MDNode *PropertyNode);
 
     /// Create debugging information entry for Objective-C
     /// property.
@@ -237,10 +240,10 @@ namespace dxil {
     /// \param SetterName   Name of the Objective C property setter selector.
     /// \param PropertyAttributes Objective C property attributes.
     /// \param Ty           Type.
-    DIObjCProperty *createObjCProperty(StringRef Name, DIFile *File,
+    DIObjCProperty *createObjCProperty(llvm::StringRef Name, DIFile *File,
                                        unsigned LineNumber,
-                                       StringRef GetterName,
-                                       StringRef SetterName,
+                                       llvm::StringRef GetterName,
+                                       llvm::StringRef SetterName,
                                        unsigned PropertyAttributes, DIType *Ty);
 
     /// Create debugging information entry for a class.
@@ -259,14 +262,14 @@ namespace dxil {
     ///                     for more info.
     /// \param TemplateParms Template type parameters.
     /// \param UniqueIdentifier A unique identifier for the class.
-    DICompositeType *createClassType(DIScope *Scope, StringRef Name,
+    DICompositeType *createClassType(DIScope *Scope, llvm::StringRef Name,
                                      DIFile *File, unsigned LineNumber,
                                      uint64_t SizeInBits, uint64_t AlignInBits,
                                      uint64_t OffsetInBits, unsigned Flags,
                                      DIType *DerivedFrom, DINodeArray Elements,
                                      DIType *VTableHolder = nullptr,
                                      MDNode *TemplateParms = nullptr,
-                                     StringRef UniqueIdentifier = "");
+                                     llvm::StringRef UniqueIdentifier = "");
 
     /// Create debugging information entry for a struct.
     /// \param Scope        Scope in which this struct is defined.
@@ -280,10 +283,10 @@ namespace dxil {
     /// \param RunTimeLang  Optional parameter, Objective-C runtime version.
     /// \param UniqueIdentifier A unique identifier for the struct.
     DICompositeType *createStructType(
-        DIScope *Scope, StringRef Name, DIFile *File, unsigned LineNumber,
+        DIScope *Scope, llvm::StringRef Name, DIFile *File, unsigned LineNumber,
         uint64_t SizeInBits, uint64_t AlignInBits, unsigned Flags,
         DIType *DerivedFrom, DINodeArray Elements, unsigned RunTimeLang = 0,
-        DIType *VTableHolder = nullptr, StringRef UniqueIdentifier = "");
+        DIType *VTableHolder = nullptr, llvm::StringRef UniqueIdentifier = "");
 
     /// Create debugging information entry for an union.
     /// \param Scope        Scope in which this union is defined.
@@ -296,20 +299,21 @@ namespace dxil {
     /// \param Elements     Union elements.
     /// \param RunTimeLang  Optional parameter, Objective-C runtime version.
     /// \param UniqueIdentifier A unique identifier for the union.
-    DICompositeType *createUnionType(DIScope *Scope, StringRef Name,
+    DICompositeType *createUnionType(DIScope *Scope, llvm::StringRef Name,
                                      DIFile *File, unsigned LineNumber,
                                      uint64_t SizeInBits, uint64_t AlignInBits,
                                      unsigned Flags, DINodeArray Elements,
                                      unsigned RunTimeLang = 0,
-                                     StringRef UniqueIdentifier = "");
+                                     llvm::StringRef UniqueIdentifier = "");
 
     /// Create debugging information for template
     /// type parameter.
     /// \param Scope        Scope in which this type is defined.
     /// \param Name         Type parameter name.
     /// \param Ty           Parameter type.
-    DITemplateTypeParameter *
-    createTemplateTypeParameter(DIScope *Scope, StringRef Name, DIType *Ty);
+    DITemplateTypeParameter *createTemplateTypeParameter(DIScope *Scope,
+                                                         llvm::StringRef Name,
+                                                         DIType *Ty);
 
     /// Create debugging information for template
     /// value parameter.
@@ -318,7 +322,7 @@ namespace dxil {
     /// \param Ty           Parameter type.
     /// \param Val          Constant parameter value.
     DITemplateValueParameter *createTemplateValueParameter(DIScope *Scope,
-                                                           StringRef Name,
+                                                           llvm::StringRef Name,
                                                            DIType *Ty,
                                                            Constant *Val);
 
@@ -327,10 +331,9 @@ namespace dxil {
     /// \param Name         Value parameter name.
     /// \param Ty           Parameter type.
     /// \param Val          The fully qualified name of the template.
-    DITemplateValueParameter *createTemplateTemplateParameter(DIScope *Scope,
-                                                              StringRef Name,
-                                                              DIType *Ty,
-                                                              StringRef Val);
+    DITemplateValueParameter *
+    createTemplateTemplateParameter(DIScope *Scope, llvm::StringRef Name,
+                                    DIType *Ty, llvm::StringRef Val);
 
     /// Create debugging information for a template parameter pack.
     /// \param Scope        Scope in which this type is defined.
@@ -338,7 +341,7 @@ namespace dxil {
     /// \param Ty           Parameter type.
     /// \param Val          An array of types in the pack.
     DITemplateValueParameter *createTemplateParameterPack(DIScope *Scope,
-                                                          StringRef Name,
+                                                          llvm::StringRef Name,
                                                           DIType *Ty,
                                                           DINodeArray Val);
 
@@ -370,9 +373,9 @@ namespace dxil {
     /// \param UnderlyingType Underlying type of a C++11/ObjC fixed enum.
     /// \param UniqueIdentifier A unique identifier for the enum.
     DICompositeType *createEnumerationType(
-        DIScope *Scope, StringRef Name, DIFile *File, unsigned LineNumber,
+        DIScope *Scope, llvm::StringRef Name, DIFile *File, unsigned LineNumber,
         uint64_t SizeInBits, uint64_t AlignInBits, DINodeArray Elements,
-        DIType *UnderlyingType, StringRef UniqueIdentifier = "");
+        DIType *UnderlyingType, llvm::StringRef UniqueIdentifier = "");
 
     /// Create subroutine type.
     /// \param File            File in which this subroutine is defined.
@@ -392,19 +395,19 @@ namespace dxil {
     DIType *createObjectPointerType(DIType *Ty);
 
     /// Create a permanent forward-declared type.
-    DICompositeType *createForwardDecl(unsigned Tag, StringRef Name,
+    DICompositeType *createForwardDecl(unsigned Tag, llvm::StringRef Name,
                                        DIScope *Scope, DIFile *F, unsigned Line,
                                        unsigned RuntimeLang = 0,
                                        uint64_t SizeInBits = 0,
                                        uint64_t AlignInBits = 0,
-                                       StringRef UniqueIdentifier = "");
+                                       llvm::StringRef UniqueIdentifier = "");
 
     /// Create a temporary forward-declared type.
     DICompositeType *createReplaceableCompositeType(
-        unsigned Tag, StringRef Name, DIScope *Scope, DIFile *F, unsigned Line,
-        unsigned RuntimeLang = 0, uint64_t SizeInBits = 0,
+        unsigned Tag, llvm::StringRef Name, DIScope *Scope, DIFile *F,
+        unsigned Line, unsigned RuntimeLang = 0, uint64_t SizeInBits = 0,
         uint64_t AlignInBits = 0, unsigned Flags = DINode::FlagFwdDecl,
-        StringRef UniqueIdentifier = "");
+        llvm::StringRef UniqueIdentifier = "");
 
     /// Retain DIType* in a module even if it is not referenced
     /// through debug info anchors.
@@ -415,10 +418,10 @@ namespace dxil {
     DIBasicType *createUnspecifiedParameter();
 
     /// Get a DINodeArray, create one if required.
-    DINodeArray getOrCreateArray(ArrayRef<Metadata *> Elements);
+    DINodeArray getOrCreateArray(llvm::ArrayRef<Metadata *> Elements);
 
     /// Get a DITypeRefArray, create one if required.
-    DITypeRefArray getOrCreateTypeArray(ArrayRef<Metadata *> Elements);
+    DITypeRefArray getOrCreateTypeArray(llvm::ArrayRef<Metadata *> Elements);
 
     /// Create a descriptor for a value range.  This
     /// implicitly uniques the values returned.
@@ -434,21 +437,20 @@ namespace dxil {
     /// \param Ty          Variable Type.
     /// \param isLocalToUnit Boolean flag indicate whether this variable is
     ///                      externally visible or not.
-    /// \param Val         llvm::Value of the variable.
+    /// \param Val         Value of the variable.
     /// \param Decl        Reference to the corresponding declaration.
-    DIGlobalVariable *createGlobalVariable(DIScope *Context, StringRef Name,
-                                           StringRef LinkageName, DIFile *File,
-                                           unsigned LineNo, DIType *Ty,
-                                           bool isLocalToUnit,
-                                           llvm::Constant *Val,
-                                           MDNode *Decl = nullptr);
+    DIGlobalVariable *
+    createGlobalVariable(DIScope *Context, llvm::StringRef Name,
+                         llvm::StringRef LinkageName, DIFile *File,
+                         unsigned LineNo, DIType *Ty, bool isLocalToUnit,
+                         Constant *Val, MDNode *Decl = nullptr);
 
     /// Identical to createGlobalVariable
     /// except that the resulting DbgNode is temporary and meant to be RAUWed.
     DIGlobalVariable *createTempGlobalVariableFwdDecl(
-        DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *File,
-        unsigned LineNo, DIType *Ty, bool isLocalToUnit, llvm::Constant *Val,
-        MDNode *Decl = nullptr);
+        DIScope *Context, llvm::StringRef Name, llvm::StringRef LinkageName,
+        DIFile *File, unsigned LineNo, DIType *Ty, bool isLocalToUnit,
+        Constant *Val, MDNode *Decl = nullptr);
 
     /// Create a new descriptor for the specified
     /// local variable.
@@ -465,7 +467,7 @@ namespace dxil {
     /// \param ArgNo       If this variable is an argument then this argument's
     ///                    number. 1 indicates 1st argument.
     DILocalVariable *createLocalVariable(unsigned Tag, DIScope *Scope,
-                                         StringRef Name, DIFile *File,
+                                         llvm::StringRef Name, DIFile *File,
                                          unsigned LineNo, DIType *Ty,
                                          bool AlwaysPreserve = false,
                                          unsigned Flags = 0,
@@ -474,8 +476,8 @@ namespace dxil {
     /// Create a new descriptor for the specified
     /// variable which has a complex address expression for its address.
     /// \param Addr        An array of complex address operations.
-    DIExpression *createExpression(ArrayRef<uint64_t> Addr = None);
-    DIExpression *createExpression(ArrayRef<int64_t> Addr);
+    DIExpression *createExpression(llvm::ArrayRef<uint64_t> Addr = {});
+    DIExpression *createExpression(llvm::ArrayRef<int64_t> Addr);
 
     /// Create a descriptor to describe one part
     /// of aggregate variable that is fragmented across multiple Values.
@@ -502,18 +504,18 @@ namespace dxil {
     /// \param Fn            llvm::Function pointer.
     /// \param TParam        Function template parameters.
     DISubprogram *
-    createFunction(DIScope *Scope, StringRef Name, StringRef LinkageName,
-                   DIFile *File, unsigned LineNo, DISubroutineType *Ty,
-                   bool isLocalToUnit, bool isDefinition, unsigned ScopeLine,
-                   unsigned Flags = 0, bool isOptimized = false,
-                   Function *Fn = nullptr, MDNode *TParam = nullptr,
-                   MDNode *Decl = nullptr);
+    createFunction(DIScope *Scope, llvm::StringRef Name,
+                   llvm::StringRef LinkageName, DIFile *File, unsigned LineNo,
+                   DISubroutineType *Ty, bool isLocalToUnit, bool isDefinition,
+                   unsigned ScopeLine, unsigned Flags = 0,
+                   bool isOptimized = false, Function *Fn = nullptr,
+                   MDNode *TParam = nullptr, MDNode *Decl = nullptr);
 
     /// Identical to createFunction,
     /// except that the resulting DbgNode is meant to be RAUWed.
     DISubprogram *createTempFunctionFwdDecl(
-        DIScope *Scope, StringRef Name, StringRef LinkageName, DIFile *File,
-        unsigned LineNo, DISubroutineType *Ty, bool isLocalToUnit,
+        DIScope *Scope, llvm::StringRef Name, llvm::StringRef LinkageName,
+        DIFile *File, unsigned LineNo, DISubroutineType *Ty, bool isLocalToUnit,
         bool isDefinition, unsigned ScopeLine, unsigned Flags = 0,
         bool isOptimized = false, Function *Fn = nullptr,
         MDNode *TParam = nullptr, MDNode *Decl = nullptr);
@@ -521,12 +523,12 @@ namespace dxil {
     /// FIXME: this is added for dragonegg. Once we update dragonegg
     /// to call resolve function, this will be removed.
     DISubprogram *
-    createFunction(DIScopeRef Scope, StringRef Name, StringRef LinkageName,
-                   DIFile *File, unsigned LineNo, DISubroutineType *Ty,
-                   bool isLocalToUnit, bool isDefinition, unsigned ScopeLine,
-                   unsigned Flags = 0, bool isOptimized = false,
-                   Function *Fn = nullptr, MDNode *TParam = nullptr,
-                   MDNode *Decl = nullptr);
+    createFunction(DIScopeRef Scope, llvm::StringRef Name,
+                   llvm::StringRef LinkageName, DIFile *File, unsigned LineNo,
+                   DISubroutineType *Ty, bool isLocalToUnit, bool isDefinition,
+                   unsigned ScopeLine, unsigned Flags = 0,
+                   bool isOptimized = false, Function *Fn = nullptr,
+                   MDNode *TParam = nullptr, MDNode *Decl = nullptr);
 
     /// Create a new descriptor for the specified C++ method.
     /// See comments in \a DISubprogram* for descriptions of these fields.
@@ -548,12 +550,13 @@ namespace dxil {
     /// \param Fn            llvm::Function pointer.
     /// \param TParam        Function template parameters.
     DISubprogram *
-    createMethod(DIScope *Scope, StringRef Name, StringRef LinkageName,
-                 DIFile *File, unsigned LineNo, DISubroutineType *Ty,
-                 bool isLocalToUnit, bool isDefinition, unsigned Virtuality = 0,
-                 unsigned VTableIndex = 0, DIType *VTableHolder = nullptr,
-                 unsigned Flags = 0, bool isOptimized = false,
-                 Function *Fn = nullptr, MDNode *TParam = nullptr);
+    createMethod(DIScope *Scope, llvm::StringRef Name,
+                 llvm::StringRef LinkageName, DIFile *File, unsigned LineNo,
+                 DISubroutineType *Ty, bool isLocalToUnit, bool isDefinition,
+                 unsigned Virtuality = 0, unsigned VTableIndex = 0,
+                 DIType *VTableHolder = nullptr, unsigned Flags = 0,
+                 bool isOptimized = false, Function *Fn = nullptr,
+                 MDNode *TParam = nullptr);
 
     /// This creates new descriptor for a namespace with the specified
     /// parent scope.
@@ -561,8 +564,8 @@ namespace dxil {
     /// \param Name        Name of this namespace
     /// \param File        Source file
     /// \param LineNo      Line number
-    DINamespace *createNameSpace(DIScope *Scope, StringRef Name, DIFile *File,
-                                 unsigned LineNo);
+    DINamespace *createNameSpace(DIScope *Scope, llvm::StringRef Name,
+                                 DIFile *File, unsigned LineNo);
 
     /// This creates new descriptor for a module with the specified
     /// parent scope.
@@ -573,10 +576,10 @@ namespace dxil {
     ///                    definitions as they would appear on a command line.
     /// \param IncludePath The path to the module map file.
     /// \param ISysRoot    The clang system root (value of -isysroot).
-    DIModule *createModule(DIScope *Scope, StringRef Name,
-                           StringRef ConfigurationMacros,
-                           StringRef IncludePath,
-                           StringRef ISysRoot);
+    DIModule *createModule(DIScope *Scope, llvm::StringRef Name,
+                           llvm::StringRef ConfigurationMacros,
+                           llvm::StringRef IncludePath,
+                           llvm::StringRef ISysRoot);
 
     /// This creates a descriptor for a lexical block with a new file
     /// attached. This merely extends the existing
@@ -624,49 +627,49 @@ namespace dxil {
     /// \param Line Line number
     DIImportedEntity *createImportedDeclaration(DIScope *Context, DINode *Decl,
                                                 unsigned Line,
-                                                StringRef Name = "");
+                                                llvm::StringRef Name = "");
 
     /// Insert a new llvm.dbg.declare intrinsic call.
-    /// \param Storage     llvm::Value of the variable
+    /// \param Storage     Value of the variable
     /// \param VarInfo     Variable's debug info descriptor.
     /// \param Expr        A complex location expression.
     /// \param DL          Debug info location.
     /// \param InsertAtEnd Location for the new intrinsic.
-    Instruction *insertDeclare(llvm::Value *Storage, DILocalVariable *VarInfo,
+    Instruction *insertDeclare(Value *Storage, DILocalVariable *VarInfo,
                                DIExpression *Expr, const DILocation *DL,
                                BasicBlock *InsertAtEnd);
 
     /// Insert a new llvm.dbg.declare intrinsic call.
-    /// \param Storage      llvm::Value of the variable
+    /// \param Storage      Value of the variable
     /// \param VarInfo      Variable's debug info descriptor.
     /// \param Expr         A complex location expression.
     /// \param DL           Debug info location.
     /// \param InsertBefore Location for the new intrinsic.
-    Instruction *insertDeclare(llvm::Value *Storage, DILocalVariable *VarInfo,
+    Instruction *insertDeclare(Value *Storage, DILocalVariable *VarInfo,
                                DIExpression *Expr, const DILocation *DL,
                                Instruction *InsertBefore);
 
     /// Insert a new llvm.dbg.value intrinsic call.
-    /// \param Val          llvm::Value of the variable
+    /// \param Val          Value of the variable
     /// \param Offset       Offset
     /// \param VarInfo      Variable's debug info descriptor.
     /// \param Expr         A complex location expression.
     /// \param DL           Debug info location.
     /// \param InsertAtEnd Location for the new intrinsic.
-    Instruction *insertDbgValueIntrinsic(llvm::Value *Val, uint64_t Offset,
+    Instruction *insertDbgValueIntrinsic(Value *Val, uint64_t Offset,
                                          DILocalVariable *VarInfo,
                                          DIExpression *Expr,
                                          const DILocation *DL,
                                          BasicBlock *InsertAtEnd);
 
     /// Insert a new llvm.dbg.value intrinsic call.
-    /// \param Val          llvm::Value of the variable
+    /// \param Val          Value of the variable
     /// \param Offset       Offset
     /// \param VarInfo      Variable's debug info descriptor.
     /// \param Expr         A complex location expression.
     /// \param DL           Debug info location.
     /// \param InsertBefore Location for the new intrinsic.
-    Instruction *insertDbgValueIntrinsic(llvm::Value *Val, uint64_t Offset,
+    Instruction *insertDbgValueIntrinsic(Value *Val, uint64_t Offset,
                                          DILocalVariable *VarInfo,
                                          DIExpression *Expr,
                                          const DILocation *DL,

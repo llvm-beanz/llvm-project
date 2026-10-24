@@ -17,6 +17,8 @@
 #include "dxil/IR/Metadata.h"
 using namespace llvm;
 
+namespace dxil {
+
 MDString *MDBuilder::createString(StringRef Str) {
   return MDString::get(Context, Str);
 }
@@ -82,7 +84,7 @@ MDNode *MDBuilder::createRange(Constant *Lo, Constant *Hi) {
 
 MDNode *MDBuilder::createAnonymousAARoot(StringRef Name, MDNode *Extra) {
   // To ensure uniqueness the root node is self-referential.
-  auto Dummy = MDNode::getTemporary(Context, None);
+  auto Dummy = MDNode::getTemporary(Context, {});
 
   SmallVector<Metadata *, 3> Args(1, Dummy.get());
   if (Extra)
@@ -181,3 +183,5 @@ MDNode *MDBuilder::createTBAAStructTagNode(MDNode *BaseType, MDNode *AccessType,
     return MDNode::get(Context, Ops);
   }
 }
+
+} // namespace dxil

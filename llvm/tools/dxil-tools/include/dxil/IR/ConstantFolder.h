@@ -119,33 +119,34 @@ public:
   //===--------------------------------------------------------------------===//
 
   Constant *CreateGetElementPtr(Type *Ty, Constant *C,
-                                ArrayRef<Constant *> IdxList) const {
+                                llvm::ArrayRef<Constant *> IdxList) const {
     return ConstantExpr::getGetElementPtr(Ty, C, IdxList);
   }
   Constant *CreateGetElementPtr(Type *Ty, Constant *C, Constant *Idx) const {
     // This form of the function only exists to avoid ambiguous overload
-    // warnings about whether to convert Idx to ArrayRef<Constant *> or
-    // ArrayRef<Value *>.
+    // warnings about whether to convert Idx to llvm::ArrayRef<Constant *> or
+    // llvm::ArrayRef<Value *>.
     return ConstantExpr::getGetElementPtr(Ty, C, Idx);
   }
   Constant *CreateGetElementPtr(Type *Ty, Constant *C,
-                                ArrayRef<Value *> IdxList) const {
+                                llvm::ArrayRef<Value *> IdxList) const {
     return ConstantExpr::getGetElementPtr(Ty, C, IdxList);
   }
 
-  Constant *CreateInBoundsGetElementPtr(Type *Ty, Constant *C,
-                                        ArrayRef<Constant *> IdxList) const {
+  Constant *
+  CreateInBoundsGetElementPtr(Type *Ty, Constant *C,
+                              llvm::ArrayRef<Constant *> IdxList) const {
     return ConstantExpr::getInBoundsGetElementPtr(Ty, C, IdxList);
   }
   Constant *CreateInBoundsGetElementPtr(Type *Ty, Constant *C,
                                         Constant *Idx) const {
     // This form of the function only exists to avoid ambiguous overload
-    // warnings about whether to convert Idx to ArrayRef<Constant *> or
-    // ArrayRef<Value *>.
+    // warnings about whether to convert Idx to llvm::ArrayRef<Constant *> or
+    // llvm::ArrayRef<Value *>.
     return ConstantExpr::getInBoundsGetElementPtr(Ty, C, Idx);
   }
   Constant *CreateInBoundsGetElementPtr(Type *Ty, Constant *C,
-                                        ArrayRef<Value *> IdxList) const {
+                                        llvm::ArrayRef<Value *> IdxList) const {
     return ConstantExpr::getInBoundsGetElementPtr(Ty, C, IdxList);
   }
 
@@ -230,12 +231,12 @@ public:
   }
 
   Constant *CreateExtractValue(Constant *Agg,
-                               ArrayRef<unsigned> IdxList) const {
+                               llvm::ArrayRef<unsigned> IdxList) const {
     return ConstantExpr::getExtractValue(Agg, IdxList);
   }
 
   Constant *CreateInsertValue(Constant *Agg, Constant *Val,
-                              ArrayRef<unsigned> IdxList) const {
+                              llvm::ArrayRef<unsigned> IdxList) const {
     return ConstantExpr::getInsertValue(Agg, Val, IdxList);
   }
 };

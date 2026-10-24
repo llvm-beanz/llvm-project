@@ -30,20 +30,21 @@
 #include <cstring>
 using namespace llvm;
 
+namespace dxil {
 
 static bool UpgradeIntrinsicFunction1(Function *F, Function *&NewFn) {
   assert(F && "Illegal to upgrade a non-existent Function.");
 
   // Quickly eliminate it, if it's not a candidate.
   StringRef Name = F->getName();
-  if (Name.size() <= 8 || !Name.startswith("llvm."))
+  if (Name.size() <= 8 || !Name.starts_with("llvm."))
     return false;
   Name = Name.substr(5); // Strip off "llvm."
 
   switch (Name[0]) {
   default: break;
   case 'a': {
-    if (Name.startswith("arm.neon.vclz")) {
+    if (Name.starts_with("arm.neon.vclz")) {
       Type* args[2] = {
         F->arg_begin()->getType(),
         Type::getInt1Ty(F->getContext())
@@ -56,7 +57,7 @@ static bool UpgradeIntrinsicFunction1(Function *F, Function *&NewFn) {
                                "llvm.ctlz." + Name.substr(14), F->getParent());
       return true;
     }
-    if (Name.startswith("arm.neon.vcnt")) {
+    if (Name.starts_with("arm.neon.vcnt")) {
       NewFn = Intrinsic::getDeclaration(F->getParent(), Intrinsic::ctpop,
                                         F->arg_begin()->getType());
       return true;
@@ -64,13 +65,13 @@ static bool UpgradeIntrinsicFunction1(Function *F, Function *&NewFn) {
     break;
   }
   case 'c': {
-    if (Name.startswith("ctlz.") && F->arg_size() == 1) {
+    if (Name.starts_with("ctlz.") && F->arg_size() == 1) {
       F->setName(Name + ".old");
       NewFn = Intrinsic::getDeclaration(F->getParent(), Intrinsic::ctlz,
                                         F->arg_begin()->getType());
       return true;
     }
-    if (Name.startswith("cttz.") && F->arg_size() == 1) {
+    if (Name.starts_with("cttz.") && F->arg_size() == 1) {
       F->setName(Name + ".old");
       NewFn = Intrinsic::getDeclaration(F->getParent(), Intrinsic::cttz,
                                         F->arg_begin()->getType());
@@ -82,7 +83,7 @@ static bool UpgradeIntrinsicFunction1(Function *F, Function *&NewFn) {
   case 'o':
     // We only need to change the name to match the mangling including the
     // address space.
-    if (F->arg_size() == 2 && Name.startswith("objectsize.")) {
+    if (F->arg_size() == 2 && Name.starts_with("objectsize.")) {
       Type *Tys[2] = { F->getReturnType(), F->arg_begin()->getType() };
       if (F->getName() != Intrinsic::getName(Intrinsic::objectsize, Tys)) {
         F->setName(Name + ".old");
@@ -102,7 +103,7 @@ static bool UpgradeIntrinsicFunction1(Function *F, Function *&NewFn) {
   return false;
 }
 
-bool llvm::UpgradeIntrinsicFunction(Function *F, Function *&NewFn) {
+bool UpgradeIntrinsicFunction(Function *F, Function *&NewFn) {
   NewFn = nullptr;
   bool Upgraded = UpgradeIntrinsicFunction1(F, NewFn);
   assert(F != NewFn && "Intrinsic function upgraded to the same function");
@@ -115,20 +116,19 @@ bool llvm::UpgradeIntrinsicFunction(Function *F, Function *&NewFn) {
   return Upgraded;
 }
 
-bool llvm::UpgradeGlobalVariable(GlobalVariable *GV) {
+bool UpgradeGlobalVariable(GlobalVariable *GV) {
   // Nothing to do yet.
   return false;
 }
 
-
 // UpgradeIntrinsicCall - Upgrade a call to an old intrinsic to be a call the
 // upgraded intrinsic. All argument and return casting must be provided in
 // order to seamlessly integrate with existing context.
-void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
+void UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
   Function *F = CI->getCalledFunction();
   LLVMContext &C = CI->getContext();
   IRBuilder<> Builder(C);
-  Builder.SetInsertPoint(CI->getParent(), CI);
+  Builder.SetInsertPoint(CI);
 
   assert(F && "Intrinsic call is not direct?");
 
@@ -139,7 +139,7 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
     return;
   }
 
-  std::string Name = CI->getName();
+  std::string Name = CI->getName().str();
   if (!Name.empty())
     CI->setName(Name + ".old");
 
@@ -174,7 +174,7 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
 // This tests each Function to determine if it needs upgrading. When we find
 // one we are interested in, we then upgrade all calls to reflect the new
 // function.
-void llvm::UpgradeCallsToIntrinsic(Function* F) {
+void UpgradeCallsToIntrinsic(Function *F) {
   assert(F && "Illegal attempt to upgrade a non-existent intrinsic.");
 
   // Upgrade the function and check if it is a totaly new function.
@@ -191,7 +191,7 @@ void llvm::UpgradeCallsToIntrinsic(Function* F) {
   }
 }
 
-void llvm::UpgradeInstWithTBAATag(Instruction *I) {
+void UpgradeInstWithTBAATag(Instruction *I) {
   MDNode *MD = I->getMetadata(LLVMContext::MD_tbaa);
   assert(MD && "UpgradeInstWithTBAATag should have a TBAA tag");
   // Check if the tag uses struct-path aware TBAA format.
@@ -215,8 +215,8 @@ void llvm::UpgradeInstWithTBAATag(Instruction *I) {
   }
 }
 
-Instruction *llvm::UpgradeBitCastInst(unsigned Opc, Value *V, Type *DestTy,
-                                      Instruction *&Temp) {
+Instruction *UpgradeBitCastInst(unsigned Opc, Value *V, Type *DestTy,
+                                Instruction *&Temp) {
   if (Opc != Instruction::BitCast)
     return nullptr;
 
@@ -237,7 +237,7 @@ Instruction *llvm::UpgradeBitCastInst(unsigned Opc, Value *V, Type *DestTy,
   return nullptr;
 }
 
-Value *llvm::UpgradeBitCastExpr(unsigned Opc, Constant *C, Type *DestTy) {
+Value *UpgradeBitCastExpr(unsigned Opc, Constant *C, Type *DestTy) {
   if (Opc != Instruction::BitCast)
     return nullptr;
 
@@ -259,7 +259,7 @@ Value *llvm::UpgradeBitCastExpr(unsigned Opc, Constant *C, Type *DestTy) {
 
 /// Check the debug info version number, if it is out-dated, drop the debug
 /// info. Return true if module is modified.
-bool llvm::UpgradeDebugInfo(Module &M) {
+bool UpgradeDebugInfo(Module &M) {
   unsigned Version = getDebugMetadataVersionFromModule(M);
   if (Version == DEBUG_METADATA_VERSION)
     return false;
@@ -272,7 +272,7 @@ bool llvm::UpgradeDebugInfo(Module &M) {
   return RetCode;
 }
 
-void llvm::UpgradeMDStringConstant(std::string &String) {
+void UpgradeMDStringConstant(std::string &String) {
   const std::string OldPrefix = "llvm.vectorizer.";
   if (String == "llvm.vectorizer.unroll") {
     String = "llvm.loop.interleave.count";
@@ -280,3 +280,5 @@ void llvm::UpgradeMDStringConstant(std::string &String) {
     String.replace(0, OldPrefix.size(), "llvm.loop.vectorize.");
   }
 }
+
+} // namespace dxil

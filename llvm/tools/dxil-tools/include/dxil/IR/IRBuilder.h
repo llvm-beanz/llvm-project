@@ -40,8 +40,8 @@ class MDNode;
 template <bool preserveNames = true>
 class IRBuilderDefaultInserter {
 protected:
-  void InsertHelper(Instruction *I, const Twine &Name,
-                    BasicBlock *BB, BasicBlock::iterator InsertPt) const {
+  void InsertHelper(Instruction *I, const llvm::Twine &Name, BasicBlock *BB,
+                    BasicBlock::iterator InsertPt) const {
     if (BB) BB->getInstList().insert(InsertPt, I);
     if (preserveNames)
       I->setName(Name);
@@ -73,7 +73,7 @@ public:
   /// inserted into a block.
   void ClearInsertionPoint() {
     BB = nullptr;
-    InsertPt = nullptr;
+    InsertPt = BasicBlock::iterator();
   }
 
   BasicBlock *GetInsertBlock() const { return BB; }
@@ -91,8 +91,8 @@ public:
   /// the specified instruction.
   void SetInsertPoint(Instruction *I) {
     BB = I->getParent();
-    InsertPt = I;
-    assert(I != BB->end() && "Can't read debug loc from end()");
+    InsertPt = I->getIterator();
+    assert(InsertPt != BB->end() && "Can't read debug loc from end()");
     SetCurrentDebugLocation(I->getDebugLoc());
   }
 
@@ -144,8 +144,8 @@ public:
     /// \brief Returns true if this insert point is set.
     bool isSet() const { return (Block != nullptr); }
 
-    llvm::BasicBlock *getBlock() const { return Block; }
-    llvm::BasicBlock::iterator getPoint() const { return Point; }
+    BasicBlock *getBlock() const { return Block; }
+    BasicBlock::iterator getPoint() const { return Point; }
   };
 
   /// \brief Returns the current insert point.
@@ -240,7 +240,8 @@ public:
   /// filled in with the null terminated string value specified.  The new global
   /// variable will be marked mergable with any others of the same contents.  If
   /// Name is specified, it is the name of the global variable created.
-  GlobalVariable *CreateGlobalString(StringRef Str, const Twine &Name = "",
+  GlobalVariable *CreateGlobalString(llvm::StringRef Str,
+                                     const llvm::Twine &Name = "",
                                      unsigned AddressSpace = 0);
 
   /// \brief Get a constant value representing either true or false.
@@ -285,7 +286,7 @@ public:
   }
 
   /// \brief Get a constant integer value.
-  ConstantInt *getInt(const APInt &AI) {
+  ConstantInt *getInt(const llvm::APInt &AI) {
     return ConstantInt::get(Context, AI);
   }
 
@@ -432,7 +433,7 @@ public:
 
   /// \brief Create a call to Masked Load intrinsic
   CallInst *CreateMaskedLoad(Value *Ptr, unsigned Align, Value *Mask,
-                             Value *PassThru = 0, const Twine &Name = "");
+                             Value *PassThru = 0, const llvm::Twine &Name = "");
 
   /// \brief Create a call to Masked Store intrinsic
   CallInst *CreateMaskedStore(Value *Val, Value *Ptr, unsigned Align,
@@ -446,58 +447,54 @@ public:
   /// start a new statepoint sequence.
   CallInst *CreateGCStatepointCall(uint64_t ID, uint32_t NumPatchBytes,
                                    Value *ActualCallee,
-                                   ArrayRef<Value *> CallArgs,
-                                   ArrayRef<Value *> DeoptArgs,
-                                   ArrayRef<Value *> GCArgs,
-                                   const Twine &Name = "");
+                                   llvm::ArrayRef<Value *> CallArgs,
+                                   llvm::ArrayRef<Value *> DeoptArgs,
+                                   llvm::ArrayRef<Value *> GCArgs,
+                                   const llvm::Twine &Name = "");
 
   // \brief Conveninence function for the common case when CallArgs are filled
   // in using makeArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be
   // .get()'ed to get the Value pointer.
   CallInst *CreateGCStatepointCall(uint64_t ID, uint32_t NumPatchBytes,
-                                   Value *ActualCallee, ArrayRef<Use> CallArgs,
-                                   ArrayRef<Value *> DeoptArgs,
-                                   ArrayRef<Value *> GCArgs,
-                                   const Twine &Name = "");
+                                   Value *ActualCallee,
+                                   llvm::ArrayRef<Use> CallArgs,
+                                   llvm::ArrayRef<Value *> DeoptArgs,
+                                   llvm::ArrayRef<Value *> GCArgs,
+                                   const llvm::Twine &Name = "");
 
   /// brief Create an invoke to the experimental.gc.statepoint intrinsic to
   /// start a new statepoint sequence.
-  InvokeInst *
-  CreateGCStatepointInvoke(uint64_t ID, uint32_t NumPatchBytes,
-                           Value *ActualInvokee, BasicBlock *NormalDest,
-                           BasicBlock *UnwindDest, ArrayRef<Value *> InvokeArgs,
-                           ArrayRef<Value *> DeoptArgs,
-                           ArrayRef<Value *> GCArgs, const Twine &Name = "");
+  InvokeInst *CreateGCStatepointInvoke(
+      uint64_t ID, uint32_t NumPatchBytes, Value *ActualInvokee,
+      BasicBlock *NormalDest, BasicBlock *UnwindDest,
+      llvm::ArrayRef<Value *> InvokeArgs, llvm::ArrayRef<Value *> DeoptArgs,
+      llvm::ArrayRef<Value *> GCArgs, const llvm::Twine &Name = "");
 
   // Conveninence function for the common case when CallArgs are filled in using
   // makeArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be .get()'ed to
   // get the Value *.
-  InvokeInst *
-  CreateGCStatepointInvoke(uint64_t ID, uint32_t NumPatchBytes,
-                           Value *ActualInvokee, BasicBlock *NormalDest,
-                           BasicBlock *UnwindDest, ArrayRef<Use> InvokeArgs,
-                           ArrayRef<Value *> DeoptArgs,
-                           ArrayRef<Value *> GCArgs, const Twine &Name = "");
+  InvokeInst *CreateGCStatepointInvoke(
+      uint64_t ID, uint32_t NumPatchBytes, Value *ActualInvokee,
+      BasicBlock *NormalDest, BasicBlock *UnwindDest,
+      llvm::ArrayRef<Use> InvokeArgs, llvm::ArrayRef<Value *> DeoptArgs,
+      llvm::ArrayRef<Value *> GCArgs, const llvm::Twine &Name = "");
 
   /// \brief Create a call to the experimental.gc.result intrinsic to extract
   /// the result from a call wrapped in a statepoint.
-  CallInst *CreateGCResult(Instruction *Statepoint,
-                           Type *ResultType,
-                           const Twine &Name = "");
+  CallInst *CreateGCResult(Instruction *Statepoint, Type *ResultType,
+                           const llvm::Twine &Name = "");
 
   /// \brief Create a call to the experimental.gc.relocate intrinsics to
   /// project the relocated value of one pointer from the statepoint.
-  CallInst *CreateGCRelocate(Instruction *Statepoint,
-                             int BaseOffset,
-                             int DerivedOffset,
-                             Type *ResultType,
-                             const Twine &Name = "");
+  CallInst *CreateGCRelocate(Instruction *Statepoint, int BaseOffset,
+                             int DerivedOffset, Type *ResultType,
+                             const llvm::Twine &Name = "");
 
 private:
   /// \brief Create a call to a masked intrinsic with given Id.
   /// Masked intrinsic has only one overloaded type - data type.
-  CallInst *CreateMaskedIntrinsic(Intrinsic::ID Id, ArrayRef<Value *> Ops,
-                                  Type *DataTy, const Twine &Name = "");
+  CallInst *CreateMaskedIntrinsic(Intrinsic::ID Id, llvm::ArrayRef<Value *> Ops,
+                                  Type *DataTy, const llvm::Twine &Name = "");
 
   Value *getCastedInt8PtrValue(Value *Ptr);
 };
@@ -568,17 +565,15 @@ public:
   bool isNamePreserving() const { return preserveNames; }
 
   /// \brief Insert and return the specified instruction.
-  template<typename InstTy>
-  InstTy *Insert(InstTy *I, const Twine &Name = "") const {
+  template <typename InstTy>
+  InstTy *Insert(InstTy *I, const llvm::Twine &Name = "") const {
     this->InsertHelper(I, Name, BB, InsertPt);
     this->SetInstDebugLocation(I);
     return I;
   }
 
   /// \brief No-op overload to handle constants.
-  Constant *Insert(Constant *C, const Twine& = "") const {
-    return C;
-  }
+  Constant *Insert(Constant *C, const llvm::Twine & = "") const { return C; }
 
   //===--------------------------------------------------------------------===//
   // Instruction creation methods: Terminators
@@ -649,28 +644,27 @@ public:
   }
 
   InvokeInst *CreateInvoke(Value *Callee, BasicBlock *NormalDest,
-                           BasicBlock *UnwindDest, const Twine &Name = "") {
-    return Insert(InvokeInst::Create(Callee, NormalDest, UnwindDest, None),
-                  Name);
+                           BasicBlock *UnwindDest,
+                           const llvm::Twine &Name = "") {
+    return Insert(InvokeInst::Create(Callee, NormalDest, UnwindDest, {}), Name);
   }
   InvokeInst *CreateInvoke(Value *Callee, BasicBlock *NormalDest,
                            BasicBlock *UnwindDest, Value *Arg1,
-                           const Twine &Name = "") {
+                           const llvm::Twine &Name = "") {
     return Insert(InvokeInst::Create(Callee, NormalDest, UnwindDest, Arg1),
                   Name);
   }
   InvokeInst *CreateInvoke3(Value *Callee, BasicBlock *NormalDest,
-                            BasicBlock *UnwindDest, Value *Arg1,
-                            Value *Arg2, Value *Arg3,
-                            const Twine &Name = "") {
+                            BasicBlock *UnwindDest, Value *Arg1, Value *Arg2,
+                            Value *Arg3, const llvm::Twine &Name = "") {
     Value *Args[] = { Arg1, Arg2, Arg3 };
     return Insert(InvokeInst::Create(Callee, NormalDest, UnwindDest, Args),
                   Name);
   }
   /// \brief Create an invoke instruction.
   InvokeInst *CreateInvoke(Value *Callee, BasicBlock *NormalDest,
-                           BasicBlock *UnwindDest, ArrayRef<Value *> Args,
-                           const Twine &Name = "") {
+                           BasicBlock *UnwindDest, llvm::ArrayRef<Value *> Args,
+                           const llvm::Twine &Name = "") {
     return Insert(InvokeInst::Create(Callee, NormalDest, UnwindDest, Args),
                   Name);
   }
@@ -689,8 +683,8 @@ public:
 private:
   BinaryOperator *CreateInsertNUWNSWBinOp(BinaryOperator::BinaryOps Opc,
                                           Value *LHS, Value *RHS,
-                                          const Twine &Name,
-                                          bool HasNUW, bool HasNSW) {
+                                          const llvm::Twine &Name, bool HasNUW,
+                                          bool HasNSW) {
     BinaryOperator *BO = Insert(BinaryOperator::Create(Opc, LHS, RHS), Name);
     if (HasNUW) BO->setHasNoUnsignedWrap();
     if (HasNSW) BO->setHasNoSignedWrap();
@@ -708,284 +702,289 @@ private:
     return I;
   }
 public:
-  Value *CreateAdd(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateAdd(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                    bool HasNUW = false, bool HasNSW = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateAdd(LC, RC, HasNUW, HasNSW), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateAdd(LC, RC, HasNUW, HasNSW), Name);
     return CreateInsertNUWNSWBinOp(Instruction::Add, LHS, RHS, Name,
                                    HasNUW, HasNSW);
   }
-  Value *CreateNSWAdd(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateNSWAdd(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateAdd(LHS, RHS, Name, false, true);
   }
-  Value *CreateNUWAdd(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateNUWAdd(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateAdd(LHS, RHS, Name, true, false);
   }
-  Value *CreateFAdd(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFAdd(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateFAdd(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateFAdd(LC, RC), Name);
     return Insert(AddFPMathAttributes(BinaryOperator::CreateFAdd(LHS, RHS),
                                       FPMathTag, FMF), Name);
   }
-  Value *CreateSub(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateSub(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                    bool HasNUW = false, bool HasNSW = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateSub(LC, RC, HasNUW, HasNSW), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateSub(LC, RC, HasNUW, HasNSW), Name);
     return CreateInsertNUWNSWBinOp(Instruction::Sub, LHS, RHS, Name,
                                    HasNUW, HasNSW);
   }
-  Value *CreateNSWSub(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateNSWSub(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateSub(LHS, RHS, Name, false, true);
   }
-  Value *CreateNUWSub(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateNUWSub(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateSub(LHS, RHS, Name, true, false);
   }
-  Value *CreateFSub(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFSub(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateFSub(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateFSub(LC, RC), Name);
     return Insert(AddFPMathAttributes(BinaryOperator::CreateFSub(LHS, RHS),
                                       FPMathTag, FMF), Name);
   }
-  Value *CreateMul(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateMul(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                    bool HasNUW = false, bool HasNSW = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateMul(LC, RC, HasNUW, HasNSW), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateMul(LC, RC, HasNUW, HasNSW), Name);
     return CreateInsertNUWNSWBinOp(Instruction::Mul, LHS, RHS, Name,
                                    HasNUW, HasNSW);
   }
-  Value *CreateNSWMul(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateNSWMul(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateMul(LHS, RHS, Name, false, true);
   }
-  Value *CreateNUWMul(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateNUWMul(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateMul(LHS, RHS, Name, true, false);
   }
-  Value *CreateFMul(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFMul(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateFMul(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateFMul(LC, RC), Name);
     return Insert(AddFPMathAttributes(BinaryOperator::CreateFMul(LHS, RHS),
                                       FPMathTag, FMF), Name);
   }
-  Value *CreateUDiv(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateUDiv(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     bool isExact = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateUDiv(LC, RC, isExact), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateUDiv(LC, RC, isExact), Name);
     if (!isExact)
       return Insert(BinaryOperator::CreateUDiv(LHS, RHS), Name);
     return Insert(BinaryOperator::CreateExactUDiv(LHS, RHS), Name);
   }
-  Value *CreateExactUDiv(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateExactUDiv(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateUDiv(LHS, RHS, Name, true);
   }
-  Value *CreateSDiv(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateSDiv(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     bool isExact = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateSDiv(LC, RC, isExact), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateSDiv(LC, RC, isExact), Name);
     if (!isExact)
       return Insert(BinaryOperator::CreateSDiv(LHS, RHS), Name);
     return Insert(BinaryOperator::CreateExactSDiv(LHS, RHS), Name);
   }
-  Value *CreateExactSDiv(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateExactSDiv(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateSDiv(LHS, RHS, Name, true);
   }
-  Value *CreateFDiv(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFDiv(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateFDiv(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateFDiv(LC, RC), Name);
     return Insert(AddFPMathAttributes(BinaryOperator::CreateFDiv(LHS, RHS),
                                       FPMathTag, FMF), Name);
   }
-  Value *CreateURem(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateURem(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateURem(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateURem(LC, RC), Name);
     return Insert(BinaryOperator::CreateURem(LHS, RHS), Name);
   }
-  Value *CreateSRem(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateSRem(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateSRem(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateSRem(LC, RC), Name);
     return Insert(BinaryOperator::CreateSRem(LHS, RHS), Name);
   }
-  Value *CreateFRem(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFRem(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateFRem(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateFRem(LC, RC), Name);
     return Insert(AddFPMathAttributes(BinaryOperator::CreateFRem(LHS, RHS),
                                       FPMathTag, FMF), Name);
   }
 
-  Value *CreateShl(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateShl(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                    bool HasNUW = false, bool HasNSW = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateShl(LC, RC, HasNUW, HasNSW), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateShl(LC, RC, HasNUW, HasNSW), Name);
     return CreateInsertNUWNSWBinOp(Instruction::Shl, LHS, RHS, Name,
                                    HasNUW, HasNSW);
   }
-  Value *CreateShl(Value *LHS, const APInt &RHS, const Twine &Name = "",
-                   bool HasNUW = false, bool HasNSW = false) {
+  Value *CreateShl(Value *LHS, const llvm::APInt &RHS,
+                   const llvm::Twine &Name = "", bool HasNUW = false,
+                   bool HasNSW = false) {
     return CreateShl(LHS, ConstantInt::get(LHS->getType(), RHS), Name,
                      HasNUW, HasNSW);
   }
-  Value *CreateShl(Value *LHS, uint64_t RHS, const Twine &Name = "",
+  Value *CreateShl(Value *LHS, uint64_t RHS, const llvm::Twine &Name = "",
                    bool HasNUW = false, bool HasNSW = false) {
     return CreateShl(LHS, ConstantInt::get(LHS->getType(), RHS), Name,
                      HasNUW, HasNSW);
   }
 
-  Value *CreateLShr(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateLShr(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     bool isExact = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateLShr(LC, RC, isExact), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateLShr(LC, RC, isExact), Name);
     if (!isExact)
       return Insert(BinaryOperator::CreateLShr(LHS, RHS), Name);
     return Insert(BinaryOperator::CreateExactLShr(LHS, RHS), Name);
   }
-  Value *CreateLShr(Value *LHS, const APInt &RHS, const Twine &Name = "",
-                    bool isExact = false) {
+  Value *CreateLShr(Value *LHS, const llvm::APInt &RHS,
+                    const llvm::Twine &Name = "", bool isExact = false) {
     return CreateLShr(LHS, ConstantInt::get(LHS->getType(), RHS), Name,isExact);
   }
-  Value *CreateLShr(Value *LHS, uint64_t RHS, const Twine &Name = "",
+  Value *CreateLShr(Value *LHS, uint64_t RHS, const llvm::Twine &Name = "",
                     bool isExact = false) {
     return CreateLShr(LHS, ConstantInt::get(LHS->getType(), RHS), Name,isExact);
   }
 
-  Value *CreateAShr(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateAShr(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                     bool isExact = false) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateAShr(LC, RC, isExact), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateAShr(LC, RC, isExact), Name);
     if (!isExact)
       return Insert(BinaryOperator::CreateAShr(LHS, RHS), Name);
     return Insert(BinaryOperator::CreateExactAShr(LHS, RHS), Name);
   }
-  Value *CreateAShr(Value *LHS, const APInt &RHS, const Twine &Name = "",
-                    bool isExact = false) {
+  Value *CreateAShr(Value *LHS, const llvm::APInt &RHS,
+                    const llvm::Twine &Name = "", bool isExact = false) {
     return CreateAShr(LHS, ConstantInt::get(LHS->getType(), RHS), Name,isExact);
   }
-  Value *CreateAShr(Value *LHS, uint64_t RHS, const Twine &Name = "",
+  Value *CreateAShr(Value *LHS, uint64_t RHS, const llvm::Twine &Name = "",
                     bool isExact = false) {
     return CreateAShr(LHS, ConstantInt::get(LHS->getType(), RHS), Name,isExact);
   }
 
-  Value *CreateAnd(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateAnd(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *RC = dyn_cast<Constant>(RHS)) {
-      if (isa<ConstantInt>(RC) && cast<ConstantInt>(RC)->isAllOnesValue())
-        return LHS;  // LHS & -1 -> LHS
-      if (Constant *LC = dyn_cast<Constant>(LHS))
-        return Insert(Folder.CreateAnd(LC, RC), Name);
-    }
+      if (Constant *RC = llvm::dyn_cast<Constant>(RHS)) {
+        if (llvm::isa<ConstantInt>(RC) &&
+            llvm::cast<ConstantInt>(RC)->isAllOnesValue())
+          return LHS; // LHS & -1 -> LHS
+        if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+          return Insert(Folder.CreateAnd(LC, RC), Name);
+      }
     return Insert(BinaryOperator::CreateAnd(LHS, RHS), Name);
   }
-  Value *CreateAnd(Value *LHS, const APInt &RHS, const Twine &Name = "") {
+  Value *CreateAnd(Value *LHS, const llvm::APInt &RHS,
+                   const llvm::Twine &Name = "") {
     return CreateAnd(LHS, ConstantInt::get(LHS->getType(), RHS), Name);
   }
-  Value *CreateAnd(Value *LHS, uint64_t RHS, const Twine &Name = "") {
+  Value *CreateAnd(Value *LHS, uint64_t RHS, const llvm::Twine &Name = "") {
     return CreateAnd(LHS, ConstantInt::get(LHS->getType(), RHS), Name);
   }
 
-  Value *CreateOr(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateOr(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *RC = dyn_cast<Constant>(RHS)) {
-      if (RC->isNullValue())
-        return LHS;  // LHS | 0 -> LHS
-      if (Constant *LC = dyn_cast<Constant>(LHS))
-        return Insert(Folder.CreateOr(LC, RC), Name);
-    }
+      if (Constant *RC = llvm::dyn_cast<Constant>(RHS)) {
+        if (RC->isNullValue())
+          return LHS; // LHS | 0 -> LHS
+        if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+          return Insert(Folder.CreateOr(LC, RC), Name);
+      }
     return Insert(BinaryOperator::CreateOr(LHS, RHS), Name);
   }
-  Value *CreateOr(Value *LHS, const APInt &RHS, const Twine &Name = "") {
+  Value *CreateOr(Value *LHS, const llvm::APInt &RHS,
+                  const llvm::Twine &Name = "") {
     return CreateOr(LHS, ConstantInt::get(LHS->getType(), RHS), Name);
   }
-  Value *CreateOr(Value *LHS, uint64_t RHS, const Twine &Name = "") {
+  Value *CreateOr(Value *LHS, uint64_t RHS, const llvm::Twine &Name = "") {
     return CreateOr(LHS, ConstantInt::get(LHS->getType(), RHS), Name);
   }
 
-  Value *CreateXor(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateXor(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateXor(LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateXor(LC, RC), Name);
     return Insert(BinaryOperator::CreateXor(LHS, RHS), Name);
   }
-  Value *CreateXor(Value *LHS, const APInt &RHS, const Twine &Name = "") {
+  Value *CreateXor(Value *LHS, const llvm::APInt &RHS,
+                   const llvm::Twine &Name = "") {
     return CreateXor(LHS, ConstantInt::get(LHS->getType(), RHS), Name);
   }
-  Value *CreateXor(Value *LHS, uint64_t RHS, const Twine &Name = "") {
+  Value *CreateXor(Value *LHS, uint64_t RHS, const llvm::Twine &Name = "") {
     return CreateXor(LHS, ConstantInt::get(LHS->getType(), RHS), Name);
   }
 
-  Value *CreateBinOp(Instruction::BinaryOps Opc,
-                     Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateBinOp(Instruction::BinaryOps Opc, Value *LHS, Value *RHS,
+                     const llvm::Twine &Name = "",
                      MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateBinOp(Opc, LC, RC), Name);
-    llvm::Instruction *BinOp = BinaryOperator::Create(Opc, LHS, RHS);
-    if (isa<FPMathOperator>(BinOp))
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateBinOp(Opc, LC, RC), Name);
+    Instruction *BinOp = BinaryOperator::Create(Opc, LHS, RHS);
+    if (llvm::isa<FPMathOperator>(BinOp))
       BinOp = AddFPMathAttributes(BinOp, FPMathTag, FMF);
     return Insert(BinOp, Name);
   }
 
-  Value *CreateNeg(Value *V, const Twine &Name = "",
-                   bool HasNUW = false, bool HasNSW = false) {
+  Value *CreateNeg(Value *V, const llvm::Twine &Name = "", bool HasNUW = false,
+                   bool HasNSW = false) {
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateNeg(VC, HasNUW, HasNSW), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateNeg(VC, HasNUW, HasNSW), Name);
     BinaryOperator *BO = Insert(BinaryOperator::CreateNeg(V), Name);
     if (HasNUW) BO->setHasNoUnsignedWrap();
     if (HasNSW) BO->setHasNoSignedWrap();
     return BO;
   }
-  Value *CreateNSWNeg(Value *V, const Twine &Name = "") {
+  Value *CreateNSWNeg(Value *V, const llvm::Twine &Name = "") {
     return CreateNeg(V, Name, false, true);
   }
-  Value *CreateNUWNeg(Value *V, const Twine &Name = "") {
+  Value *CreateNUWNeg(Value *V, const llvm::Twine &Name = "") {
     return CreateNeg(V, Name, true, false);
   }
-  Value *CreateFNeg(Value *V, const Twine &Name = "",
+  Value *CreateFNeg(Value *V, const llvm::Twine &Name = "",
                     MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateFNeg(VC), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateFNeg(VC), Name);
     return Insert(AddFPMathAttributes(BinaryOperator::CreateFNeg(V),
                                       FPMathTag, FMF), Name);
   }
-  Value *CreateNot(Value *V, const Twine &Name = "") {
+  Value *CreateNot(Value *V, const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateNot(VC), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateNot(VC), Name);
     return Insert(BinaryOperator::CreateNot(V), Name);
   }
 
@@ -994,7 +993,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   AllocaInst *CreateAlloca(Type *Ty, Value *ArraySize = nullptr,
-                           const Twine &Name = "") {
+                           const llvm::Twine &Name = "") {
     return Insert(new AllocaInst(Ty, ArraySize), Name);
   }
   // \brief Provided to resolve 'CreateLoad(Ptr, "...")' correctly, instead of
@@ -1002,13 +1001,14 @@ public:
   LoadInst *CreateLoad(Value *Ptr, const char *Name) {
     return Insert(new LoadInst(Ptr), Name);
   }
-  LoadInst *CreateLoad(Value *Ptr, const Twine &Name = "") {
+  LoadInst *CreateLoad(Value *Ptr, const llvm::Twine &Name = "") {
     return Insert(new LoadInst(Ptr), Name);
   }
-  LoadInst *CreateLoad(Type *Ty, Value *Ptr, const Twine &Name = "") {
+  LoadInst *CreateLoad(Type *Ty, Value *Ptr, const llvm::Twine &Name = "") {
     return Insert(new LoadInst(Ty, Ptr), Name);
   }
-  LoadInst *CreateLoad(Value *Ptr, bool isVolatile, const Twine &Name = "") {
+  LoadInst *CreateLoad(Value *Ptr, bool isVolatile,
+                       const llvm::Twine &Name = "") {
     return Insert(new LoadInst(Ptr, nullptr, isVolatile), Name);
   }
   StoreInst *CreateStore(Value *Val, Value *Ptr, bool isVolatile = false) {
@@ -1023,13 +1023,13 @@ public:
     return LI;
   }
   LoadInst *CreateAlignedLoad(Value *Ptr, unsigned Align,
-                              const Twine &Name = "") {
+                              const llvm::Twine &Name = "") {
     LoadInst *LI = CreateLoad(Ptr, Name);
     LI->setAlignment(Align);
     return LI;
   }
   LoadInst *CreateAlignedLoad(Value *Ptr, unsigned Align, bool isVolatile,
-                              const Twine &Name = "") {
+                              const llvm::Twine &Name = "") {
     LoadInst *LI = CreateLoad(Ptr, isVolatile, Name);
     LI->setAlignment(Align);
     return LI;
@@ -1042,7 +1042,7 @@ public:
   }
   FenceInst *CreateFence(AtomicOrdering Ordering,
                          SynchronizationScope SynchScope = CrossThread,
-                         const Twine &Name = "") {
+                         const llvm::Twine &Name = "") {
     return Insert(new FenceInst(Context, Ordering, SynchScope), Name);
   }
   AtomicCmpXchgInst *
@@ -1058,164 +1058,171 @@ public:
                                SynchronizationScope SynchScope = CrossThread) {
     return Insert(new AtomicRMWInst(Op, Ptr, Val, Ordering, SynchScope));
   }
-  Value *CreateGEP(Value *Ptr, ArrayRef<Value *> IdxList,
-                   const Twine &Name = "") {
+  Value *CreateGEP(Value *Ptr, llvm::ArrayRef<Value *> IdxList,
+                   const llvm::Twine &Name = "") {
     return CreateGEP(nullptr, Ptr, IdxList, Name);
   }
-  Value *CreateGEP(Type *Ty, Value *Ptr, ArrayRef<Value *> IdxList,
-                   const Twine &Name = "") {
+  Value *CreateGEP(Type *Ty, Value *Ptr, llvm::ArrayRef<Value *> IdxList,
+                   const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr)) {
-      // Every index must be constant.
-      size_t i, e;
-      for (i = 0, e = IdxList.size(); i != e; ++i)
-        if (!isa<Constant>(IdxList[i]))
-          break;
-      if (i == e)
-        return Insert(Folder.CreateGetElementPtr(Ty, PC, IdxList), Name);
-    }
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr)) {
+        // Every index must be constant.
+        size_t i, e;
+        for (i = 0, e = IdxList.size(); i != e; ++i)
+          if (!llvm::isa<Constant>(IdxList[i]))
+            break;
+        if (i == e)
+          return Insert(Folder.CreateGetElementPtr(Ty, PC, IdxList), Name);
+      }
     return Insert(GetElementPtrInst::Create(Ty, Ptr, IdxList), Name);
   }
-  Value *CreateInBoundsGEP(Value *Ptr, ArrayRef<Value *> IdxList,
-                           const Twine &Name = "") {
+  Value *CreateInBoundsGEP(Value *Ptr, llvm::ArrayRef<Value *> IdxList,
+                           const llvm::Twine &Name = "") {
     return CreateInBoundsGEP(nullptr, Ptr, IdxList, Name);
   }
-  Value *CreateInBoundsGEP(Type *Ty, Value *Ptr, ArrayRef<Value *> IdxList,
-                           const Twine &Name = "") {
+  Value *CreateInBoundsGEP(Type *Ty, Value *Ptr,
+                           llvm::ArrayRef<Value *> IdxList,
+                           const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr)) {
-      // Every index must be constant.
-      size_t i, e;
-      for (i = 0, e = IdxList.size(); i != e; ++i)
-        if (!isa<Constant>(IdxList[i]))
-          break;
-      if (i == e)
-        return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, IdxList),
-                      Name);
-    }
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr)) {
+        // Every index must be constant.
+        size_t i, e;
+        for (i = 0, e = IdxList.size(); i != e; ++i)
+          if (!llvm::isa<Constant>(IdxList[i]))
+            break;
+        if (i == e)
+          return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, IdxList),
+                        Name);
+      }
     return Insert(GetElementPtrInst::CreateInBounds(Ty, Ptr, IdxList), Name);
   }
-  Value *CreateGEP(Value *Ptr, Value *Idx, const Twine &Name = "") {
+  Value *CreateGEP(Value *Ptr, Value *Idx, const llvm::Twine &Name = "") {
     return CreateGEP(nullptr, Ptr, Idx, Name);
   }
-  Value *CreateGEP(Type *Ty, Value *Ptr, Value *Idx, const Twine &Name = "") {
+  Value *CreateGEP(Type *Ty, Value *Ptr, Value *Idx,
+                   const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      if (Constant *IC = dyn_cast<Constant>(Idx))
-        return Insert(Folder.CreateGetElementPtr(Ty, PC, IC), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        if (Constant *IC = llvm::dyn_cast<Constant>(Idx))
+          return Insert(Folder.CreateGetElementPtr(Ty, PC, IC), Name);
     return Insert(GetElementPtrInst::Create(Ty, Ptr, Idx), Name);
   }
   Value *CreateInBoundsGEP(Type *Ty, Value *Ptr, Value *Idx,
-                           const Twine &Name = "") {
+                           const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      if (Constant *IC = dyn_cast<Constant>(Idx))
-        return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, IC), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        if (Constant *IC = llvm::dyn_cast<Constant>(Idx))
+          return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, IC), Name);
     return Insert(GetElementPtrInst::CreateInBounds(Ty, Ptr, Idx), Name);
   }
-  Value *CreateConstGEP1_32(Value *Ptr, unsigned Idx0, const Twine &Name = "") {
+  Value *CreateConstGEP1_32(Value *Ptr, unsigned Idx0,
+                            const llvm::Twine &Name = "") {
     return CreateConstGEP1_32(nullptr, Ptr, Idx0, Name);
   }
   Value *CreateConstGEP1_32(Type *Ty, Value *Ptr, unsigned Idx0,
-                            const Twine &Name = "") {
+                            const llvm::Twine &Name = "") {
     Value *Idx = ConstantInt::get(Type::getInt32Ty(Context), Idx0);
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateGetElementPtr(Ty, PC, Idx), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateGetElementPtr(Ty, PC, Idx), Name);
 
     return Insert(GetElementPtrInst::Create(Ty, Ptr, Idx), Name);
   }
   Value *CreateConstInBoundsGEP1_32(Type *Ty, Value *Ptr, unsigned Idx0,
-                                    const Twine &Name = "") {
+                                    const llvm::Twine &Name = "") {
     Value *Idx = ConstantInt::get(Type::getInt32Ty(Context), Idx0);
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, Idx), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, Idx), Name);
 
     return Insert(GetElementPtrInst::CreateInBounds(Ty, Ptr, Idx), Name);
   }
   Value *CreateConstGEP2_32(Type *Ty, Value *Ptr, unsigned Idx0, unsigned Idx1,
-                            const Twine &Name = "") {
+                            const llvm::Twine &Name = "") {
     Value *Idxs[] = {
       ConstantInt::get(Type::getInt32Ty(Context), Idx0),
       ConstantInt::get(Type::getInt32Ty(Context), Idx1)
     };
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateGetElementPtr(Ty, PC, Idxs), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateGetElementPtr(Ty, PC, Idxs), Name);
 
     return Insert(GetElementPtrInst::Create(Ty, Ptr, Idxs), Name);
   }
   Value *CreateConstInBoundsGEP2_32(Type *Ty, Value *Ptr, unsigned Idx0,
-                                    unsigned Idx1, const Twine &Name = "") {
+                                    unsigned Idx1,
+                                    const llvm::Twine &Name = "") {
     Value *Idxs[] = {
       ConstantInt::get(Type::getInt32Ty(Context), Idx0),
       ConstantInt::get(Type::getInt32Ty(Context), Idx1)
     };
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, Idxs), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateInBoundsGetElementPtr(Ty, PC, Idxs), Name);
 
     return Insert(GetElementPtrInst::CreateInBounds(Ty, Ptr, Idxs), Name);
   }
-  Value *CreateConstGEP1_64(Value *Ptr, uint64_t Idx0, const Twine &Name = "") {
+  Value *CreateConstGEP1_64(Value *Ptr, uint64_t Idx0,
+                            const llvm::Twine &Name = "") {
     Value *Idx = ConstantInt::get(Type::getInt64Ty(Context), Idx0);
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateGetElementPtr(nullptr, PC, Idx), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateGetElementPtr(nullptr, PC, Idx), Name);
 
     return Insert(GetElementPtrInst::Create(nullptr, Ptr, Idx), Name);
   }
   Value *CreateConstInBoundsGEP1_64(Value *Ptr, uint64_t Idx0,
-                                    const Twine &Name = "") {
+                                    const llvm::Twine &Name = "") {
     Value *Idx = ConstantInt::get(Type::getInt64Ty(Context), Idx0);
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateInBoundsGetElementPtr(nullptr, PC, Idx), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateInBoundsGetElementPtr(nullptr, PC, Idx),
+                      Name);
 
     return Insert(GetElementPtrInst::CreateInBounds(nullptr, Ptr, Idx), Name);
   }
   Value *CreateConstGEP2_64(Value *Ptr, uint64_t Idx0, uint64_t Idx1,
-                    const Twine &Name = "") {
+                            const llvm::Twine &Name = "") {
     Value *Idxs[] = {
       ConstantInt::get(Type::getInt64Ty(Context), Idx0),
       ConstantInt::get(Type::getInt64Ty(Context), Idx1)
     };
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateGetElementPtr(nullptr, PC, Idxs), Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateGetElementPtr(nullptr, PC, Idxs), Name);
 
     return Insert(GetElementPtrInst::Create(nullptr, Ptr, Idxs), Name);
   }
   Value *CreateConstInBoundsGEP2_64(Value *Ptr, uint64_t Idx0, uint64_t Idx1,
-                                    const Twine &Name = "") {
+                                    const llvm::Twine &Name = "") {
     Value *Idxs[] = {
       ConstantInt::get(Type::getInt64Ty(Context), Idx0),
       ConstantInt::get(Type::getInt64Ty(Context), Idx1)
     };
 
     if (AllowFolding)
-    if (Constant *PC = dyn_cast<Constant>(Ptr))
-      return Insert(Folder.CreateInBoundsGetElementPtr(nullptr, PC, Idxs),
-                    Name);
+      if (Constant *PC = llvm::dyn_cast<Constant>(Ptr))
+        return Insert(Folder.CreateInBoundsGetElementPtr(nullptr, PC, Idxs),
+                      Name);
 
     return Insert(GetElementPtrInst::CreateInBounds(nullptr, Ptr, Idxs), Name);
   }
   Value *CreateStructGEP(Type *Ty, Value *Ptr, unsigned Idx,
-                         const Twine &Name = "") {
+                         const llvm::Twine &Name = "") {
     return CreateConstInBoundsGEP2_32(Ty, Ptr, 0, Idx, Name);
   }
 
   /// \brief Same as CreateGlobalString, but return a pointer with "i8*" type
   /// instead of a pointer to array of i8.
-  Value *CreateGlobalStringPtr(StringRef Str, const Twine &Name = "",
+  Value *CreateGlobalStringPtr(llvm::StringRef Str,
+                               const llvm::Twine &Name = "",
                                unsigned AddressSpace = 0) {
     GlobalVariable *gv = CreateGlobalString(Str, Name, AddressSpace);
     Value *zero = ConstantInt::get(Type::getInt32Ty(Context), 0);
@@ -1227,19 +1234,19 @@ public:
   // Instruction creation methods: Cast/Conversion Operators
   //===--------------------------------------------------------------------===//
 
-  Value *CreateTrunc(Value *V, Type *DestTy, const Twine &Name = "") {
+  Value *CreateTrunc(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::Trunc, V, DestTy, Name);
   }
-  Value *CreateZExt(Value *V, Type *DestTy, const Twine &Name = "") {
+  Value *CreateZExt(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::ZExt, V, DestTy, Name);
   }
-  Value *CreateSExt(Value *V, Type *DestTy, const Twine &Name = "") {
+  Value *CreateSExt(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::SExt, V, DestTy, Name);
   }
   /// \brief Create a ZExt or Trunc from the integer value V to DestTy. Return
   /// the value untouched if the type of V is already DestTy.
   Value *CreateZExtOrTrunc(Value *V, Type *DestTy,
-                           const Twine &Name = "") {
+                           const llvm::Twine &Name = "") {
     assert(V->getType()->isIntOrIntVectorTy() &&
            DestTy->isIntOrIntVectorTy() &&
            "Can only zero extend/truncate integers!");
@@ -1253,7 +1260,7 @@ public:
   /// \brief Create a SExt or Trunc from the integer value V to DestTy. Return
   /// the value untouched if the type of V is already DestTy.
   Value *CreateSExtOrTrunc(Value *V, Type *DestTy,
-                           const Twine &Name = "") {
+                           const llvm::Twine &Name = "") {
     assert(V->getType()->isIntOrIntVectorTy() &&
            DestTy->isIntOrIntVectorTy() &&
            "Can only sign extend/truncate integers!");
@@ -1264,114 +1271,110 @@ public:
       return CreateTrunc(V, DestTy, Name);
     return V;
   }
-  Value *CreateFPToUI(Value *V, Type *DestTy, const Twine &Name = ""){
+  Value *CreateFPToUI(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::FPToUI, V, DestTy, Name);
   }
-  Value *CreateFPToSI(Value *V, Type *DestTy, const Twine &Name = ""){
+  Value *CreateFPToSI(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::FPToSI, V, DestTy, Name);
   }
-  Value *CreateUIToFP(Value *V, Type *DestTy, const Twine &Name = ""){
+  Value *CreateUIToFP(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::UIToFP, V, DestTy, Name);
   }
-  Value *CreateSIToFP(Value *V, Type *DestTy, const Twine &Name = ""){
+  Value *CreateSIToFP(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::SIToFP, V, DestTy, Name);
   }
-  Value *CreateFPTrunc(Value *V, Type *DestTy,
-                       const Twine &Name = "") {
+  Value *CreateFPTrunc(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::FPTrunc, V, DestTy, Name);
   }
-  Value *CreateFPExt(Value *V, Type *DestTy, const Twine &Name = "") {
+  Value *CreateFPExt(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::FPExt, V, DestTy, Name);
   }
-  Value *CreatePtrToInt(Value *V, Type *DestTy,
-                        const Twine &Name = "") {
+  Value *CreatePtrToInt(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::PtrToInt, V, DestTy, Name);
   }
-  Value *CreateIntToPtr(Value *V, Type *DestTy,
-                        const Twine &Name = "") {
+  Value *CreateIntToPtr(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::IntToPtr, V, DestTy, Name);
   }
-  Value *CreateBitCast(Value *V, Type *DestTy,
-                       const Twine &Name = "") {
+  Value *CreateBitCast(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     return CreateCast(Instruction::BitCast, V, DestTy, Name);
   }
   Value *CreateAddrSpaceCast(Value *V, Type *DestTy,
-                             const Twine &Name = "") {
+                             const llvm::Twine &Name = "") {
     return CreateCast(Instruction::AddrSpaceCast, V, DestTy, Name);
   }
   Value *CreateZExtOrBitCast(Value *V, Type *DestTy,
-                             const Twine &Name = "") {
+                             const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateZExtOrBitCast(VC, DestTy), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateZExtOrBitCast(VC, DestTy), Name);
     return Insert(CastInst::CreateZExtOrBitCast(V, DestTy), Name);
   }
   Value *CreateSExtOrBitCast(Value *V, Type *DestTy,
-                             const Twine &Name = "") {
+                             const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateSExtOrBitCast(VC, DestTy), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateSExtOrBitCast(VC, DestTy), Name);
     return Insert(CastInst::CreateSExtOrBitCast(V, DestTy), Name);
   }
   Value *CreateTruncOrBitCast(Value *V, Type *DestTy,
-                              const Twine &Name = "") {
+                              const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateTruncOrBitCast(VC, DestTy), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateTruncOrBitCast(VC, DestTy), Name);
     return Insert(CastInst::CreateTruncOrBitCast(V, DestTy), Name);
   }
   Value *CreateCast(Instruction::CastOps Op, Value *V, Type *DestTy,
-                    const Twine &Name = "") {
+                    const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateCast(Op, VC, DestTy), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateCast(Op, VC, DestTy), Name);
     return Insert(CastInst::Create(Op, V, DestTy), Name);
   }
   Value *CreatePointerCast(Value *V, Type *DestTy,
-                           const Twine &Name = "") {
+                           const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreatePointerCast(VC, DestTy), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreatePointerCast(VC, DestTy), Name);
     return Insert(CastInst::CreatePointerCast(V, DestTy), Name);
   }
 
   Value *CreatePointerBitCastOrAddrSpaceCast(Value *V, Type *DestTy,
-                                             const Twine &Name = "") {
+                                             const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
 
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V)) {
-      return Insert(Folder.CreatePointerBitCastOrAddrSpaceCast(VC, DestTy),
-                    Name);
-    }
+      if (Constant *VC = llvm::dyn_cast<Constant>(V)) {
+        return Insert(Folder.CreatePointerBitCastOrAddrSpaceCast(VC, DestTy),
+                      Name);
+      }
 
     return Insert(CastInst::CreatePointerBitCastOrAddrSpaceCast(V, DestTy),
                   Name);
   }
 
   Value *CreateIntCast(Value *V, Type *DestTy, bool isSigned,
-                       const Twine &Name = "") {
+                       const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateIntCast(VC, DestTy, isSigned), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateIntCast(VC, DestTy, isSigned), Name);
     return Insert(CastInst::CreateIntegerCast(V, DestTy, isSigned), Name);
   }
 
   Value *CreateBitOrPointerCast(Value *V, Type *DestTy,
-                                const Twine &Name = "") {
+                                const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (V->getType()->isPointerTy() && DestTy->isIntegerTy())
@@ -1381,18 +1384,19 @@ public:
 
     return CreateBitCast(V, DestTy, Name);
   }
+
 private:
   // \brief Provided to resolve 'CreateIntCast(Ptr, Ptr, "...")', giving a
   // compile time error, instead of converting the string to bool for the
   // isSigned parameter.
   Value *CreateIntCast(Value *, Type *, const char *) = delete;
 public:
-  Value *CreateFPCast(Value *V, Type *DestTy, const Twine &Name = "") {
+  Value *CreateFPCast(Value *V, Type *DestTy, const llvm::Twine &Name = "") {
     if (V->getType() == DestTy)
       return V;
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(V))
-      return Insert(Folder.CreateFPCast(VC, DestTy), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(V))
+        return Insert(Folder.CreateFPCast(VC, DestTy), Name);
     return Insert(CastInst::CreateFPCast(V, DestTy), Name);
   }
 
@@ -1400,108 +1404,108 @@ public:
   // Instruction creation methods: Compare Instructions
   //===--------------------------------------------------------------------===//
 
-  Value *CreateICmpEQ(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpEQ(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_EQ, LHS, RHS, Name);
   }
-  Value *CreateICmpNE(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpNE(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_NE, LHS, RHS, Name);
   }
-  Value *CreateICmpUGT(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpUGT(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_UGT, LHS, RHS, Name);
   }
-  Value *CreateICmpUGE(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpUGE(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_UGE, LHS, RHS, Name);
   }
-  Value *CreateICmpULT(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpULT(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_ULT, LHS, RHS, Name);
   }
-  Value *CreateICmpULE(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpULE(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_ULE, LHS, RHS, Name);
   }
-  Value *CreateICmpSGT(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpSGT(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_SGT, LHS, RHS, Name);
   }
-  Value *CreateICmpSGE(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpSGE(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_SGE, LHS, RHS, Name);
   }
-  Value *CreateICmpSLT(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpSLT(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_SLT, LHS, RHS, Name);
   }
-  Value *CreateICmpSLE(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreateICmpSLE(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     return CreateICmp(ICmpInst::ICMP_SLE, LHS, RHS, Name);
   }
 
-  Value *CreateFCmpOEQ(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpOEQ(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_OEQ, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpOGT(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpOGT(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_OGT, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpOGE(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpOGE(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_OGE, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpOLT(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpOLT(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_OLT, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpOLE(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpOLE(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_OLE, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpONE(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpONE(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_ONE, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpORD(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpORD(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_ORD, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpUNO(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpUNO(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_UNO, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpUEQ(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpUEQ(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_UEQ, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpUGT(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpUGT(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_UGT, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpUGE(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpUGE(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_UGE, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpULT(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpULT(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_ULT, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpULE(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpULE(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_ULE, LHS, RHS, Name, FPMathTag);
   }
-  Value *CreateFCmpUNE(Value *LHS, Value *RHS, const Twine &Name = "",
+  Value *CreateFCmpUNE(Value *LHS, Value *RHS, const llvm::Twine &Name = "",
                        MDNode *FPMathTag = nullptr) {
     return CreateFCmp(FCmpInst::FCMP_UNE, LHS, RHS, Name, FPMathTag);
   }
 
   Value *CreateICmp(CmpInst::Predicate P, Value *LHS, Value *RHS,
-                    const Twine &Name = "") {
+                    const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateICmp(P, LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateICmp(P, LC, RC), Name);
     return Insert(new ICmpInst(P, LHS, RHS), Name);
   }
   Value *CreateFCmp(CmpInst::Predicate P, Value *LHS, Value *RHS,
-                    const Twine &Name = "", MDNode *FPMathTag = nullptr) {
+                    const llvm::Twine &Name = "", MDNode *FPMathTag = nullptr) {
     if (AllowFolding)
-    if (Constant *LC = dyn_cast<Constant>(LHS))
-      if (Constant *RC = dyn_cast<Constant>(RHS))
-        return Insert(Folder.CreateFCmp(P, LC, RC), Name);
+      if (Constant *LC = llvm::dyn_cast<Constant>(LHS))
+        if (Constant *RC = llvm::dyn_cast<Constant>(RHS))
+          return Insert(Folder.CreateFCmp(P, LC, RC), Name);
     return Insert(AddFPMathAttributes(new FCmpInst(P, LHS, RHS),
                                       FPMathTag, FMF), Name);
   }
@@ -1511,109 +1515,109 @@ public:
   //===--------------------------------------------------------------------===//
 
   PHINode *CreatePHI(Type *Ty, unsigned NumReservedValues,
-                     const Twine &Name = "") {
+                     const llvm::Twine &Name = "") {
     return Insert(PHINode::Create(Ty, NumReservedValues), Name);
   }
 
-  CallInst *CreateCall(Value *Callee, ArrayRef<Value *> Args = None,
-                       const Twine &Name = "") {
+  CallInst *CreateCall(Value *Callee, llvm::ArrayRef<Value *> Args = {},
+                       const llvm::Twine &Name = "") {
     return Insert(CallInst::Create(Callee, Args), Name);
   }
 
-  CallInst *CreateCall(llvm::FunctionType *FTy, Value *Callee,
-                       ArrayRef<Value *> Args, const Twine &Name = "") {
+  CallInst *CreateCall(FunctionType *FTy, Value *Callee,
+                       llvm::ArrayRef<Value *> Args,
+                       const llvm::Twine &Name = "") {
     return Insert(CallInst::Create(FTy, Callee, Args), Name);
   }
 
-  CallInst *CreateCall(Function *Callee, ArrayRef<Value *> Args,
-                       const Twine &Name = "") {
+  CallInst *CreateCall(Function *Callee, llvm::ArrayRef<Value *> Args,
+                       const llvm::Twine &Name = "") {
     return CreateCall(Callee->getFunctionType(), Callee, Args, Name);
   }
 
   Value *CreateSelect(Value *C, Value *True, Value *False,
-                      const Twine &Name = "") {
+                      const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *CC = dyn_cast<Constant>(C))
-      if (Constant *TC = dyn_cast<Constant>(True))
-        if (Constant *FC = dyn_cast<Constant>(False))
-          return Insert(Folder.CreateSelect(CC, TC, FC), Name);
+      if (Constant *CC = llvm::dyn_cast<Constant>(C))
+        if (Constant *TC = llvm::dyn_cast<Constant>(True))
+          if (Constant *FC = llvm::dyn_cast<Constant>(False))
+            return Insert(Folder.CreateSelect(CC, TC, FC), Name);
     return Insert(SelectInst::Create(C, True, False), Name);
   }
 
-  VAArgInst *CreateVAArg(Value *List, Type *Ty, const Twine &Name = "") {
+  VAArgInst *CreateVAArg(Value *List, Type *Ty, const llvm::Twine &Name = "") {
     return Insert(new VAArgInst(List, Ty), Name);
   }
 
   Value *CreateExtractElement(Value *Vec, Value *Idx,
-                              const Twine &Name = "") {
+                              const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(Vec))
-      if (Constant *IC = dyn_cast<Constant>(Idx))
-        return Insert(Folder.CreateExtractElement(VC, IC), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(Vec))
+        if (Constant *IC = llvm::dyn_cast<Constant>(Idx))
+          return Insert(Folder.CreateExtractElement(VC, IC), Name);
     return Insert(ExtractElementInst::Create(Vec, Idx), Name);
   }
 
   Value *CreateExtractElement(Value *Vec, uint64_t Idx,
-                              const Twine &Name = "") {
+                              const llvm::Twine &Name = "") {
     return CreateExtractElement(Vec, getInt64(Idx), Name);
   }
 
   Value *CreateInsertElement(Value *Vec, Value *NewElt, Value *Idx,
-                             const Twine &Name = "") {
+                             const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *VC = dyn_cast<Constant>(Vec))
-      if (Constant *NC = dyn_cast<Constant>(NewElt))
-        if (Constant *IC = dyn_cast<Constant>(Idx))
-          return Insert(Folder.CreateInsertElement(VC, NC, IC), Name);
+      if (Constant *VC = llvm::dyn_cast<Constant>(Vec))
+        if (Constant *NC = llvm::dyn_cast<Constant>(NewElt))
+          if (Constant *IC = llvm::dyn_cast<Constant>(Idx))
+            return Insert(Folder.CreateInsertElement(VC, NC, IC), Name);
     return Insert(InsertElementInst::Create(Vec, NewElt, Idx), Name);
   }
 
   Value *CreateInsertElement(Value *Vec, Value *NewElt, uint64_t Idx,
-                             const Twine &Name = "") {
+                             const llvm::Twine &Name = "") {
     return CreateInsertElement(Vec, NewElt, getInt64(Idx), Name);
   }
 
   Value *CreateShuffleVector(Value *V1, Value *V2, Value *Mask,
-                             const Twine &Name = "") {
+                             const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *V1C = dyn_cast<Constant>(V1))
-      if (Constant *V2C = dyn_cast<Constant>(V2))
-        if (Constant *MC = dyn_cast<Constant>(Mask))
-          return Insert(Folder.CreateShuffleVector(V1C, V2C, MC), Name);
+      if (Constant *V1C = llvm::dyn_cast<Constant>(V1))
+        if (Constant *V2C = llvm::dyn_cast<Constant>(V2))
+          if (Constant *MC = llvm::dyn_cast<Constant>(Mask))
+            return Insert(Folder.CreateShuffleVector(V1C, V2C, MC), Name);
     return Insert(new ShuffleVectorInst(V1, V2, Mask), Name);
   }
 
-  Value *CreateShuffleVector(Value *V1, Value *V2, ArrayRef<int> IntMask,
-                             const Twine &Name = "") {
+  Value *CreateShuffleVector(Value *V1, Value *V2, llvm::ArrayRef<int> IntMask,
+                             const llvm::Twine &Name = "") {
     size_t MaskSize = IntMask.size();
-    SmallVector<Constant*, 8> MaskVec(MaskSize);
+    llvm::SmallVector<Constant *, 8> MaskVec(MaskSize);
     for (size_t i = 0; i != MaskSize; ++i)
       MaskVec[i] = getInt32(IntMask[i]);
     Value *Mask = ConstantVector::get(MaskVec);
     return CreateShuffleVector(V1, V2, Mask, Name);
   }
 
-  Value *CreateExtractValue(Value *Agg,
-                            ArrayRef<unsigned> Idxs,
-                            const Twine &Name = "") {
+  Value *CreateExtractValue(Value *Agg, llvm::ArrayRef<unsigned> Idxs,
+                            const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *AggC = dyn_cast<Constant>(Agg))
-      return Insert(Folder.CreateExtractValue(AggC, Idxs), Name);
+      if (Constant *AggC = llvm::dyn_cast<Constant>(Agg))
+        return Insert(Folder.CreateExtractValue(AggC, Idxs), Name);
     return Insert(ExtractValueInst::Create(Agg, Idxs), Name);
   }
 
   Value *CreateInsertValue(Value *Agg, Value *Val,
-                           ArrayRef<unsigned> Idxs,
-                           const Twine &Name = "") {
+                           llvm::ArrayRef<unsigned> Idxs,
+                           const llvm::Twine &Name = "") {
     if (AllowFolding)
-    if (Constant *AggC = dyn_cast<Constant>(Agg))
-      if (Constant *ValC = dyn_cast<Constant>(Val))
-        return Insert(Folder.CreateInsertValue(AggC, ValC, Idxs), Name);
+      if (Constant *AggC = llvm::dyn_cast<Constant>(Agg))
+        if (Constant *ValC = llvm::dyn_cast<Constant>(Val))
+          return Insert(Folder.CreateInsertValue(AggC, ValC, Idxs), Name);
     return Insert(InsertValueInst::Create(Agg, Val, Idxs), Name);
   }
 
   LandingPadInst *CreateLandingPad(Type *Ty, unsigned NumClauses,
-                                   const Twine &Name = "") {
+                                   const llvm::Twine &Name = "") {
     return Insert(LandingPadInst::Create(Ty, NumClauses), Name);
   }
 
@@ -1622,13 +1626,13 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// \brief Return an i1 value testing if \p Arg is null.
-  Value *CreateIsNull(Value *Arg, const Twine &Name = "") {
+  Value *CreateIsNull(Value *Arg, const llvm::Twine &Name = "") {
     return CreateICmpEQ(Arg, Constant::getNullValue(Arg->getType()),
                         Name);
   }
 
   /// \brief Return an i1 value testing if \p Arg is not null.
-  Value *CreateIsNotNull(Value *Arg, const Twine &Name = "") {
+  Value *CreateIsNotNull(Value *Arg, const llvm::Twine &Name = "") {
     return CreateICmpNE(Arg, Constant::getNullValue(Arg->getType()),
                         Name);
   }
@@ -1639,10 +1643,10 @@ public:
   /// This is intended to implement C-style pointer subtraction. As such, the
   /// pointers must be appropriately aligned for their element types and
   /// pointing into the same object.
-  Value *CreatePtrDiff(Value *LHS, Value *RHS, const Twine &Name = "") {
+  Value *CreatePtrDiff(Value *LHS, Value *RHS, const llvm::Twine &Name = "") {
     assert(LHS->getType() == RHS->getType() &&
            "Pointer subtraction operand types must match!");
-    PointerType *ArgType = cast<PointerType>(LHS->getType());
+    PointerType *ArgType = llvm::cast<PointerType>(LHS->getType());
     Value *LHS_int = CreatePtrToInt(LHS, Type::getInt64Ty(Context));
     Value *RHS_int = CreatePtrToInt(RHS, Type::getInt64Ty(Context));
     Value *Difference = CreateSub(LHS_int, RHS_int);
@@ -1653,7 +1657,8 @@ public:
 
   /// \brief Return a vector value that contains \arg V broadcasted to \p
   /// NumElts elements.
-  Value *CreateVectorSplat(unsigned NumElts, Value *V, const Twine &Name = "") {
+  Value *CreateVectorSplat(unsigned NumElts, Value *V,
+                           const llvm::Twine &Name = "") {
     assert(NumElts > 0 && "Cannot splat to an empty vector!");
 
     // First insert it into an undef vector so we can shuffle it.
@@ -1670,8 +1675,8 @@ public:
   /// \brief Return a value that has been extracted from a larger integer type.
   Value *CreateExtractInteger(const DataLayout &DL, Value *From,
                               IntegerType *ExtractedTy, uint64_t Offset,
-                              const Twine &Name) {
-    IntegerType *IntTy = cast<IntegerType>(From->getType());
+                              const llvm::Twine &Name) {
+    IntegerType *IntTy = llvm::cast<IntegerType>(From->getType());
     assert(DL.getTypeStoreSize(ExtractedTy) + Offset <=
                DL.getTypeStoreSize(IntTy) &&
            "Element extends past full value");
@@ -1700,10 +1705,10 @@ public:
   CallInst *CreateAlignmentAssumption(const DataLayout &DL, Value *PtrValue,
                                       unsigned Alignment,
                                       Value *OffsetValue = nullptr) {
-    assert(isa<PointerType>(PtrValue->getType()) &&
+    assert(llvm::isa<PointerType>(PtrValue->getType()) &&
            "trying to create an alignment assumption on a non-pointer?");
 
-    PointerType *PtrTy = cast<PointerType>(PtrValue->getType());
+    PointerType *PtrTy = llvm::cast<PointerType>(PtrValue->getType());
     Type *IntPtrTy = getIntPtrTy(DL, PtrTy->getAddressSpace());
     Value *PtrIntValue = CreatePtrToInt(PtrValue, IntPtrTy, "ptrint");
 
@@ -1711,7 +1716,7 @@ public:
       Alignment > 0 ? Alignment - 1 : 0);
     if (OffsetValue) {
       bool IsOffsetZero = false;
-      if (ConstantInt *CI = dyn_cast<ConstantInt>(OffsetValue))
+      if (ConstantInt *CI = llvm::dyn_cast<ConstantInt>(OffsetValue))
         IsOffsetZero = CI->isZero();
 
       if (!IsOffsetZero) {

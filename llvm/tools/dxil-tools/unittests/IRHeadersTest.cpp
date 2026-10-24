@@ -13,20 +13,24 @@
 #include "dxil/IR/CallSite.h"
 #include "dxil/IR/Comdat.h"
 #include "dxil/IR/Constants.h"
+#include "dxil/IR/DIBuilder.h"
 #include "dxil/IR/DebugInfoMetadata.h"
 #include "dxil/IR/DerivedTypes.h"
 #include "dxil/IR/DiagnosticInfo.h"
 #include "dxil/IR/DiagnosticPrinter.h"
 #include "dxil/IR/Function.h"
 #include "dxil/IR/GlobalValue.h"
+#include "dxil/IR/IRBuilder.h"
 #include "dxil/IR/IRPrintingPasses.h"
 #include "dxil/IR/InlineAsm.h"
 #include "dxil/IR/InstIterator.h"
 #include "dxil/IR/InstrTypes.h"
 #include "dxil/IR/IntrinsicInst.h"
 #include "dxil/IR/LLVMContext.h"
+#include "dxil/IR/MDBuilder.h"
 #include "dxil/IR/Metadata.h"
 #include "dxil/IR/Module.h"
+#include "dxil/IR/NoFolder.h"
 #include "dxil/IR/Statepoint.h"
 #include "dxil/IR/TrackingMDRef.h"
 #include "dxil/IR/TypeFinder.h"
@@ -39,14 +43,17 @@
 #include "llvm/IR/Comdat.h"
 #include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/TypeFinder.h"
@@ -81,6 +88,34 @@ static_assert(!std::is_same_v<dxil::WeakTrackingVH, llvm::WeakTrackingVH>);
 static_assert(!std::is_same_v<dxil::IntrinsicInst, llvm::IntrinsicInst>);
 static_assert(!std::is_same_v<dxil::DiagnosticInfo, llvm::DiagnosticInfo>);
 static_assert(!std::is_same_v<dxil::TypeFinder, llvm::TypeFinder>);
+static_assert(!std::is_same_v<dxil::DIBuilder, llvm::DIBuilder>);
+static_assert(!std::is_same_v<dxil::MDBuilder, llvm::MDBuilder>);
+static_assert(!std::is_same_v<dxil::IRBuilder<>, llvm::IRBuilder<>>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<dxil::IRBuilderBase::InsertPoint>().getBlock()),
+        dxil::BasicBlock *>);
+static_assert(
+    std::is_same_v<
+        decltype(std::declval<dxil::IRBuilderBase::InsertPoint>().getPoint()),
+        dxil::BasicBlock::iterator>);
+static_assert(
+    std::is_same_v<decltype(&dxil::MDBuilder::createString),
+                   dxil::MDString *(dxil::MDBuilder::*)(llvm::StringRef)>);
+static_assert(
+    std::is_same_v<decltype(std::declval<dxil::DIBuilder>().createExpression()),
+                   dxil::DIExpression *>);
+static_assert(
+    std::is_same_v<decltype(std::declval<dxil::IRBuilder<>>().CreateCall(
+                       std::declval<dxil::FunctionType *>(),
+                       std::declval<dxil::Value *>(),
+                       std::declval<llvm::ArrayRef<dxil::Value *>>())),
+                   dxil::CallInst *>);
+static_assert(std::is_same_v<decltype(std::declval<dxil::NoFolder>()
+                                          .CreatePointerBitCastOrAddrSpaceCast(
+                                              std::declval<dxil::Constant *>(),
+                                              std::declval<dxil::Type *>())),
+                             dxil::Instruction *>);
 static_assert(!std::is_same_v<dxil::AssemblyAnnotationWriter,
                               llvm::AssemblyAnnotationWriter>);
 static_assert(
@@ -173,6 +208,13 @@ static_assert(dxil::Instruction::AtomicRMW == 32);
 static_assert(dxil::Instruction::Call == 49);
 
 namespace {
+
+TEST(IRHeaders, EmptyBuilderInsertPoint) {
+  dxil::IRBuilderBase::InsertPoint IP;
+  EXPECT_FALSE(IP.isSet());
+  EXPECT_EQ(nullptr, IP.getBlock());
+  EXPECT_EQ(dxil::BasicBlock::iterator(), IP.getPoint());
+}
 
 TEST(IRHeaders, EmptyCallSites) {
   dxil::CallSite Mutable;

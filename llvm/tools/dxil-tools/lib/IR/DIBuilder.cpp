@@ -12,15 +12,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "dxil/IR/DIBuilder.h"
-#include "llvm/ADT/STLExtras.h"
 #include "dxil/IR/Constants.h"
 #include "dxil/IR/DebugInfo.h"
 #include "dxil/IR/IntrinsicInst.h"
 #include "dxil/IR/Module.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Dwarf.h"
 
 using namespace llvm;
+
+namespace dxil {
 using namespace llvm::dwarf;
 
 namespace {
@@ -176,21 +178,24 @@ createImportedModule(LLVMContext &C, dwarf::Tag Tag, DIScope *Context,
 DIImportedEntity *DIBuilder::createImportedModule(DIScope *Context,
                                                   DINamespace *NS,
                                                   unsigned Line) {
-  return ::createImportedModule(VMContext, dwarf::DW_TAG_imported_module,
-                                Context, NS, Line, StringRef(), AllImportedModules);
+  return dxil::createImportedModule(VMContext, dwarf::DW_TAG_imported_module,
+                                    Context, NS, Line, StringRef(),
+                                    AllImportedModules);
 }
 
 DIImportedEntity *DIBuilder::createImportedModule(DIScope *Context,
                                                   DIImportedEntity *NS,
                                                   unsigned Line) {
-  return ::createImportedModule(VMContext, dwarf::DW_TAG_imported_module,
-                                Context, NS, Line, StringRef(), AllImportedModules);
+  return dxil::createImportedModule(VMContext, dwarf::DW_TAG_imported_module,
+                                    Context, NS, Line, StringRef(),
+                                    AllImportedModules);
 }
 
 DIImportedEntity *DIBuilder::createImportedModule(DIScope *Context, DIModule *M,
                                                   unsigned Line) {
-  return ::createImportedModule(VMContext, dwarf::DW_TAG_imported_module,
-                                Context, M, Line, StringRef(), AllImportedModules);
+  return dxil::createImportedModule(VMContext, dwarf::DW_TAG_imported_module,
+                                    Context, M, Line, StringRef(),
+                                    AllImportedModules);
 }
 
 DIImportedEntity *DIBuilder::createImportedDeclaration(DIScope *Context,
@@ -199,9 +204,9 @@ DIImportedEntity *DIBuilder::createImportedDeclaration(DIScope *Context,
                                                        StringRef Name) {
   // Make sure to use the unique identifier based metadata reference for
   // types that have one.
-  return ::createImportedModule(VMContext, dwarf::DW_TAG_imported_declaration,
-                                Context, DINodeRef::get(Decl), Line, Name,
-                                AllImportedModules);
+  return dxil::createImportedModule(
+      VMContext, dwarf::DW_TAG_imported_declaration, Context,
+      DINodeRef::get(Decl), Line, Name, AllImportedModules);
 }
 
 DIFile *DIBuilder::createFile(StringRef Filename, StringRef Directory) {
@@ -309,7 +314,7 @@ DIDerivedType *DIBuilder::createStaticMemberType(DIScope *Scope, StringRef Name,
                                                  DIFile *File,
                                                  unsigned LineNumber,
                                                  DIType *Ty, unsigned Flags,
-                                                 llvm::Constant *Val) {
+                                                 Constant *Val) {
   Flags |= DINode::FlagStaticMember;
   return DIDerivedType::get(
       VMContext, dwarf::DW_TAG_member, Name, File, LineNumber,
@@ -540,7 +545,7 @@ DINodeArray DIBuilder::getOrCreateArray(ArrayRef<Metadata *> Elements) {
 }
 
 DITypeRefArray DIBuilder::getOrCreateTypeArray(ArrayRef<Metadata *> Elements) {
-  SmallVector<llvm::Metadata *, 16> Elts;
+  SmallVector<Metadata *, 16> Elts;
   for (unsigned i = 0, e = Elements.size(); i != e; ++i) {
     if (Elements[i] && isa<MDNode>(Elements[i]))
       Elts.push_back(DITypeRef::get(cast<DIType>(Elements[i])));
@@ -659,8 +664,7 @@ DISubprogram *DIBuilder::createFunction(DIScope *Context, StringRef Name,
       VMContext, DIScopeRef::get(getNonCompileUnitScope(Context)), Name,
       LinkageName, File, LineNo, Ty, isLocalToUnit, isDefinition, ScopeLine,
       nullptr, 0, 0, Flags, isOptimized, Fn, cast_or_null<MDTuple>(TParams),
-      cast_or_null<DISubprogram>(Decl),
-      nullptr); // HLSL Change - this leaked, better nullptr than empty anyway - MDTuple::getTemporary(VMContext, None).release());
+      cast_or_null<DISubprogram>(Decl), nullptr);
 
   if (isDefinition)
     AllSubprograms.push_back(Node);
@@ -877,3 +881,5 @@ void DIBuilder::replaceArrays(DICompositeType *&T, DINodeArray Elements,
   if (TParams)
     trackIfUnresolved(TParams.get());
 }
+
+} // namespace dxil
