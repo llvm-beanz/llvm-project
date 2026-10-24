@@ -11,7 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-include "llvm/CodeGen/ValueTypes.td"
+include "dxil/IR/ValueTypes.td"
 
 //===----------------------------------------------------------------------===//
 //  Properties we keep track of for intrinsics.
