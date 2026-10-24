@@ -11,7 +11,7 @@
 // functions with the isa/dyncast family of functions.  In particular, this
 // allows you to do things like:
 //
-//     if (MemCpyInst *MCI = dyn_cast<MemCpyInst>(Inst))
+//     if (MemCpyInst *MCI = llvm::dyn_cast<MemCpyInst>(Inst))
 //        ... MCI->getDest() ... MCI->getSource() ...
 //
 // All intrinsic function calls are instances of the call instruction, so these
@@ -53,7 +53,7 @@ namespace dxil {
       return false;
     }
     static inline bool classof(const Value *V) {
-      return isa<CallInst>(V) && classof(cast<CallInst>(V));
+      return llvm::isa<CallInst>(V) && classof(llvm::cast<CallInst>(V));
     }
   };
 
@@ -72,7 +72,8 @@ namespace dxil {
       }
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
 
     static Value *StripCast(Value *C);
@@ -84,19 +85,19 @@ namespace dxil {
   public:
     Value *getAddress() const;
     DILocalVariable *getVariable() const {
-      return cast<DILocalVariable>(getRawVariable());
+      return llvm::cast<DILocalVariable>(getRawVariable());
     }
     DIExpression *getExpression() const {
-      return cast<DIExpression>(getRawExpression());
+      return llvm::cast<DIExpression>(getRawExpression());
     }
 
     void setVariable(DIVariable *v) { setArgOperand(1, MetadataAsValue::get(getContext(), v)); } // HLSL Change
 
     Metadata *getRawVariable() const {
-      return cast<MetadataAsValue>(getArgOperand(1))->getMetadata();
+      return llvm::cast<MetadataAsValue>(getArgOperand(1))->getMetadata();
     }
     Metadata *getRawExpression() const {
-      return cast<MetadataAsValue>(getArgOperand(2))->getMetadata();
+      return llvm::cast<MetadataAsValue>(getArgOperand(2))->getMetadata();
     }
 
     // Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -104,7 +105,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::dbg_declare;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
   };
 
@@ -115,23 +117,23 @@ namespace dxil {
     const Value *getValue() const;
     Value *getValue();
     uint64_t getOffset() const {
-      return cast<ConstantInt>(
-                          const_cast<Value*>(getArgOperand(1)))->getZExtValue();
+      return llvm::cast<ConstantInt>(const_cast<Value *>(getArgOperand(1)))
+          ->getZExtValue();
     }
     DILocalVariable *getVariable() const {
-      return cast<DILocalVariable>(getRawVariable());
+      return llvm::cast<DILocalVariable>(getRawVariable());
     }
     DIExpression *getExpression() const {
-      return cast<DIExpression>(getRawExpression());
+      return llvm::cast<DIExpression>(getRawExpression());
     }
 
     void setVariable(DIVariable *v) { setArgOperand(2, MetadataAsValue::get(getContext(), v)); } // HLSL Change
 
     Metadata *getRawVariable() const {
-      return cast<MetadataAsValue>(getArgOperand(2))->getMetadata();
+      return llvm::cast<MetadataAsValue>(getArgOperand(2))->getMetadata();
     }
     Metadata *getRawExpression() const {
-      return cast<MetadataAsValue>(getArgOperand(3))->getMetadata();
+      return llvm::cast<MetadataAsValue>(getArgOperand(3))->getMetadata();
     }
 
     // Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -139,7 +141,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::dbg_value;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
   };
 
@@ -156,7 +159,7 @@ namespace dxil {
     Use &getLengthUse() { return getArgOperandUse(2); }
 
     ConstantInt *getAlignmentCst() const {
-      return cast<ConstantInt>(const_cast<Value*>(getArgOperand(3)));
+      return llvm::cast<ConstantInt>(const_cast<Value *>(getArgOperand(3)));
     }
 
     unsigned getAlignment() const {
@@ -164,14 +167,15 @@ namespace dxil {
     }
 
     ConstantInt *getVolatileCst() const {
-      return cast<ConstantInt>(const_cast<Value*>(getArgOperand(4)));
+      return llvm::cast<ConstantInt>(const_cast<Value *>(getArgOperand(4)));
     }
     bool isVolatile() const {
       return !getVolatileCst()->isZero();
     }
 
     unsigned getDestAddressSpace() const {
-      return cast<PointerType>(getRawDest()->getType())->getAddressSpace();
+      return llvm::cast<PointerType>(getRawDest()->getType())
+          ->getAddressSpace();
     }
 
     /// getDest - This is just like getRawDest, but it strips off any cast
@@ -216,7 +220,8 @@ namespace dxil {
       }
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
   };
 
@@ -241,7 +246,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::memset;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
   };
 
@@ -261,7 +267,8 @@ namespace dxil {
     Value *getSource() const { return getRawSource()->stripPointerCasts(); }
 
     unsigned getSourceAddressSpace() const {
-      return cast<PointerType>(getRawSource()->getType())->getAddressSpace();
+      return llvm::cast<PointerType>(getRawSource()->getType())
+          ->getAddressSpace();
     }
 
     void setSource(Value *Ptr) {
@@ -276,7 +283,8 @@ namespace dxil {
              I->getIntrinsicID() == Intrinsic::memmove;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
   };
 
@@ -290,7 +298,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::memcpy;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
   };
 
@@ -303,7 +312,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::memmove;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
   };
 
@@ -315,7 +325,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::vastart;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
 
     Value *getArgList() const { return const_cast<Value*>(getArgOperand(0)); }
@@ -329,7 +340,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::vaend;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
 
     Value *getArgList() const { return const_cast<Value*>(getArgOperand(0)); }
@@ -343,7 +355,8 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::vacopy;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
 
     Value *getDest() const { return const_cast<Value*>(getArgOperand(0)); }
@@ -357,24 +370,25 @@ namespace dxil {
       return I->getIntrinsicID() == Intrinsic::instrprof_increment;
     }
     static inline bool classof(const Value *V) {
-      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+      return llvm::isa<IntrinsicInst>(V) &&
+             classof(llvm::cast<IntrinsicInst>(V));
     }
 
     GlobalVariable *getName() const {
-      return cast<GlobalVariable>(
+      return llvm::cast<GlobalVariable>(
           const_cast<Value *>(getArgOperand(0))->stripPointerCasts());
     }
 
     ConstantInt *getHash() const {
-      return cast<ConstantInt>(const_cast<Value *>(getArgOperand(1)));
+      return llvm::cast<ConstantInt>(const_cast<Value *>(getArgOperand(1)));
     }
 
     ConstantInt *getNumCounters() const {
-      return cast<ConstantInt>(const_cast<Value *>(getArgOperand(2)));
+      return llvm::cast<ConstantInt>(const_cast<Value *>(getArgOperand(2)));
     }
 
     ConstantInt *getIndex() const {
-      return cast<ConstantInt>(const_cast<Value *>(getArgOperand(3)));
+      return llvm::cast<ConstantInt>(const_cast<Value *>(getArgOperand(3)));
     }
   };
 }

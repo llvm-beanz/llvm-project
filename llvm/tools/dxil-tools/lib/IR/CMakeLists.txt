@@ -5,7 +5,6 @@ add_llvm_library(DXILCore
   BasicBlock.cpp
   Comdat.cpp
   ConstantFold.cpp
-  ConstantRange.cpp
   Constants.cpp
   Core.cpp
   DIBuilder.cpp
@@ -55,5 +54,6 @@ add_llvm_library(DXILCore
   dxil_intrinsics_gen
 
   LINK_COMPONENTS
+  Core
   Support
   )

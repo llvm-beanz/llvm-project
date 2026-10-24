@@ -17,14 +17,14 @@
 #ifndef DXIL_IR_DEBUGINFO_H
 #define DXIL_IR_DEBUGINFO_H
 
+#include "dxil/IR/DebugInfoMetadata.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator_range.h"
-#include "dxil/IR/DebugInfoMetadata.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/Casting.h"
-#include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <iterator>
 
@@ -34,7 +34,7 @@ class DbgDeclareInst;
 class DbgValueInst;
 
 /// \brief Maps from type identifier to the actual MDNode.
-typedef DenseMap<const MDString *, DIType *> DITypeIdentifierMap;
+typedef llvm::DenseMap<const MDString *, DIType *> DITypeIdentifierMap;
 
 /// \brief Find subprogram that is enclosing this scope.
 DISubprogram *getDISubprogram(const MDNode *Scope);
@@ -104,32 +104,34 @@ private:
   bool addScope(DIScope *Scope);
 
 public:
-  typedef SmallVectorImpl<DICompileUnit *>::const_iterator
+  typedef llvm::SmallVectorImpl<DICompileUnit *>::const_iterator
       compile_unit_iterator;
-  typedef SmallVectorImpl<DISubprogram *>::const_iterator subprogram_iterator;
-  typedef SmallVectorImpl<DIGlobalVariable *>::const_iterator
+  typedef llvm::SmallVectorImpl<DISubprogram *>::const_iterator
+      subprogram_iterator;
+  typedef llvm::SmallVectorImpl<DIGlobalVariable *>::const_iterator
       global_variable_iterator;
-  typedef SmallVectorImpl<DIType *>::const_iterator type_iterator;
-  typedef SmallVectorImpl<DIScope *>::const_iterator scope_iterator;
+  typedef llvm::SmallVectorImpl<DIType *>::const_iterator type_iterator;
+  typedef llvm::SmallVectorImpl<DIScope *>::const_iterator scope_iterator;
 
-  iterator_range<compile_unit_iterator> compile_units() const {
-    return iterator_range<compile_unit_iterator>(CUs.begin(), CUs.end());
+  llvm::iterator_range<compile_unit_iterator> compile_units() const {
+    return llvm::iterator_range<compile_unit_iterator>(CUs.begin(), CUs.end());
   }
 
-  iterator_range<subprogram_iterator> subprograms() const {
-    return iterator_range<subprogram_iterator>(SPs.begin(), SPs.end());
+  llvm::iterator_range<subprogram_iterator> subprograms() const {
+    return llvm::iterator_range<subprogram_iterator>(SPs.begin(), SPs.end());
   }
 
-  iterator_range<global_variable_iterator> global_variables() const {
-    return iterator_range<global_variable_iterator>(GVs.begin(), GVs.end());
+  llvm::iterator_range<global_variable_iterator> global_variables() const {
+    return llvm::iterator_range<global_variable_iterator>(GVs.begin(),
+                                                          GVs.end());
   }
 
-  iterator_range<type_iterator> types() const {
-    return iterator_range<type_iterator>(TYs.begin(), TYs.end());
+  llvm::iterator_range<type_iterator> types() const {
+    return llvm::iterator_range<type_iterator>(TYs.begin(), TYs.end());
   }
 
-  iterator_range<scope_iterator> scopes() const {
-    return iterator_range<scope_iterator>(Scopes.begin(), Scopes.end());
+  llvm::iterator_range<scope_iterator> scopes() const {
+    return llvm::iterator_range<scope_iterator>(Scopes.begin(), Scopes.end());
   }
 
   unsigned compile_unit_count() const { return CUs.size(); }
@@ -139,19 +141,20 @@ public:
   unsigned scope_count() const { return Scopes.size(); }
 
 private:
-  SmallVector<DICompileUnit *, 8> CUs;
-  SmallVector<DISubprogram *, 8> SPs;
-  SmallVector<DIGlobalVariable *, 8> GVs;
-  SmallVector<DIType *, 8> TYs;
-  SmallVector<DIScope *, 8> Scopes;
-  SmallPtrSet<const MDNode *, 64> NodesSeen;
+  llvm::SmallVector<DICompileUnit *, 8> CUs;
+  llvm::SmallVector<DISubprogram *, 8> SPs;
+  llvm::SmallVector<DIGlobalVariable *, 8> GVs;
+  llvm::SmallVector<DIType *, 8> TYs;
+  llvm::SmallVector<DIScope *, 8> Scopes;
+  llvm::SmallPtrSet<const MDNode *, 32> NodesSeen;
   DITypeIdentifierMap TypeIdentifierMap;
 
   /// \brief Specify if TypeIdentifierMap is initialized.
   bool TypeMapInitialized;
 };
 
-DenseMap<const Function *, DISubprogram *> makeSubprogramMap(const Module &M);
+llvm::DenseMap<const Function *, DISubprogram *>
+makeSubprogramMap(const Module &M);
 
 } // end namespace llvm
 

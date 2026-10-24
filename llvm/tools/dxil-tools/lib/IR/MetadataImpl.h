@@ -20,7 +20,7 @@
 namespace dxil {
 
 template <class T, class InfoT>
-static T *getUniqued(DenseSet<T *, InfoT> &Store,
+static T *getUniqued(llvm::DenseSet<T *, InfoT> &Store,
                      const typename InfoT::KeyTy &Key) {
   auto I = Store.find_as(Key);
   return I == Store.end() ? nullptr : *I;

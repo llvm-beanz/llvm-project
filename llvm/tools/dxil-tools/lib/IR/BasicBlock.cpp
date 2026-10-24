@@ -372,8 +372,7 @@ BasicBlock *BasicBlock::splitBasicBlock(iterator I, const Twine &BBName) {
   assert(I != InstList.end() &&
          "Trying to get me to create degenerate basic block!");
 
-  BasicBlock *InsertBefore = std::next(Function::iterator(this))
-                               .getNodePtrUnchecked();
+  BasicBlock *InsertBefore = getNextNode();
   BasicBlock *New = BasicBlock::Create(getContext(), BBName,
                                        getParent(), InsertBefore);
 

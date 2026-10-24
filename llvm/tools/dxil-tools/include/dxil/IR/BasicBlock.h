@@ -46,7 +46,7 @@ class Function;
 /// modifying a program. However, the verifier will ensure that basic blocks
 /// are "well formed".
 class BasicBlock : public Value, // Basic blocks are data objects also
-                   public llvm::ilist_node<BasicBlock> {
+                   public llvm::ilist_node_with_parent<BasicBlock, Function> {
   friend class BlockAddress;
 public:
   typedef SymbolTableList<Instruction, BasicBlock> InstListType;

@@ -47,7 +47,7 @@ template <typename FunTy = const Function,
           typename IterTy = User::const_op_iterator>
 class CallSiteBase {
 protected:
-  PointerIntPair<InstrTy*, 1, bool> I;
+  llvm::PointerIntPair<InstrTy *, 1, bool> I;
 
   CallSiteBase() : I(nullptr, false) {}
   CallSiteBase(CallTy *CI) : I(CI, true) { assert(CI); }
@@ -61,7 +61,7 @@ private:
   /// which is NOT a call site.
   ///
   static CallSiteBase get(ValTy *V) {
-    if (InstrTy *II = dyn_cast<InstrTy>(V)) {
+    if (InstrTy *II = llvm::dyn_cast_if_present<InstrTy>(V)) {
       if (II->getOpcode() == Instruction::Call)
         return CallSiteBase(static_cast<CallTy*>(II));
       else if (II->getOpcode() == Instruction::Invoke)
@@ -97,7 +97,7 @@ public:
   /// call, otherwise return null (if it's an indirect call).
   ///
   FunTy *getCalledFunction() const {
-    return dyn_cast<FunTy>(getCalledValue());
+    return llvm::dyn_cast<FunTy>(getCalledValue());
   }
 
   /// setCalledFunction - Set the callee to the specified value.
@@ -155,8 +155,8 @@ public:
   }
 
   IterTy arg_end() const { return (*this)->op_end() - getArgumentEndOffset(); }
-  iterator_range<IterTy> args() const {
-    return iterator_range<IterTy>(arg_begin(), arg_end());
+  llvm::iterator_range<IterTy> args() const {
+    return llvm::iterator_range<IterTy>(arg_begin(), arg_end());
   }
   bool arg_empty() const { return arg_end() == arg_begin(); }
   unsigned arg_size() const { return unsigned(arg_end() - arg_begin()); }
@@ -172,26 +172,25 @@ public:
   /// \brief Tests if this call site must be tail call optimized.  Only a
   /// CallInst can be tail call optimized.
   bool isMustTailCall() const {
-    return isCall() && cast<CallInst>(getInstruction())->isMustTailCall();
+    return isCall() && llvm::cast<CallInst>(getInstruction())->isMustTailCall();
   }
 
   /// \brief Tests if this call site is marked as a tail call.
   bool isTailCall() const {
-    return isCall() && cast<CallInst>(getInstruction())->isTailCall();
+    return isCall() && llvm::cast<CallInst>(getInstruction())->isTailCall();
   }
 
-#define CALLSITE_DELEGATE_GETTER(METHOD) \
-  InstrTy *II = getInstruction();    \
-  return isCall()                        \
-    ? cast<CallInst>(II)->METHOD         \
-    : cast<InvokeInst>(II)->METHOD
+#define CALLSITE_DELEGATE_GETTER(METHOD)                                       \
+  InstrTy *II = getInstruction();                                              \
+  return isCall() ? llvm::cast<CallInst>(II)->METHOD                           \
+                  : llvm::cast<InvokeInst>(II)->METHOD
 
-#define CALLSITE_DELEGATE_SETTER(METHOD) \
-  InstrTy *II = getInstruction();    \
-  if (isCall())                          \
-    cast<CallInst>(II)->METHOD;          \
-  else                                   \
-    cast<InvokeInst>(II)->METHOD
+#define CALLSITE_DELEGATE_SETTER(METHOD)                                       \
+  InstrTy *II = getInstruction();                                              \
+  if (isCall())                                                                \
+    llvm::cast<CallInst>(II)->METHOD;                                          \
+  else                                                                         \
+    llvm::cast<InvokeInst>(II)->METHOD
 
   unsigned getNumArgOperands() const {
     CALLSITE_DELEGATE_GETTER(getNumArgOperands());
@@ -203,7 +202,7 @@ public:
 
   bool isInlineAsm() const { 
     if (isCall())
-      return cast<CallInst>(getInstruction())->isInlineAsm();
+      return llvm::cast<CallInst>(getInstruction())->isInlineAsm();
     return false;
   }
 
@@ -387,9 +386,9 @@ private:
 
   IterTy getCallee() const {
     if (isCall()) // Skip Callee
-      return cast<CallInst>(getInstruction())->op_end() - 1;
+      return llvm::cast<CallInst>(getInstruction())->op_end() - 1;
     else // Skip BB, BB, Callee
-      return cast<InvokeInst>(getInstruction())->op_end() - 3;
+      return llvm::cast<InvokeInst>(getInstruction())->op_end() - 3;
   }
 };
 

@@ -12,22 +12,24 @@
 // Diagnostics reporting is still done as part of the LLVMContext.
 //===----------------------------------------------------------------------===//
 
-#include "LLVMContextImpl.h"
-#include "llvm/ADT/Twine.h"
-#include "dxil/IR/Constants.h"
-#include "dxil/IR/DebugInfo.h"
 #include "dxil/IR/DiagnosticInfo.h"
+#include "LLVMContextImpl.h"
+#include "dxil/IR/Constants.h"
+#include "dxil/IR/DebugInfoMetadata.h"
 #include "dxil/IR/DiagnosticPrinter.h"
 #include "dxil/IR/Function.h"
 #include "dxil/IR/Instruction.h"
 #include "dxil/IR/Metadata.h"
 #include "dxil/IR/Module.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Regex.h"
 #include <atomic>
 #include <string>
 
 using namespace llvm;
+
+namespace dxil {
 
 namespace {
 
@@ -45,7 +47,7 @@ struct PassRemarksOpt {
       Pattern = std::make_shared<Regex>(Val);
       std::string RegexError;
       if (!Pattern->isValid(RegexError))
-        report_fatal_error("Invalid regular expression '" + Val +
+        report_fatal_error(Twine("Invalid regular expression '") + Val +
                                "' in -pass-remarks: " + RegexError,
                            false);
     }
@@ -103,7 +105,7 @@ static PassRemarksOptNull PassRemarksAnalysisOptLoc;
 }
 #endif
 
-int llvm::getNextAvailablePluginDiagnosticKind() {
+int getNextAvailablePluginDiagnosticKind() {
   static std::atomic<int> PluginKindID(DK_FirstPluginKind);
   return ++PluginKindID;
 }
@@ -191,24 +193,21 @@ void DiagnosticInfoMIRParser::print(DiagnosticPrinter &DP) const {
   DP << Diagnostic;
 }
 
-void llvm::emitOptimizationRemark(LLVMContext &Ctx, const char *PassName,
-                                  const Function &Fn, const DebugLoc &DLoc,
-                                  const Twine &Msg) {
+void emitOptimizationRemark(LLVMContext &Ctx, const char *PassName,
+                            const Function &Fn, const DebugLoc &DLoc,
+                            const Twine &Msg) {
   Ctx.diagnose(DiagnosticInfoOptimizationRemark(PassName, Fn, DLoc, Msg));
 }
 
-void llvm::emitOptimizationRemarkMissed(LLVMContext &Ctx, const char *PassName,
-                                        const Function &Fn,
-                                        const DebugLoc &DLoc,
-                                        const Twine &Msg) {
+void emitOptimizationRemarkMissed(LLVMContext &Ctx, const char *PassName,
+                                  const Function &Fn, const DebugLoc &DLoc,
+                                  const Twine &Msg) {
   Ctx.diagnose(DiagnosticInfoOptimizationRemarkMissed(PassName, Fn, DLoc, Msg));
 }
 
-void llvm::emitOptimizationRemarkAnalysis(LLVMContext &Ctx,
-                                          const char *PassName,
-                                          const Function &Fn,
-                                          const DebugLoc &DLoc,
-                                          const Twine &Msg) {
+void emitOptimizationRemarkAnalysis(LLVMContext &Ctx, const char *PassName,
+                                    const Function &Fn, const DebugLoc &DLoc,
+                                    const Twine &Msg) {
   Ctx.diagnose(
       DiagnosticInfoOptimizationRemarkAnalysis(PassName, Fn, DLoc, Msg));
 }
@@ -218,14 +217,14 @@ bool DiagnosticInfoOptimizationFailure::isEnabled() const {
   return getSeverity() == DS_Warning;
 }
 
-void llvm::emitLoopVectorizeWarning(LLVMContext &Ctx, const Function &Fn,
-                                    const DebugLoc &DLoc, const Twine &Msg) {
+void emitLoopVectorizeWarning(LLVMContext &Ctx, const Function &Fn,
+                              const DebugLoc &DLoc, const Twine &Msg) {
   Ctx.diagnose(DiagnosticInfoOptimizationFailure(
       Fn, DLoc, Twine("loop not vectorized: " + Msg)));
 }
 
-void llvm::emitLoopInterleaveWarning(LLVMContext &Ctx, const Function &Fn,
-                                     const DebugLoc &DLoc, const Twine &Msg) {
+void emitLoopInterleaveWarning(LLVMContext &Ctx, const Function &Fn,
+                               const DebugLoc &DLoc, const Twine &Msg) {
   Ctx.diagnose(DiagnosticInfoOptimizationFailure(
       Fn, DLoc, Twine("loop not interleaved: " + Msg)));
 }
@@ -276,3 +275,5 @@ void DiagnosticInfoDxil::print(DiagnosticPrinter &DP) const {
   DP << getMsgStr();
 }
 // HLSL Change end - Dxil Diagnostic Info reporter
+
+} // namespace dxil

@@ -128,10 +128,10 @@ public:
 
   /// \brief Report a message to the currently installed diagnostic handler.
   ///
-  /// This function returns, in particular in the case of error reporting
-  /// (DI.Severity == \a DS_Error), so the caller should leave the compilation
-  /// process in a self-consistent state, even though the generated code
-  /// need not be correct.
+  /// With an installed diagnostic handler, this function returns even for
+  /// errors. The caller must leave compilation in a self-consistent state.
+  /// Without a handler, an error diagnostic terminates the process with exit
+  /// status 1.
   ///
   /// The diagnostic message will be implicitly prefixed with a severity keyword
   /// according to \p DI.getSeverity(), i.e., "error: " for \a DS_Error,
@@ -165,9 +165,9 @@ public:
   void yield();
 
   /// emitError - Emit an error message to the currently installed error handler
-  /// with optional location information.  This function returns, so code should
-  /// be prepared to drop the erroneous construct on the floor and "not crash".
-  /// The generated code need not be correct.  The error message will be
+  /// with optional location information. With an installed diagnostic handler,
+  /// this function returns. Otherwise, it terminates the process with exit
+  /// status 1. The error message will be
   /// implicitly prefixed with "error: " and should not end with a ".".
   void emitError(unsigned LocCookie, const llvm::Twine &ErrorStr);
   void emitError(const Instruction *I, const llvm::Twine &ErrorStr);

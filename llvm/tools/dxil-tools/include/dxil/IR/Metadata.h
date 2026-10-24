@@ -518,7 +518,7 @@ dyn_extract_or_null(Y &&MD) {
 /// These are used to efficiently contain a byte sequence for metadata.
 /// MDString is always unnamed.
 class MDString : public Metadata {
-  friend class llvm::StringMapEntry<MDString>;
+  friend class llvm::StringMapEntryStorage<MDString>;
 
   MDString(const MDString &) = delete;
   MDString &operator=(MDString &&) = delete;
@@ -526,7 +526,6 @@ class MDString : public Metadata {
 
   llvm::StringMapEntry<MDString> *Entry;
   MDString() : Metadata(MDStringKind, Uniqued), Entry(nullptr) {}
-  MDString(MDString &&) : Metadata(MDStringKind, Uniqued) {}
 
 public:
   static MDString *get(LLVMContext &Context, llvm::StringRef Str);

@@ -18,13 +18,16 @@
 
 #include <string>
 
-namespace dxil {
-// Forward declarations.
-class Module;
+namespace llvm {
 class raw_ostream;
 class SMDiagnostic;
 class StringRef;
 class Twine;
+} // namespace llvm
+
+namespace dxil {
+// Forward declarations.
+class Module;
 class Value;
 
 /// \brief Interface for custom diagnostic printing.
@@ -36,7 +39,7 @@ public:
   virtual DiagnosticPrinter &operator<<(char C) = 0;
   virtual DiagnosticPrinter &operator<<(unsigned char C) = 0;
   virtual DiagnosticPrinter &operator<<(signed char C) = 0;
-  virtual DiagnosticPrinter &operator<<(StringRef Str) = 0;
+  virtual DiagnosticPrinter &operator<<(llvm::StringRef Str) = 0;
   virtual DiagnosticPrinter &operator<<(const char *Str) = 0;
   virtual DiagnosticPrinter &operator<<(const std::string &Str) = 0;
   virtual DiagnosticPrinter &operator<<(unsigned long N) = 0;
@@ -47,31 +50,29 @@ public:
   virtual DiagnosticPrinter &operator<<(unsigned int N) = 0;
   virtual DiagnosticPrinter &operator<<(int N) = 0;
   virtual DiagnosticPrinter &operator<<(double N) = 0;
-  virtual DiagnosticPrinter &operator<<(const Twine &Str) = 0;
+  virtual DiagnosticPrinter &operator<<(const llvm::Twine &Str) = 0;
 
   // IR related types.
   virtual DiagnosticPrinter &operator<<(const Value &V) = 0;
   virtual DiagnosticPrinter &operator<<(const Module &M) = 0;
 
   // Other types.
-  virtual DiagnosticPrinter &operator<<(const SMDiagnostic &Diag) = 0;
-  virtual DiagnosticPrinter &
-  operator<<(std::ios_base &(*iomanip)(std::ios_base &)) = 0; // HLSL Change
+  virtual DiagnosticPrinter &operator<<(const llvm::SMDiagnostic &Diag) = 0;
 };
 
 /// \brief Basic diagnostic printer that uses an underlying raw_ostream.
 class DiagnosticPrinterRawOStream : public DiagnosticPrinter {
 protected:
-  raw_ostream &Stream;
+  llvm::raw_ostream &Stream;
 
 public:
-  DiagnosticPrinterRawOStream(raw_ostream &Stream) : Stream(Stream) {};
+  DiagnosticPrinterRawOStream(llvm::raw_ostream &Stream) : Stream(Stream) {}
 
   // Simple types.
   DiagnosticPrinter &operator<<(char C) override;
   DiagnosticPrinter &operator<<(unsigned char C) override;
   DiagnosticPrinter &operator<<(signed char C) override;
-  DiagnosticPrinter &operator<<(StringRef Str) override;
+  DiagnosticPrinter &operator<<(llvm::StringRef Str) override;
   DiagnosticPrinter &operator<<(const char *Str) override;
   DiagnosticPrinter &operator<<(const std::string &Str) override;
   DiagnosticPrinter &operator<<(unsigned long N) override;
@@ -82,17 +83,15 @@ public:
   DiagnosticPrinter &operator<<(unsigned int N) override;
   DiagnosticPrinter &operator<<(int N) override;
   DiagnosticPrinter &operator<<(double N) override;
-  DiagnosticPrinter &operator<<(const Twine &Str) override;
+  DiagnosticPrinter &operator<<(const llvm::Twine &Str) override;
 
   // IR related types.
   DiagnosticPrinter &operator<<(const Value &V) override;
   DiagnosticPrinter &operator<<(const Module &M) override;
 
   // Other types.
-  DiagnosticPrinter &operator<<(const SMDiagnostic &Diag) override;
-  DiagnosticPrinter &operator<<(
-      std::ios_base &(*iomanip)(std::ios_base &)) override; // HLSL Change
+  DiagnosticPrinter &operator<<(const llvm::SMDiagnostic &Diag) override;
 };
-} // End namespace llvm
+} // namespace dxil
 
 #endif

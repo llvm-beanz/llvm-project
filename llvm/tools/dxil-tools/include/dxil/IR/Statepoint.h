@@ -98,22 +98,22 @@ public:
   }
 
   uint64_t getFlags() const {
-    return cast<ConstantInt>(getCallSite().getArgument(FlagsPos))
+    return llvm::cast<ConstantInt>(getCallSite().getArgument(FlagsPos))
         ->getZExtValue();
   }
 
   /// Return the ID associated with this statepoint.
   uint64_t getID() const {
     const Value *IDVal = getCallSite().getArgument(IDPos);
-    return cast<ConstantInt>(IDVal)->getZExtValue();
+    return llvm::cast<ConstantInt>(IDVal)->getZExtValue();
   }
 
   /// Return the number of patchable bytes associated with this statepoint.
   uint32_t getNumPatchBytes() const {
     const Value *NumPatchBytesVal = getCallSite().getArgument(NumPatchBytesPos);
     uint64_t NumPatchBytes =
-      cast<ConstantInt>(NumPatchBytesVal)->getZExtValue();
-    assert(isInt<32>(NumPatchBytes) && "should fit in 32 bits!");
+        llvm::cast<ConstantInt>(NumPatchBytesVal)->getZExtValue();
+    assert(llvm::isInt<32>(NumPatchBytes) && "should fit in 32 bits!");
     return NumPatchBytes;
   }
 
@@ -129,7 +129,7 @@ public:
   /// Return the function being called if this is a direct call, otherwise
   /// return null (if it's an indirect call).
   FunTy *getCalledFunction() const {
-    return dyn_cast<Function>(getCalledValue());
+    return llvm::dyn_cast<Function>(getCalledValue());
   }
 
   /// Return the caller function for this statepoint.
@@ -144,15 +144,15 @@ public:
   /// Return the type of the value returned by the call underlying the
   /// statepoint.
   Type *getActualReturnType() const {
-    auto *FTy = cast<FunctionType>(
-        cast<PointerType>(getCalledValue()->getType())->getElementType());
+    auto *FTy = llvm::cast<FunctionType>(
+        llvm::cast<PointerType>(getCalledValue()->getType())->getElementType());
     return FTy->getReturnType();
   }
 
   /// Number of arguments to be passed to the actual callee.
   int getNumCallArgs() const {
     const Value *NumCallArgsVal = getCallSite().getArgument(NumCallArgsPos);
-    return cast<ConstantInt>(NumCallArgsVal)->getZExtValue();
+    return llvm::cast<ConstantInt>(NumCallArgsVal)->getZExtValue();
   }
 
   size_t arg_size() const { return getNumCallArgs(); }
@@ -172,8 +172,8 @@ public:
   }
 
   /// range adapter for call arguments
-  iterator_range<arg_iterator> call_args() const {
-    return iterator_range<arg_iterator>(arg_begin(), arg_end());
+  llvm::iterator_range<arg_iterator> call_args() const {
+    return llvm::iterator_range<arg_iterator>(arg_begin(), arg_end());
   }
 
   /// \brief Return true if the call or the callee has the given attribute.
@@ -186,7 +186,7 @@ public:
   /// Number of GC transition args.
   int getNumTotalGCTransitionArgs() const {
     const Value *NumGCTransitionArgs = *arg_end();
-    return cast<ConstantInt>(NumGCTransitionArgs)->getZExtValue();
+    return llvm::cast<ConstantInt>(NumGCTransitionArgs)->getZExtValue();
   }
   typename CallSiteTy::arg_iterator gc_transition_args_begin() const {
     auto I = arg_end() + 1;
@@ -200,16 +200,16 @@ public:
   }
 
   /// range adapter for GC transition arguments
-  iterator_range<arg_iterator> gc_transition_args() const {
-    return iterator_range<arg_iterator>(gc_transition_args_begin(),
-                                        gc_transition_args_end());
+  llvm::iterator_range<arg_iterator> gc_transition_args() const {
+    return llvm::iterator_range<arg_iterator>(gc_transition_args_begin(),
+                                              gc_transition_args_end());
   }
 
   /// Number of additional arguments excluding those intended
   /// for garbage collection.
   int getNumTotalVMSArgs() const {
     const Value *NumVMSArgs = *gc_transition_args_end();
-    return cast<ConstantInt>(NumVMSArgs)->getZExtValue();
+    return llvm::cast<ConstantInt>(NumVMSArgs)->getZExtValue();
   }
 
   typename CallSiteTy::arg_iterator vm_state_begin() const {
@@ -224,8 +224,8 @@ public:
   }
 
   /// range adapter for vm state arguments
-  iterator_range<arg_iterator> vm_state_args() const {
-    return iterator_range<arg_iterator>(vm_state_begin(), vm_state_end());
+  llvm::iterator_range<arg_iterator> vm_state_args() const {
+    return llvm::iterator_range<arg_iterator>(vm_state_begin(), vm_state_end());
   }
 
   typename CallSiteTy::arg_iterator gc_args_begin() const {
@@ -236,8 +236,8 @@ public:
   }
 
   /// range adapter for gc arguments
-  iterator_range<arg_iterator> gc_args() const {
-    return iterator_range<arg_iterator>(gc_args_begin(), gc_args_end());
+  llvm::iterator_range<arg_iterator> gc_args() const {
+    return llvm::iterator_range<arg_iterator>(gc_args_begin(), gc_args_end());
   }
 
   /// Get list of all gc reloactes linked to this statepoint
@@ -252,7 +252,7 @@ public:
   InstructionTy *getGCResult() const {
     for (auto *U : getInstruction()->users())
       if (isGCResult(U))
-        return cast<CallInst>(U);
+        return llvm::cast<CallInst>(U);
 
     return nullptr;
   }
@@ -320,7 +320,7 @@ public:
   bool isTiedToInvoke() const {
     const Value *Token = RelocateCS.getArgument(0);
 
-    return isa<ExtractValueInst>(Token) || isa<InvokeInst>(Token);
+    return llvm::isa<ExtractValueInst>(Token) || llvm::isa<InvokeInst>(Token);
   }
 
   /// Get enclosed relocate intrinsic
@@ -332,13 +332,13 @@ public:
 
     // This takes care both of relocates for call statepoints and relocates
     // on normal path of invoke statepoint.
-    if (!isa<ExtractValueInst>(Token)) {
-      return cast<Instruction>(Token);
+    if (!llvm::isa<ExtractValueInst>(Token)) {
+      return llvm::cast<Instruction>(Token);
     }
 
     // This relocate is on exceptional path of an invoke statepoint
     const BasicBlock *InvokeBB =
-        cast<Instruction>(Token)->getParent()->getUniquePredecessor();
+        llvm::cast<Instruction>(Token)->getParent()->getUniquePredecessor();
 
     assert(InvokeBB && "safepoints should have unique landingpads");
     assert(InvokeBB->getTerminator() &&
@@ -352,13 +352,13 @@ public:
   /// which contains the base pointer of the pointer whose
   /// relocation this gc.relocate describes.
   unsigned getBasePtrIndex() {
-    return cast<ConstantInt>(RelocateCS.getArgument(1))->getZExtValue();
+    return llvm::cast<ConstantInt>(RelocateCS.getArgument(1))->getZExtValue();
   }
 
   /// The index into the associate statepoint's argument list which
   /// contains the pointer whose relocation this gc.relocate describes.
   unsigned getDerivedPtrIndex() {
-    return cast<ConstantInt>(RelocateCS.getArgument(2))->getZExtValue();
+    return llvm::cast<ConstantInt>(RelocateCS.getArgument(2))->getZExtValue();
   }
 
   Value *getBasePtr() {
@@ -394,12 +394,12 @@ StatepointBase<FunTy, InstructionTy, ValueTy, CallSiteTy>::getRelocates()
 
   // We need to scan thorough exceptional relocations if it is invoke statepoint
   LandingPadInst *LandingPad =
-      cast<InvokeInst>(getInstruction())->getLandingPadInst();
+      llvm::cast<InvokeInst>(getInstruction())->getLandingPadInst();
 
   // Search for extract value from landingpad instruction to which
   // gc relocates will be attached
   for (const User *LandingPadUser : LandingPad->users()) {
-    if (!isa<ExtractValueInst>(LandingPadUser))
+    if (!llvm::isa<ExtractValueInst>(LandingPadUser))
       continue;
 
     // gc relocates should be attached to this extract value

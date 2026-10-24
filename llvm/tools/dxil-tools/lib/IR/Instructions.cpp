@@ -15,16 +15,18 @@
 #include "dxil/IR/Instructions.h"
 #include "LLVMContextImpl.h"
 #include "dxil/IR/CallSite.h"
-#include "dxil/IR/ConstantRange.h"
 #include "dxil/IR/Constants.h"
 #include "dxil/IR/DataLayout.h"
 #include "dxil/IR/DerivedTypes.h"
 #include "dxil/IR/Function.h"
 #include "dxil/IR/Module.h"
 #include "dxil/IR/Operator.h"
+#include "llvm/IR/ConstantRange.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 using namespace llvm;
+
+namespace dxil {
 
 //===----------------------------------------------------------------------===//
 //                            CallSite Class
@@ -3622,3 +3624,5 @@ UnreachableInst *UnreachableInst::cloneImpl() const {
   LLVMContext &Context = getContext();
   return new UnreachableInst(Context);
 }
+
+} // namespace dxil

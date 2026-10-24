@@ -17,6 +17,7 @@
 #define DXIL_IR_INTRINSICS_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 #include <string>
 
 namespace dxil {
@@ -43,11 +44,11 @@ namespace Intrinsic {
   };
 
   /// Return the LLVM name for an intrinsic, such as "llvm.ppc.altivec.lvx".
-  std::string getName(ID id, ArrayRef<Type*> Tys = None);
+  std::string getName(ID id, llvm::ArrayRef<Type *> Tys = {});
 
   /// Return the function type for an intrinsic.
   FunctionType *getType(LLVMContext &Context, ID id,
-                        ArrayRef<Type*> Tys = None);
+                        llvm::ArrayRef<Type *> Tys = {});
 
   /// Returns true if the intrinsic can be overloaded.
   bool isOverloaded(ID id);
@@ -67,7 +68,7 @@ namespace Intrinsic {
   /// using iAny, fAny, vAny, or iPTRAny).  For a declaration of an overloaded
   /// intrinsic, Tys must provide exactly one type for each overloaded type in
   /// the intrinsic.
-  Function *getDeclaration(Module *M, ID id, ArrayRef<Type*> Tys = None);
+  Function *getDeclaration(Module *M, ID id, llvm::ArrayRef<Type *> Tys = {});
 
   /// Map a GCC builtin name to an intrinsic ID.
   ID getIntrinsicForGCCBuiltin(const char *Prefix, const char *BuiltinName);
@@ -124,7 +125,8 @@ namespace Intrinsic {
 
   /// Return the IIT table descriptor for the specified intrinsic into an array
   /// of IITDescriptors.
-  void getIntrinsicInfoTableEntries(ID id, SmallVectorImpl<IITDescriptor> &T);
+  void getIntrinsicInfoTableEntries(ID id,
+                                    llvm::SmallVectorImpl<IITDescriptor> &T);
 
 } // End Intrinsic namespace
 

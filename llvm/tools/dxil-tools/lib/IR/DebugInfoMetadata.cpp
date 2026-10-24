@@ -19,6 +19,8 @@
 
 using namespace llvm;
 
+namespace dxil {
+
 DILocation::DILocation(LLVMContext &C, StorageType Storage, unsigned Line,
                        unsigned Column, ArrayRef<Metadata *> MDs)
     : MDNode(C, DILocationKind, Storage, MDs) {
@@ -566,3 +568,5 @@ DIImportedEntity *DIImportedEntity::getImpl(LLVMContext &Context, unsigned Tag,
   Metadata *Ops[] = {Scope, Entity, Name};
   DEFINE_GETIMPL_STORE(DIImportedEntity, (Tag, Line), Ops);
 }
+
+} // namespace dxil

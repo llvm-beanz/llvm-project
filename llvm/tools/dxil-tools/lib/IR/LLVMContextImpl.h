@@ -902,6 +902,34 @@ public:
   }
 };
 
+class ValueHandleHead {
+  // The tag distinguishes map heads from ordinary ValueHandleBase::Next slots.
+  using TaggedPtr = llvm::PointerIntPair<ValueHandleBase *, 1, bool>;
+  ValueHandleBase *Head =
+      static_cast<ValueHandleBase *>(TaggedPtr(nullptr, true).getOpaqueValue());
+
+public:
+  ValueHandleBase *get() const {
+    return TaggedPtr::getFromOpaqueValue(Head).getPointer();
+  }
+
+  ValueHandleBase **getAddress() { return &Head; }
+
+  static TaggedPtr exchange(ValueHandleBase **Slot, ValueHandleBase *NewPtr) {
+    TaggedPtr Old = TaggedPtr::getFromOpaqueValue(*Slot);
+    TaggedPtr Updated = Old;
+    Updated.setPointer(NewPtr);
+    *Slot = static_cast<ValueHandleBase *>(Updated.getOpaqueValue());
+    return Old;
+  }
+
+  ValueHandleHead() = default;
+  ValueHandleHead(ValueHandleHead &&Other) noexcept;
+  ValueHandleHead &operator=(ValueHandleHead &&) = delete;
+  ValueHandleHead(const ValueHandleHead &) = delete;
+  ValueHandleHead &operator=(const ValueHandleHead &) = delete;
+};
+
 class LLVMContextImpl {
 public:
   /// OwnedModules - The set of modules instantiated in this context, and which
@@ -1000,7 +1028,7 @@ public:
   /// ValueHandles - This map keeps track of all of the value handles that are
   /// watching a Value*.  The Value::HasValueHandle bit is used to know
   /// whether or not a value has an entry in this map.
-  typedef llvm::DenseMap<Value *, ValueHandleBase *> ValueHandlesTy;
+  typedef llvm::DenseMap<Value *, ValueHandleHead> ValueHandlesTy;
   ValueHandlesTy ValueHandles;
   
   /// CustomMDKindNames - Map to hold the metadata string to ID mapping.

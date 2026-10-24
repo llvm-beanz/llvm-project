@@ -13,6 +13,8 @@
 #include "dxil/IR/DebugInfo.h"
 using namespace llvm;
 
+namespace dxil {
+
 //===----------------------------------------------------------------------===//
 // DebugLoc Implementation
 //===----------------------------------------------------------------------===//
@@ -100,3 +102,5 @@ void DebugLoc::print(raw_ostream &OS) const {
     OS << " ]";
   }
 }
+
+} // namespace dxil

@@ -46,6 +46,8 @@ namespace dxil {
 /// below for details.
 class ValueHandleBase {
   friend class Value;
+  friend class ValueHandleHead;
+
 protected:
   /// \brief This indicates what sub class the handle actually is.
   ///

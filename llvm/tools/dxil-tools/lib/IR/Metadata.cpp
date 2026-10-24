@@ -15,19 +15,21 @@
 #include "LLVMContextImpl.h"
 #include "MetadataImpl.h"
 #include "SymbolTableListTraitsImpl.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallSet.h"
-#include "llvm/ADT/SmallString.h"
-#include "llvm/ADT/StringMap.h"
-#include "dxil/IR/ConstantRange.h"
 #include "dxil/IR/DebugInfoMetadata.h"
 #include "dxil/IR/Instruction.h"
 #include "dxil/IR/LLVMContext.h"
 #include "dxil/IR/Module.h"
 #include "dxil/IR/ValueHandle.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/IR/ConstantRange.h"
 
 using namespace llvm;
+
+namespace dxil {
 
 MetadataAsValue::MetadataAsValue(Type *Ty, Metadata *MD)
     : Value(Ty, MetadataAsValueVal), MD(MD) {
@@ -54,7 +56,7 @@ static Metadata *canonicalizeMetadataForValue(LLVMContext &Context,
                                               Metadata *MD) {
   if (!MD)
     // !{}
-    return MDNode::get(Context, None);
+    return MDNode::get(Context, {});
 
   // Return early if this isn't a single-operand MDNode.
   auto *N = dyn_cast<MDNode>(MD);
@@ -63,7 +65,7 @@ static Metadata *canonicalizeMetadataForValue(LLVMContext &Context,
 
   if (!N->getOperand(0))
     // !{}
-    return MDNode::get(Context, None);
+    return MDNode::get(Context, {});
 
   if (auto *C = dyn_cast<ConstantAsMetadata>(N->getOperand(0)))
     // Look through the MDNode.
@@ -186,13 +188,13 @@ void ReplaceableMetadataImpl::replaceAllUsesWith(Metadata *MD) {
     }
 
     // Check for MetadataAsValue.
-    if (Owner.is<MetadataAsValue *>()) {
-      Owner.get<MetadataAsValue *>()->handleChangedMetadata(MD);
+    if (llvm::isa<MetadataAsValue *>(Owner)) {
+      llvm::cast<MetadataAsValue *>(Owner)->handleChangedMetadata(MD);
       continue;
     }
 
     // There's a Metadata owner -- dispatch.
-    Metadata *OwnerMD = Owner.get<Metadata *>();
+    Metadata *OwnerMD = llvm::cast<Metadata *>(Owner);
     switch (OwnerMD->getMetadataID()) {
 #define HANDLE_METADATA_LEAF(CLASS)                                            \
   case Metadata::CLASS##Kind:                                                  \
@@ -226,11 +228,11 @@ void ReplaceableMetadataImpl::resolveAllUses(bool ResolveUsers) {
     auto Owner = Pair.second.first;
     if (!Owner)
       continue;
-    if (Owner.is<MetadataAsValue *>())
+    if (llvm::isa<MetadataAsValue *>(Owner))
       continue;
 
     // Resolve MDNodes that point at this.
-    auto *OwnerMD = dyn_cast<MDNode>(Owner.get<Metadata *>());
+    auto *OwnerMD = dyn_cast<MDNode>(llvm::cast<Metadata *>(Owner));
     if (!OwnerMD)
       continue;
     if (OwnerMD->isResolved())
@@ -359,30 +361,14 @@ void ValueAsMetadata::handleRAUW(Value *From, Value *To) {
 
 MDString *MDString::get(LLVMContext &Context, StringRef Str) {
   auto &Store = Context.pImpl->MDStringCache;
-  auto I = Store.find(Str);
-  if (I != Store.end())
-    return &I->second;
-
-  auto *Entry =
-      StringMapEntry<MDString>::Create(Str, Store.getAllocator(), MDString());
-  // HLSL Change Begin: Don't leak on insertion failure
-  try {
-  bool WasInserted = Store.insert(Entry);
-  (void)WasInserted;
-  assert(WasInserted && "Expected entry to be inserted");
-  }
-  catch (...) {
-    Entry->Destroy();
-    throw;
-  }
-  // HLSL Change End
-  Entry->second.Entry = Entry;
-  return &Entry->second;
+  auto &Entry = *Store.try_emplace(Str).first;
+  Entry.second.Entry = &Entry;
+  return &Entry.second;
 }
 
 StringRef MDString::getString() const {
   assert(Entry && "Expected to find string map entry");
-  return Entry->first();
+  return Entry->getKey();
 }
 
 //===----------------------------------------------------------------------===//
@@ -393,7 +379,7 @@ StringRef MDString::getString() const {
 // prepended to them.
 #define HANDLE_MDNODE_LEAF(CLASS)                                              \
   static_assert(                                                               \
-      llvm::AlignOf<uint64_t>::Alignment >= llvm::AlignOf<CLASS>::Alignment,   \
+      alignof(uint64_t) >= alignof(CLASS),                                     \
       "Alignment is insufficient after objects prepended to " #CLASS);
 #include "dxil/IR/Metadata.def"
 
@@ -401,7 +387,7 @@ void *MDNode::operator new(size_t Size, unsigned NumOps) {
   size_t OpSize = NumOps * sizeof(MDOperand);
   // uint64_t is the most aligned type we need support (ensured by static_assert
   // above)
-  OpSize = RoundUpToAlignment(OpSize, llvm::alignOf<uint64_t>());
+  OpSize = llvm::alignTo(OpSize, alignof(uint64_t));
   void *Ptr = reinterpret_cast<char *>(::operator new(OpSize + Size)) + OpSize;
   MDOperand *O = static_cast<MDOperand *>(Ptr);
   for (MDOperand *E = O - NumOps; O != E; --O)
@@ -412,7 +398,7 @@ void *MDNode::operator new(size_t Size, unsigned NumOps) {
 void MDNode::operator delete(void *Mem) {
   MDNode *N = static_cast<MDNode *>(Mem);
   size_t OpSize = N->NumOperands * sizeof(MDOperand);
-  OpSize = RoundUpToAlignment(OpSize, llvm::alignOf<uint64_t>());
+  OpSize = llvm::alignTo(OpSize, alignof(uint64_t));
 
   MDOperand *O = static_cast<MDOperand *>(Mem);
   for (MDOperand *E = O - N->NumOperands; O != E; --O)
@@ -439,7 +425,8 @@ MDNode::MDNode(LLVMContext &Context, unsigned ID, StorageType Storage,
     if (!countUnresolvedOperands())
       return;
 
-  this->Context.makeReplaceable(make_unique<ReplaceableMetadataImpl>(Context));
+  this->Context.makeReplaceable(
+      std::make_unique<ReplaceableMetadataImpl>(Context));
 }
 
 TempMDNode MDNode::clone() const {
@@ -718,16 +705,8 @@ MDTuple *MDTuple::getImpl(LLVMContext &Context, ArrayRef<Metadata *> MDs,
     assert(ShouldCreate && "Expected non-uniqued nodes to always be created");
   }
 
-  // HLSL Change - guard with try/catch
-  MDTuple *MDTuplePtr(new (MDs.size()) MDTuple(Context, Storage, Hash, MDs));
-  MDTuple *Result;
-  try {
-    Result = storeImpl(MDTuplePtr, Storage, Context.pImpl->MDTuples);
-  } catch (...) {
-    MDTuplePtr->deleteAsSubclass();
-    throw;
-  }
-  return Result;
+  return storeImpl(new (MDs.size()) MDTuple(Context, Storage, Hash, MDs),
+                   Storage, Context.pImpl->MDTuples);
 }
 
 void MDNode::deleteTemporary(MDNode *N) {
@@ -1276,3 +1255,5 @@ void Function::clearMetadata() {
   getContext().pImpl->FunctionMetadata.erase(this);
   setHasMetadataHashEntry(false);
 }
+
+} // namespace dxil

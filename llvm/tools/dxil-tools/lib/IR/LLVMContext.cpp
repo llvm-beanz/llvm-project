@@ -23,13 +23,14 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/SourceMgr.h"
 #include <cctype>
+#include <cstdlib>
 using namespace llvm;
+
+namespace dxil {
 
 static ManagedStatic<LLVMContext> GlobalContext;
 
-LLVMContext& llvm::getGlobalContext() {
-  return *GlobalContext;
-}
+LLVMContext &getGlobalContext() { return *GlobalContext; }
 
 LLVMContext::LLVMContext() : pImpl(new LLVMContextImpl(*this)) {
   std::unique_ptr<LLVMContextImpl> implPtrGuard(pImpl); // HLSL Change: Don't leak if constructor throws.
@@ -191,15 +192,15 @@ static bool isDiagnosticEnabled(const DiagnosticInfo &DI) {
   // the pass that is emitting the diagnostic. If there is no match, ignore the
   // diagnostic and return.
   switch (DI.getKind()) {
-  case llvm::DK_OptimizationRemark:
+  case DK_OptimizationRemark:
     if (!cast<DiagnosticInfoOptimizationRemark>(DI).isEnabled())
       return false;
     break;
-  case llvm::DK_OptimizationRemarkMissed:
+  case DK_OptimizationRemarkMissed:
     if (!cast<DiagnosticInfoOptimizationRemarkMissed>(DI).isEnabled())
       return false;
     break;
-  case llvm::DK_OptimizationRemarkAnalysis:
+  case DK_OptimizationRemarkAnalysis:
     if (!cast<DiagnosticInfoOptimizationRemarkAnalysis>(DI).isEnabled())
       return false;
     break;
@@ -240,8 +241,7 @@ void LLVMContext::diagnose(const DiagnosticInfo &DI) {
   DI.print(DP);
   errs() << "\n";
   if (DI.getSeverity() == DS_Error)
-    // exit(1); // HLSL Change - unwind if necessary, but don't terminate the process
-    throw std::exception();
+    std::exit(1);
 }
 
 void LLVMContext::emitError(unsigned LocCookie, const Twine &ErrorStr) {
@@ -279,5 +279,7 @@ void LLVMContext::getMDKindNames(SmallVectorImpl<StringRef> &Names) const {
   Names.resize(pImpl->CustomMDKindNames.size());
   for (StringMap<unsigned>::const_iterator I = pImpl->CustomMDKindNames.begin(),
        E = pImpl->CustomMDKindNames.end(); I != E; ++I)
-    Names[I->second] = I->first();
+    Names[I->second] = I->getKey();
 }
+
+} // namespace dxil

@@ -25,7 +25,7 @@ namespace dxil {
   class generic_gep_type_iterator {
 
     ItTy OpIt;
-    PointerIntPair<Type *, 1> CurTy;
+    llvm::PointerIntPair<Type *, 1> CurTy;
     unsigned AddrSpace;
     generic_gep_type_iterator() {}
   public:
@@ -72,7 +72,7 @@ namespace dxil {
     Type *getIndexedType() const {
       if (CurTy.getInt())
         return CurTy.getPointer();
-      CompositeType *CT = cast<CompositeType>(CurTy.getPointer());
+      CompositeType *CT = llvm::cast<CompositeType>(CurTy.getPointer());
       return CT->getTypeAtIndex(getOperand());
     }
 
@@ -86,7 +86,7 @@ namespace dxil {
       if (CurTy.getInt()) {
         CurTy.setInt(false);
       } else if (CompositeType *CT =
-                     dyn_cast<CompositeType>(CurTy.getPointer())) {
+                     llvm::dyn_cast<CompositeType>(CurTy.getPointer())) {
         CurTy.setPointer(CT->getTypeAtIndex(getOperand()));
       } else {
         CurTy.setPointer(nullptr);
@@ -103,10 +103,10 @@ namespace dxil {
   typedef generic_gep_type_iterator<> gep_type_iterator;
 
   inline gep_type_iterator gep_type_begin(const User *GEP) {
-    auto *GEPOp = cast<GEPOperator>(GEP);
+    auto *GEPOp = llvm::cast<GEPOperator>(GEP);
     return gep_type_iterator::begin(
         GEPOp->getSourceElementType(),
-        cast<PointerType>(GEPOp->getPointerOperandType()->getScalarType())
+        llvm::cast<PointerType>(GEPOp->getPointerOperandType()->getScalarType())
             ->getAddressSpace(),
         GEP->op_begin() + 1);
   }
@@ -114,10 +114,10 @@ namespace dxil {
     return gep_type_iterator::end(GEP->op_end());
   }
   inline gep_type_iterator gep_type_begin(const User &GEP) {
-    auto &GEPOp = cast<GEPOperator>(GEP);
+    auto &GEPOp = llvm::cast<GEPOperator>(GEP);
     return gep_type_iterator::begin(
         GEPOp.getSourceElementType(),
-        cast<PointerType>(GEPOp.getPointerOperandType()->getScalarType())
+        llvm::cast<PointerType>(GEPOp.getPointerOperandType()->getScalarType())
             ->getAddressSpace(),
         GEP.op_begin() + 1);
   }
@@ -125,15 +125,15 @@ namespace dxil {
     return gep_type_iterator::end(GEP.op_end());
   }
 
-  template<typename T>
+  template <typename T>
   inline generic_gep_type_iterator<const T *>
-  gep_type_begin(Type *Op0, ArrayRef<T> A) {
+  gep_type_begin(Type *Op0, llvm::ArrayRef<T> A) {
     return generic_gep_type_iterator<const T *>::begin(Op0, A.begin());
   }
 
-  template<typename T>
+  template <typename T>
   inline generic_gep_type_iterator<const T *>
-  gep_type_end(Type * /*Op0*/, ArrayRef<T> A) {
+  gep_type_end(Type * /*Op0*/, llvm::ArrayRef<T> A) {
     return generic_gep_type_iterator<const T *>::end(A.end());
   }
 } // end namespace llvm

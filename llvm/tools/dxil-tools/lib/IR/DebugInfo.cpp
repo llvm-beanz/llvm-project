@@ -14,32 +14,32 @@
 
 #include "dxil/IR/DebugInfo.h"
 #include "LLVMContextImpl.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallString.h"
-#include "llvm/Analysis/ValueTracking.h"
 #include "dxil/IR/Constants.h"
-#include "dxil/IR/DIBuilder.h"
 #include "dxil/IR/DerivedTypes.h"
+#include "dxil/IR/GVMaterializer.h"
 #include "dxil/IR/Instructions.h"
 #include "dxil/IR/IntrinsicInst.h"
 #include "dxil/IR/Intrinsics.h"
-#include "dxil/IR/GVMaterializer.h"
 #include "dxil/IR/Module.h"
 #include "dxil/IR/ValueHandle.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Dwarf.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
 using namespace llvm::dwarf;
 
-DISubprogram *llvm::getDISubprogram(const MDNode *Scope) {
+namespace dxil {
+
+DISubprogram *getDISubprogram(const MDNode *Scope) {
   if (auto *LocalScope = dyn_cast_or_null<DILocalScope>(Scope))
     return LocalScope->getSubprogram();
   return nullptr;
 }
 
-DISubprogram *llvm::getDISubprogram(const Function *F) {
+DISubprogram *getDISubprogram(const Function *F) {
   // We look for the first instr that has a debug annotation leading back to F.
   for (auto &BB : *F) {
     auto Inst = std::find_if(BB.begin(), BB.end(), [](const Instruction &Inst) {
@@ -56,7 +56,7 @@ DISubprogram *llvm::getDISubprogram(const Function *F) {
   return nullptr;
 }
 
-DICompositeTypeBase *llvm::getDICompositeType(DIType *T) {
+DICompositeTypeBase *getDICompositeType(DIType *T) {
   if (auto *C = dyn_cast_or_null<DICompositeTypeBase>(T))
     return C;
 
@@ -71,8 +71,7 @@ DICompositeTypeBase *llvm::getDICompositeType(DIType *T) {
   return nullptr;
 }
 
-DITypeIdentifierMap
-llvm::generateDITypeIdentifierMap(const NamedMDNode *CU_Nodes) {
+DITypeIdentifierMap generateDITypeIdentifierMap(const NamedMDNode *CU_Nodes) {
   DITypeIdentifierMap Map;
   for (unsigned CUi = 0, CUe = CU_Nodes->getNumOperands(); CUi != CUe; ++CUi) {
     auto *CU = cast<DICompileUnit>(CU_Nodes->getOperand(CUi));
@@ -317,7 +316,7 @@ bool DebugInfoFinder::addScope(DIScope *Scope) {
   return true;
 }
 
-bool llvm::stripDebugInfo(Function &F) {
+bool stripDebugInfo(Function &F) {
   bool Changed = false;
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
@@ -330,7 +329,7 @@ bool llvm::stripDebugInfo(Function &F) {
   return Changed;
 }
 
-bool llvm::StripDebugInfo(Module &M) {
+bool StripDebugInfo(Module &M) {
   bool Changed = false;
 
   // Remove all of the calls to the debugger intrinsics, and remove them from
@@ -355,9 +354,9 @@ bool llvm::StripDebugInfo(Module &M) {
 
   for (Module::named_metadata_iterator NMI = M.named_metadata_begin(),
          NME = M.named_metadata_end(); NMI != NME;) {
-    NamedMDNode *NMD = NMI;
+    NamedMDNode *NMD = &*NMI;
     ++NMI;
-    if (NMD->getName().startswith("llvm.dbg.")) {
+    if (NMD->getName().starts_with("llvm.dbg.")) {
       NMD->eraseFromParent();
       Changed = true;
     }
@@ -372,7 +371,7 @@ bool llvm::StripDebugInfo(Module &M) {
   return Changed;
 }
 
-unsigned llvm::getDebugMetadataVersionFromModule(const Module &M) {
+unsigned getDebugMetadataVersionFromModule(const Module &M) {
   if (auto *Val = mdconst::dyn_extract_or_null<ConstantInt>(
           M.getModuleFlag("Debug Info Version")))
     return Val->getZExtValue();
@@ -380,13 +379,13 @@ unsigned llvm::getDebugMetadataVersionFromModule(const Module &M) {
 }
 
 // HLSL Change - begin
-bool llvm::hasDebugInfo(const Module &M) {
+bool hasDebugInfo(const Module &M) {
   // We might just get away with checking if there's "llvm.dbg.cu",
   // but this is more robust.
   for (Module::const_named_metadata_iterator NMI = M.named_metadata_begin(),
                                              NME = M.named_metadata_end();
        NMI != NME; ++NMI) {
-    if (NMI->getName().startswith("llvm.dbg.")) {
+    if (NMI->getName().starts_with("llvm.dbg.")) {
       return true;
     }
   }
@@ -394,8 +393,7 @@ bool llvm::hasDebugInfo(const Module &M) {
 }
 // HLSL Change - end
 
-DenseMap<const llvm::Function *, DISubprogram *>
-llvm::makeSubprogramMap(const Module &M) {
+DenseMap<const Function *, DISubprogram *> makeSubprogramMap(const Module &M) {
   DenseMap<const Function *, DISubprogram *> R;
 
   NamedMDNode *CU_Nodes = M.getNamedMetadata("llvm.dbg.cu");
@@ -411,3 +409,5 @@ llvm::makeSubprogramMap(const Module &M) {
   }
   return R;
 }
+
+} // namespace dxil

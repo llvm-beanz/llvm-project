@@ -27,10 +27,13 @@
 #include "llvm/Support/ErrorHandling.h"
 #include <iterator>
 
+namespace llvm {
+class ConstantRange;
+}
+
 namespace dxil {
 
 class ConstantInt;
-class ConstantRange;
 class DataLayout;
 class LLVMContext;
 
@@ -1208,7 +1211,8 @@ public:
 
   /// Initialize a set of values that all satisfy the predicate with C.
   /// \brief Make a ConstantRange for a relation with a constant value.
-  static ConstantRange makeConstantRange(Predicate pred, const llvm::APInt &C);
+  static llvm::ConstantRange makeConstantRange(Predicate pred,
+                                               const llvm::APInt &C);
 
   /// Exchange the two operands to this instruction in such a way that it does
   /// not modify the semantics of the instruction. The predicate value may be

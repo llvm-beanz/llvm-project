@@ -32,7 +32,9 @@ class MDNode;
 class BasicBlock;
 struct AAMDNodes;
 
-class Instruction : public User, public llvm::ilist_node<Instruction> {
+class Instruction
+    : public User,
+      public llvm::ilist_node_with_parent<Instruction, BasicBlock> {
   void operator=(const Instruction &) = delete;
   Instruction(const Instruction &) = delete;
 
