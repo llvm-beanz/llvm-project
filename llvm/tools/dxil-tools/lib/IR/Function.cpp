@@ -17,7 +17,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/CodeGen/ValueTypes.h"
 #include "dxil/IR/CallSite.h"
 #include "dxil/IR/Constants.h"
 #include "dxil/IR/DerivedTypes.h"
@@ -27,10 +26,6 @@
 #include "dxil/IR/MDBuilder.h"
 #include "dxil/IR/Metadata.h"
 #include "dxil/IR/Module.h"
-#include "llvm/Support/ManagedStatic.h"
-#include "llvm/Support/RWMutex.h"
-#include "llvm/Support/StringPool.h"
-#include "llvm/Support/Threading.h"
 using namespace llvm;
 
 namespace dxil {
@@ -450,10 +445,6 @@ void Function::recalculateIntrinsicID() {
 /// which can't be confused with it's prefix.  This ensures we don't have
 /// collisions between two unrelated function types. Otherwise, you might
 /// parse ffXX as f(fXX) or f(fX)X.  (X is a placeholder for any other type.)
-/// Manglings of integers, floats, and vectors ('i', 'f', and 'v' prefix in most
-/// cases) fall back to the MVT codepath, where they could be mangled to
-/// 'x86mmx', for example; matching on derived types is not sufficient to mangle
-/// everything.
 static std::string getMangledTypeStr(Type* Ty) {
   std::string Result;
   if (PointerType* PTyp = dyn_cast<PointerType>(Ty)) {
@@ -472,9 +463,35 @@ static std::string getMangledTypeStr(Type* Ty) {
     if (FT->isVarArg())
       Result += "vararg";
     // Ensure nested function types are distinguishable.
-    Result += "f"; 
-  } else if (Ty)
-    Result += EVT::getEVT(Ty).getEVTString();
+    Result += "f";
+  } else if (auto *VTy = dyn_cast<VectorType>(Ty)) {
+    Result += "v" + utostr(VTy->getNumElements()) +
+              getMangledTypeStr(VTy->getElementType());
+  } else if (Ty) {
+    switch (Ty->getTypeID()) {
+    case Type::VoidTyID:
+      Result += "isVoid";
+      break;
+    case Type::IntegerTyID:
+      Result += "i" + utostr(Ty->getIntegerBitWidth());
+      break;
+    case Type::HalfTyID:
+    case Type::FloatTyID:
+    case Type::DoubleTyID:
+    case Type::X86_FP80TyID:
+    case Type::FP128TyID:
+      Result += "f" + utostr(Ty->getPrimitiveSizeInBits());
+      break;
+    case Type::PPC_FP128TyID:
+      Result += "ppcf128";
+      break;
+    case Type::X86_MMXTyID:
+      Result += "x86mmx";
+      break;
+    default:
+      llvm_unreachable("Invalid intrinsic overload type");
+    }
+  }
   return Result;
 }
 
@@ -746,9 +763,9 @@ static Type *DecodeFixedType(ArrayRef<Intrinsic::IITDescriptor> &Infos,
   case IITDescriptor::Struct: {
     Type *Elts[5];
     assert(D.Struct_NumElements <= 5 && "Can't handle this yet");
-    for (unsigned i = 0, e = D.Struct_NumElements; i != e && i < _countof(Elts); ++i) // HLSL Change - add extra check to help SAL
+    for (unsigned i = 0, e = D.Struct_NumElements; i != e; ++i)
       Elts[i] = DecodeFixedType(Infos, Tys, Context);
-    return StructType::get(Context, makeArrayRef(Elts,D.Struct_NumElements));
+    return StructType::get(Context, ArrayRef(Elts, D.Struct_NumElements));
   }
 
   case IITDescriptor::Argument:
@@ -973,7 +990,7 @@ std::optional<uint64_t> Function::getEntryCount() const {
   MDNode *MD = getMetadata(LLVMContext::MD_prof);
   if (MD && MD->getOperand(0))
     if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0)))
-      if (MDS->getString().equals("function_entry_count")) {
+      if (MDS->getString() == "function_entry_count") {
         ConstantInt *CI = mdconst::extract<ConstantInt>(MD->getOperand(1));
         return CI->getValue().getZExtValue();
       }

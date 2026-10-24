@@ -27,6 +27,8 @@
 #include "dxil/IR/Metadata.h"
 using namespace llvm;
 
+namespace dxil {
+
 //===----------------------------------------------------------------------===//
 /// DbgInfoIntrinsic - This is the common base class for debug info intrinsics
 ///
@@ -79,3 +81,5 @@ const Value *DbgValueInst::getValue() const {
 }
 
 Value *DbgValueInst::getValue() { return getValueImpl(getArgOperand(0)); }
+
+} // namespace dxil

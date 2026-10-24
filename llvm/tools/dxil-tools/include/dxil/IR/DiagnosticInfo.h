@@ -15,7 +15,6 @@
 #ifndef DXIL_IR_DIAGNOSTICINFO_H
 #define DXIL_IR_DIAGNOSTICINFO_H
 
-#include "llvm-c/Core.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "dxil/IR/DebugLoc.h"
 #include "dxil/IR/Module.h"
@@ -412,8 +411,6 @@ public:
   }
 };
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_SIMPLE_CONVERSION_FUNCTIONS(DiagnosticInfo, LLVMDiagnosticInfoRef)
 
 /// Emit an optimization-applied message. \p PassName is the name of the pass
 /// emitting the message. If -Rpass= is given and \p PassName matches the

@@ -14,11 +14,12 @@
 #include "dxil/IR/Constant.h"
 #include "dxil/IR/Constants.h"
 #include "dxil/IR/Statepoint.h"
-#include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
 
-bool llvm::isStatepoint(const ImmutableCallSite &CS) {
+namespace dxil {
+
+bool isStatepoint(const ImmutableCallSite &CS) {
   if (!CS.getInstruction()) {
     // This is not a call site
     return false;
@@ -27,18 +28,16 @@ bool llvm::isStatepoint(const ImmutableCallSite &CS) {
   const Function *F = CS.getCalledFunction();
   return (F && F->getIntrinsicID() == Intrinsic::experimental_gc_statepoint);
 }
-bool llvm::isStatepoint(const Value *inst) {
+bool isStatepoint(const Value *inst) {
   if (isa<InvokeInst>(inst) || isa<CallInst>(inst)) {
     ImmutableCallSite CS(inst);
     return isStatepoint(CS);
   }
   return false;
 }
-bool llvm::isStatepoint(const Value &inst) {
-  return isStatepoint(&inst);
-}
+bool isStatepoint(const Value &inst) { return isStatepoint(&inst); }
 
-bool llvm::isGCRelocate(const ImmutableCallSite &CS) {
+bool isGCRelocate(const ImmutableCallSite &CS) {
   if (!CS.getInstruction()) {
     // This is not a call site
     return false;
@@ -46,7 +45,7 @@ bool llvm::isGCRelocate(const ImmutableCallSite &CS) {
 
   return isGCRelocate(CS.getInstruction());
 }
-bool llvm::isGCRelocate(const Value *inst) {
+bool isGCRelocate(const Value *inst) {
   if (const CallInst *call = dyn_cast<CallInst>(inst)) {
     if (const Function *F = call->getCalledFunction()) {
       return F->getIntrinsicID() == Intrinsic::experimental_gc_relocate;
@@ -55,7 +54,7 @@ bool llvm::isGCRelocate(const Value *inst) {
   return false;
 }
 
-bool llvm::isGCResult(const ImmutableCallSite &CS) {
+bool isGCResult(const ImmutableCallSite &CS) {
   if (!CS.getInstruction()) {
     // This is not a call site
     return false;
@@ -63,7 +62,7 @@ bool llvm::isGCResult(const ImmutableCallSite &CS) {
 
   return isGCResult(CS.getInstruction());
 }
-bool llvm::isGCResult(const Value *inst) {
+bool isGCResult(const Value *inst) {
   if (const CallInst *call = dyn_cast<CallInst>(inst)) {
     if (Function *F = call->getCalledFunction()) {
       return (F->getIntrinsicID() == Intrinsic::experimental_gc_result_int ||
@@ -74,3 +73,5 @@ bool llvm::isGCResult(const Value *inst) {
   }
   return false;
 }
+
+} // namespace dxil

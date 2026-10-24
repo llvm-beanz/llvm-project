@@ -15,13 +15,11 @@
 #ifndef DXIL_IR_TYPE_H
 #define DXIL_IR_TYPE_H
 
-#include "llvm-c/Core.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -55,7 +53,6 @@ public:
   /// value, you can cast to a class defined in DerivedTypes.h.
   /// Note: If you add an element to this, you need to add an element to the
   /// Type::getPrimitiveType function, or else things will break!
-  /// Also update LLVMTypeKind and LLVMGetTypeKind () in the C binding.
   ///
   enum TypeID {
     // PrimitiveTypes - make sure LastPrimitiveTyID stays up to date.
@@ -491,18 +488,7 @@ template <> struct GraphTraits<const dxil::Type *> {
 
 namespace dxil {
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_ISA_CONVERSION_FUNCTIONS(Type, LLVMTypeRef)
 
-/* Specialized opaque type conversions.
- */
-inline Type **unwrap(LLVMTypeRef *Tys) {
-  return reinterpret_cast<Type **>(Tys);
-}
-
-inline LLVMTypeRef *wrap(Type **Tys) {
-  return reinterpret_cast<LLVMTypeRef *>(const_cast<Type **>(Tys));
-}
 
 } // namespace dxil
 

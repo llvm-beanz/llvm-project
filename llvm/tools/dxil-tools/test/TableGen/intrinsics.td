@@ -12,6 +12,7 @@ include "dxil/IR/Intrinsics.td"
 // CHECK-NEXT: "llvm.log2",
 // CHECK:      #ifdef GET_INTRINSIC_OVERLOAD_TABLE
 // CHECK:      #ifdef GET_FUNCTION_RECOGNIZER
+// CHECK:      NameR.starts_with(
 // CHECK:      #ifdef GET_INTRINSIC_GENERATOR_GLOBAL
 // CHECK:      static const unsigned IIT_Table[] = {
 // CHECK-NEXT: 0x2E2E, (1U<<31) | 73, 0x10, (1U<<31) | 97, 0x1F1F, 0x2F2F, 0x2F2F,

@@ -1,7 +1,4 @@
-set(LLVM_OPTIONAL_SOURCES BitReader.cpp)
-
 add_llvm_library(DXILBitReader
-  # BitReader.cpp # HLSL Change - this is just the C wrapper
   BitcodeReader.cpp
   BitstreamReader.cpp
 

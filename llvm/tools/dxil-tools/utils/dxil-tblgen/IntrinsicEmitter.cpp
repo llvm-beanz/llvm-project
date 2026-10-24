@@ -178,8 +178,8 @@ EmitFnNameRecognizer(const std::vector<CodeGenIntrinsic> &Ints,
       // For overloaded intrinsics, only the prefix needs to match
       std::string TheStr = Ints[IntNo].Name.substr(6);
       TheStr += '.';  // Require "bswap." instead of bswap.
-      OS << "    if (NameR.startswith(\"" << TheStr << "\")) "
-         << Result << '\n';
+      OS << "    if (NameR.starts_with(\"" << TheStr << "\")) " << Result
+         << '\n';
     }
 
     // Emit the matcher logic for the fixed length strings.
@@ -709,7 +709,7 @@ EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
 
   OS << "    }\n";
   OS << "  }\n";
-  OS << "  return AttributeSet::get(C, makeArrayRef(AS, NumAttrs));\n";
+  OS << "  return AttributeSet::get(C, ArrayRef(AS, NumAttrs));\n";
   OS << "}\n";
   OS << "#endif // GET_INTRINSIC_ATTRIBUTES\n\n";
 }

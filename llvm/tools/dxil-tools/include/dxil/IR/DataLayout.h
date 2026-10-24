@@ -29,7 +29,6 @@
 
 // This needs to be outside of the namespace, to avoid conflict with llvm-c
 // decl.
-typedef struct LLVMOpaqueTargetData *LLVMTargetDataRef;
 
 namespace llvm {
 class Triple;
@@ -463,13 +462,6 @@ public:
   unsigned getPreferredAlignmentLog(const GlobalVariable *GV) const;
 };
 
-inline DataLayout *unwrap(LLVMTargetDataRef P) {
-  return reinterpret_cast<DataLayout *>(P);
-}
-
-inline LLVMTargetDataRef wrap(const DataLayout *P) {
-  return reinterpret_cast<LLVMTargetDataRef>(const_cast<DataLayout *>(P));
-}
 
 /// Used to lazily calculate structure layout information for a target machine,
 /// based on the DataLayout structure.

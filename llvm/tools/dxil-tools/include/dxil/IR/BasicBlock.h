@@ -18,7 +18,6 @@
 #include "llvm/ADT/ilist.h"
 #include "dxil/IR/Instruction.h"
 #include "dxil/IR/SymbolTableListTraits.h"
-#include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/DataTypes.h"
 
 namespace dxil {
@@ -325,8 +324,6 @@ private:
   }
 };
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_SIMPLE_CONVERSION_FUNCTIONS(BasicBlock, LLVMBasicBlockRef)
 
 } // End llvm namespace
 

@@ -1,5 +1,4 @@
 add_llvm_library(DXILBitWriter
-  BitWriter.cpp
   BitcodeWriter.cpp
   BitcodeWriterPass.cpp
   ValueEnumerator.cpp

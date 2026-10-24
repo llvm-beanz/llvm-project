@@ -6,6 +6,8 @@
 
 #include "ConstantsContext.h"
 
+using namespace llvm;
+
 namespace dxil {
 Type *GEPOperator::getSourceElementType() const {
   if (auto *I = dyn_cast<GetElementPtrInst>(this))

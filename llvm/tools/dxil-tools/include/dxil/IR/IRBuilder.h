@@ -27,7 +27,6 @@
 #include "dxil/IR/LLVMContext.h"
 #include "dxil/IR/Operator.h"
 #include "dxil/IR/ValueHandle.h"
-#include "llvm/Support/CBindingWrapping.h"
 
 namespace dxil {
 class MDNode;
@@ -1735,8 +1734,6 @@ public:
   }
 };
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_SIMPLE_CONVERSION_FUNCTIONS(IRBuilder<>, LLVMBuilderRef)
 
 }
 

@@ -25,9 +25,7 @@
 #ifndef DXIL_IR_USE_H
 #define DXIL_IR_USE_H
 
-#include "llvm-c/Core.h"
 #include "llvm/ADT/PointerIntPair.h"
-#include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include <cstddef>
@@ -161,8 +159,6 @@ private:
   friend class Value;
 };
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_SIMPLE_CONVERSION_FUNCTIONS(Use, LLVMUseRef)
 
 } // namespace dxil
 

@@ -23,7 +23,6 @@
 #include "dxil/IR/Metadata.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/iterator_range.h"
-#include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/DataTypes.h"
 #include <system_error>
@@ -664,15 +663,7 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &O, const Module &M) {
   return O;
 }
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_SIMPLE_CONVERSION_FUNCTIONS(Module, LLVMModuleRef)
 
-/* LLVMModuleProviderRef exists for historical reasons, but now just holds a
- * Module.
- */
-inline Module *unwrap(LLVMModuleProviderRef MP) {
-  return reinterpret_cast<Module*>(MP);
-}
   
 } // End llvm namespace
 

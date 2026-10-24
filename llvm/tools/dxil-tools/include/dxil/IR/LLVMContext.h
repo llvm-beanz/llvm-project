@@ -15,11 +15,9 @@
 #ifndef DXIL_IR_LLVMCONTEXT_H
 #define DXIL_IR_LLVMCONTEXT_H
 
-#include "llvm-c/Core.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/SourceMgr.h"
 
@@ -193,18 +191,7 @@ private:
 /// only care about operating on a single thread.
 extern LLVMContext &getGlobalContext();
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_SIMPLE_CONVERSION_FUNCTIONS(LLVMContext, LLVMContextRef)
 
-/* Specialized opaque context conversions.
- */
-inline LLVMContext **unwrap(LLVMContextRef* Tys) {
-  return reinterpret_cast<LLVMContext**>(Tys);
-}
-
-inline LLVMContextRef *wrap(const LLVMContext **Tys) {
-  return reinterpret_cast<LLVMContextRef*>(const_cast<LLVMContext**>(Tys));
-}
 
 }
 

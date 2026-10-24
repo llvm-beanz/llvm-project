@@ -6,7 +6,6 @@ add_llvm_library(DXILCore
   Comdat.cpp
   ConstantFold.cpp
   Constants.cpp
-  Core.cpp
   DIBuilder.cpp
   DataLayout.cpp
   DebugInfo.cpp
@@ -44,7 +43,6 @@ add_llvm_library(DXILCore
   User.cpp
   Value.cpp
   ValueSymbolTable.cpp
-  ValueTypes.cpp
   Verifier.cpp
 
   ADDITIONAL_HEADER_DIRS

@@ -18,7 +18,6 @@
 #define DXIL_IR_LEGACYPASSMANAGER_H
 
 #include "llvm/Pass.h"
-#include "llvm/Support/CBindingWrapping.h"
 #include <set> // HLSL change
 
 namespace dxil {
@@ -103,8 +102,6 @@ private:
 
 } // End legacy namespace
 
-// Create wrappers for C Binding types (see CBindingWrapping.h).
-DEFINE_STDCXX_CONVERSION_FUNCTIONS(legacy::PassManagerBase, LLVMPassManagerRef)
 
 } // End llvm namespace
 
