@@ -13,13 +13,16 @@
 
 #include "dxil/IR/Comdat.h"
 #include "llvm/ADT/StringMap.h"
-using namespace llvm;
 
-Comdat::Comdat(SelectionKind SK, StringMapEntry<Comdat> *Name)
+namespace dxil {
+
+Comdat::Comdat(SelectionKind SK, llvm::StringMapEntry<Comdat> *Name)
     : Name(Name), SK(SK) {}
 
 Comdat::Comdat(Comdat &&C) : Name(C.Name), SK(C.SK) {}
 
 Comdat::Comdat() : Name(nullptr), SK(Comdat::Any) {}
 
-StringRef Comdat::getName() const { return Name->first(); }
+llvm::StringRef Comdat::getName() const { return Name->getKey(); }
+
+} // namespace dxil

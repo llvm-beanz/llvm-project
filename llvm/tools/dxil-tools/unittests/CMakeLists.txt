@@ -4,8 +4,11 @@ add_custom_target(DXILUnitTests)
 set_target_properties(DXILUnitTests PROPERTIES FOLDER "LLVM/Tests")
 
 add_unittest(DXILUnitTests DXILTests
+  AttributeImplTest.cpp
   BitcodeHeaderTest.cpp
   IRHeadersTest.cpp
+  UseTest.cpp
+  ../lib/IR/Use.cpp
 
   DEPENDS
   intrinsics_gen

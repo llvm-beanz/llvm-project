@@ -60,8 +60,8 @@ public:
 
   /// InlineAsm::get - Return the specified uniqued inline asm string.
   ///
-  static InlineAsm *get(FunctionType *Ty, StringRef AsmString,
-                        StringRef Constraints, bool hasSideEffects,
+  static InlineAsm *get(FunctionType *Ty, llvm::StringRef AsmString,
+                        llvm::StringRef Constraints, bool hasSideEffects,
                         bool isAlignStack = false,
                         AsmDialect asmDialect = AD_ATT);
   
@@ -86,7 +86,7 @@ public:
   /// the specified constraint string is legal for the type.  This returns true
   /// if legal, false if not.
   ///
-  static bool Verify(FunctionType *Ty, StringRef Constraints);
+  static bool Verify(FunctionType *Ty, llvm::StringRef Constraints);
 
   // Constraint String Parsing 
   enum ConstraintPrefix {
@@ -163,7 +163,7 @@ public:
     /// Parse - Analyze the specified string (e.g. "=*&{eax}") and fill in the
     /// fields in this structure.  If the constraint string is not understood,
     /// return true, otherwise return false.
-    bool Parse(StringRef Str, ConstraintInfoVector &ConstraintsSoFar);
+    bool Parse(llvm::StringRef Str, ConstraintInfoVector &ConstraintsSoFar);
                
     /// selectAlternative - Point this constraint to the alternative constraint
     /// indicated by the index.
@@ -173,7 +173,7 @@ public:
   /// ParseConstraints - Split up the constraint string into the specific
   /// constraints and their prefixes.  If this returns an empty vector, and if
   /// the constraint string itself isn't empty, there was an error parsing.
-  static ConstraintInfoVector ParseConstraints(StringRef ConstraintString);
+  static ConstraintInfoVector ParseConstraints(llvm::StringRef ConstraintString);
   
   /// ParseConstraints - Parse the constraints of this inlineasm object, 
   /// returning them the same way that ParseConstraints(str) does.

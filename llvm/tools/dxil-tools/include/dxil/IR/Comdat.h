@@ -19,10 +19,12 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Compiler.h"
 
-namespace dxil {
-
+namespace llvm {
 class raw_ostream;
 template <typename ValueTy> class StringMapEntry;
+} // namespace llvm
+
+namespace dxil {
 
 // This is a Name X SelectionKind pair. The reason for having this be an
 // independent object instead of just adding the name and the SelectionKind
@@ -41,26 +43,26 @@ public:
   Comdat(Comdat &&C);
   SelectionKind getSelectionKind() const { return SK; }
   void setSelectionKind(SelectionKind Val) { SK = Val; }
-  StringRef getName() const;
-  void print(raw_ostream &OS) const;
+  llvm::StringRef getName() const;
+  void print(llvm::raw_ostream &OS) const;
   void dump() const;
 
 private:
   friend class Module;
   Comdat();
-  Comdat(SelectionKind SK, StringMapEntry<Comdat> *Name);
+  Comdat(SelectionKind SK, llvm::StringMapEntry<Comdat> *Name);
   Comdat(const Comdat &) = delete;
 
   // Points to the map in Module.
-  StringMapEntry<Comdat> *Name;
+  llvm::StringMapEntry<Comdat> *Name;
   SelectionKind SK;
 };
 
-inline raw_ostream &operator<<(raw_ostream &OS, const Comdat &C) {
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const Comdat &C) {
   C.print(OS);
   return OS;
 }
 
-} // end llvm namespace
+} // namespace dxil
 
 #endif

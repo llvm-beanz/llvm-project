@@ -1006,7 +1006,7 @@ void Function::setEntryCount(uint64_t Count) {
   setMetadata(LLVMContext::MD_prof, MDB.createFunctionEntryCount(Count));
 }
 
-Optional<uint64_t> Function::getEntryCount() const {
+std::optional<uint64_t> Function::getEntryCount() const {
   MDNode *MD = getMetadata(LLVMContext::MD_prof);
   if (MD && MD->getOperand(0))
     if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0)))
@@ -1014,7 +1014,7 @@ Optional<uint64_t> Function::getEntryCount() const {
         ConstantInt *CI = mdconst::extract<ConstantInt>(MD->getOperand(1));
         return CI->getValue().getZExtValue();
       }
-  return None;
+  return std::nullopt;
 }
 
 void Function::setPersonalityFn(Constant *C) {

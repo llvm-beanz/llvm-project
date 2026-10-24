@@ -17,31 +17,37 @@
 
 #include "llvm-c/Core.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
 
+namespace llvm {
+class raw_ostream;
+} // namespace llvm
+
 namespace dxil {
+
+using llvm::cast;
 
 class PointerType;
 class IntegerType;
-class raw_ostream;
 class Module;
 class LLVMContext;
 class LLVMContextImpl;
-class StringRef;
-template<class GraphType> struct GraphTraits;
 
 /// The instances of the Type class are immutable: once they are created,
 /// they are never changed.  Also note that only one instance of a particular
 /// type is ever created.  Thus seeing if two types are equal is a matter of
 /// doing a trivial pointer comparison. To enforce that no two equal instances
-/// are created, Type instances can only be created via static factory methods 
+/// are created, Type instances can only be created via static factory methods
 /// in class Type and in derived classes.  Once allocated, Types are never
 /// free'd.
-/// 
+///
 class Type {
 public:
   //===--------------------------------------------------------------------===//
@@ -53,25 +59,25 @@ public:
   ///
   enum TypeID {
     // PrimitiveTypes - make sure LastPrimitiveTyID stays up to date.
-    VoidTyID = 0,    ///<  0: type with no size
-    HalfTyID,        ///<  1: 16-bit floating point type
-    FloatTyID,       ///<  2: 32-bit floating point type
-    DoubleTyID,      ///<  3: 64-bit floating point type
-    X86_FP80TyID,    ///<  4: 80-bit floating point type (X87)
-    FP128TyID,       ///<  5: 128-bit floating point type (112-bit mantissa)
-    PPC_FP128TyID,   ///<  6: 128-bit floating point type (two 64-bits, PowerPC)
-    LabelTyID,       ///<  7: Labels
-    MetadataTyID,    ///<  8: Metadata
-    X86_MMXTyID,     ///<  9: MMX vectors (64 bits, X86 specific)
+    VoidTyID = 0,  ///<  0: type with no size
+    HalfTyID,      ///<  1: 16-bit floating point type
+    FloatTyID,     ///<  2: 32-bit floating point type
+    DoubleTyID,    ///<  3: 64-bit floating point type
+    X86_FP80TyID,  ///<  4: 80-bit floating point type (X87)
+    FP128TyID,     ///<  5: 128-bit floating point type (112-bit mantissa)
+    PPC_FP128TyID, ///<  6: 128-bit floating point type (two 64-bits, PowerPC)
+    LabelTyID,     ///<  7: Labels
+    MetadataTyID,  ///<  8: Metadata
+    X86_MMXTyID,   ///<  9: MMX vectors (64 bits, X86 specific)
 
     // Derived types... see DerivedTypes.h file.
     // Make sure FirstDerivedTyID stays up to date!
-    IntegerTyID,     ///< 10: Arbitrary bit width integers
-    FunctionTyID,    ///< 11: Functions
-    StructTyID,      ///< 12: Structures
-    ArrayTyID,       ///< 13: Arrays
-    PointerTyID,     ///< 14: Pointers
-    VectorTyID       ///< 15: SIMD 'packed' format, or other vector type
+    IntegerTyID,  ///< 10: Arbitrary bit width integers
+    FunctionTyID, ///< 11: Functions
+    StructTyID,   ///< 12: Structures
+    ArrayTyID,    ///< 13: Arrays
+    PointerTyID,  ///< 14: Pointers
+    VectorTyID    ///< 15: SIMD 'packed' format, or other vector type
   };
 
 private:
@@ -87,8 +93,8 @@ private:
 protected:
   friend class LLVMContextImpl;
   explicit Type(LLVMContext &C, TypeID tid)
-    : Context(C), IDAndSubclassData(0),
-      NumContainedTys(0), ContainedTys(nullptr) {
+      : Context(C), IDAndSubclassData(0), NumContainedTys(0),
+        ContainedTys(nullptr) {
     setTypeID(tid);
   }
   ~Type() = default;
@@ -97,9 +103,9 @@ protected:
     IDAndSubclassData = (ID & 0xFF) | (IDAndSubclassData & 0xFFFFFF00);
     assert(getTypeID() == ID && "TypeID data too large for field");
   }
-  
+
   unsigned getSubclassData() const { return IDAndSubclassData >> 8; }
-  
+
   void setSubclassData(unsigned val) {
     IDAndSubclassData = (IDAndSubclassData & 0xFF) | (val << 8);
     // Ensure we don't have any accidental truncation.
@@ -115,10 +121,10 @@ protected:
   /// of a structure, the pointee of a pointer, the element type of an array,
   /// etc.  This pointer may be 0 for types that don't contain other types
   /// (Integer, Double, Float).
-  Type * const *ContainedTys;
+  Type *const *ContainedTys;
 
 public:
-  void print(raw_ostream &O) const;
+  void print(llvm::raw_ostream &O) const;
   LLVM_DUMP_METHOD void dump() const; // HLSL Change - Add LLVM_DUMP_METHOD
 
   /// getContext - Return the LLVMContext in which this type was uniqued.
@@ -141,7 +147,7 @@ public:
 
   /// isFloatTy - Return true if this is 'float', a 32-bit IEEE fp type.
   bool isFloatTy() const { return getTypeID() == FloatTyID; }
-  
+
   /// isDoubleTy - Return true if this is 'double', a 64-bit IEEE fp type.
   bool isDoubleTy() const { return getTypeID() == DoubleTyID; }
 
@@ -158,20 +164,26 @@ public:
   /// types
   bool isFloatingPointTy() const {
     return getTypeID() == HalfTyID || getTypeID() == FloatTyID ||
-           getTypeID() == DoubleTyID ||
-           getTypeID() == X86_FP80TyID || getTypeID() == FP128TyID ||
-           getTypeID() == PPC_FP128TyID;
+           getTypeID() == DoubleTyID || getTypeID() == X86_FP80TyID ||
+           getTypeID() == FP128TyID || getTypeID() == PPC_FP128TyID;
   }
 
-  const fltSemantics &getFltSemantics() const {
+  const llvm::fltSemantics &getFltSemantics() const {
     switch (getTypeID()) {
-    case HalfTyID: return APFloat::IEEEhalf;
-    case FloatTyID: return APFloat::IEEEsingle;
-    case DoubleTyID: return APFloat::IEEEdouble;
-    case X86_FP80TyID: return APFloat::x87DoubleExtended;
-    case FP128TyID: return APFloat::IEEEquad;
-    case PPC_FP128TyID: return APFloat::PPCDoubleDouble;
-    default: llvm_unreachable("Invalid floating type");
+    case HalfTyID:
+      return llvm::APFloat::IEEEhalf();
+    case FloatTyID:
+      return llvm::APFloat::IEEEsingle();
+    case DoubleTyID:
+      return llvm::APFloat::IEEEdouble();
+    case X86_FP80TyID:
+      return llvm::APFloat::x87DoubleExtended();
+    case FP128TyID:
+      return llvm::APFloat::IEEEquad();
+    case PPC_FP128TyID:
+      return llvm::APFloat::PPCDoubleDouble();
+    default:
+      llvm_unreachable("Invalid floating type");
     }
   }
 
@@ -181,7 +193,7 @@ public:
   /// isFPOrFPVectorTy - Return true if this is a FP type or a vector of FP.
   ///
   bool isFPOrFPVectorTy() const { return getScalarType()->isFloatingPointTy(); }
- 
+
   /// isLabelTy - Return true if this is 'label'.
   bool isLabelTy() const { return getTypeID() == LabelTyID; }
 
@@ -190,7 +202,7 @@ public:
 
   /// isIntegerTy - True if this is an instance of IntegerType.
   ///
-  bool isIntegerTy() const { return getTypeID() == IntegerTyID; } 
+  bool isIntegerTy() const { return getTypeID() == IntegerTyID; }
 
   /// isIntegerTy - Return true if this is an IntegerType of the given width.
   bool isIntegerTy(unsigned Bitwidth) const;
@@ -199,7 +211,7 @@ public:
   /// integer types.
   ///
   bool isIntOrIntVectorTy() const { return getScalarType()->isIntegerTy(); }
-  
+
   /// isFunctionTy - True if this is an instance of FunctionType.
   ///
   bool isFunctionTy() const { return getTypeID() == FunctionTyID; }
@@ -220,14 +232,14 @@ public:
   /// pointer types.
   ///
   bool isPtrOrPtrVectorTy() const { return getScalarType()->isPointerTy(); }
- 
+
   /// isVectorTy - True if this is an instance of VectorType.
   ///
   bool isVectorTy() const { return getTypeID() == VectorTyID; }
 
-  /// canLosslesslyBitCastTo - Return true if this type could be converted 
-  /// with a lossless BitCast to type 'Ty'. For example, i8* to i32*. BitCasts 
-  /// are valid for types of the same size only where no re-interpretation of 
+  /// canLosslesslyBitCastTo - Return true if this type could be converted
+  /// with a lossless BitCast to type 'Ty'. For example, i8* to i32*. BitCasts
+  /// are valid for types of the same size only where no re-interpretation of
   /// the bits is done.
   /// @brief Determine if this type could be losslessly bitcast to Ty
   bool canLosslesslyBitCastTo(Type *Ty) const;
@@ -265,11 +277,10 @@ public:
   /// get the actual size for a particular target, it is reasonable to use the
   /// DataLayout subsystem to do this.
   ///
-  bool isSized(SmallPtrSetImpl<const Type*> *Visited = nullptr) const {
+  bool isSized(llvm::SmallPtrSetImpl<const Type *> *Visited = nullptr) const {
     // If it's a primitive, it is always sized.
     if (getTypeID() == IntegerTyID || isFloatingPointTy() ||
-        getTypeID() == PointerTyID ||
-        getTypeID() == X86_MMXTyID)
+        getTypeID() == PointerTyID || getTypeID() == X86_MMXTyID)
       return true;
     // If it is not something that can have a size (e.g. a function or label),
     // it doesn't have a size.
@@ -310,11 +321,13 @@ public:
   //===--------------------------------------------------------------------===//
   // Type Iteration support.
   //
-  typedef Type * const *subtype_iterator;
+  typedef Type *const *subtype_iterator;
   subtype_iterator subtype_begin() const { return ContainedTys; }
-  subtype_iterator subtype_end() const { return &ContainedTys[NumContainedTys];}
-  ArrayRef<Type*> subtypes() const {
-    return makeArrayRef(subtype_begin(), subtype_end());
+  subtype_iterator subtype_end() const {
+    return &ContainedTys[NumContainedTys];
+  }
+  llvm::ArrayRef<Type *> subtypes() const {
+    return llvm::ArrayRef(subtype_begin(), subtype_end());
   }
 
   typedef std::reverse_iterator<subtype_iterator> subtype_reverse_iterator;
@@ -344,19 +357,19 @@ public:
   // example) is shorthand for cast<VectorType>(Ty)->getNumElements().  This is
   // only intended to cover the core methods that are frequently used, helper
   // methods should not be added here.
-  
+
   unsigned getIntegerBitWidth() const;
 
   Type *getFunctionParamType(unsigned i) const;
   unsigned getFunctionNumParams() const;
   bool isFunctionVarArg() const;
-  
-  StringRef getStructName() const;
+
+  llvm::StringRef getStructName() const;
   unsigned getStructNumElements() const;
   Type *getStructElementType(unsigned N) const;
-  
+
   Type *getSequentialElementType() const;
-  
+
   uint64_t getArrayNumElements() const;
   Type *getArrayElementType() const { return getSequentialElementType(); }
 
@@ -367,7 +380,7 @@ public:
 
   /// \brief Get the address space of this pointer or pointer vector type.
   unsigned getPointerAddressSpace() const;
-  
+
   //===--------------------------------------------------------------------===//
   // Static members exported by the Type class itself.  Useful for getting
   // instances of Type.
@@ -396,7 +409,7 @@ public:
   static IntegerType *getInt32Ty(LLVMContext &C);
   static IntegerType *getInt64Ty(LLVMContext &C);
   static IntegerType *getInt128Ty(LLVMContext &C);
-  
+
   //===--------------------------------------------------------------------===//
   // Convenience methods for getting pointer types with one of the above builtin
   // types as pointee.
@@ -423,19 +436,24 @@ private:
   /// isSizedDerivedType - Derived types like structures and arrays are sized
   /// iff all of the members of the type are sized as well.  Since asking for
   /// their size is relatively uncommon, move this operation out of line.
-  bool isSizedDerivedType(SmallPtrSetImpl<const Type*> *Visited = nullptr) const;
+  bool isSizedDerivedType(
+      llvm::SmallPtrSetImpl<const Type *> *Visited = nullptr) const;
 };
 
 // Printing of types.
-static inline raw_ostream &operator<<(raw_ostream &OS, Type &T) {
+static inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, Type &T) {
   T.print(OS);
   return OS;
 }
 
+} // namespace dxil
+
+namespace llvm {
+
 // allow isa<PointerType>(x) to work without DerivedTypes.h included.
-template <> struct isa_impl<PointerType, Type> {
-  static inline bool doit(const Type &Ty) {
-    return Ty.getTypeID() == Type::PointerTyID;
+template <> struct isa_impl<dxil::PointerType, dxil::Type> {
+  static inline bool doit(const dxil::Type &Ty) {
+    return Ty.getTypeID() == dxil::Type::PointerTyID;
   }
 };
 //                                                                           //
@@ -443,46 +461,49 @@ template <> struct isa_impl<PointerType, Type> {
 // Provide specializations of GraphTraits to be able to treat a type as a
 // graph of sub types.
 
+template <> struct GraphTraits<dxil::Type *> {
+  typedef dxil::Type *NodeRef;
+  typedef dxil::Type::subtype_iterator ChildIteratorType;
 
-template <> struct GraphTraits<Type*> {
-  typedef Type NodeType;
-  typedef Type::subtype_iterator ChildIteratorType;
-
-  static inline NodeType *getEntryNode(Type *T) { return T; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static inline NodeRef getEntryNode(dxil::Type *T) { return T; }
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return N->subtype_begin();
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
+  static inline ChildIteratorType child_end(NodeRef N) {
     return N->subtype_end();
   }
 };
 
-template <> struct GraphTraits<const Type*> {
-  typedef const Type NodeType;
-  typedef Type::subtype_iterator ChildIteratorType;
+template <> struct GraphTraits<const dxil::Type *> {
+  typedef const dxil::Type *NodeRef;
+  typedef dxil::Type::subtype_iterator ChildIteratorType;
 
-  static inline NodeType *getEntryNode(NodeType *T) { return T; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static inline NodeRef getEntryNode(NodeRef T) { return T; }
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return N->subtype_begin();
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
+  static inline ChildIteratorType child_end(NodeRef N) {
     return N->subtype_end();
   }
 };
+
+} // namespace llvm
+
+namespace dxil {
 
 // Create wrappers for C Binding types (see CBindingWrapping.h).
 DEFINE_ISA_CONVERSION_FUNCTIONS(Type, LLVMTypeRef)
 
 /* Specialized opaque type conversions.
  */
-inline Type **unwrap(LLVMTypeRef* Tys) {
-  return reinterpret_cast<Type**>(Tys);
+inline Type **unwrap(LLVMTypeRef *Tys) {
+  return reinterpret_cast<Type **>(Tys);
 }
 
 inline LLVMTypeRef *wrap(Type **Tys) {
-  return reinterpret_cast<LLVMTypeRef*>(const_cast<Type**>(Tys));
+  return reinterpret_cast<LLVMTypeRef *>(const_cast<Type **>(Tys));
 }
-  
-} // End llvm namespace
+
+} // namespace dxil
 
 #endif

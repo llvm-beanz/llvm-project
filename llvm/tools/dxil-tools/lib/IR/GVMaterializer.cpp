@@ -13,6 +13,5 @@
 //===----------------------------------------------------------------------===//
 
 #include "dxil/IR/GVMaterializer.h"
-using namespace llvm;
 
-GVMaterializer::~GVMaterializer() {}
+dxil::GVMaterializer::~GVMaterializer() = default;

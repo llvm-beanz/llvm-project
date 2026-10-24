@@ -16,8 +16,9 @@
 #ifndef DXIL_LIB_IR_ATTRIBUTEIMPL_H
 #define DXIL_LIB_IR_ATTRIBUTEIMPL_H
 
-#include "llvm/ADT/FoldingSet.h"
 #include "dxil/IR/Attributes.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/FoldingSet.h"
 #include <string>
 
 namespace dxil {
@@ -29,7 +30,7 @@ class LLVMContext;
 /// \class
 /// \brief This class represents a single, uniqued attribute. That attribute
 /// could be a single enum, a tuple, or a string.
-class AttributeImpl : public FoldingSetNode {
+class AttributeImpl : public llvm::FoldingSetNode {
   unsigned char KindID; ///< Holds the AttrEntryKind of the attribute
 
   // AttributesImpl is uniqued, these should not be publicly available.
@@ -37,11 +38,7 @@ class AttributeImpl : public FoldingSetNode {
   AttributeImpl(const AttributeImpl &) = delete;
 
 protected:
-  enum AttrEntryKind {
-    EnumAttrEntry,
-    IntAttrEntry,
-    StringAttrEntry
-  };
+  enum AttrEntryKind { EnumAttrEntry, IntAttrEntry, StringAttrEntry };
 
   AttributeImpl(AttrEntryKind KindID) : KindID(KindID) {}
 
@@ -53,18 +50,18 @@ public:
   bool isStringAttribute() const { return KindID == StringAttrEntry; }
 
   bool hasAttribute(Attribute::AttrKind A) const;
-  bool hasAttribute(StringRef Kind) const;
+  bool hasAttribute(llvm::StringRef Kind) const;
 
   Attribute::AttrKind getKindAsEnum() const;
   uint64_t getValueAsInt() const;
 
-  StringRef getKindAsString() const;
-  StringRef getValueAsString() const;
+  llvm::StringRef getKindAsString() const;
+  llvm::StringRef getValueAsString() const;
 
   /// \brief Used when sorting the attributes.
   bool operator<(const AttributeImpl &AI) const;
 
-  void Profile(FoldingSetNodeID &ID) const {
+  void Profile(llvm::FoldingSetNodeID &ID) const {
     if (isEnumAttribute())
       Profile(ID, getKindAsEnum(), 0);
     else if (isIntAttribute())
@@ -72,14 +69,17 @@ public:
     else
       Profile(ID, getKindAsString(), getValueAsString());
   }
-  static void Profile(FoldingSetNodeID &ID, Attribute::AttrKind Kind,
+  static void Profile(llvm::FoldingSetNodeID &ID, Attribute::AttrKind Kind,
                       uint64_t Val) {
     ID.AddInteger(Kind);
-    if (Val) ID.AddInteger(Val);
+    if (Val)
+      ID.AddInteger(Val);
   }
-  static void Profile(FoldingSetNodeID &ID, StringRef Kind, StringRef Values) {
+  static void Profile(llvm::FoldingSetNodeID &ID, llvm::StringRef Kind,
+                      llvm::StringRef Values) {
     ID.AddString(Kind);
-    if (!Values.empty()) ID.AddString(Values);
+    if (!Values.empty())
+      ID.AddString(Values);
   }
 
   // FIXME: Remove this!
@@ -130,21 +130,21 @@ class StringAttributeImpl : public AttributeImpl {
   std::string Val;
 
 public:
-  StringAttributeImpl(StringRef Kind, StringRef Val = StringRef())
+  StringAttributeImpl(llvm::StringRef Kind, llvm::StringRef Val = {})
       : AttributeImpl(StringAttrEntry), Kind(Kind), Val(Val) {}
 
-  StringRef getStringKind() const { return Kind; }
-  StringRef getStringValue() const { return Val; }
+  llvm::StringRef getStringKind() const { return Kind; }
+  llvm::StringRef getStringValue() const { return Val; }
 };
 
 //===----------------------------------------------------------------------===//
 /// \class
 /// \brief This class represents a group of attributes that apply to one
 /// element: function, return type, or parameter.
-class AttributeSetNode : public FoldingSetNode {
+class alignas(Attribute) AttributeSetNode : public llvm::FoldingSetNode {
   unsigned NumAttrs; ///< Number of attributes in this node.
 
-  AttributeSetNode(ArrayRef<Attribute> Attrs) : NumAttrs(Attrs.size()) {
+  AttributeSetNode(llvm::ArrayRef<Attribute> Attrs) : NumAttrs(Attrs.size()) {
     // There's memory after the node where we can store the entries in.
     std::copy(Attrs.begin(), Attrs.end(),
               reinterpret_cast<Attribute *>(this + 1));
@@ -153,15 +153,16 @@ class AttributeSetNode : public FoldingSetNode {
   // AttributesSetNode is uniqued, these should not be publicly available.
   void operator=(const AttributeSetNode &) = delete;
   AttributeSetNode(const AttributeSetNode &) = delete;
+
 public:
-  static AttributeSetNode *get(LLVMContext &C, ArrayRef<Attribute> Attrs);
+  static AttributeSetNode *get(LLVMContext &C, llvm::ArrayRef<Attribute> Attrs);
 
   bool hasAttribute(Attribute::AttrKind Kind) const;
-  bool hasAttribute(StringRef Kind) const;
+  bool hasAttribute(llvm::StringRef Kind) const;
   bool hasAttributes() const { return NumAttrs != 0; }
 
   Attribute getAttribute(Attribute::AttrKind Kind) const;
-  Attribute getAttribute(StringRef Kind) const;
+  Attribute getAttribute(llvm::StringRef Kind) const;
 
   unsigned getAlignment() const;
   unsigned getStackAlignment() const;
@@ -173,27 +174,28 @@ public:
   iterator begin() const { return reinterpret_cast<iterator>(this + 1); }
   iterator end() const { return begin() + NumAttrs; }
 
-  void Profile(FoldingSetNodeID &ID) const {
-    Profile(ID, makeArrayRef(begin(), end()));
+  void Profile(llvm::FoldingSetNodeID &ID) const {
+    Profile(ID, llvm::ArrayRef(begin(), end()));
   }
-  static void Profile(FoldingSetNodeID &ID, ArrayRef<Attribute> AttrList) {
+  static void Profile(llvm::FoldingSetNodeID &ID,
+                      llvm::ArrayRef<Attribute> AttrList) {
     for (unsigned I = 0, E = AttrList.size(); I != E; ++I)
       AttrList[I].Profile(ID);
   }
 };
 static_assert(
-    AlignOf<AttributeSetNode>::Alignment >= AlignOf<Attribute>::Alignment,
+    alignof(AttributeSetNode) >= alignof(Attribute),
     "Alignment is insufficient for objects appended to AttributeSetNode");
 //                                                                           //
 ///////////////////////////////////////////////////////////////////////////////
 /// \class
 /// \brief This class represents a set of attributes that apply to the function,
 /// return type, and parameters.
-class AttributeSetImpl : public FoldingSetNode {
+class AttributeSetImpl : public llvm::FoldingSetNode {
   friend class AttributeSet;
 
 public:
-  typedef std::pair<unsigned, AttributeSetNode*> IndexAttrPair;
+  typedef std::pair<unsigned, AttributeSetNode *> IndexAttrPair;
 
 private:
   LLVMContext &Context;
@@ -207,9 +209,11 @@ private:
   // AttributesSet is uniqued, these should not be publicly available.
   void operator=(const AttributeSetImpl &) = delete;
   AttributeSetImpl(const AttributeSetImpl &) = delete;
+
 public:
-  AttributeSetImpl(LLVMContext &C,
-                   ArrayRef<std::pair<unsigned, AttributeSetNode *> > Attrs)
+  AttributeSetImpl(
+      LLVMContext &C,
+      llvm::ArrayRef<std::pair<unsigned, AttributeSetNode *>> Attrs)
       : Context(C), NumAttrs(Attrs.size()) {
 
 #ifndef NDEBUG
@@ -217,7 +221,7 @@ public:
       for (const std::pair<unsigned, AttributeSetNode *> *i = Attrs.begin() + 1,
                                                          *e = Attrs.end();
            i != e; ++i) {
-        assert((i-1)->first <= i->first && "Attribute set not ordered!");
+        assert((i - 1)->first <= i->first && "Attribute set not ordered!");
       }
     }
 #endif
@@ -236,9 +240,7 @@ public:
   /// is the index of the return, parameter, or function object that the
   /// attributes are applied to, not the index into the AttrNodes list where the
   /// attributes reside.
-  unsigned getSlotIndex(unsigned Slot) const {
-    return getNode(Slot)->first;
-  }
+  unsigned getSlotIndex(unsigned Slot) const { return getNode(Slot)->first; }
 
   /// \brief Retrieve the attributes for the given "slot" in the AttrNode list.
   /// \p Slot is an index into the AttrNodes list, not the index of the return /
@@ -257,11 +259,12 @@ public:
   iterator begin(unsigned Slot) const { return getSlotNode(Slot)->begin(); }
   iterator end(unsigned Slot) const { return getSlotNode(Slot)->end(); }
 
-  void Profile(FoldingSetNodeID &ID) const {
-    Profile(ID, makeArrayRef(getNode(0), getNumAttributes()));
+  void Profile(llvm::FoldingSetNodeID &ID) const {
+    Profile(ID, llvm::ArrayRef(getNode(0), getNumAttributes()));
   }
-  static void Profile(FoldingSetNodeID &ID,
-                      ArrayRef<std::pair<unsigned, AttributeSetNode*> > Nodes) {
+  static void
+  Profile(llvm::FoldingSetNodeID &ID,
+          llvm::ArrayRef<std::pair<unsigned, AttributeSetNode *>> Nodes) {
     for (unsigned i = 0, e = Nodes.size(); i != e; ++i) {
       ID.AddInteger(Nodes[i].first);
       ID.AddPointer(Nodes[i].second);
@@ -274,10 +277,9 @@ public:
   void dump() const;
 };
 static_assert(
-    AlignOf<AttributeSetImpl>::Alignment >=
-        AlignOf<AttributeSetImpl::IndexAttrPair>::Alignment,
+    alignof(AttributeSetImpl) >= alignof(AttributeSetImpl::IndexAttrPair),
     "Alignment is insufficient for objects appended to AttributeSetImpl");
 
-} // end llvm namespace
+} // namespace dxil
 
 #endif

@@ -28,6 +28,7 @@
 #include "llvm-c/Core.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/Support/CBindingWrapping.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include <cstddef>
 #include <iterator>
@@ -37,17 +38,23 @@ namespace dxil {
 class Value;
 class User;
 class Use;
-template <typename> struct simplify_type;
+
+} // namespace dxil
+
+namespace llvm {
 
 // Use** is only 4-byte aligned.
-template <> class PointerLikeTypeTraits<Use **> {
-public:
-  static inline void *getAsVoidPointer(Use **P) { return P; }
-  static inline Use **getFromVoidPointer(void *P) {
-    return static_cast<Use **>(P);
+template <> struct PointerLikeTypeTraits<dxil::Use **> {
+  static inline void *getAsVoidPointer(dxil::Use **P) { return P; }
+  static inline dxil::Use **getFromVoidPointer(void *P) {
+    return static_cast<dxil::Use **>(P);
   }
   enum { NumLowBitsAvailable = 2 };
 };
+
+} // namespace llvm
+
+namespace dxil {
 
 /// \brief A Use represents the edge between a Value definition and its users.
 ///
@@ -74,7 +81,7 @@ public:
 
   // A type for the word following an array of hung-off Uses in memory, which is
   // a pointer back to their User with the bottom bit set.
-  typedef PointerIntPair<User *, 1, unsigned> UserRef;
+  typedef llvm::PointerIntPair<User *, 1, unsigned> UserRef;
 
 private:
   Use(const Use &U) = delete;
@@ -134,7 +141,7 @@ private:
 
   Value *Val;
   Use *Next;
-  PointerIntPair<Use **, 2, PrevPtrTag> Prev;
+  llvm::PointerIntPair<Use **, 2, PrevPtrTag> Prev;
 
   void setPrev(Use **NewPrev) { Prev.setPointer(NewPrev); }
   void addToList(Use **List) {
@@ -154,20 +161,26 @@ private:
   friend class Value;
 };
 
-/// \brief Allow clients to treat uses just like values when using
-/// casting operators.
-template <> struct simplify_type<Use> {
-  typedef Value *SimpleType;
-  static SimpleType getSimplifiedValue(Use &Val) { return Val.get(); }
-};
-template <> struct simplify_type<const Use> {
-  typedef /*const*/ Value *SimpleType;
-  static SimpleType getSimplifiedValue(const Use &Val) { return Val.get(); }
-};
-
 // Create wrappers for C Binding types (see CBindingWrapping.h).
 DEFINE_SIMPLE_CONVERSION_FUNCTIONS(Use, LLVMUseRef)
 
-}
+} // namespace dxil
+
+namespace llvm {
+
+/// \brief Allow clients to treat uses just like values when using
+/// casting operators.
+template <> struct simplify_type<dxil::Use> {
+  typedef dxil::Value *SimpleType;
+  static SimpleType getSimplifiedValue(dxil::Use &Val) { return Val.get(); }
+};
+template <> struct simplify_type<const dxil::Use> {
+  typedef dxil::Value *SimpleType;
+  static SimpleType getSimplifiedValue(const dxil::Use &Val) {
+    return Val.get();
+  }
+};
+
+} // namespace llvm
 
 #endif

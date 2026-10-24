@@ -17,9 +17,6 @@
 #include "dxil/IR/User.h"
 
 namespace dxil {
-  class APInt;
-
-  template<typename T> class SmallVectorImpl;
 
 /// This is an important base class in LLVM. It provides the common facilities
 /// of all constant values in an LLVM program. A constant is a value that is
@@ -121,7 +118,7 @@ public:
 
   /// If C is a constant integer then return its value, otherwise C must be a
   /// vector of constant integers, all equal, and the common value is returned.
-  const APInt &getUniqueInteger() const;
+  const llvm::APInt &getUniqueInteger() const;
 
   /// Called if some element of this constant is no longer valid.
   /// At this point only other constants may be on the use_list for this
@@ -159,7 +156,7 @@ public:
 
   /// getIntegerValue - Return the value for an integer or pointer constant,
   /// or a vector thereof, with the given scalar value.
-  static Constant *getIntegerValue(Type* Ty, const APInt &V);
+  static Constant *getIntegerValue(Type* Ty, const llvm::APInt &V);
   
   /// removeDeadConstantUsers - If there are any dead constant users dangling
   /// off of this constant, remove them.  This method is useful for clients

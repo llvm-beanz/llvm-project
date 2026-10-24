@@ -19,7 +19,6 @@
 #define DXIL_IR_FUNCTION_H
 
 #include "llvm/ADT/iterator_range.h"
-#include "llvm/ADT/Optional.h"
 #include "dxil/IR/Argument.h"
 #include "dxil/IR/Attributes.h"
 #include "dxil/IR/BasicBlock.h"
@@ -27,6 +26,7 @@
 #include "dxil/IR/GlobalObject.h"
 #include "dxil/IR/OperandTraits.h"
 #include "llvm/Support/Compiler.h"
+#include <optional>
 
 namespace dxil {
 
@@ -221,7 +221,7 @@ public:
   void setEntryCount(uint64_t Count);
 
   /// Get the entry count for this function.
-  Optional<uint64_t> getEntryCount() const;
+  std::optional<uint64_t> getEntryCount() const;
 
   /// @brief Return true if the function has the attribute.
   bool hasFnAttribute(Attribute::AttrKind Kind) const {

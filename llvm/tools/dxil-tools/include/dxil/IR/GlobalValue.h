@@ -66,7 +66,7 @@ public:
 
 protected:
   GlobalValue(PointerType *Ty, ValueTy VTy, Use *Ops, unsigned NumOps,
-              LinkageTypes Linkage, const Twine &Name)
+              LinkageTypes Linkage, const llvm::Twine &Name)
       : Constant(Ty, VTy, Ops, NumOps), Linkage(Linkage),
         Visibility(DefaultVisibility), UnnamedAddr(0),
         DllStorageClass(DefaultStorageClass),
@@ -172,7 +172,7 @@ public:
   }
   void setDLLStorageClass(DLLStorageClassTypes C) { DllStorageClass = C; }
 
-  bool hasSection() const { return !StringRef(getSection()).empty(); }
+  bool hasSection() const { return !llvm::StringRef(getSection()).empty(); }
   // It is unfortunate that we have to use "char *" in here since this is
   // always non NULL, but:
   // * The C API expects a null terminated string, so we cannot use StringRef.
@@ -303,7 +303,7 @@ public:
   /// If special LLVM prefix that is used to inform the asm printer to not emit
   /// usual symbol prefix before the symbol name is used then return linkage
   /// name after skipping this special LLVM prefix.
-  static StringRef getRealLinkageName(StringRef Name) {
+  static llvm::StringRef getRealLinkageName(llvm::StringRef Name) {
     if (!Name.empty() && Name[0] == '\1')
       return Name.substr(1);
     return Name;

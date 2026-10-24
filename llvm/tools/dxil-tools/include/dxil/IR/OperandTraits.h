@@ -137,7 +137,7 @@ CLASS::const_op_iterator CLASS::op_end() const { \
 VALUECLASS *CLASS::getOperand(unsigned i_nocapture) const { \
   assert(i_nocapture < OperandTraits<CLASS>::operands(this) \
          && "getOperand() out of range!"); \
-  return cast_or_null<VALUECLASS>( \
+  return llvm::cast_if_present<VALUECLASS>( \
     OperandTraits<CLASS>::op_begin(const_cast<CLASS*>(this))[i_nocapture].get()); \
 } \
 void CLASS::setOperand(unsigned i_nocapture, VALUECLASS *Val_nocapture) { \
