@@ -16,20 +16,19 @@
 #define DXIL_IR_LLVMCONTEXT_H
 
 #include "llvm-c/Core.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/CBindingWrapping.h"
 #include "llvm/Support/Compiler.h"
-#include "llvm/Support/Options.h"
+#include "llvm/Support/SourceMgr.h"
 
 namespace dxil {
 
 class LLVMContextImpl;
-class StringRef;
-class Twine;
 class Instruction;
 class Module;
-class SMDiagnostic;
 class DiagnosticInfo;
-template <typename T> class SmallVectorImpl;
 class Function;
 class DebugLoc;
 
@@ -65,19 +64,19 @@ public:
 
   /// getMDKindID - Return a unique non-zero ID for the specified metadata kind.
   /// This ID is uniqued across modules in the current LLVMContext.
-  unsigned getMDKindID(StringRef Name) const;
+  unsigned getMDKindID(llvm::StringRef Name) const;
 
   // HLSL Change - Begin
   /// Return a unique non-zero ID for the specified metadata kind if it exists.
-  bool findMDKindID(StringRef Name, unsigned *ID) const;
+  bool findMDKindID(llvm::StringRef Name, unsigned *ID) const;
   // HLSL Change - End
 
   /// getMDKindNames - Populate client supplied SmallVector with the name for
   /// custom metadata IDs registered in this LLVMContext.
-  void getMDKindNames(SmallVectorImpl<StringRef> &Result) const;
+  void getMDKindNames(llvm::SmallVectorImpl<llvm::StringRef> &Result) const;
 
 
-  typedef void (*InlineAsmDiagHandlerTy)(const SMDiagnostic&, void *Context,
+  typedef void (*InlineAsmDiagHandlerTy)(const llvm::SMDiagnostic&, void *Context,
                                          unsigned LocCookie);
 
   /// Defines the type of a diagnostic handler.
@@ -170,18 +169,10 @@ public:
   /// be prepared to drop the erroneous construct on the floor and "not crash".
   /// The generated code need not be correct.  The error message will be
   /// implicitly prefixed with "error: " and should not end with a ".".
-  void emitError(unsigned LocCookie, const Twine &ErrorStr);
-  void emitError(const Instruction *I, const Twine &ErrorStr);
-  void emitError(const Twine &ErrorStr);
-  void emitWarning(const Twine &WarningStr); // HLSL Change
-
-  /// \brief Query for a debug option's value.
-  ///
-  /// This function returns typed data populated from command line parsing.
-  template <typename ValT, typename Base, ValT(Base::*Mem)>
-  ValT getOption() const {
-    return OptionRegistry::instance().template get<ValT, Base, Mem>();
-  }
+  void emitError(unsigned LocCookie, const llvm::Twine &ErrorStr);
+  void emitError(const Instruction *I, const llvm::Twine &ErrorStr);
+  void emitError(const llvm::Twine &ErrorStr);
+  void emitWarning(const llvm::Twine &WarningStr); // HLSL Change
 
 private:
   LLVMContext(LLVMContext&) = delete;

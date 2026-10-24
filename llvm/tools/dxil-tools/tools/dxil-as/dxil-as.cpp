@@ -15,41 +15,41 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "dxil/AsmParser/Parser.h"
+#include "dxil/Bitcode/ReaderWriter.h"
 #include "dxil/IR/LLVMContext.h"
-#include "dxil/AsmParser//Parser.h"
-#include "dxil/Bitcode//ReaderWriter.h"
 #include "dxil/IR/Module.h"
 #include "dxil/IR/Verifier.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/ManagedStatic.h"
-#include "llvm/Support/PrettyStackTrace.h"
-#include "llvm/Support/Signals.h"
+#include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/SystemUtils.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include <memory>
 using namespace llvm;
+using dxil::LLVMContext;
+using dxil::Module;
 
-static cl::opt<std::string>
-InputFilename(cl::Positional, cl::desc("<input .llvm file>"), cl::init("-"));
+static cl::opt<std::string> InputFilename(cl::Positional,
+                                          cl::desc("<input .llvm file>"),
+                                          cl::init("-"));
 
-static cl::opt<std::string>
-OutputFilename("o", cl::desc("Override output filename"),
-               cl::value_desc("filename"));
+static cl::opt<std::string> OutputFilename("o",
+                                           cl::desc("Override output filename"),
+                                           cl::value_desc("filename"));
+
+static cl::opt<bool> Force("f", cl::desc("Enable binary output on terminals"));
+
+static cl::opt<bool> DisableOutput("disable-output", cl::desc("Disable output"),
+                                   cl::init(false));
+
+static cl::opt<bool> DumpAsm("d", cl::desc("Print assembly as parsed"),
+                             cl::Hidden);
 
 static cl::opt<bool>
-Force("f", cl::desc("Enable binary output on terminals"));
-
-static cl::opt<bool>
-DisableOutput("disable-output", cl::desc("Disable output"), cl::init(false));
-
-static cl::opt<bool>
-DumpAsm("d", cl::desc("Print assembly as parsed"), cl::Hidden);
-
-static cl::opt<bool>
-DisableVerify("disable-verify", cl::Hidden,
-              cl::desc("Do not run verifier on input LLVM (dangerous!)"));
+    DisableVerify("disable-verify", cl::Hidden,
+                  cl::desc("Do not run verifier on input LLVM (dangerous!)"));
 
 static cl::opt<bool> PreserveBitcodeUseListOrder(
     "preserve-bc-uselistorder",
@@ -63,55 +63,34 @@ static void WriteOutputFile(const Module *M) {
       OutputFilename = "-";
     } else {
       StringRef IFN = InputFilename;
-      OutputFilename = (IFN.endswith(".ll") ? IFN.drop_back(3) : IFN).str();
+      OutputFilename = (IFN.ends_with(".ll") ? IFN.drop_back(3) : IFN).str();
       OutputFilename += ".bc";
     }
   }
 
   std::error_code EC;
-  std::unique_ptr<tool_output_file> Out(
-      new tool_output_file(OutputFilename, EC, sys::fs::F_None));
+  ToolOutputFile Out(OutputFilename, EC, sys::fs::OF_None);
   if (EC) {
     errs() << EC.message() << '\n';
     exit(1);
   }
 
-  if (Force || !CheckBitcodeOutputToConsole(Out->os(), true))
-    WriteBitcodeToFile(M, Out->os(), PreserveBitcodeUseListOrder);
+  if (Force || !CheckBitcodeOutputToConsole(Out.os()))
+    dxil::WriteBitcodeToFile(M, Out.os(), PreserveBitcodeUseListOrder);
 
   // Declare success.
-  Out->keep();
+  Out.keep();
 }
 
-// HLSL Change Starts
-#define NOMINMAX
-#include "dxc/Support/WinIncludes.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/MSFileSystem.h"
-// HLSL Change Ends
-
-// HLSL Change: changed calling convention to __cdecl
-int __cdecl main(int argc, char **argv) {
-  // Print a stack trace if we signal out.
-  // sys::PrintStackTraceOnErrorSignal(); // HLSL Change - disable this
-  // PrettyStackTraceProgram X(argc, argv); // HLSL Change - disable this
-  // HLSL Change Starts
-  llvm::sys::fs::MSFileSystem* msfPtr;
-  HRESULT hr;
-  if (!SUCCEEDED(hr = CreateMSFileSystemForDisk(&msfPtr)))
-    return 1;
-  std::unique_ptr<llvm::sys::fs::MSFileSystem> msf(msfPtr);
-  llvm::sys::fs::AutoPerThreadSystem pts(msf.get());
-  llvm::STDStreamCloser stdStreamCloser;
-  // HLSL Change Ends
-
-  LLVMContext &Context = getGlobalContext();
-  llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
-  cl::ParseCommandLineOptions(argc, argv, "llvm .ll -> .bc assembler\n");
+int main(int argc, char **argv) {
+  InitLLVM X(argc, argv);
+  LLVMContext Context;
+  cl::ParseCommandLineOptions(argc, argv, "DXIL .ll -> .bc assembler\n");
 
   // Parse the file now...
   SMDiagnostic Err;
-  std::unique_ptr<Module> M = parseAssemblyFile(InputFilename, Err, Context);
+  std::unique_ptr<Module> M =
+      dxil::parseAssemblyFile(InputFilename, Err, Context);
   if (!M.get()) {
     Err.print(argv[0], errs());
     return 1;
@@ -120,7 +99,7 @@ int __cdecl main(int argc, char **argv) {
   if (!DisableVerify) {
     std::string ErrorStr;
     raw_string_ostream OS(ErrorStr);
-    if (verifyModule(*M.get(), &OS)) {
+    if (dxil::verifyModule(*M, &OS)) {
       errs() << argv[0]
              << ": assembly parsed, but does not verify as correct!\n";
       errs() << OS.str();
@@ -128,7 +107,8 @@ int __cdecl main(int argc, char **argv) {
     }
   }
 
-  if (DumpAsm) errs() << "Here's the assembly:\n" << *M.get();
+  if (DumpAsm)
+    errs() << "Here's the assembly:\n" << *M.get();
 
   if (!DisableOutput)
     WriteOutputFile(M.get());

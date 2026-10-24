@@ -17,9 +17,10 @@
 #define DXIL_IR_ATTRIBUTES_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/FoldingSet.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Compiler.h"
-#include "llvm/Support/PointerLikeTypeTraits.h"
 #include <bitset>
 #include <cassert>
 #include <map>
@@ -32,7 +33,6 @@ class AttributeImpl;
 class AttributeSetImpl;
 class AttributeSetNode;
 class Constant;
-template<typename T> struct DenseMapInfo;
 class LLVMContext;
 class Type;
 
@@ -132,8 +132,8 @@ public:
 
   /// \brief Return a uniquified Attribute object.
   static Attribute get(LLVMContext &Context, AttrKind Kind, uint64_t Val = 0);
-  static Attribute get(LLVMContext &Context, StringRef Kind,
-                       StringRef Val = StringRef());
+  static Attribute get(LLVMContext &Context, llvm::StringRef Kind,
+                       llvm::StringRef Val = llvm::StringRef());
 
   /// \brief Return a uniquified Attribute object that has the specific
   /// alignment set.
@@ -162,7 +162,7 @@ public:
   bool hasAttribute(AttrKind Val) const;
 
   /// \brief Return true if the target-dependent attribute is present.
-  bool hasAttribute(StringRef Val) const;
+  bool hasAttribute(llvm::StringRef Val) const;
 
   /// \brief Return the attribute's kind as an enum (Attribute::AttrKind). This
   /// requires the attribute to be an enum or alignment attribute.
@@ -174,11 +174,11 @@ public:
 
   /// \brief Return the attribute's kind as a string. This requires the
   /// attribute to be a string attribute.
-  StringRef getKindAsString() const;
+  llvm::StringRef getKindAsString() const;
 
   /// \brief Return the attribute's value as a string. This requires the
   /// attribute to be a string attribute.
-  StringRef getValueAsString() const;
+  llvm::StringRef getValueAsString() const;
 
   /// \brief Returns the alignment field of an attribute as a byte alignment
   /// value.
@@ -207,7 +207,7 @@ public:
   /// \brief Less-than operator. Useful for sorting the attributes list.
   bool operator<(Attribute A) const;
 
-  void Profile(FoldingSetNodeID &ID) const {
+  void Profile(llvm::FoldingSetNodeID &ID) const {
     ID.AddPointer(pImpl);
   }
 };
@@ -229,7 +229,7 @@ public:
 private:
   friend class AttrBuilder;
   friend class AttributeSetImpl;
-  template <typename Ty> friend struct DenseMapInfo;
+  template <typename Ty, typename Enable> friend struct llvm::DenseMapInfo;
 
   /// \brief The attributes that we are managing. This can be null to represent
   /// the empty attributes list.
@@ -240,13 +240,13 @@ private:
 
   /// \brief Create an AttributeSet with the specified parameters in it.
   static AttributeSet get(LLVMContext &C,
-                          ArrayRef<std::pair<unsigned, Attribute> > Attrs);
+                          llvm::ArrayRef<std::pair<unsigned, Attribute> > Attrs);
   static AttributeSet get(LLVMContext &C,
-                          ArrayRef<std::pair<unsigned,
+                          llvm::ArrayRef<std::pair<unsigned,
                                              AttributeSetNode*> > Attrs);
 
   static AttributeSet getImpl(LLVMContext &C,
-                              ArrayRef<std::pair<unsigned,
+                              llvm::ArrayRef<std::pair<unsigned,
                                                  AttributeSetNode*> > Attrs);
 
 
@@ -259,9 +259,9 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// \brief Return an AttributeSet with the specified parameters in it.
-  static AttributeSet get(LLVMContext &C, ArrayRef<AttributeSet> Attrs);
+  static AttributeSet get(LLVMContext &C, llvm::ArrayRef<AttributeSet> Attrs);
   static AttributeSet get(LLVMContext &C, unsigned Index,
-                          ArrayRef<Attribute::AttrKind> Kind);
+                          llvm::ArrayRef<Attribute::AttrKind> Kind);
   static AttributeSet get(LLVMContext &C, unsigned Index, const AttrBuilder &B);
 
   /// \brief Add an attribute to the attribute set at the given index. Because
@@ -272,9 +272,9 @@ public:
   /// \brief Add an attribute to the attribute set at the given index. Because
   /// attribute sets are immutable, this returns a new set.
   AttributeSet addAttribute(LLVMContext &C, unsigned Index,
-                            StringRef Kind) const;
+                            llvm::StringRef Kind) const;
   AttributeSet addAttribute(LLVMContext &C, unsigned Index,
-                            StringRef Kind, StringRef Value) const;
+                            llvm::StringRef Kind, llvm::StringRef Value) const;
 
   /// \brief Add attributes to the attribute set at the given index. Because
   /// attribute sets are immutable, this returns a new set.
@@ -330,7 +330,7 @@ public:
   bool hasAttribute(unsigned Index, Attribute::AttrKind Kind) const;
 
   /// \brief Return true if the attribute exists at the given index.
-  bool hasAttribute(unsigned Index, StringRef Kind) const;
+  bool hasAttribute(unsigned Index, llvm::StringRef Kind) const;
 
   /// \brief Return true if attribute exists at the given index.
   bool hasAttributes(unsigned Index) const;
@@ -343,7 +343,7 @@ public:
   Attribute getAttribute(unsigned Index, Attribute::AttrKind Kind) const;
 
   /// \brief Return the attribute object that exists at the given index.
-  Attribute getAttribute(unsigned Index, StringRef Kind) const;
+  Attribute getAttribute(unsigned Index, llvm::StringRef Kind) const;
 
   /// \brief Return the alignment for the specified function parameter.
   unsigned getParamAlignment(unsigned Index) const;
@@ -361,7 +361,7 @@ public:
   /// \brief Return the attributes at the index as a string.
   std::string getAsString(unsigned Index, bool InAttrGrp = false) const;
 
-  typedef ArrayRef<Attribute>::iterator iterator;
+  typedef llvm::ArrayRef<Attribute>::iterator iterator;
 
   iterator begin(unsigned Slot) const;
   iterator end(unsigned Slot) const;
@@ -405,26 +405,6 @@ public:
   void dump() const;
 };
 
-//===----------------------------------------------------------------------===//
-/// \class
-/// \brief Provide DenseMapInfo for AttributeSet.
-template<> struct DenseMapInfo<AttributeSet> {
-  static inline AttributeSet getEmptyKey() {
-    uintptr_t Val = static_cast<uintptr_t>(-1);
-    Val <<= PointerLikeTypeTraits<void*>::NumLowBitsAvailable;
-    return AttributeSet(reinterpret_cast<AttributeSetImpl*>(Val));
-  }
-  static inline AttributeSet getTombstoneKey() {
-    uintptr_t Val = static_cast<uintptr_t>(-2);
-    Val <<= PointerLikeTypeTraits<void*>::NumLowBitsAvailable;
-    return AttributeSet(reinterpret_cast<AttributeSetImpl*>(Val));
-  }
-  static unsigned getHashValue(AttributeSet AS) {
-    return (unsigned((uintptr_t)AS.pImpl) >> 4) ^
-           (unsigned((uintptr_t)AS.pImpl) >> 9);
-  }
-  static bool isEqual(AttributeSet LHS, AttributeSet RHS) { return LHS == RHS; }
-};
 //                                                                           //
 ///////////////////////////////////////////////////////////////////////////////
 /// \class
@@ -464,7 +444,7 @@ public:
   AttrBuilder &addAttribute(Attribute A);
 
   /// \brief Add the target-dependent attribute to the builder.
-  AttrBuilder &addAttribute(StringRef A, StringRef V = StringRef());
+  AttrBuilder &addAttribute(llvm::StringRef A, llvm::StringRef V = llvm::StringRef());
 
   /// \brief Remove an attribute from the builder.
   AttrBuilder &removeAttribute(Attribute::AttrKind Val);
@@ -473,7 +453,7 @@ public:
   AttrBuilder &removeAttributes(AttributeSet A, uint64_t Index);
 
   /// \brief Remove the target-dependent attribute to the builder.
-  AttrBuilder &removeAttribute(StringRef A);
+  AttrBuilder &removeAttribute(llvm::StringRef A);
 
   /// \brief Add the attributes from the builder.
   AttrBuilder &merge(const AttrBuilder &B);
@@ -493,7 +473,7 @@ public:
 
   /// \brief Return true if the builder has the specified target-dependent
   /// attribute.
-  bool contains(StringRef A) const;
+  bool contains(llvm::StringRef A) const;
 
   /// \brief Return true if the builder has IR-level attributes.
   bool hasAttributes() const;
@@ -578,5 +558,16 @@ AttrBuilder typeIncompatible(const Type *Ty);
 } // end AttributeFuncs namespace
 
 } // end llvm namespace
+
+namespace llvm {
+template <> struct DenseMapInfo<dxil::AttributeSet> {
+  static unsigned getHashValue(dxil::AttributeSet AS) {
+    return DenseMapInfo<dxil::AttributeSetImpl *>::getHashValue(AS.pImpl);
+  }
+  static bool isEqual(dxil::AttributeSet LHS, dxil::AttributeSet RHS) {
+    return LHS == RHS;
+  }
+};
+} // namespace llvm
 
 #endif
