@@ -52,6 +52,13 @@ private:
   std::unique_ptr<ValueSymbolTable> SymTab; ///< Symbol table of args/instructions // HLSL Change: use unique_ptr
   AttributeSet AttributeSets;             ///< Parameter attributes
   FunctionType *Ty;
+  unsigned NextBlockNumber = 0;
+
+  friend class BasicBlock;
+  unsigned allocateBlockNumber() {
+    assert(NextBlockNumber != ~0u && "Too many basic blocks");
+    return NextBlockNumber++;
+  }
 
   /*
    * Value::SubclassData
@@ -101,6 +108,10 @@ private:
            Module *M = nullptr);
 
 public:
+  /// Return an exclusive upper bound on block numbers, including deleted
+  /// blocks.
+  unsigned getMaxBlockNumber() const { return NextBlockNumber; }
+
   static Function *Create(FunctionType *Ty, LinkageTypes Linkage,
                           const llvm::Twine &N = "", Module *M = nullptr) {
     return new(1) Function(Ty, Linkage, N, M);

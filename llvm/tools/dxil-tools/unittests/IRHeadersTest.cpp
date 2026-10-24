@@ -21,7 +21,6 @@
 #include "dxil/IR/Function.h"
 #include "dxil/IR/GlobalValue.h"
 #include "dxil/IR/IRBuilder.h"
-#include "dxil/IR/IRPrintingPasses.h"
 #include "dxil/IR/InlineAsm.h"
 #include "dxil/IR/InstIterator.h"
 #include "dxil/IR/InstrTypes.h"
@@ -118,8 +117,6 @@ static_assert(std::is_same_v<decltype(std::declval<dxil::NoFolder>()
                              dxil::Instruction *>);
 static_assert(!std::is_same_v<dxil::AssemblyAnnotationWriter,
                               llvm::AssemblyAnnotationWriter>);
-static_assert(
-    std::is_constructible_v<dxil::PrintModulePass, llvm::raw_ostream &>);
 static_assert(
     std::is_same_v<decltype(&dxil::AssemblyAnnotationWriter::printInfoComment),
                    void (dxil::AssemblyAnnotationWriter::*)(

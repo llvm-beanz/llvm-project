@@ -94,6 +94,8 @@ BasicBlock::~BasicBlock() {
 }
 
 void BasicBlock::setParent(Function *parent) {
+  if (parent && parent != Parent)
+    Number = parent->allocateBlockNumber();
   // Set Parent=parent, updating instruction symtab entries as appropriate.
   InstList.setSymTabObject(&Parent, parent);
 }

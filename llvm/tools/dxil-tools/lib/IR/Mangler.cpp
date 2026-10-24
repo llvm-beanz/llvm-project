@@ -21,6 +21,8 @@
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
 
+namespace dxil {
+
 namespace {
 enum ManglerPrefixTy {
   Default,      ///< Emit default string before each symbol.
@@ -99,7 +101,7 @@ static void addByteCountSuffix(raw_ostream &OS, const Function *F,
       Ty = cast<PointerType>(Ty)->getElementType();
     // Size should be aligned to pointer size.
     unsigned PtrSize = DL.getPointerSize();
-    ArgWords += RoundUpToAlignment(DL.getTypeAllocSize(Ty), PtrSize);
+    ArgWords += alignTo(DL.getTypeAllocSize(Ty), PtrSize);
   }
 
   OS << '@' << ArgWords;
@@ -134,7 +136,7 @@ void Mangler::getNameWithPrefix(raw_ostream &OS, const GlobalValue *GV,
   // Mangle functions with Microsoft calling conventions specially.  Only do
   // this mangling for x86_64 vectorcall and 32-bit x86.
   const Function *MSFunc = dyn_cast<Function>(GV);
-  if (Name.startswith("\01"))
+  if (Name.starts_with("\01"))
     MSFunc = nullptr; // Don't mangle when \01 is present.
   CallingConv::ID CC =
       MSFunc ? MSFunc->getCallingConv() : (unsigned)CallingConv::C;
@@ -172,3 +174,5 @@ void Mangler::getNameWithPrefix(SmallVectorImpl<char> &OutName,
   raw_svector_ostream OS(OutName);
   getNameWithPrefix(OS, GV, CannotUsePrivateLabel);
 }
+
+} // namespace dxil

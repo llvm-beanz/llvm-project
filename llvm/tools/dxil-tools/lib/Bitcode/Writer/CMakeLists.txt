@@ -1,6 +1,5 @@
 add_llvm_library(DXILBitWriter
   BitcodeWriter.cpp
-  BitcodeWriterPass.cpp
   ValueEnumerator.cpp
 
   DEPENDS

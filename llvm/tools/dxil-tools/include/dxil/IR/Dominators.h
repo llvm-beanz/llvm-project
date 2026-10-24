@@ -23,7 +23,6 @@
 #include "dxil/IR/BasicBlock.h"
 #include "dxil/IR/CFG.h"
 #include "dxil/IR/Function.h"
-#include "llvm/Pass.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/GenericDomTree.h"
 #include "llvm/Support/raw_ostream.h"
@@ -31,21 +30,7 @@
 
 namespace dxil {
 
-// FIXME: Replace this brittle forward declaration with the include of the new
-// PassManager.h when doing so doesn't break the PassManagerBuilder.
-template <typename IRUnitT> class AnalysisManager;
-class PreservedAnalyses;
-
-extern template class DomTreeNodeBase<BasicBlock>;
-extern template class DominatorTreeBase<BasicBlock>;
-
-extern template void Calculate<Function, BasicBlock *>(
-    DominatorTreeBase<GraphTraits<BasicBlock *>::NodeType> &DT, Function &F);
-extern template void Calculate<Function, Inverse<BasicBlock *>>(
-    DominatorTreeBase<GraphTraits<Inverse<BasicBlock *>>::NodeType> &DT,
-    Function &F);
-
-typedef DomTreeNodeBase<BasicBlock> DomTreeNode;
+using DomTreeNode = llvm::DomTreeNodeBase<BasicBlock>;
 
 class BasicBlockEdge {
   const BasicBlock *Start;
@@ -64,11 +49,11 @@ public:
 
 /// \brief Concrete subclass of DominatorTreeBase that is used to compute a
 /// normal dominator tree.
-class DominatorTree : public DominatorTreeBase<BasicBlock> {
+class DominatorTree : public llvm::DominatorTreeBase<BasicBlock, false> {
 public:
-  typedef DominatorTreeBase<BasicBlock> Base;
+  typedef llvm::DominatorTreeBase<BasicBlock, false> Base;
 
-  DominatorTree() : DominatorTreeBase<BasicBlock>(false) {}
+  DominatorTree() = default;
 
   DominatorTree(DominatorTree &&Arg)
       : Base(std::move(static_cast<Base &>(Arg))) {}
@@ -118,114 +103,6 @@ public:
   void verifyDomTree() const;
 };
 
-//===-------------------------------------
-// DominatorTree GraphTraits specializations so the DominatorTree can be
-// iterable by generic graph iterators.
-
-template <> struct GraphTraits<DomTreeNode*> {
-  typedef DomTreeNode NodeType;
-  typedef NodeType::iterator  ChildIteratorType;
-
-  static NodeType *getEntryNode(NodeType *N) {
-    return N;
-  }
-  static inline ChildIteratorType child_begin(NodeType *N) {
-    return N->begin();
-  }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return N->end();
-  }
-
-  typedef df_iterator<DomTreeNode*> nodes_iterator;
-
-  static nodes_iterator nodes_begin(DomTreeNode *N) {
-    return df_begin(getEntryNode(N));
-  }
-
-  static nodes_iterator nodes_end(DomTreeNode *N) {
-    return df_end(getEntryNode(N));
-  }
-};
-
-template <> struct GraphTraits<DominatorTree*>
-  : public GraphTraits<DomTreeNode*> {
-  static NodeType *getEntryNode(DominatorTree *DT) {
-    return DT->getRootNode();
-  }
-
-  static nodes_iterator nodes_begin(DominatorTree *N) {
-    return df_begin(getEntryNode(N));
-  }
-
-  static nodes_iterator nodes_end(DominatorTree *N) {
-    return df_end(getEntryNode(N));
-  }
-};
-
-/// \brief Analysis pass which computes a \c DominatorTree.
-class DominatorTreeAnalysis {
-public:
-  /// \brief Provide the result typedef for this analysis pass.
-  typedef DominatorTree Result;
-
-  /// \brief Opaque, unique identifier for this analysis pass.
-  static void *ID() { return (void *)&PassID; }
-
-  /// \brief Run the analysis pass over a function and produce a dominator tree.
-  DominatorTree run(Function &F);
-
-  /// \brief Provide access to a name for this pass for debugging purposes.
-  static StringRef name() { return "DominatorTreeAnalysis"; }
-
-private:
-  static char PassID;
-};
-
-/// \brief Printer pass for the \c DominatorTree.
-class DominatorTreePrinterPass {
-  raw_ostream &OS;
-
-public:
-  explicit DominatorTreePrinterPass(raw_ostream &OS);
-  PreservedAnalyses run(Function &F, AnalysisManager<Function> *AM);
-
-  static StringRef name() { return "DominatorTreePrinterPass"; }
-};
-
-/// \brief Verifier pass for the \c DominatorTree.
-struct DominatorTreeVerifierPass {
-  PreservedAnalyses run(Function &F, AnalysisManager<Function> *AM);
-
-  static StringRef name() { return "DominatorTreeVerifierPass"; }
-};
-
-/// \brief Legacy analysis pass which computes a \c DominatorTree.
-class DominatorTreeWrapperPass : public FunctionPass {
-  DominatorTree DT;
-
-public:
-  static char ID;
-
-  DominatorTreeWrapperPass() : FunctionPass(ID) {
-    initializeDominatorTreeWrapperPassPass(*PassRegistry::getPassRegistry());
-  }
-
-  DominatorTree &getDomTree() { return DT; }
-  const DominatorTree &getDomTree() const { return DT; }
-
-  bool runOnFunction(Function &F) override;
-
-  void verifyAnalysis() const override;
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.setPreservesAll();
-  }
-
-  void releaseMemory() override { DT.releaseMemory(); }
-
-  void print(raw_ostream &OS, const Module *M = nullptr) const override;
-};
-
-} // End llvm namespace
+} // namespace dxil
 
 #endif

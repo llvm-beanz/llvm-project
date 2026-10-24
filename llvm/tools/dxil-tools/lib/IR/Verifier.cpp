@@ -61,7 +61,6 @@
 #include "dxil/IR/LLVMContext.h"
 #include "dxil/IR/Metadata.h"
 #include "dxil/IR/Module.h"
-#include "dxil/IR/PassManager.h"
 #include "dxil/IR/Statepoint.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -69,8 +68,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/ConstantRange.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -78,6 +75,7 @@
 #include <cstdarg>
 using namespace llvm;
 
+namespace dxil {
 
 namespace {
 struct VerifierSupport {
@@ -1074,8 +1072,8 @@ void Verifier::visitDILocalVariable(const DILocalVariable &N) {
   // Checks common to all variables.
   visitDIVariable(N);
 
-  Assert(N.getTag() == dwarf::DW_TAG_auto_variable ||
-             N.getTag() == dwarf::DW_TAG_arg_variable,
+  Assert(N.getTag() == DW_TAG_auto_variable ||
+             N.getTag() == DW_TAG_arg_variable,
          "invalid tag", &N);
   Assert(N.getRawScope() && isa<DILocalScope>(N.getRawScope()),
          "local variable requires a valid scope", &N, N.getRawScope());
@@ -1488,7 +1486,7 @@ void Verifier::VerifyFunctionMetadata(
              "expected string with name of the !prof annotation", MD);
       MDString *MDS = cast<MDString>(MD->getOperand(0));
       StringRef ProfName = MDS->getString();
-      Assert(ProfName.equals("function_entry_count"),
+      Assert(ProfName == "function_entry_count",
              "first operand should be 'function_entry_count'", MD);
 
       // Check second operand.
@@ -1738,13 +1736,13 @@ void Verifier::visitFunction(const Function &F) {
   for (Function::const_arg_iterator I = F.arg_begin(), E = F.arg_end(); I != E;
        ++I, ++i) {
     Assert(I->getType() == FT->getParamType(i),
-           "Argument value does not match function argument type!", I,
+           "Argument value does not match function argument type!", &*I,
            FT->getParamType(i));
     Assert(I->getType()->isFirstClassType(),
-           "Function arguments must have first-class types!", I);
+           "Function arguments must have first-class types!", &*I);
     if (!isLLVMdotName)
       Assert(!I->getType()->isMetadataTy(),
-             "Function takes metadata but isn't an intrinsic", I, &F);
+             "Function takes metadata but isn't an intrinsic", &*I, &F);
   }
 
   // Get the function metadata attachments.
@@ -2294,7 +2292,7 @@ void Verifier::VerifyCallSite(CallSite CS) {
 
   // Verify that there's no metadata unless it's a direct call to an intrinsic.
   if (CS.getCalledFunction() == nullptr ||
-      !CS.getCalledFunction()->getName().startswith("llvm.")) {
+      !CS.getCalledFunction()->getName().starts_with("llvm.")) {
     for (FunctionType::param_iterator PI = FTy->param_begin(),
            PE = FTy->param_end(); PI != PE; ++PI)
       Assert(!(*PI)->isMetadataTy(),
@@ -2582,7 +2580,7 @@ void Verifier::visitRangeMetadata(Instruction& I,
   unsigned NumRanges = NumOperands / 2;
   Assert(NumRanges >= 1, "It should have at least one range!", Range);
 
-  ConstantRange LastRange(1); // Dummy initial value
+  ConstantRange LastRange(1, true); // Dummy initial value
   for (unsigned i = 0; i < NumRanges; ++i) {
     ConstantInt *Low =
         mdconst::dyn_extract<ConstantInt>(Range->getOperand(2 * i));
@@ -3635,7 +3633,7 @@ void Verifier::verifyTypeRefs() {
 //  Implement the public interfaces to this file...
 //===----------------------------------------------------------------------===//
 
-bool llvm::verifyFunction(const Function &f, raw_ostream *OS) {
+bool verifyFunction(const Function &f, raw_ostream *OS) {
   Function &F = const_cast<Function &>(f);
   assert(!F.isDeclaration() && "Cannot verify external functions");
 
@@ -3647,7 +3645,7 @@ bool llvm::verifyFunction(const Function &f, raw_ostream *OS) {
   return !V.verify(F);
 }
 
-bool llvm::verifyModule(const Module &M, raw_ostream *OS) {
+bool verifyModule(const Module &M, raw_ostream *OS) {
   raw_null_ostream NullStr;
   Verifier V(OS ? *OS : NullStr);
 
@@ -3661,59 +3659,4 @@ bool llvm::verifyModule(const Module &M, raw_ostream *OS) {
   return !V.verify(M) || Broken;
 }
 
-namespace {
-struct VerifierLegacyPass : public FunctionPass {
-  static char ID;
-
-  Verifier V;
-  bool FatalErrors;
-
-  VerifierLegacyPass() : FunctionPass(ID), V(dbgs()), FatalErrors(true) {
-    initializeVerifierLegacyPassPass(*PassRegistry::getPassRegistry());
-  }
-  explicit VerifierLegacyPass(bool FatalErrors)
-      : FunctionPass(ID), V(dbgs()), FatalErrors(FatalErrors) {
-    initializeVerifierLegacyPassPass(*PassRegistry::getPassRegistry());
-  }
-
-  bool runOnFunction(Function &F) override {
-    return false;
-    if (!V.verify(F) && FatalErrors)
-      report_fatal_error("Broken function found, compilation aborted!");
-
-    return false;
-  }
-
-  bool doFinalization(Module &M) override {
-    if (!V.verify(M) && FatalErrors)
-      report_fatal_error("Broken module found, compilation aborted!");
-
-    return false;
-  }
-
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.setPreservesAll();
-  }
-};
-}
-
-char VerifierLegacyPass::ID = 0;
-INITIALIZE_PASS(VerifierLegacyPass, "verify", "Module Verifier", false, false)
-
-FunctionPass *llvm::createVerifierPass(bool FatalErrors) {
-  return new VerifierLegacyPass(FatalErrors);
-}
-
-PreservedAnalyses VerifierPass::run(Module &M) {
-  if (verifyModule(M, &dbgs()) && FatalErrors)
-    report_fatal_error("Broken module found, compilation aborted!");
-
-  return PreservedAnalyses::all();
-}
-
-PreservedAnalyses VerifierPass::run(Function &F) {
-  if (verifyFunction(F, &dbgs()) && FatalErrors)
-    report_fatal_error("Broken function found, compilation aborted!");
-
-  return PreservedAnalyses::all();
-}
+} // namespace dxil

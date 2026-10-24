@@ -304,6 +304,7 @@ template <> struct GraphTraits<dxil::BasicBlock *> {
   typedef dxil::succ_iterator ChildIteratorType;
 
   static NodeRef getEntryNode(dxil::BasicBlock *BB) { return BB; }
+  static unsigned getNumber(NodeRef BB) { return BB->getNumber(); }
   static inline ChildIteratorType child_begin(NodeRef N) {
     return succ_begin(N);
   }
@@ -315,6 +316,7 @@ template <> struct GraphTraits<const dxil::BasicBlock *> {
   typedef dxil::succ_const_iterator ChildIteratorType;
 
   static NodeRef getEntryNode(const dxil::BasicBlock *BB) { return BB; }
+  static unsigned getNumber(NodeRef BB) { return BB->getNumber(); }
 
   static inline ChildIteratorType child_begin(NodeRef N) {
     return succ_begin(N);
@@ -370,6 +372,11 @@ struct GraphTraits<dxil::Function *> : public GraphTraits<dxil::BasicBlock *> {
     return nodes_iterator(F->end());
   }
   static size_t size(dxil::Function *F) { return F->size(); }
+  static unsigned getMaxNumber(dxil::Function *F) {
+    return F->getMaxBlockNumber();
+  }
+  // Block numbers are never reassigned within a function.
+  static unsigned getNumberEpoch(dxil::Function *) { return 0; }
 };
 template <>
 struct GraphTraits<const dxil::Function *>
@@ -387,6 +394,10 @@ struct GraphTraits<const dxil::Function *>
     return nodes_iterator(F->end());
   }
   static size_t size(const dxil::Function *F) { return F->size(); }
+  static unsigned getMaxNumber(const dxil::Function *F) {
+    return F->getMaxBlockNumber();
+  }
+  static unsigned getNumberEpoch(const dxil::Function *) { return 0; }
 };
 
 // Provide specializations of GraphTraits to be able to treat a function as a

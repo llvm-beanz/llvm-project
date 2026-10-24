@@ -27,7 +27,6 @@ namespace dxil {
   class DataStreamer;
   class LLVMContext;
   class Module;
-  class ModulePass;
   class raw_ostream;
 
   /// Read the header of the specified bitcode buffer and prepare for lazy

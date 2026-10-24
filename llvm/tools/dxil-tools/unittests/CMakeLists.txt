@@ -8,15 +8,17 @@ add_unittest(DXILUnitTests DXILTests
   BitcodeHeaderTest.cpp
   ConstantsContextTest.cpp
   IRHeadersTest.cpp
+  IRTest.cpp
   IntrinsicsTest.cpp
   PatternMatchTest.cpp
   UseTest.cpp
-  ../lib/IR/Use.cpp
 
   DEPENDS
   dxil_intrinsics_gen
   intrinsics_gen
   )
+
+target_link_libraries(DXILTests PRIVATE DXILCore)
 
 add_custom_target(check-dxil-tools-unit
   COMMAND $<TARGET_FILE:DXILTests>

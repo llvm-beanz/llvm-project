@@ -34,12 +34,7 @@ class HLModule;
 }
 // HLSL Change end
 
-namespace llvm {
-class RandomNumberGenerator;
-} // namespace llvm
-
 namespace dxil {
-class Pass;
 class FunctionType;
 class GVMaterializer;
 class LLVMContext;
@@ -217,17 +212,6 @@ public:
   /// Get any module-scope inline assembly blocks.
   /// @returns a string containing the module-scope inline assembly blocks.
   const std::string &getModuleInlineAsm() const { return GlobalScopeAsm; }
-
-  /// Get a llvm::RandomNumberGenerator salted for use with this module. The
-  /// RNG can be seeded via -rng-seed=<uint64> and is salted with the
-  /// ModuleID and the provided pass salt. The returned RNG should not
-  /// be shared across threads or passes.
-  ///
-  /// A unique RNG per pass ensures a reproducible random stream even
-  /// when other randomness consuming passes are added or removed. In
-  /// addition, the random stream will be reproducible across LLVM
-  /// versions when the pass does not change.
-  llvm::RandomNumberGenerator *createRNG(const Pass *P) const;
 
   /// @}
   /// @name Module Level Mutators
@@ -621,7 +605,7 @@ public:
 /// @name Utility functions for querying Debug information.
 /// @{
 
-  /// \brief Returns the Dwarf Version by checking module flags.
+  /// Return the DWARF version module flag, or the legacy default of 4.
   unsigned getDwarfVersion() const;
 
 /// @}

@@ -20,8 +20,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "dxil/IR/CFG.h"
 #include "dxil/IR/Instructions.h"
-#include "dxil/IR/PassManager.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/GenericDomTreeConstruction.h"
@@ -29,12 +27,9 @@
 #include <algorithm>
 using namespace llvm;
 
-// Always verify dominfo if expensive checking is enabled.
-#ifdef XDEBUG
-static bool VerifyDomInfo = true;
-#else
-static bool VerifyDomInfo = false;
-#endif
+template class llvm::DominatorTreeBase<dxil::BasicBlock, false>;
+
+namespace dxil {
 
 bool BasicBlockEdge::isSingleEdge() const {
   const TerminatorInst *TI = Start->getTerminator();
@@ -58,15 +53,6 @@ bool BasicBlockEdge::isSingleEdge() const {
 // GenericDomTreeConstruction.h.
 //
 //===----------------------------------------------------------------------===//
-
-template class llvm::DomTreeNodeBase<BasicBlock>;
-template class llvm::DominatorTreeBase<BasicBlock>;
-
-template void llvm::Calculate<Function, BasicBlock *>(
-    DominatorTreeBase<GraphTraits<BasicBlock *>::NodeType> &DT, Function &F);
-template void llvm::Calculate<Function, Inverse<BasicBlock *>>(
-    DominatorTreeBase<GraphTraits<Inverse<BasicBlock *>>::NodeType> &DT,
-    Function &F);
 
 // dominates - Return true if Def dominates a use in User. This performs
 // the special checks necessary if Def and User are in the same basic block.
@@ -288,64 +274,4 @@ void DominatorTree::verifyDomTree() const {
   }
 }
 
-//===----------------------------------------------------------------------===//
-//  DominatorTreeAnalysis and related pass implementations
-//===----------------------------------------------------------------------===//
-//
-// This implements the DominatorTreeAnalysis which is used with the new pass
-// manager. It also implements some methods from utility passes.
-//
-//===----------------------------------------------------------------------===//
-
-DominatorTree DominatorTreeAnalysis::run(Function &F) {
-  DominatorTree DT;
-  DT.recalculate(F);
-  return DT;
-}
-
-char DominatorTreeAnalysis::PassID;
-
-DominatorTreePrinterPass::DominatorTreePrinterPass(raw_ostream &OS) : OS(OS) {}
-
-PreservedAnalyses DominatorTreePrinterPass::run(Function &F,
-                                                FunctionAnalysisManager *AM) {
-  OS << "DominatorTree for function: " << F.getName() << "\n";
-  AM->getResult<DominatorTreeAnalysis>(F).print(OS);
-
-  return PreservedAnalyses::all();
-}
-
-PreservedAnalyses DominatorTreeVerifierPass::run(Function &F,
-                                                 FunctionAnalysisManager *AM) {
-  AM->getResult<DominatorTreeAnalysis>(F).verifyDomTree();
-
-  return PreservedAnalyses::all();
-}
-
-//===----------------------------------------------------------------------===//
-//  DominatorTreeWrapperPass Implementation
-//===----------------------------------------------------------------------===//
-//
-// The implementation details of the wrapper pass that holds a DominatorTree
-// suitable for use with the legacy pass manager.
-//
-//===----------------------------------------------------------------------===//
-
-char DominatorTreeWrapperPass::ID = 0;
-INITIALIZE_PASS(DominatorTreeWrapperPass, "domtree",
-                "Dominator Tree Construction", true, true)
-
-bool DominatorTreeWrapperPass::runOnFunction(Function &F) {
-  DT.recalculate(F);
-  return false;
-}
-
-void DominatorTreeWrapperPass::verifyAnalysis() const {
-    if (VerifyDomInfo)
-      DT.verifyDomTree();
-}
-
-void DominatorTreeWrapperPass::print(raw_ostream &OS, const Module *) const {
-  DT.print(OS);
-}
-
+} // namespace dxil

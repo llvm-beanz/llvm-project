@@ -53,6 +53,7 @@ public:
 private:
   InstListType InstList;
   Function *Parent;
+  unsigned Number = ~0u;
 
   void setParent(Function *parent);
   friend class SymbolTableListTraits<BasicBlock, Function>;
@@ -70,6 +71,12 @@ private:
                       BasicBlock *InsertBefore = nullptr);
 
 public:
+  /// Return the stable number assigned when this block joined its function.
+  unsigned getNumber() const {
+    assert(Parent && "Block numbers require a parent function");
+    return Number;
+  }
+
   /// \brief Get the context in which this basic block lives.
   LLVMContext &getContext() const;
 

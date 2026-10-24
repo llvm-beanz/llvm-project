@@ -23,9 +23,6 @@
 #include "dxil/IR/InstrTypes.h"
 #include "dxil/IR/LLVMContext.h"
 #include "dxil/IR/TypeFinder.h"
-#include "llvm/Support/Dwarf.h"
-#include "llvm/Support/Path.h"
-#include "llvm/Support/RandomNumberGenerator.h"
 #include <algorithm>
 #include <cstdarg>
 #include <cstdlib>
@@ -48,7 +45,7 @@ template class SymbolTableListTraits<GlobalAlias, Module>;
 //
 
 Module::Module(StringRef MID, LLVMContext &C)
-    : Context(C), Materializer(), ModuleID(MID), DL("") {
+    : Context(C), Materializer(), ModuleID(MID.str()), DL("") {
   // HLSL Change - use unique_ptr to avoid leaks
   std::unique_ptr<ValueSymbolTable> ValSymTabPtr(new ValueSymbolTable());
   std::unique_ptr<StringMap<NamedMDNode *> > NamedMDSymTabPtr(new StringMap<NamedMDNode *>());
@@ -71,25 +68,6 @@ Module::~Module() {
   delete ValSymTab;
   delete static_cast<StringMap<NamedMDNode *> *>(NamedMDSymTab);
 }
-
-RandomNumberGenerator *Module::createRNG(const Pass* P) const {
-  SmallString<32> Salt(P->getPassName());
-
-  // This RNG is guaranteed to produce the same random stream only
-  // when the Module ID and thus the input filename is the same. This
-  // might be problematic if the input filename extension changes
-  // (e.g. from .c to .bc or .ll).
-  //
-  // We could store this salt in NamedMetadata, but this would make
-  // the parameter non-const. This would unfortunately make this
-  // interface unusable by any Machine passes, since they only have a
-  // const reference to their IR Module. Alternatively we can always
-  // store salt metadata from the Module constructor.
-  Salt += sys::path::filename(getModuleIdentifier());
-
-  return new RandomNumberGenerator(Salt);
-}
-
 
 /// getNamedValue - Return the first global value in the module with
 /// the specified name, of arbitrary type.  This method returns null
@@ -283,7 +261,7 @@ NamedMDNode *Module::getOrInsertNamedMetadata(StringRef Name) {
 /// delete it.
 void Module::eraseNamedMetadata(NamedMDNode *NMD) {
   static_cast<StringMap<NamedMDNode *> *>(NamedMDSymTab)->erase(NMD->getName());
-  NamedMDList.erase(NMD);
+  NamedMDList.erase(named_metadata_iterator(NMD));
 }
 
 bool Module::isValidModFlagBehavior(Metadata *MD, ModFlagBehavior &MFB) {
@@ -473,7 +451,7 @@ void Module::dropAllReferences() {
 unsigned Module::getDwarfVersion() const {
   auto *Val = cast_or_null<ConstantAsMetadata>(getModuleFlag("Dwarf Version"));
   if (!Val)
-    return dwarf::DWARF_VERSION;
+    return 4;
   return cast<ConstantInt>(Val->getValue())->getZExtValue();
 }
 
@@ -486,8 +464,8 @@ Comdat *Module::getOrInsertComdat(StringRef Name) {
 PICLevel::Level Module::getPICLevel() const {
   auto *Val = cast_or_null<ConstantAsMetadata>(getModuleFlag("PIC Level"));
 
-  if (Val == NULL)
-    return PICLevel::Default;
+  if (!Val)
+    return PICLevel::NotPIC;
 
   return static_cast<PICLevel::Level>(
       cast<ConstantInt>(Val->getValue())->getZExtValue());

@@ -20,7 +20,6 @@
 #include "dxil/IR/Constants.h"
 #include "dxil/IR/DebugInfo.h"
 #include "dxil/IR/DerivedTypes.h"
-#include "dxil/IR/IRPrintingPasses.h"
 #include "dxil/IR/InlineAsm.h"
 #include "dxil/IR/IntrinsicInst.h"
 #include "dxil/IR/LLVMContext.h"
