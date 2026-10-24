@@ -12,12 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "LLLexer.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/Twine.h"
-#include "dxil/AsmParser//Parser.h"
+#include "dxil/AsmParser/Parser.h"
 #include "dxil/IR/DerivedTypes.h"
 #include "dxil/IR/Instruction.h"
 #include "dxil/IR/LLVMContext.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/ADT/bit.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -28,6 +29,8 @@
 #include <cstdlib>
 #include <cstring>
 using namespace llvm;
+
+namespace dxil {
 
 bool LLLexer::Error(LocTy ErrorLoc, const Twine &Msg) const {
   ErrorInfo = SM.GetMessage(ErrorLoc, SourceMgr::DK_Error, Msg);
@@ -753,7 +756,7 @@ lltok::Kind LLLexer::LexIdentifier() {
 
 #define DWKEYWORD(TYPE, TOKEN)                                                 \
   do {                                                                         \
-    if (Keyword.startswith("DW_" #TYPE "_")) {                                 \
+    if (Keyword.starts_with("DW_" #TYPE "_")) {                                \
       StrVal.assign(Keyword.begin(), Keyword.end());                           \
       return lltok::TOKEN;                                                     \
     }                                                                          \
@@ -765,7 +768,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   DWKEYWORD(OP, DwarfOp);
 #undef DWKEYWORD
 
-  if (Keyword.startswith("DIFlag")) {
+  if (Keyword.starts_with("DIFlag")) {
     StrVal.assign(Keyword.begin(), Keyword.end());
     return lltok::DIFlag;
   }
@@ -832,7 +835,7 @@ lltok::Kind LLLexer::Lex0x() {
     // HexFPConstant - Floating point constant represented in IEEE format as a
     // hexadecimal number for when exponential notation is not precise enough.
     // Half, Float, and double only.
-    APFloatVal = APFloat(BitsToDouble(HexIntToVal(TokStart+2, CurPtr)));
+    APFloatVal = APFloat(bit_cast<double>(HexIntToVal(TokStart + 2, CurPtr)));
     return lltok::APFloat;
   }
 
@@ -842,21 +845,21 @@ lltok::Kind LLLexer::Lex0x() {
   case 'K':
     // F80HexFPConstant - x87 long double in hexadecimal format (10 bytes)
     FP80HexToIntPair(TokStart+3, CurPtr, Pair);
-    APFloatVal = APFloat(APFloat::x87DoubleExtended, APInt(80, Pair));
+    APFloatVal = APFloat(APFloat::x87DoubleExtended(), APInt(80, Pair));
     return lltok::APFloat;
   case 'L':
     // F128HexFPConstant - IEEE 128-bit in hexadecimal format (16 bytes)
     HexToIntPair(TokStart+3, CurPtr, Pair);
-    APFloatVal = APFloat(APFloat::IEEEquad, APInt(128, Pair));
+    APFloatVal = APFloat(APFloat::IEEEquad(), APInt(128, Pair));
     return lltok::APFloat;
   case 'M':
     // PPC128HexFPConstant - PowerPC 128-bit in hexadecimal format (16 bytes)
     HexToIntPair(TokStart+3, CurPtr, Pair);
-    APFloatVal = APFloat(APFloat::PPCDoubleDouble, APInt(128, Pair));
+    APFloatVal = APFloat(APFloat::PPCDoubleDouble(), APInt(128, Pair));
     return lltok::APFloat;
   case 'H':
-    APFloatVal = APFloat(APFloat::IEEEhalf,
-                         APInt(16,HexIntToVal(TokStart+3, CurPtr)));
+    APFloatVal = APFloat(APFloat::IEEEhalf(),
+                         APInt(16, HexIntToVal(TokStart + 3, CurPtr)));
     return lltok::APFloat;
   }
 }
@@ -961,3 +964,5 @@ lltok::Kind LLLexer::LexPositive() {
   APFloatVal = APFloat(std::atof(TokStart));
   return lltok::APFloat;
 }
+
+} // namespace dxil

@@ -16,12 +16,15 @@
 
 #include "llvm/Support/MemoryBuffer.h"
 
+namespace llvm {
+class SMDiagnostic;
+}
+
 namespace dxil {
 
 class LLVMContext;
 class Module;
 struct SlotMapping;
-class SMDiagnostic;
 
 /// This function is the main interface to the LLVM Assembly Parser. It parses
 /// an ASCII file that (presumably) contains LLVM Assembly code. It returns a
@@ -34,8 +37,8 @@ class SMDiagnostic;
 /// \param Context Context in which to allocate globals info.
 /// \param Slots The optional slot mapping that will be initialized during
 ///              parsing.
-std::unique_ptr<Module> parseAssemblyFile(StringRef Filename,
-                                          SMDiagnostic &Error,
+std::unique_ptr<Module> parseAssemblyFile(llvm::StringRef Filename,
+                                          llvm::SMDiagnostic &Error,
                                           LLVMContext &Context,
                                           SlotMapping *Slots = nullptr);
 
@@ -50,18 +53,19 @@ std::unique_ptr<Module> parseAssemblyFile(StringRef Filename,
 /// \param Context Context in which to allocate globals info.
 /// \param Slots The optional slot mapping that will be initialized during
 ///              parsing.
-std::unique_ptr<Module> parseAssemblyString(StringRef AsmString,
-                                            SMDiagnostic &Error,
+std::unique_ptr<Module> parseAssemblyString(llvm::StringRef AsmString,
+                                            llvm::SMDiagnostic &Error,
                                             LLVMContext &Context,
                                             SlotMapping *Slots = nullptr);
 
 /// parseAssemblyFile and parseAssemblyString are wrappers around this function.
-/// \brief Parse LLVM Assembly from a MemoryBuffer.
-/// \param F The MemoryBuffer containing assembly
+/// \brief Parse LLVM Assembly from a llvm::MemoryBuffer.
+/// \param F The llvm::MemoryBuffer containing assembly
 /// \param Err Error result info.
 /// \param Slots The optional slot mapping that will be initialized during
 ///              parsing.
-std::unique_ptr<Module> parseAssembly(MemoryBufferRef F, SMDiagnostic &Err,
+std::unique_ptr<Module> parseAssembly(llvm::MemoryBufferRef F,
+                                      llvm::SMDiagnostic &Err,
                                       LLVMContext &Context,
                                       SlotMapping *Slots = nullptr);
 
@@ -70,15 +74,15 @@ std::unique_ptr<Module> parseAssembly(MemoryBufferRef F, SMDiagnostic &Err,
 /// parseAssembly for the convenience of interactive users that want to add
 /// recently parsed bits to an existing module.
 ///
-/// \param F The MemoryBuffer containing assembly
+/// \param F The llvm::MemoryBuffer containing assembly
 /// \param M The module to add data to.
 /// \param Err Error result info.
 /// \param Slots The optional slot mapping that will be initialized during
 ///              parsing.
 /// \return true on error.
-bool parseAssemblyInto(MemoryBufferRef F, Module &M, SMDiagnostic &Err,
-                       SlotMapping *Slots = nullptr);
+bool parseAssemblyInto(llvm::MemoryBufferRef F, Module &M,
+                       llvm::SMDiagnostic &Err, SlotMapping *Slots = nullptr);
 
-} // End llvm namespace
+} // namespace dxil
 
 #endif

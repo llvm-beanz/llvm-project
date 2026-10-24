@@ -4,6 +4,7 @@ add_custom_target(DXILUnitTests)
 set_target_properties(DXILUnitTests PROPERTIES FOLDER "LLVM/Tests")
 
 add_unittest(DXILUnitTests DXILTests
+  AsmParserTest.cpp
   AttributeImplTest.cpp
   BitcodeHeaderTest.cpp
   ConstantsContextTest.cpp
@@ -18,7 +19,7 @@ add_unittest(DXILUnitTests DXILTests
   intrinsics_gen
   )
 
-target_link_libraries(DXILTests PRIVATE DXILCore)
+target_link_libraries(DXILTests PRIVATE DXILAsmParser DXILCore)
 
 add_custom_target(check-dxil-tools-unit
   COMMAND $<TARGET_FILE:DXILTests>

@@ -12,8 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "LLParser.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "dxil/AsmParser//SlotMapping.h"
+#include "dxil/AsmParser/SlotMapping.h"
 #include "dxil/IR/AutoUpgrade.h"
 #include "dxil/IR/CallingConv.h"
 #include "dxil/IR/Constants.h"
@@ -26,11 +25,15 @@
 #include "dxil/IR/Module.h"
 #include "dxil/IR/Operator.h"
 #include "dxil/IR/ValueSymbolTable.h"
-#include "llvm/Support/Dwarf.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringSwitch.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
+
+namespace dxil {
 
 static std::string getTypeString(Type *T) {
   std::string Result;
@@ -158,7 +161,7 @@ bool LLParser::ValidateEndOfModule() {
 
   // Look for intrinsic functions and CallInst that need to be upgraded
   for (Module::iterator FI = M->begin(), FE = M->end(); FI != FE; )
-    UpgradeCallsToIntrinsic(FI++); // must be post-increment, as we remove
+    UpgradeCallsToIntrinsic(&*FI++); // must be post-increment, as we remove
 
   UpgradeDebugInfo(*M);
 
@@ -522,7 +525,7 @@ bool LLParser::parseComdat() {
 bool LLParser::ParseMDString(MDString *&Result) {
   std::string Str;
   if (ParseStringConstant(Str)) return true;
-  llvm::UpgradeMDStringConstant(Str);
+  UpgradeMDStringConstant(Str);
   Result = MDString::get(Context, Str);
   return false;
 }
@@ -543,7 +546,7 @@ bool LLParser::ParseMDNodeID(MDNode *&Result) {
 
   // Otherwise, create MDNode forward reference.
   auto &FwdRef = ForwardRefMDNodes[MID];
-  FwdRef = std::make_pair(MDTuple::getTemporary(Context, None), Lex.getLoc());
+  FwdRef = std::make_pair(MDTuple::getTemporary(Context, {}), Lex.getLoc());
 
   Result = FwdRef.first.get();
   NumberedMetadata[MID].reset(Result);
@@ -2149,7 +2152,7 @@ LLParser::PerFunctionState::PerFunctionState(LLParser &p, Function &f,
   for (Function::arg_iterator AI = F.arg_begin(), E = F.arg_end();
        AI != E; ++AI)
     if (!AI->hasName())
-      NumberedVals.push_back(AI);
+      NumberedVals.push_back(&*AI);
 }
 
 LLParser::PerFunctionState::~PerFunctionState() {
@@ -2973,7 +2976,7 @@ bool LLParser::parseOptionalComdat(StringRef GlobalName, Comdat *&C) {
   } else {
     if (GlobalName.empty())
       return TokError("comdat cannot be unnamed");
-    C = getComdat(GlobalName, KwLoc);
+    C = getComdat(GlobalName.str(), KwLoc);
   }
 
   return false;
@@ -3112,8 +3115,6 @@ struct MDFieldList : public MDFieldImpl<SmallVector<Metadata *, 4>> {
 
 } // end namespace
 
-namespace dxil {
-
 template <>
 bool LLParser::ParseMDField(LocTy Loc, StringRef Name,
                             MDUnsignedField &Result) {
@@ -3147,7 +3148,10 @@ bool LLParser::ParseMDField(LocTy Loc, StringRef Name, DwarfTagField &Result) {
   if (Lex.getKind() != lltok::DwarfTag)
     return TokError("expected DWARF tag");
 
-  unsigned Tag = dwarf::getTag(Lex.getStrVal());
+  unsigned Tag = StringSwitch<unsigned>(Lex.getStrVal())
+                     .Case("DW_TAG_auto_variable", DW_TAG_auto_variable)
+                     .Case("DW_TAG_arg_variable", DW_TAG_arg_variable)
+                     .Default(dwarf::getTag(Lex.getStrVal()));
   if (Tag == dwarf::DW_TAG_invalid)
     return TokError("invalid DWARF tag" + Twine(" '") + Lex.getStrVal() + "'");
   assert(Tag <= Result.Max && "Expected valid DWARF tag");
@@ -3338,7 +3342,6 @@ bool LLParser::ParseMDField(LocTy Loc, StringRef Name, MDFieldList &Result) {
   return false;
 }
 
-} // end namespace llvm
 
 template <class ParserTy>
 bool LLParser::ParseMDFieldsImplBody(ParserTy parseField) {
@@ -3997,14 +4000,14 @@ bool LLParser::ConvertValIDToValue(Type *Ty, ValID &ID, Value *&V,
 
     // The lexer has no type info, so builds all half, float, and double FP
     // constants as double.  Fix this here.  Long double does not need this.
-    if (&ID.APFloatVal.getSemantics() == &APFloat::IEEEdouble) {
+    if (&ID.APFloatVal.getSemantics() == &APFloat::IEEEdouble()) {
       bool Ignored;
       if (Ty->isHalfTy())
-        ID.APFloatVal.convert(APFloat::IEEEhalf, APFloat::rmNearestTiesToEven,
+        ID.APFloatVal.convert(APFloat::IEEEhalf(), APFloat::rmNearestTiesToEven,
                               &Ignored);
       else if (Ty->isFloatTy())
-        ID.APFloatVal.convert(APFloat::IEEEsingle, APFloat::rmNearestTiesToEven,
-                              &Ignored);
+        ID.APFloatVal.convert(APFloat::IEEEsingle(),
+                              APFloat::rmNearestTiesToEven, &Ignored);
     }
     V = ConstantFP::get(Context, ID.APFloatVal);
 
@@ -4056,8 +4059,7 @@ bool LLParser::ConvertValIDToValue(Type *Ty, ValID &ID, Value *&V,
           return Error(ID.Loc, "element " + Twine(i) +
                     " of struct initializer doesn't match struct element type");
 
-      V = ConstantStruct::get(ST, makeArrayRef(ID.ConstantStructElts,
-                                               ID.UIntVal));
+      V = ConstantStruct::get(ST, ArrayRef(ID.ConstantStructElts, ID.UIntVal));
     } else
       return Error(ID.Loc, "constant expression type mismatch");
     return false;
@@ -5834,3 +5836,5 @@ bool LLParser::ParseUseListOrderBB() {
 
   return sortUseListOrder(V, Indexes, Loc);
 }
+
+} // namespace dxil

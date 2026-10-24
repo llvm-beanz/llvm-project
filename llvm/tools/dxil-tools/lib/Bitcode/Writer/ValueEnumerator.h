@@ -37,7 +37,6 @@ class NamedMDNode;
 class AttributeSet;
 class ValueSymbolTable;
 class MDSymbolTable;
-class raw_ostream;
 
 class ValueEnumerator {
 public:
@@ -49,39 +48,39 @@ public:
   UseListOrderStack UseListOrders;
 
 private:
-  typedef DenseMap<Type*, unsigned> TypeMapType;
+  typedef llvm::DenseMap<Type *, unsigned> TypeMapType;
   TypeMapType TypeMap;
   TypeList Types;
 
-  typedef DenseMap<const Value*, unsigned> ValueMapType;
+  typedef llvm::DenseMap<const Value *, unsigned> ValueMapType;
   ValueMapType ValueMap;
   ValueList Values;
 
-  typedef UniqueVector<const Comdat *> ComdatSetType;
+  typedef llvm::UniqueVector<const Comdat *> ComdatSetType;
   ComdatSetType Comdats;
 
   std::vector<const Metadata *> MDs;
-  SmallVector<const LocalAsMetadata *, 8> FunctionLocalMDs;
-  typedef DenseMap<const Metadata *, unsigned> MetadataMapType;
+  llvm::SmallVector<const LocalAsMetadata *, 8> FunctionLocalMDs;
+  typedef llvm::DenseMap<const Metadata *, unsigned> MetadataMapType;
   MetadataMapType MDValueMap;
   bool HasMDString;
   bool HasDILocation;
   bool HasGenericDINode;
   bool ShouldPreserveUseListOrder;
 
-  typedef DenseMap<AttributeSet, unsigned> AttributeGroupMapType;
+  typedef llvm::DenseMap<AttributeSet, unsigned> AttributeGroupMapType;
   AttributeGroupMapType AttributeGroupMap;
   std::vector<AttributeSet> AttributeGroups;
 
-  typedef DenseMap<AttributeSet, unsigned> AttributeMapType;
+  typedef llvm::DenseMap<AttributeSet, unsigned> AttributeMapType;
   AttributeMapType AttributeMap;
   std::vector<AttributeSet> Attribute;
 
   /// GlobalBasicBlockIDs - This map memoizes the basic block ID's referenced by
   /// the "getGlobalBasicBlockID" method.
-  mutable DenseMap<const BasicBlock*, unsigned> GlobalBasicBlockIDs;
+  mutable llvm::DenseMap<const BasicBlock *, unsigned> GlobalBasicBlockIDs;
 
-  typedef DenseMap<const Instruction*, unsigned> InstructionMapType;
+  typedef llvm::DenseMap<const Instruction *, unsigned> InstructionMapType;
   InstructionMapType InstructionMap;
   unsigned InstructionCount;
 
@@ -106,8 +105,9 @@ public:
   ValueEnumerator(const Module &M, bool ShouldPreserveUseListOrder);
 
   void dump() const;
-  void print(raw_ostream &OS, const ValueMapType &Map, const char *Name) const;
-  void print(raw_ostream &OS, const MetadataMapType &Map,
+  void print(llvm::raw_ostream &OS, const ValueMapType &Map,
+             const char *Name) const;
+  void print(llvm::raw_ostream &OS, const MetadataMapType &Map,
              const char *Name) const;
 
   unsigned getValueID(const Value *V) const;
@@ -158,7 +158,8 @@ public:
 
   const ValueList &getValues() const { return Values; }
   const std::vector<const Metadata *> &getMDs() const { return MDs; }
-  const SmallVectorImpl<const LocalAsMetadata *> &getFunctionLocalMDs() const {
+  const llvm::SmallVectorImpl<const LocalAsMetadata *> &
+  getFunctionLocalMDs() const {
     return FunctionLocalMDs;
   }
   const TypeList &getTypes() const { return Types; }
@@ -203,6 +204,6 @@ private:
   void EnumerateNamedMetadata(const Module &M);
 };
 
-} // End llvm namespace
+} // namespace dxil
 
 #endif

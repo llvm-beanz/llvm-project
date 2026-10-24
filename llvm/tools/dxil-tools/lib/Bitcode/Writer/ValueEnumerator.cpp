@@ -26,6 +26,8 @@
 #include <algorithm>
 using namespace llvm;
 
+namespace dxil {
+
 namespace {
 struct OrderMap {
   DenseMap<const Value *, std::pair<unsigned, bool>> IDs;
@@ -515,7 +517,7 @@ void ValueEnumerator::EnumerateNamedMetadata(const Module &M) {
   for (Module::const_named_metadata_iterator I = M.named_metadata_begin(),
                                              E = M.named_metadata_end();
        I != E; ++I)
-    EnumerateNamedMDNode(I);
+    EnumerateNamedMDNode(&*I);
 }
 
 void ValueEnumerator::EnumerateNamedMDNode(const NamedMDNode *MD) {
@@ -731,7 +733,7 @@ void ValueEnumerator::incorporateFunction(const Function &F) {
   // Adding function arguments to the value table.
   for (Function::const_arg_iterator I = F.arg_begin(), E = F.arg_end();
        I != E; ++I)
-    EnumerateValue(I);
+    EnumerateValue(&*I);
 
   FirstFuncConstantID = Values.size();
 
@@ -744,8 +746,8 @@ void ValueEnumerator::incorporateFunction(const Function &F) {
             isa<InlineAsm>(*OI))
           EnumerateValue(*OI);
       }
-    BasicBlocks.push_back(BB);
-    ValueMap[BB] = BasicBlocks.size();
+    BasicBlocks.push_back(&*BB);
+    ValueMap[&*BB] = BasicBlocks.size();
   }
 
   // Optimize the constant layout.
@@ -770,7 +772,7 @@ void ValueEnumerator::incorporateFunction(const Function &F) {
       }
 
       if (!I->getType()->isVoidTy())
-        EnumerateValue(I);
+        EnumerateValue(&*I);
     }
   }
 
@@ -798,7 +800,7 @@ static void IncorporateFunctionInfoGlobalBBIDs(const Function *F,
                                  DenseMap<const BasicBlock*, unsigned> &IDMap) {
   unsigned Counter = 0;
   for (Function::const_iterator BB = F->begin(), E = F->end(); BB != E; ++BB)
-    IDMap[BB] = ++Counter;
+    IDMap[&*BB] = ++Counter;
 }
 
 /// getGlobalBasicBlockID - This returns the function-specific ID for the
@@ -816,3 +818,5 @@ unsigned ValueEnumerator::getGlobalBasicBlockID(const BasicBlock *BB) const {
 uint64_t ValueEnumerator::computeBitsRequiredForTypeIndicies() const {
   return Log2_32_Ceil(getTypes().size() + 1);
 }
+
+} // namespace dxil

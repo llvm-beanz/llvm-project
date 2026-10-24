@@ -11,11 +11,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "dxil/Bitcode//ReaderWriter.h"
 #include "ValueEnumerator.h"
-#include "llvm/ADT/Triple.h"
-#include "dxil/Bitcode//BitstreamWriter.h"
-#include "dxil/Bitcode//LLVMBitCodes.h"
+#include "dxil/Bitcode/LLVMBitCodes.h"
+#include "dxil/Bitcode/ReaderWriter.h"
 #include "dxil/IR/Constants.h"
 #include "dxil/IR/DebugInfoMetadata.h"
 #include "dxil/IR/DerivedTypes.h"
@@ -25,32 +23,36 @@
 #include "dxil/IR/Operator.h"
 #include "dxil/IR/UseListOrder.h"
 #include "dxil/IR/ValueSymbolTable.h"
+#include "llvm/Bitstream/BitstreamWriter.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include <cctype>
 #include <map>
 using namespace llvm;
+
+namespace dxil {
 
 /// These are manifest constants used by the bitcode writer. They do not need to
 /// be kept in sync with the reader, but need to be consistent within this file.
 enum {
   // VALUE_SYMTAB_BLOCK abbrev id's.
-  VST_ENTRY_8_ABBREV = bitc::FIRST_APPLICATION_ABBREV,
+  VST_ENTRY_8_ABBREV = llvm::bitc::FIRST_APPLICATION_ABBREV,
   VST_ENTRY_7_ABBREV,
   VST_ENTRY_6_ABBREV,
   VST_BBENTRY_6_ABBREV,
 
   // CONSTANTS_BLOCK abbrev id's.
-  CONSTANTS_SETTYPE_ABBREV = bitc::FIRST_APPLICATION_ABBREV,
+  CONSTANTS_SETTYPE_ABBREV = llvm::bitc::FIRST_APPLICATION_ABBREV,
   CONSTANTS_INTEGER_ABBREV,
   CONSTANTS_CE_CAST_Abbrev,
   CONSTANTS_NULL_Abbrev,
 
   // FUNCTION_BLOCK abbrev id's.
-  FUNCTION_INST_LOAD_ABBREV = bitc::FIRST_APPLICATION_ABBREV,
+  FUNCTION_INST_LOAD_ABBREV = llvm::bitc::FIRST_APPLICATION_ABBREV,
   FUNCTION_INST_BINOP_ABBREV,
   FUNCTION_INST_BINOP_FLAGS_ABBREV,
   FUNCTION_INST_CAST_ABBREV,
@@ -335,53 +337,53 @@ static void WriteTypeTable(const ValueEnumerator &VE, BitstreamWriter &Stream) {
   uint64_t NumBits = VE.computeBitsRequiredForTypeIndicies();
 
   // Abbrev for TYPE_CODE_POINTER.
-  IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+  auto Abbv = std::make_shared<BitCodeAbbrev>();
   Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_POINTER));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, NumBits));
   Abbv->Add(BitCodeAbbrevOp(0));  // Addrspace = 0
-  unsigned PtrAbbrev = Stream.EmitAbbrev(Abbv.get());
+  unsigned PtrAbbrev = Stream.EmitAbbrev(Abbv);
 
   // Abbrev for TYPE_CODE_FUNCTION.
-  Abbv = new BitCodeAbbrev();
+  Abbv = std::make_shared<BitCodeAbbrev>();
   Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_FUNCTION));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1));  // isvararg
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, NumBits));
 
-  unsigned FunctionAbbrev = Stream.EmitAbbrev(Abbv.get());
+  unsigned FunctionAbbrev = Stream.EmitAbbrev(Abbv);
 
   // Abbrev for TYPE_CODE_STRUCT_ANON.
-  Abbv = new BitCodeAbbrev();
+  Abbv = std::make_shared<BitCodeAbbrev>();
   Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_STRUCT_ANON));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1));  // ispacked
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, NumBits));
 
-  unsigned StructAnonAbbrev = Stream.EmitAbbrev(Abbv.get());
+  unsigned StructAnonAbbrev = Stream.EmitAbbrev(Abbv);
 
   // Abbrev for TYPE_CODE_STRUCT_NAME.
-  Abbv = new BitCodeAbbrev();
+  Abbv = std::make_shared<BitCodeAbbrev>();
   Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_STRUCT_NAME));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Char6));
-  unsigned StructNameAbbrev = Stream.EmitAbbrev(Abbv.get());
+  unsigned StructNameAbbrev = Stream.EmitAbbrev(Abbv);
 
   // Abbrev for TYPE_CODE_STRUCT_NAMED.
-  Abbv = new BitCodeAbbrev();
+  Abbv = std::make_shared<BitCodeAbbrev>();
   Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_STRUCT_NAMED));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1));  // ispacked
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, NumBits));
 
-  unsigned StructNamedAbbrev = Stream.EmitAbbrev(Abbv.get());
+  unsigned StructNamedAbbrev = Stream.EmitAbbrev(Abbv);
 
   // Abbrev for TYPE_CODE_ARRAY.
-  Abbv = new BitCodeAbbrev();
+  Abbv = std::make_shared<BitCodeAbbrev>();
   Abbv->Add(BitCodeAbbrevOp(bitc::TYPE_CODE_ARRAY));
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));   // size
   Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, NumBits));
 
-  unsigned ArrayAbbrev = Stream.EmitAbbrev(Abbv.get());
+  unsigned ArrayAbbrev = Stream.EmitAbbrev(Abbv);
 
   // Emit an entry count so the reader can reserve space.
   TypeVals.push_back(TypeList.size());
@@ -633,7 +635,7 @@ static void WriteModuleInfo(const Module *M, const ValueEnumerator &VE,
   unsigned SimpleGVarAbbrev = 0;
   if (!M->global_empty()) {
     // Add an abbrev for common globals with no visibility or thread localness.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::MODULE_CODE_GLOBALVAR));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed,
                               Log2_32_Ceil(MaxGlobalType+1)));
@@ -655,7 +657,7 @@ static void WriteModuleInfo(const Module *M, const ValueEnumerator &VE,
       Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed,
                                Log2_32_Ceil(SectionMap.size()+1)));
     // Don't bother emitting vis + thread local.
-    SimpleGVarAbbrev = Stream.EmitAbbrev(Abbv.get());
+    SimpleGVarAbbrev = Stream.EmitAbbrev(Abbv);
   }
 
   // Emit the global variable information.
@@ -1172,11 +1174,11 @@ static void WriteModuleMetadata(const Module *M,
   unsigned MDSAbbrev = 0;
   if (VE.hasMDString()) {
     // Abbrev for METADATA_STRING.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_STRING));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
-    MDSAbbrev = Stream.EmitAbbrev(Abbv.get());
+    MDSAbbrev = Stream.EmitAbbrev(Abbv);
   }
 
   // Initialize MDNode abbreviations.
@@ -1188,14 +1190,14 @@ static void WriteModuleMetadata(const Module *M,
     //
     // Assume the column is usually under 128, and always output the inlined-at
     // location (it's never more expensive than building an array size 1).
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_LOCATION));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
-    DILocationAbbrev = Stream.EmitAbbrev(Abbv.get());
+    DILocationAbbrev = Stream.EmitAbbrev(Abbv);
   }
 
   if (VE.hasGenericDINode()) {
@@ -1203,7 +1205,7 @@ static void WriteModuleMetadata(const Module *M,
     //
     // Assume the column is usually under 128, and always output the inlined-at
     // location (it's never more expensive than building an array size 1).
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_GENERIC_DEBUG));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
@@ -1211,17 +1213,17 @@ static void WriteModuleMetadata(const Module *M,
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
-    GenericDINodeAbbrev = Stream.EmitAbbrev(Abbv.get());
+    GenericDINodeAbbrev = Stream.EmitAbbrev(Abbv);
   }
 
   unsigned NameAbbrev = 0;
   if (!M->named_metadata_empty()) {
     // Abbrev for METADATA_NAME.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::METADATA_NAME));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
-    NameAbbrev = Stream.EmitAbbrev(Abbv.get());
+    NameAbbrev = Stream.EmitAbbrev(Abbv);
   }
 
   SmallVector<uint64_t, 64> Record;
@@ -1319,7 +1321,7 @@ static void WriteMetadataAttachment(const Function &F,
       // If no metadata, ignore instruction.
       if (MDs.empty()) continue;
 
-      Record.push_back(VE.getInstructionID(I));
+      Record.push_back(VE.getInstructionID(&*I));
 
       for (unsigned i = 0, e = MDs.size(); i != e; ++i) {
         Record.push_back(MDs[i].first);
@@ -1377,30 +1379,30 @@ static void WriteConstants(unsigned FirstVal, unsigned LastVal,
   // If this is a constant pool for the module, emit module-specific abbrevs.
   if (isGlobal) {
     // Abbrev for CST_CODE_AGGREGATE.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_AGGREGATE));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, Log2_32_Ceil(LastVal+1)));
-    AggregateAbbrev = Stream.EmitAbbrev(Abbv.get());
+    AggregateAbbrev = Stream.EmitAbbrev(Abbv);
 
     // Abbrev for CST_CODE_STRING.
-    Abbv = new BitCodeAbbrev();
+    Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_STRING));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
-    String8Abbrev = Stream.EmitAbbrev(Abbv.get());
+    String8Abbrev = Stream.EmitAbbrev(Abbv);
     // Abbrev for CST_CODE_CSTRING.
-    Abbv = new BitCodeAbbrev();
+    Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_CSTRING));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 7));
-    CString7Abbrev = Stream.EmitAbbrev(Abbv.get());
+    CString7Abbrev = Stream.EmitAbbrev(Abbv);
     // Abbrev for CST_CODE_CSTRING.
-    Abbv = new BitCodeAbbrev();
+    Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_CSTRING));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Char6));
-    CString6Abbrev = Stream.EmitAbbrev(Abbv.get());
+    CString6Abbrev = Stream.EmitAbbrev(Abbv);
   }
 
   SmallVector<uint64_t, 64> Record;
@@ -2191,169 +2193,169 @@ static void WriteBlockInfo(const ValueEnumerator &VE, BitstreamWriter &Stream) {
   // We only want to emit block info records for blocks that have multiple
   // instances: CONSTANTS_BLOCK, FUNCTION_BLOCK and VALUE_SYMTAB_BLOCK.
   // Other blocks can define their abbrevs inline.
-  Stream.EnterBlockInfoBlock(2);
+  Stream.EnterBlockInfoBlock();
 
   { // 8-bit fixed-width VST_ENTRY/VST_BBENTRY strings.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 3));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 8));
-    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID,
-                                   Abbv.get()) != VST_ENTRY_8_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID, Abbv) !=
+        VST_ENTRY_8_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
 
   { // 7-bit fixed width VST_ENTRY strings.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::VST_CODE_ENTRY));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 7));
-    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID,
-                                   Abbv.get()) != VST_ENTRY_7_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID, Abbv) !=
+        VST_ENTRY_7_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // 6-bit char6 VST_ENTRY strings.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::VST_CODE_ENTRY));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Char6));
-    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID,
-                                   Abbv.get()) != VST_ENTRY_6_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID, Abbv) !=
+        VST_ENTRY_6_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // 6-bit char6 VST_BBENTRY strings.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::VST_CODE_BBENTRY));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Char6));
-    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID,
-                                   Abbv.get()) != VST_BBENTRY_6_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::VALUE_SYMTAB_BLOCK_ID, Abbv) !=
+        VST_BBENTRY_6_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
 
 
 
   { // SETTYPE abbrev for CONSTANTS_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_SETTYPE));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed,
                               VE.computeBitsRequiredForTypeIndicies()));
-    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID,
-                                   Abbv.get()) != CONSTANTS_SETTYPE_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID, Abbv) !=
+        CONSTANTS_SETTYPE_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
 
   { // INTEGER abbrev for CONSTANTS_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_INTEGER));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));
-    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID,
-                                   Abbv.get()) != CONSTANTS_INTEGER_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID, Abbv) !=
+        CONSTANTS_INTEGER_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
 
   { // CE_CAST abbrev for CONSTANTS_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_CE_CAST));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 4));  // cast opc
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed,       // typeid
                               VE.computeBitsRequiredForTypeIndicies()));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 8));    // value id
 
-    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID,
-                                   Abbv.get()) != CONSTANTS_CE_CAST_Abbrev)
+    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID, Abbv) !=
+        CONSTANTS_CE_CAST_Abbrev)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // NULL abbrev for CONSTANTS_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::CST_CODE_NULL));
-    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID,
-                                   Abbv.get()) != CONSTANTS_NULL_Abbrev)
+    if (Stream.EmitBlockInfoAbbrev(bitc::CONSTANTS_BLOCK_ID, Abbv) !=
+        CONSTANTS_NULL_Abbrev)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
 
   // FIXME: This should only use space for first class types!
 
   { // INST_LOAD abbrev for FUNCTION_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_LOAD));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // Ptr
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed,    // dest ty
                               VE.computeBitsRequiredForTypeIndicies()));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 4)); // Align
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // volatile
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID,
-                                   Abbv.get()) != FUNCTION_INST_LOAD_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
+        FUNCTION_INST_LOAD_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // INST_BINOP abbrev for FUNCTION_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_BINOP));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // LHS
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // RHS
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 4)); // opc
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID,
-                                   Abbv.get()) != FUNCTION_INST_BINOP_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
+        FUNCTION_INST_BINOP_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // INST_BINOP_FLAGS abbrev for FUNCTION_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_BINOP));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // LHS
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // RHS
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 4)); // opc
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 7)); // flags
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID,
-                                   Abbv.get()) != FUNCTION_INST_BINOP_FLAGS_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
+        FUNCTION_INST_BINOP_FLAGS_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // INST_CAST abbrev for FUNCTION_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_CAST));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));    // OpVal
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed,       // dest ty
                               VE.computeBitsRequiredForTypeIndicies()));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 4));  // opc
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID,
-                                   Abbv.get()) != FUNCTION_INST_CAST_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
+        FUNCTION_INST_CAST_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
 
   { // INST_RET abbrev for FUNCTION_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_RET));
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID,
-                                   Abbv.get()) != FUNCTION_INST_RET_VOID_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
+        FUNCTION_INST_RET_VOID_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // INST_RET abbrev for FUNCTION_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_RET));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6)); // ValID
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID,
-                                   Abbv.get()) != FUNCTION_INST_RET_VAL_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
+        FUNCTION_INST_RET_VAL_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   { // INST_UNREACHABLE abbrev for FUNCTION_BLOCK.
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_UNREACHABLE));
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID,
-                                   Abbv.get()) != FUNCTION_INST_UNREACHABLE_ABBREV)
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
+        FUNCTION_INST_UNREACHABLE_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
   {
-    IntrusiveRefCntPtr<BitCodeAbbrev> Abbv = new BitCodeAbbrev();
+    auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::FUNC_CODE_INST_GEP));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, // dest ty
                               Log2_32_Ceil(VE.getTypes().size() + 1)));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Array));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::VBR, 6));
-    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv.get()) !=
+    if (Stream.EmitBlockInfoAbbrev(bitc::FUNCTION_BLOCK_ID, Abbv) !=
         FUNCTION_INST_GEP_ABBREV)
       llvm_unreachable("Unexpected abbrev ordering!");
   }
@@ -2488,8 +2490,8 @@ static void EmitDarwinBCHeaderAndTrailer(SmallVectorImpl<char> &Buffer,
 
 /// WriteBitcodeToFile - Write the specified module to the specified output
 /// stream.
-void llvm::WriteBitcodeToFile(const Module *M, raw_ostream &Out,
-                              bool ShouldPreserveUseListOrder) {
+void WriteBitcodeToFile(const Module *M, raw_ostream &Out,
+                        bool ShouldPreserveUseListOrder) {
   SmallVector<char, 0> Buffer;
   Buffer.reserve(256*1024);
 
@@ -2521,3 +2523,5 @@ void llvm::WriteBitcodeToFile(const Module *M, raw_ostream &Out,
   // Write the generated bitstream to "Out".
   Out.write((char*)&Buffer.front(), Buffer.size());
 }
+
+} // namespace dxil

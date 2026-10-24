@@ -23,18 +23,16 @@
 #include <string>
 
 namespace dxil {
-  class BitstreamWriter;
   class DataStreamer;
   class LLVMContext;
   class Module;
-  class raw_ostream;
 
   /// Read the header of the specified bitcode buffer and prepare for lazy
   /// deserialization of function bodies. If ShouldLazyLoadMetadata is true,
   /// lazily load metadata as well. If successful, this moves Buffer. On
   /// error, this *does not* move Buffer.
-  ErrorOr<std::unique_ptr<Module>>
-  getLazyBitcodeModule(std::unique_ptr<MemoryBuffer> &&Buffer,
+  llvm::ErrorOr<std::unique_ptr<Module>>
+  getLazyBitcodeModule(std::unique_ptr<llvm::MemoryBuffer> &&Buffer,
                        LLVMContext &Context,
                        DiagnosticHandlerFunction DiagnosticHandler = nullptr,
                        bool ShouldLazyLoadMetadata = false,
@@ -42,8 +40,8 @@ namespace dxil {
 
   /// Read the header of the specified stream and prepare for lazy
   /// deserialization and streaming of function bodies.
-  ErrorOr<std::unique_ptr<Module>> getStreamedBitcodeModule(
-      StringRef Name, std::unique_ptr<DataStreamer> Streamer,
+  llvm::ErrorOr<std::unique_ptr<Module>> getStreamedBitcodeModule(
+      llvm::StringRef Name, std::unique_ptr<DataStreamer> Streamer,
       LLVMContext &Context,
       DiagnosticHandlerFunction DiagnosticHandler = nullptr);
 
@@ -51,12 +49,12 @@ namespace dxil {
   /// triple information. If successful, this returns a string. On error, this
   /// returns "".
   std::string
-  getBitcodeTargetTriple(MemoryBufferRef Buffer, LLVMContext &Context,
+  getBitcodeTargetTriple(llvm::MemoryBufferRef Buffer, LLVMContext &Context,
                          DiagnosticHandlerFunction DiagnosticHandler = nullptr);
 
   /// Read the specified bitcode file, returning the module.
-  ErrorOr<std::unique_ptr<Module>>
-  parseBitcodeFile(MemoryBufferRef Buffer, LLVMContext &Context,
+  llvm::ErrorOr<std::unique_ptr<Module>>
+  parseBitcodeFile(llvm::MemoryBufferRef Buffer, LLVMContext &Context,
                    DiagnosticHandlerFunction DiagnosticHandler = nullptr,
                    bool ShouldTrackBitstreamUsage = false); // HLSL Change
 
@@ -68,7 +66,7 @@ namespace dxil {
   /// If \c ShouldPreserveUseListOrder, encode the use-list order for each \a
   /// Value in \c M.  These will be reconstructed exactly when \a M is
   /// deserialized.
-  void WriteBitcodeToFile(const Module *M, raw_ostream &Out,
+  void WriteBitcodeToFile(const Module *M, llvm::raw_ostream &Out,
                           bool ShouldPreserveUseListOrder = false);
 
   const std::error_category &BitcodeErrorCategory();
@@ -78,12 +76,12 @@ namespace dxil {
   }
 
   class BitcodeDiagnosticInfo : public DiagnosticInfo {
-    const Twine &Msg;
+    const llvm::Twine &Msg;
     std::error_code EC;
 
   public:
     BitcodeDiagnosticInfo(std::error_code EC, DiagnosticSeverity Severity,
-                          const Twine &Msg);
+                          const llvm::Twine &Msg);
     void print(DiagnosticPrinter &DP) const override;
     std::error_code getError() const { return EC; };
 
@@ -92,7 +90,7 @@ namespace dxil {
     }
   };
 
-} // End llvm namespace
+  } // namespace dxil
 
 namespace std {
 template <> struct is_error_code_enum<dxil::BitcodeError> : std::true_type {};

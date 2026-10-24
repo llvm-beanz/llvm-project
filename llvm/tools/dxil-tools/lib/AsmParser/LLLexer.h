@@ -21,16 +21,14 @@
 #include <string>
 
 namespace dxil {
-  class MemoryBuffer;
   class Type;
-  class SMDiagnostic;
   class LLVMContext;
 
   class LLLexer {
     const char *CurPtr;
-    StringRef CurBuf;
-    SMDiagnostic &ErrorInfo;
-    SourceMgr &SM;
+    llvm::StringRef CurBuf;
+    llvm::SMDiagnostic &ErrorInfo;
+    llvm::SourceMgr &SM;
     LLVMContext &Context;
 
     // Information about the current token.
@@ -39,32 +37,33 @@ namespace dxil {
     std::string StrVal;
     unsigned UIntVal;
     Type *TyVal;
-    APFloat APFloatVal;
-    APSInt  APSIntVal;
+    llvm::APFloat APFloatVal;
+    llvm::APSInt APSIntVal;
 
   public:
-    explicit LLLexer(StringRef StartBuf, SourceMgr &SM, SMDiagnostic &,
-                     LLVMContext &C);
+    explicit LLLexer(llvm::StringRef StartBuf, llvm::SourceMgr &SM,
+                     llvm::SMDiagnostic &, LLVMContext &C);
 
     lltok::Kind Lex() {
       return CurKind = LexToken();
     }
 
-    typedef SMLoc LocTy;
-    LocTy getLoc() const { return SMLoc::getFromPointer(TokStart); }
+    typedef llvm::SMLoc LocTy;
+    LocTy getLoc() const { return llvm::SMLoc::getFromPointer(TokStart); }
     lltok::Kind getKind() const { return CurKind; }
     const std::string &getStrVal() const { return StrVal; }
     Type *getTyVal() const { return TyVal; }
     unsigned getUIntVal() const { return UIntVal; }
-    const APSInt &getAPSIntVal() const { return APSIntVal; }
-    const APFloat &getAPFloatVal() const { return APFloatVal; }
+    const llvm::APSInt &getAPSIntVal() const { return APSIntVal; }
+    const llvm::APFloat &getAPFloatVal() const { return APFloatVal; }
 
+    bool Error(LocTy L, const llvm::Twine &Msg) const;
+    bool Error(const llvm::Twine &Msg) const { return Error(getLoc(), Msg); }
 
-    bool Error(LocTy L, const Twine &Msg) const;
-    bool Error(const Twine &Msg) const { return Error(getLoc(), Msg); }
-
-    void Warning(LocTy WarningLoc, const Twine &Msg) const;
-    void Warning(const Twine &Msg) const { return Warning(getLoc(), Msg); }
+    void Warning(LocTy WarningLoc, const llvm::Twine &Msg) const;
+    void Warning(const llvm::Twine &Msg) const {
+      return Warning(getLoc(), Msg);
+    }
 
   private:
     lltok::Kind LexToken();
@@ -91,6 +90,6 @@ namespace dxil {
     void HexToIntPair(const char *Buffer, const char *End, uint64_t Pair[2]);
     void FP80HexToIntPair(const char *Buff, const char *End, uint64_t Pair[2]);
   };
-} // end namespace llvm
+  } // end namespace dxil
 
 #endif

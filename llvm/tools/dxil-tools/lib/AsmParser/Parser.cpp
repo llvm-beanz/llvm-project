@@ -11,10 +11,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "dxil/AsmParser//Parser.h"
+#include "dxil/AsmParser/Parser.h"
 #include "LLParser.h"
-#include "llvm/ADT/STLExtras.h"
 #include "dxil/IR/Module.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
@@ -22,8 +22,10 @@
 #include <system_error>
 using namespace llvm;
 
-bool llvm::parseAssemblyInto(MemoryBufferRef F, Module &M, SMDiagnostic &Err,
-                             SlotMapping *Slots) {
+namespace dxil {
+
+bool parseAssemblyInto(MemoryBufferRef F, Module &M, SMDiagnostic &Err,
+                       SlotMapping *Slots) {
   SourceMgr SM;
   std::unique_ptr<MemoryBuffer> Buf = MemoryBuffer::getMemBuffer(F);
   SM.AddNewSourceBuffer(std::move(Buf), SMLoc());
@@ -31,12 +33,11 @@ bool llvm::parseAssemblyInto(MemoryBufferRef F, Module &M, SMDiagnostic &Err,
   return LLParser(F.getBuffer(), SM, Err, &M, Slots).Run();
 }
 
-std::unique_ptr<Module> llvm::parseAssembly(MemoryBufferRef F,
-                                            SMDiagnostic &Err,
-                                            LLVMContext &Context,
-                                            SlotMapping *Slots) {
+std::unique_ptr<Module> parseAssembly(MemoryBufferRef F, SMDiagnostic &Err,
+                                      LLVMContext &Context,
+                                      SlotMapping *Slots) {
   std::unique_ptr<Module> M =
-      make_unique<Module>(F.getBufferIdentifier(), Context);
+      std::make_unique<Module>(F.getBufferIdentifier(), Context);
 
   if (parseAssemblyInto(F, *M, Err, Slots))
     return nullptr;
@@ -44,10 +45,9 @@ std::unique_ptr<Module> llvm::parseAssembly(MemoryBufferRef F,
   return M;
 }
 
-std::unique_ptr<Module> llvm::parseAssemblyFile(StringRef Filename,
-                                                SMDiagnostic &Err,
-                                                LLVMContext &Context,
-                                                SlotMapping *Slots) {
+std::unique_ptr<Module> parseAssemblyFile(StringRef Filename, SMDiagnostic &Err,
+                                          LLVMContext &Context,
+                                          SlotMapping *Slots) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> FileOrErr =
       MemoryBuffer::getFileOrSTDIN(Filename);
   if (std::error_code EC = FileOrErr.getError()) {
@@ -59,10 +59,12 @@ std::unique_ptr<Module> llvm::parseAssemblyFile(StringRef Filename,
   return parseAssembly(FileOrErr.get()->getMemBufferRef(), Err, Context, Slots);
 }
 
-std::unique_ptr<Module> llvm::parseAssemblyString(StringRef AsmString,
-                                                  SMDiagnostic &Err,
-                                                  LLVMContext &Context,
-                                                  SlotMapping *Slots) {
+std::unique_ptr<Module> parseAssemblyString(StringRef AsmString,
+                                            SMDiagnostic &Err,
+                                            LLVMContext &Context,
+                                            SlotMapping *Slots) {
   MemoryBufferRef F(AsmString, "<string>");
   return parseAssembly(F, Err, Context, Slots);
 }
+
+} // namespace dxil

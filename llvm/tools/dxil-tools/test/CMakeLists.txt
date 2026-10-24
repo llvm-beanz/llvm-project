@@ -6,5 +6,5 @@ configure_lit_site_cfg(
 
 add_lit_testsuite(check-dxil-tools "Running DXIL tools tests"
   ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS dxil-tblgen FileCheck
+  DEPENDS dxil-as dxil-tblgen llvm-bcanalyzer FileCheck
   )

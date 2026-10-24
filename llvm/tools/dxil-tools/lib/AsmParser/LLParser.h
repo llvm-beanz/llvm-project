@@ -60,8 +60,8 @@ namespace dxil {
     LLLexer::LocTy Loc;
     unsigned UIntVal;
     std::string StrVal, StrVal2;
-    APSInt APSIntVal;
-    APFloat APFloatVal;
+    llvm::APSInt APSIntVal;
+    llvm::APFloat APFloatVal;
     Constant *ConstantVal;
     Constant **ConstantStructElts;
 
@@ -101,15 +101,15 @@ namespace dxil {
     // which otherwise support RAUW. Instead, we defer resolving MDNode
     // references until the definitions have been processed.
     struct MDRef {
-      SMLoc Loc;
+      llvm::SMLoc Loc;
       unsigned MDKind, MDSlot;
     };
 
-    SmallVector<Instruction*, 64> InstsWithTBAATag;
+    llvm::SmallVector<Instruction *, 64> InstsWithTBAATag;
 
     // Type resolution handling data structures.  The location is set when we
     // have processed a use of the type but not a definition yet.
-    StringMap<std::pair<Type*, LocTy> > NamedTypes;
+    llvm::StringMap<std::pair<Type *, LocTy>> NamedTypes;
     std::map<unsigned, std::pair<Type*, LocTy> > NumberedTypes;
 
     std::map<unsigned, TrackingMDNodeRef> NumberedMetadata;
@@ -137,8 +137,8 @@ namespace dxil {
     std::map<unsigned, AttrBuilder> NumberedAttrBuilders;
 
   public:
-    LLParser(StringRef F, SourceMgr &SM, SMDiagnostic &Err, Module *M,
-             SlotMapping *Slots = nullptr)
+    LLParser(llvm::StringRef F, llvm::SourceMgr &SM, llvm::SMDiagnostic &Err,
+             Module *M, SlotMapping *Slots = nullptr)
         : Context(M->getContext()), Lex(F, SM, Err, M->getContext()), M(M),
           Slots(Slots), BlockAddressPFS(nullptr) {}
     bool Run();
@@ -146,11 +146,10 @@ namespace dxil {
     LLVMContext &getContext() { return Context; }
 
   private:
-
-    bool Error(LocTy L, const Twine &Msg) const {
+    bool Error(LocTy L, const llvm::Twine &Msg) const {
       return Lex.Error(L, Msg);
     }
-    bool TokError(const Twine &Msg) const {
+    bool TokError(const llvm::Twine &Msg) const {
       return Error(Lex.getLoc(), Msg);
     }
 
@@ -233,8 +232,9 @@ namespace dxil {
     bool ParseOptionalStackAlignment(unsigned &Alignment);
     bool ParseOptionalCommaAlign(unsigned &Alignment, bool &AteExtraComma);
     bool ParseOptionalCommaInAlloca(bool &IsInAlloca);
-    bool ParseIndexList(SmallVectorImpl<unsigned> &Indices,bool &AteExtraComma);
-    bool ParseIndexList(SmallVectorImpl<unsigned> &Indices) {
+    bool ParseIndexList(llvm::SmallVectorImpl<unsigned> &Indices,
+                        bool &AteExtraComma);
+    bool ParseIndexList(llvm::SmallVectorImpl<unsigned> &Indices) {
       bool AteExtraComma;
       if (ParseIndexList(Indices, AteExtraComma)) return true;
       if (AteExtraComma)
@@ -274,11 +274,12 @@ namespace dxil {
                                     bool inAttrGrp, LocTy &BuiltinLoc);
 
     // Type Parsing.
-    bool ParseType(Type *&Result, const Twine &Msg, bool AllowVoid = false);
+    bool ParseType(Type *&Result, const llvm::Twine &Msg,
+                   bool AllowVoid = false);
     bool ParseType(Type *&Result, bool AllowVoid = false) {
       return ParseType(Result, "expected type", AllowVoid);
     }
-    bool ParseType(Type *&Result, const Twine &Msg, LocTy &Loc,
+    bool ParseType(Type *&Result, const llvm::Twine &Msg, LocTy &Loc,
                    bool AllowVoid = false) {
       Loc = Lex.getLoc();
       return ParseType(Result, Msg, AllowVoid);
@@ -288,9 +289,9 @@ namespace dxil {
       return ParseType(Result, AllowVoid);
     }
     bool ParseAnonStructType(Type *&Result, bool Packed);
-    bool ParseStructBody(SmallVectorImpl<Type*> &Body);
-    bool ParseStructDefinition(SMLoc TypeLoc, StringRef Name,
-                               std::pair<Type*, LocTy> &Entry,
+    bool ParseStructBody(llvm::SmallVectorImpl<Type *> &Body);
+    bool ParseStructDefinition(llvm::SMLoc TypeLoc, llvm::StringRef Name,
+                               std::pair<Type *, LocTy> &Entry,
                                Type *&ResultTy);
 
     bool ParseArrayVectorType(Type *&Result, bool isVector);
@@ -376,32 +377,32 @@ namespace dxil {
       ParamInfo(LocTy loc, Value *v, AttributeSet attrs)
         : Loc(loc), V(v), Attrs(attrs) {}
     };
-    bool ParseParameterList(SmallVectorImpl<ParamInfo> &ArgList,
-                            PerFunctionState &PFS,
-                            bool IsMustTailCall = false,
+    bool ParseParameterList(llvm::SmallVectorImpl<ParamInfo> &ArgList,
+                            PerFunctionState &PFS, bool IsMustTailCall = false,
                             bool InVarArgsFunc = false);
 
     // Constant Parsing.
     bool ParseValID(ValID &ID, PerFunctionState *PFS = nullptr);
     bool ParseGlobalValue(Type *Ty, Constant *&V);
     bool ParseGlobalTypeAndValue(Constant *&V);
-    bool ParseGlobalValueVector(SmallVectorImpl<Constant *> &Elts);
-    bool parseOptionalComdat(StringRef GlobalName, Comdat *&C);
+    bool ParseGlobalValueVector(llvm::SmallVectorImpl<Constant *> &Elts);
+    bool parseOptionalComdat(llvm::StringRef GlobalName, Comdat *&C);
     bool ParseMetadataAsValue(Value *&V, PerFunctionState &PFS);
-    bool ParseValueAsMetadata(Metadata *&MD, const Twine &TypeMsg,
+    bool ParseValueAsMetadata(Metadata *&MD, const llvm::Twine &TypeMsg,
                               PerFunctionState *PFS);
     bool ParseMetadata(Metadata *&MD, PerFunctionState *PFS);
     bool ParseMDTuple(MDNode *&MD, bool IsDistinct = false);
     bool ParseMDNode(MDNode *&MD);
     bool ParseMDNodeTail(MDNode *&MD);
-    bool ParseMDNodeVector(SmallVectorImpl<Metadata *> &MDs);
+    bool ParseMDNodeVector(llvm::SmallVectorImpl<Metadata *> &MDs);
     bool ParseMetadataAttachment(unsigned &Kind, MDNode *&MD);
     bool ParseInstructionMetadata(Instruction &Inst);
     bool ParseOptionalFunctionMetadata(Function &F);
 
     template <class FieldTy>
-    bool ParseMDField(LocTy Loc, StringRef Name, FieldTy &Result);
-    template <class FieldTy> bool ParseMDField(StringRef Name, FieldTy &Result);
+    bool ParseMDField(LocTy Loc, llvm::StringRef Name, FieldTy &Result);
+    template <class FieldTy>
+    bool ParseMDField(llvm::StringRef Name, FieldTy &Result);
     template <class ParserTy>
     bool ParseMDFieldsImplBody(ParserTy parseField);
     template <class ParserTy>
@@ -421,7 +422,8 @@ namespace dxil {
       ArgInfo(LocTy L, Type *ty, AttributeSet Attr, const std::string &N)
         : Loc(L), Ty(ty), Attrs(Attr), Name(N) {}
     };
-    bool ParseArgumentList(SmallVectorImpl<ArgInfo> &ArgList, bool &isVarArg);
+    bool ParseArgumentList(llvm::SmallVectorImpl<ArgInfo> &ArgList,
+                           bool &isVarArg);
     bool ParseFunctionHeader(Function *&Fn, bool isDefine);
     bool ParseFunctionBody(Function &Fn);
     bool ParseBasicBlock(PerFunctionState &PFS);
@@ -469,9 +471,10 @@ namespace dxil {
     // Use-list order directives.
     bool ParseUseListOrder(PerFunctionState *PFS = nullptr);
     bool ParseUseListOrderBB();
-    bool ParseUseListOrderIndexes(SmallVectorImpl<unsigned> &Indexes);
-    bool sortUseListOrder(Value *V, ArrayRef<unsigned> Indexes, SMLoc Loc);
+    bool ParseUseListOrderIndexes(llvm::SmallVectorImpl<unsigned> &Indexes);
+    bool sortUseListOrder(Value *V, llvm::ArrayRef<unsigned> Indexes,
+                          llvm::SMLoc Loc);
   };
-} // End llvm namespace
+  } // namespace dxil
 
 #endif
