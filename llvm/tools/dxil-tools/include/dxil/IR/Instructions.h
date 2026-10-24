@@ -29,7 +29,6 @@
 
 namespace dxil {
 
-class APInt;
 class ConstantInt;
 class ConstantRange;
 class DataLayout;
@@ -83,18 +82,19 @@ protected:
 
 public:
   explicit AllocaInst(Type *Ty, Value *ArraySize = nullptr,
-                      const Twine &Name = "",
+                      const llvm::Twine &Name = "",
                       Instruction *InsertBefore = nullptr);
-  AllocaInst(Type *Ty, Value *ArraySize,
-             const Twine &Name, BasicBlock *InsertAtEnd);
+  AllocaInst(Type *Ty, Value *ArraySize, const llvm::Twine &Name,
+             BasicBlock *InsertAtEnd);
 
-  AllocaInst(Type *Ty, const Twine &Name, Instruction *InsertBefore = nullptr);
-  AllocaInst(Type *Ty, const Twine &Name, BasicBlock *InsertAtEnd);
+  AllocaInst(Type *Ty, const llvm::Twine &Name,
+             Instruction *InsertBefore = nullptr);
+  AllocaInst(Type *Ty, const llvm::Twine &Name, BasicBlock *InsertAtEnd);
 
   AllocaInst(Type *Ty, Value *ArraySize, unsigned Align,
-             const Twine &Name = "", Instruction *InsertBefore = nullptr);
+             const llvm::Twine &Name = "", Instruction *InsertBefore = nullptr);
   AllocaInst(Type *Ty, Value *ArraySize, unsigned Align,
-             const Twine &Name, BasicBlock *InsertAtEnd);
+             const llvm::Twine &Name, BasicBlock *InsertAtEnd);
 
   // Out of line virtual method, so the vtable, etc. has a home.
   ~AllocaInst() override;
@@ -156,7 +156,7 @@ public:
     return (I->getOpcode() == Instruction::Alloca);
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   // Shadow Instruction::setInstructionSubclassData with a private forwarding
@@ -182,37 +182,37 @@ protected:
   LoadInst *cloneImpl() const;
 
 public:
-  LoadInst(Value *Ptr, const Twine &NameStr, Instruction *InsertBefore);
-  LoadInst(Value *Ptr, const Twine &NameStr, BasicBlock *InsertAtEnd);
-  LoadInst(Type *Ty, Value *Ptr, const Twine &NameStr, bool isVolatile = false,
-           Instruction *InsertBefore = nullptr);
-  LoadInst(Value *Ptr, const Twine &NameStr, bool isVolatile = false,
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, Instruction *InsertBefore);
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
+  LoadInst(Type *Ty, Value *Ptr, const llvm::Twine &NameStr,
+           bool isVolatile = false, Instruction *InsertBefore = nullptr);
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, bool isVolatile = false,
            Instruction *InsertBefore = nullptr)
       : LoadInst(cast<PointerType>(Ptr->getType())->getElementType(), Ptr,
                  NameStr, isVolatile, InsertBefore) {}
-  LoadInst(Value *Ptr, const Twine &NameStr, bool isVolatile,
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, bool isVolatile,
            BasicBlock *InsertAtEnd);
-  LoadInst(Value *Ptr, const Twine &NameStr, bool isVolatile, unsigned Align,
-           Instruction *InsertBefore = nullptr)
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, bool isVolatile,
+           unsigned Align, Instruction *InsertBefore = nullptr)
       : LoadInst(cast<PointerType>(Ptr->getType())->getElementType(), Ptr,
                  NameStr, isVolatile, Align, InsertBefore) {}
-  LoadInst(Type *Ty, Value *Ptr, const Twine &NameStr, bool isVolatile,
+  LoadInst(Type *Ty, Value *Ptr, const llvm::Twine &NameStr, bool isVolatile,
            unsigned Align, Instruction *InsertBefore = nullptr);
-  LoadInst(Value *Ptr, const Twine &NameStr, bool isVolatile,
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, bool isVolatile,
            unsigned Align, BasicBlock *InsertAtEnd);
-  LoadInst(Value *Ptr, const Twine &NameStr, bool isVolatile, unsigned Align,
-           AtomicOrdering Order, SynchronizationScope SynchScope = CrossThread,
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, bool isVolatile,
+           unsigned Align, AtomicOrdering Order,
+           SynchronizationScope SynchScope = CrossThread,
            Instruction *InsertBefore = nullptr)
       : LoadInst(cast<PointerType>(Ptr->getType())->getElementType(), Ptr,
                  NameStr, isVolatile, Align, Order, SynchScope, InsertBefore) {}
-  LoadInst(Type *Ty, Value *Ptr, const Twine &NameStr, bool isVolatile,
+  LoadInst(Type *Ty, Value *Ptr, const llvm::Twine &NameStr, bool isVolatile,
            unsigned Align, AtomicOrdering Order,
            SynchronizationScope SynchScope = CrossThread,
            Instruction *InsertBefore = nullptr);
-  LoadInst(Value *Ptr, const Twine &NameStr, bool isVolatile,
+  LoadInst(Value *Ptr, const llvm::Twine &NameStr, bool isVolatile,
            unsigned Align, AtomicOrdering Order,
-           SynchronizationScope SynchScope,
-           BasicBlock *InsertAtEnd);
+           SynchronizationScope SynchScope, BasicBlock *InsertAtEnd);
 
   LoadInst(Value *Ptr, const char *NameStr, Instruction *InsertBefore);
   LoadInst(Value *Ptr, const char *NameStr, BasicBlock *InsertAtEnd);
@@ -296,7 +296,7 @@ public:
     return I->getOpcode() == Instruction::Load;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   // Shadow Instruction::setInstructionSubclassData with a private forwarding
@@ -420,7 +420,7 @@ public:
     return I->getOpcode() == Instruction::Store;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   // Shadow Instruction::setInstructionSubclassData with a private forwarding
@@ -494,7 +494,7 @@ public:
     return I->getOpcode() == Instruction::Fence;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   // Shadow Instruction::setInstructionSubclassData with a private forwarding
@@ -646,7 +646,7 @@ public:
     return I->getOpcode() == Instruction::AtomicCmpXchg;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   // Shadow Instruction::setInstructionSubclassData with a private forwarding
@@ -793,7 +793,7 @@ public:
     return I->getOpcode() == Instruction::AtomicRMW;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   void Init(BinOp Operation, Value *Ptr, Value *Val,
@@ -832,18 +832,20 @@ class GetElementPtrInst : public Instruction {
   Type *ResultElementType;
 
   GetElementPtrInst(const GetElementPtrInst &GEPI);
-  void init(Value *Ptr, ArrayRef<Value *> IdxList, const Twine &NameStr);
+  void init(Value *Ptr, llvm::ArrayRef<Value *> IdxList,
+            const llvm::Twine &NameStr);
 
   /// Constructors - Create a getelementptr instruction with a base pointer an
   /// list of indices. The first ctor can optionally insert before an existing
   /// instruction, the second appends the new instruction to the specified
   /// BasicBlock.
   inline GetElementPtrInst(Type *PointeeType, Value *Ptr,
-                           ArrayRef<Value *> IdxList, unsigned Values,
-                           const Twine &NameStr, Instruction *InsertBefore);
+                           llvm::ArrayRef<Value *> IdxList, unsigned Values,
+                           const llvm::Twine &NameStr,
+                           Instruction *InsertBefore);
   inline GetElementPtrInst(Type *PointeeType, Value *Ptr,
-                           ArrayRef<Value *> IdxList, unsigned Values,
-                           const Twine &NameStr, BasicBlock *InsertAtEnd);
+                           llvm::ArrayRef<Value *> IdxList, unsigned Values,
+                           const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
 
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
@@ -852,8 +854,8 @@ protected:
 
 public:
   static GetElementPtrInst *Create(Type *PointeeType, Value *Ptr,
-                                   ArrayRef<Value *> IdxList,
-                                   const Twine &NameStr = "",
+                                   llvm::ArrayRef<Value *> IdxList,
+                                   const llvm::Twine &NameStr = "",
                                    Instruction *InsertBefore = nullptr) {
     unsigned Values = 1 + unsigned(IdxList.size());
     if (!PointeeType)
@@ -867,8 +869,8 @@ public:
                                           NameStr, InsertBefore);
   }
   static GetElementPtrInst *Create(Type *PointeeType, Value *Ptr,
-                                   ArrayRef<Value *> IdxList,
-                                   const Twine &NameStr,
+                                   llvm::ArrayRef<Value *> IdxList,
+                                   const llvm::Twine &NameStr,
                                    BasicBlock *InsertAtEnd) {
     unsigned Values = 1 + unsigned(IdxList.size());
     if (!PointeeType)
@@ -884,15 +886,15 @@ public:
 
   /// Create an "inbounds" getelementptr. See the documentation for the
   /// "inbounds" flag in LangRef.html for details.
-  static GetElementPtrInst *CreateInBounds(Value *Ptr,
-                                           ArrayRef<Value *> IdxList,
-                                           const Twine &NameStr = "",
-                                           Instruction *InsertBefore = nullptr){
+  static GetElementPtrInst *
+  CreateInBounds(Value *Ptr, llvm::ArrayRef<Value *> IdxList,
+                 const llvm::Twine &NameStr = "",
+                 Instruction *InsertBefore = nullptr) {
     return CreateInBounds(nullptr, Ptr, IdxList, NameStr, InsertBefore);
   }
   static GetElementPtrInst *
-  CreateInBounds(Type *PointeeType, Value *Ptr, ArrayRef<Value *> IdxList,
-                 const Twine &NameStr = "",
+  CreateInBounds(Type *PointeeType, Value *Ptr, llvm::ArrayRef<Value *> IdxList,
+                 const llvm::Twine &NameStr = "",
                  Instruction *InsertBefore = nullptr) {
     GetElementPtrInst *GEP =
         Create(PointeeType, Ptr, IdxList, NameStr, InsertBefore);
@@ -900,14 +902,14 @@ public:
     return GEP;
   }
   static GetElementPtrInst *CreateInBounds(Value *Ptr,
-                                           ArrayRef<Value *> IdxList,
-                                           const Twine &NameStr,
+                                           llvm::ArrayRef<Value *> IdxList,
+                                           const llvm::Twine &NameStr,
                                            BasicBlock *InsertAtEnd) {
     return CreateInBounds(nullptr, Ptr, IdxList, NameStr, InsertAtEnd);
   }
   static GetElementPtrInst *CreateInBounds(Type *PointeeType, Value *Ptr,
-                                           ArrayRef<Value *> IdxList,
-                                           const Twine &NameStr,
+                                           llvm::ArrayRef<Value *> IdxList,
+                                           const llvm::Twine &NameStr,
                                            BasicBlock *InsertAtEnd) {
     GetElementPtrInst *GEP =
         Create(PointeeType, Ptr, IdxList, NameStr, InsertAtEnd);
@@ -947,9 +949,9 @@ public:
   /// Null is returned if the indices are invalid for the specified
   /// pointer type.
   ///
-  static Type *getIndexedType(Type *Ty, ArrayRef<Value *> IdxList);
-  static Type *getIndexedType(Type *Ty, ArrayRef<Constant *> IdxList);
-  static Type *getIndexedType(Type *Ty, ArrayRef<uint64_t> IdxList);
+  static Type *getIndexedType(Type *Ty, llvm::ArrayRef<Value *> IdxList);
+  static Type *getIndexedType(Type *Ty, llvm::ArrayRef<Constant *> IdxList);
+  static Type *getIndexedType(Type *Ty, llvm::ArrayRef<uint64_t> IdxList);
 
   inline op_iterator       idx_begin()       { return op_begin()+1; }
   inline const_op_iterator idx_begin() const { return op_begin()+1; }
@@ -979,13 +981,13 @@ public:
 
   /// GetGEPReturnType - Returns the pointer type returned by the GEP
   /// instruction, which may be a vector of pointers.
-  static Type *getGEPReturnType(Value *Ptr, ArrayRef<Value *> IdxList) {
+  static Type *getGEPReturnType(Value *Ptr, llvm::ArrayRef<Value *> IdxList) {
     return getGEPReturnType(
         cast<PointerType>(Ptr->getType()->getScalarType())->getElementType(),
         Ptr, IdxList);
   }
   static Type *getGEPReturnType(Type *ElTy, Value *Ptr,
-                                ArrayRef<Value *> IdxList) {
+                                llvm::ArrayRef<Value *> IdxList) {
     Type *PtrTy = PointerType::get(checkGEPType(getIndexedType(ElTy, IdxList)),
                                    Ptr->getType()->getPointerAddressSpace());
     // Vector GEP
@@ -1029,20 +1031,21 @@ public:
 
   /// \brief Accumulate the constant address offset of this GEP if possible.
   ///
-  /// This routine accepts an APInt into which it will accumulate the constant
-  /// offset of this GEP if the GEP is in fact constant. If the GEP is not
-  /// all-constant, it returns false and the value of the offset APInt is
-  /// undefined (it is *not* preserved!). The APInt passed into this routine
-  /// must be at least as wide as the IntPtr type for the address space of
-  /// the base GEP pointer.
-  bool accumulateConstantOffset(const DataLayout &DL, APInt &Offset) const;
+  /// This routine accepts an llvm::APInt into which it will accumulate the
+  /// constant offset of this GEP if the GEP is in fact constant. If the GEP is
+  /// not all-constant, it returns false and the value of the offset llvm::APInt
+  /// is undefined (it is *not* preserved!). The llvm::APInt passed into this
+  /// routine must be at least as wide as the IntPtr type for the address space
+  /// of the base GEP pointer.
+  bool accumulateConstantOffset(const DataLayout &DL,
+                                llvm::APInt &Offset) const;
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
     return (I->getOpcode() == Instruction::GetElementPtr);
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -1052,8 +1055,9 @@ struct OperandTraits<GetElementPtrInst> :
 };
 
 GetElementPtrInst::GetElementPtrInst(Type *PointeeType, Value *Ptr,
-                                     ArrayRef<Value *> IdxList, unsigned Values,
-                                     const Twine &NameStr,
+                                     llvm::ArrayRef<Value *> IdxList,
+                                     unsigned Values,
+                                     const llvm::Twine &NameStr,
                                      Instruction *InsertBefore)
     : Instruction(getGEPReturnType(PointeeType, Ptr, IdxList), GetElementPtr,
                   OperandTraits<GetElementPtrInst>::op_end(this) - Values,
@@ -1065,8 +1069,9 @@ GetElementPtrInst::GetElementPtrInst(Type *PointeeType, Value *Ptr,
   init(Ptr, IdxList, NameStr);
 }
 GetElementPtrInst::GetElementPtrInst(Type *PointeeType, Value *Ptr,
-                                     ArrayRef<Value *> IdxList, unsigned Values,
-                                     const Twine &NameStr,
+                                     llvm::ArrayRef<Value *> IdxList,
+                                     unsigned Values,
+                                     const llvm::Twine &NameStr,
                                      BasicBlock *InsertAtEnd)
     : Instruction(getGEPReturnType(PointeeType, Ptr, IdxList), GetElementPtr,
                   OperandTraits<GetElementPtrInst>::op_end(this) - Values,
@@ -1109,43 +1114,41 @@ protected:
 
 public:
   /// \brief Constructor with insert-before-instruction semantics.
-  ICmpInst(
-    Instruction *InsertBefore,  ///< Where to insert
-    Predicate pred,  ///< The predicate to use for the comparison
-    Value *LHS,      ///< The left-hand-side of the expression
-    Value *RHS,      ///< The right-hand-side of the expression
-    const Twine &NameStr = ""  ///< Name of the instruction
-  ) : CmpInst(makeCmpResultType(LHS->getType()),
-              Instruction::ICmp, pred, LHS, RHS, NameStr,
-              InsertBefore) {
+  ICmpInst(Instruction *InsertBefore, ///< Where to insert
+           Predicate pred, ///< The predicate to use for the comparison
+           Value *LHS,     ///< The left-hand-side of the expression
+           Value *RHS,     ///< The right-hand-side of the expression
+           const llvm::Twine &NameStr = "" ///< Name of the instruction
+           )
+      : CmpInst(makeCmpResultType(LHS->getType()), Instruction::ICmp, pred, LHS,
+                RHS, NameStr, InsertBefore) {
 #ifndef NDEBUG
   AssertOK();
 #endif
   }
 
   /// \brief Constructor with insert-at-end semantics.
-  ICmpInst(
-    BasicBlock &InsertAtEnd, ///< Block to insert into.
-    Predicate pred,  ///< The predicate to use for the comparison
-    Value *LHS,      ///< The left-hand-side of the expression
-    Value *RHS,      ///< The right-hand-side of the expression
-    const Twine &NameStr = ""  ///< Name of the instruction
-  ) : CmpInst(makeCmpResultType(LHS->getType()),
-              Instruction::ICmp, pred, LHS, RHS, NameStr,
-              &InsertAtEnd) {
+  ICmpInst(BasicBlock &InsertAtEnd, ///< Block to insert into.
+           Predicate pred,          ///< The predicate to use for the comparison
+           Value *LHS,              ///< The left-hand-side of the expression
+           Value *RHS,              ///< The right-hand-side of the expression
+           const llvm::Twine &NameStr = "" ///< Name of the instruction
+           )
+      : CmpInst(makeCmpResultType(LHS->getType()), Instruction::ICmp, pred, LHS,
+                RHS, NameStr, &InsertAtEnd) {
 #ifndef NDEBUG
   AssertOK();
 #endif
   }
 
   /// \brief Constructor with no-insertion semantics
-  ICmpInst(
-    Predicate pred, ///< The predicate to use for the comparison
-    Value *LHS,     ///< The left-hand-side of the expression
-    Value *RHS,     ///< The right-hand-side of the expression
-    const Twine &NameStr = "" ///< Name of the instruction
-  ) : CmpInst(makeCmpResultType(LHS->getType()),
-              Instruction::ICmp, pred, LHS, RHS, NameStr) {
+  ICmpInst(Predicate pred, ///< The predicate to use for the comparison
+           Value *LHS,     ///< The left-hand-side of the expression
+           Value *RHS,     ///< The right-hand-side of the expression
+           const llvm::Twine &NameStr = "" ///< Name of the instruction
+           )
+      : CmpInst(makeCmpResultType(LHS->getType()), Instruction::ICmp, pred, LHS,
+                RHS, NameStr) {
 #ifndef NDEBUG
   AssertOK();
 #endif
@@ -1205,7 +1208,7 @@ public:
 
   /// Initialize a set of values that all satisfy the predicate with C.
   /// \brief Make a ConstantRange for a relation with a constant value.
-  static ConstantRange makeConstantRange(Predicate pred, const APInt &C);
+  static ConstantRange makeConstantRange(Predicate pred, const llvm::APInt &C);
 
   /// Exchange the two operands to this instruction in such a way that it does
   /// not modify the semantics of the instruction. The predicate value may be
@@ -1222,7 +1225,7 @@ public:
     return I->getOpcode() == Instruction::ICmp;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 
 };
@@ -1244,15 +1247,14 @@ protected:
 
 public:
   /// \brief Constructor with insert-before-instruction semantics.
-  FCmpInst(
-    Instruction *InsertBefore, ///< Where to insert
-    Predicate pred,  ///< The predicate to use for the comparison
-    Value *LHS,      ///< The left-hand-side of the expression
-    Value *RHS,      ///< The right-hand-side of the expression
-    const Twine &NameStr = ""  ///< Name of the instruction
-  ) : CmpInst(makeCmpResultType(LHS->getType()),
-              Instruction::FCmp, pred, LHS, RHS, NameStr,
-              InsertBefore) {
+  FCmpInst(Instruction *InsertBefore, ///< Where to insert
+           Predicate pred, ///< The predicate to use for the comparison
+           Value *LHS,     ///< The left-hand-side of the expression
+           Value *RHS,     ///< The right-hand-side of the expression
+           const llvm::Twine &NameStr = "" ///< Name of the instruction
+           )
+      : CmpInst(makeCmpResultType(LHS->getType()), Instruction::FCmp, pred, LHS,
+                RHS, NameStr, InsertBefore) {
     assert(pred <= FCmpInst::LAST_FCMP_PREDICATE &&
            "Invalid FCmp predicate value");
     assert(getOperand(0)->getType() == getOperand(1)->getType() &&
@@ -1263,15 +1265,14 @@ public:
   }
 
   /// \brief Constructor with insert-at-end semantics.
-  FCmpInst(
-    BasicBlock &InsertAtEnd, ///< Block to insert into.
-    Predicate pred,  ///< The predicate to use for the comparison
-    Value *LHS,      ///< The left-hand-side of the expression
-    Value *RHS,      ///< The right-hand-side of the expression
-    const Twine &NameStr = ""  ///< Name of the instruction
-  ) : CmpInst(makeCmpResultType(LHS->getType()),
-              Instruction::FCmp, pred, LHS, RHS, NameStr,
-              &InsertAtEnd) {
+  FCmpInst(BasicBlock &InsertAtEnd, ///< Block to insert into.
+           Predicate pred,          ///< The predicate to use for the comparison
+           Value *LHS,              ///< The left-hand-side of the expression
+           Value *RHS,              ///< The right-hand-side of the expression
+           const llvm::Twine &NameStr = "" ///< Name of the instruction
+           )
+      : CmpInst(makeCmpResultType(LHS->getType()), Instruction::FCmp, pred, LHS,
+                RHS, NameStr, &InsertAtEnd) {
     assert(pred <= FCmpInst::LAST_FCMP_PREDICATE &&
            "Invalid FCmp predicate value");
     assert(getOperand(0)->getType() == getOperand(1)->getType() &&
@@ -1282,13 +1283,13 @@ public:
   }
 
   /// \brief Constructor with no-insertion semantics
-  FCmpInst(
-    Predicate pred, ///< The predicate to use for the comparison
-    Value *LHS,     ///< The left-hand-side of the expression
-    Value *RHS,     ///< The right-hand-side of the expression
-    const Twine &NameStr = "" ///< Name of the instruction
-  ) : CmpInst(makeCmpResultType(LHS->getType()),
-              Instruction::FCmp, pred, LHS, RHS, NameStr) {
+  FCmpInst(Predicate pred, ///< The predicate to use for the comparison
+           Value *LHS,     ///< The left-hand-side of the expression
+           Value *RHS,     ///< The right-hand-side of the expression
+           const llvm::Twine &NameStr = "" ///< Name of the instruction
+           )
+      : CmpInst(makeCmpResultType(LHS->getType()), Instruction::FCmp, pred, LHS,
+                RHS, NameStr) {
     assert(pred <= FCmpInst::LAST_FCMP_PREDICATE &&
            "Invalid FCmp predicate value");
     assert(getOperand(0)->getType() == getOperand(1)->getType() &&
@@ -1338,7 +1339,7 @@ public:
     return I->getOpcode() == Instruction::FCmp;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -1352,64 +1353,65 @@ class CallInst : public Instruction {
   AttributeSet AttributeList; ///< parameter attributes for call
   FunctionType *FTy;
   CallInst(const CallInst &CI);
-  void init(Value *Func, ArrayRef<Value *> Args, const Twine &NameStr) {
+  void init(Value *Func, llvm::ArrayRef<Value *> Args,
+            const llvm::Twine &NameStr) {
     init(cast<FunctionType>(
              cast<PointerType>(Func->getType())->getElementType()),
          Func, Args, NameStr);
   }
-  void init(FunctionType *FTy, Value *Func, ArrayRef<Value *> Args,
-            const Twine &NameStr);
-  void init(Value *Func, const Twine &NameStr);
+  void init(FunctionType *FTy, Value *Func, llvm::ArrayRef<Value *> Args,
+            const llvm::Twine &NameStr);
+  void init(Value *Func, const llvm::Twine &NameStr);
 
   /// Construct a CallInst given a range of arguments.
   /// \brief Construct a CallInst from a range of arguments
-  inline CallInst(FunctionType *Ty, Value *Func, ArrayRef<Value *> Args,
-                  const Twine &NameStr, Instruction *InsertBefore);
-  inline CallInst(Value *Func, ArrayRef<Value *> Args, const Twine &NameStr,
-                  Instruction *InsertBefore)
+  inline CallInst(FunctionType *Ty, Value *Func, llvm::ArrayRef<Value *> Args,
+                  const llvm::Twine &NameStr, Instruction *InsertBefore);
+  inline CallInst(Value *Func, llvm::ArrayRef<Value *> Args,
+                  const llvm::Twine &NameStr, Instruction *InsertBefore)
       : CallInst(cast<FunctionType>(
                      cast<PointerType>(Func->getType())->getElementType()),
                  Func, Args, NameStr, InsertBefore) {}
 
   /// Construct a CallInst given a range of arguments.
   /// \brief Construct a CallInst from a range of arguments
-  inline CallInst(Value *Func, ArrayRef<Value *> Args,
-                  const Twine &NameStr, BasicBlock *InsertAtEnd);
+  inline CallInst(Value *Func, llvm::ArrayRef<Value *> Args,
+                  const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
 
-  explicit CallInst(Value *F, const Twine &NameStr,
+  explicit CallInst(Value *F, const llvm::Twine &NameStr,
                     Instruction *InsertBefore);
-  CallInst(Value *F, const Twine &NameStr, BasicBlock *InsertAtEnd);
+  CallInst(Value *F, const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
+
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
   CallInst *cloneImpl() const;
 
 public:
-  static CallInst *Create(Value *Func,
-                          ArrayRef<Value *> Args,
-                          const Twine &NameStr = "",
+  static CallInst *Create(Value *Func, llvm::ArrayRef<Value *> Args,
+                          const llvm::Twine &NameStr = "",
                           Instruction *InsertBefore = nullptr) {
     return Create(cast<FunctionType>(
                       cast<PointerType>(Func->getType())->getElementType()),
                   Func, Args, NameStr, InsertBefore);
   }
-  static CallInst *Create(FunctionType *Ty, Value *Func, ArrayRef<Value *> Args,
-                          const Twine &NameStr = "",
+  static CallInst *Create(FunctionType *Ty, Value *Func,
+                          llvm::ArrayRef<Value *> Args,
+                          const llvm::Twine &NameStr = "",
                           Instruction *InsertBefore = nullptr) {
     return new (unsigned(Args.size() + 1))
         CallInst(Ty, Func, Args, NameStr, InsertBefore);
   }
-  static CallInst *Create(Value *Func,
-                          ArrayRef<Value *> Args,
-                          const Twine &NameStr, BasicBlock *InsertAtEnd) {
+  static CallInst *Create(Value *Func, llvm::ArrayRef<Value *> Args,
+                          const llvm::Twine &NameStr, BasicBlock *InsertAtEnd) {
     return new(unsigned(Args.size() + 1))
       CallInst(Func, Args, NameStr, InsertAtEnd);
   }
-  static CallInst *Create(Value *F, const Twine &NameStr = "",
+  static CallInst *Create(Value *F, const llvm::Twine &NameStr = "",
                           Instruction *InsertBefore = nullptr) {
     return new(1) CallInst(F, NameStr, InsertBefore);
   }
-  static CallInst *Create(Value *F, const Twine &NameStr,
+  static CallInst *Create(Value *F, const llvm::Twine &NameStr,
                           BasicBlock *InsertAtEnd) {
     return new(1) CallInst(F, NameStr, InsertAtEnd);
   }
@@ -1419,16 +1421,16 @@ public:
   ///    constant 1.
   /// 2. Call malloc with that argument.
   /// 3. Bitcast the result of the malloc call to the specified type.
-  static Instruction *CreateMalloc(Instruction *InsertBefore,
-                                   Type *IntPtrTy, Type *AllocTy,
-                                   Value *AllocSize, Value *ArraySize = nullptr,
-                                   Function* MallocF = nullptr,
-                                   const Twine &Name = "");
-  static Instruction *CreateMalloc(BasicBlock *InsertAtEnd,
-                                   Type *IntPtrTy, Type *AllocTy,
-                                   Value *AllocSize, Value *ArraySize = nullptr,
-                                   Function* MallocF = nullptr,
-                                   const Twine &Name = "");
+  static Instruction *CreateMalloc(Instruction *InsertBefore, Type *IntPtrTy,
+                                   Type *AllocTy, Value *AllocSize,
+                                   Value *ArraySize = nullptr,
+                                   Function *MallocF = nullptr,
+                                   const llvm::Twine &Name = "");
+  static Instruction *CreateMalloc(BasicBlock *InsertAtEnd, Type *IntPtrTy,
+                                   Type *AllocTy, Value *AllocSize,
+                                   Value *ArraySize = nullptr,
+                                   Function *MallocF = nullptr,
+                                   const llvm::Twine &Name = "");
   /// CreateFree - Generate the IR for a call to the builtin free function.
   static Instruction* CreateFree(Value* Source, Instruction *InsertBefore);
   static Instruction* CreateFree(Value* Source, BasicBlock *InsertAtEnd);
@@ -1475,15 +1477,15 @@ public:
   void setArgOperand(unsigned i, Value *v) { setOperand(i, v); }
 
   /// arg_operands - iteration adapter for range-for loops.
-  iterator_range<op_iterator> arg_operands() {
+  llvm::iterator_range<op_iterator> arg_operands() {
     // The last operand in the op list is the callee - it's not one of the args
     // so we don't want to iterate over it.
-    return iterator_range<op_iterator>(op_begin(), op_end() - 1);
+    return llvm::iterator_range<op_iterator>(op_begin(), op_end() - 1);
   }
 
   /// arg_operands - iteration adapter for range-for loops.
-  iterator_range<const_op_iterator> arg_operands() const {
-    return iterator_range<const_op_iterator>(op_begin(), op_end() - 1);
+  llvm::iterator_range<const_op_iterator> arg_operands() const {
+    return llvm::iterator_range<const_op_iterator>(op_begin(), op_end() - 1);
   }
 
   /// \brief Wrappers for getting the \c Use of a call argument.
@@ -1512,7 +1514,7 @@ public:
   void addAttribute(unsigned i, Attribute::AttrKind attr);
 
   /// addAttribute - adds the attribute to the list of attributes.
-  void addAttribute(unsigned i, StringRef Kind, StringRef Value);
+  void addAttribute(unsigned i, llvm::StringRef Kind, llvm::StringRef Value);
 
   /// removeAttribute - removes the attribute from the list of attributes.
   void removeAttribute(unsigned i, Attribute attr);
@@ -1532,9 +1534,7 @@ public:
   }
 
   /// \brief Determine whether this call has the given attribute.
-  bool hasFnAttr(StringRef A) const {
-    return hasFnAttrImpl(A);
-  }
+  bool hasFnAttr(llvm::StringRef A) const { return hasFnAttrImpl(A); }
 
   /// \brief Determine whether the call or the callee has the given attributes.
   bool paramHasAttr(unsigned i, Attribute::AttrKind A) const;
@@ -1636,7 +1636,7 @@ public:
   /// indirect function invocation.
   ///
   Function *getCalledFunction() const {
-    return dyn_cast<Function>(Op<-1>());
+    return llvm::dyn_cast<Function>(Op<-1>());
   }
 
   /// getCalledValue - Get a pointer to the function that is invoked by this
@@ -1658,16 +1658,14 @@ public:
   }
 
   /// isInlineAsm - Check if this call is an inline asm statement.
-  bool isInlineAsm() const {
-    return isa<InlineAsm>(Op<-1>());
-  }
+  bool isInlineAsm() const { return llvm::isa<InlineAsm>(Op<-1>()); }
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
     return I->getOpcode() == Instruction::Call;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
 
@@ -1691,24 +1689,24 @@ template <>
 struct OperandTraits<CallInst> : public VariadicOperandTraits<CallInst, 1> {
 };
 
-CallInst::CallInst(Value *Func, ArrayRef<Value *> Args,
-                   const Twine &NameStr, BasicBlock *InsertAtEnd)
-  : Instruction(cast<FunctionType>(cast<PointerType>(Func->getType())
-                                   ->getElementType())->getReturnType(),
-                Instruction::Call,
-                OperandTraits<CallInst>::op_end(this) - (Args.size() + 1),
-                unsigned(Args.size() + 1), InsertAtEnd) {
+CallInst::CallInst(Value *Func, llvm::ArrayRef<Value *> Args,
+                   const llvm::Twine &NameStr, BasicBlock *InsertAtEnd)
+    : Instruction(cast<FunctionType>(
+                      cast<PointerType>(Func->getType())->getElementType())
+                      ->getReturnType(),
+                  Instruction::Call,
+                  OperandTraits<CallInst>::op_end(this) - (Args.size() + 1),
+                  unsigned(Args.size() + 1), InsertAtEnd) {
   init(Func, Args, NameStr);
 }
 
-CallInst::CallInst(FunctionType *Ty, Value *Func, ArrayRef<Value *> Args,
-                   const Twine &NameStr, Instruction *InsertBefore)
+CallInst::CallInst(FunctionType *Ty, Value *Func, llvm::ArrayRef<Value *> Args,
+                   const llvm::Twine &NameStr, Instruction *InsertBefore)
     : Instruction(Ty->getReturnType(), Instruction::Call,
                   OperandTraits<CallInst>::op_end(this) - (Args.size() + 1),
                   unsigned(Args.size() + 1), InsertBefore) {
   init(Ty, Func, Args, NameStr);
 }
-
 
 // Note: if you get compile errors about private methods then
 //       please update your code to use the high-level operand
@@ -1729,20 +1727,21 @@ class SelectInst : public Instruction {
     Op<2>() = S2;
   }
 
-  SelectInst(Value *C, Value *S1, Value *S2, const Twine &NameStr,
+  SelectInst(Value *C, Value *S1, Value *S2, const llvm::Twine &NameStr,
              Instruction *InsertBefore)
-    : Instruction(S1->getType(), Instruction::Select,
-                  &Op<0>(), 3, InsertBefore) {
+      : Instruction(S1->getType(), Instruction::Select, &Op<0>(), 3,
+                    InsertBefore) {
     init(C, S1, S2);
     setName(NameStr);
   }
-  SelectInst(Value *C, Value *S1, Value *S2, const Twine &NameStr,
+  SelectInst(Value *C, Value *S1, Value *S2, const llvm::Twine &NameStr,
              BasicBlock *InsertAtEnd)
-    : Instruction(S1->getType(), Instruction::Select,
-                  &Op<0>(), 3, InsertAtEnd) {
+      : Instruction(S1->getType(), Instruction::Select, &Op<0>(), 3,
+                    InsertAtEnd) {
     init(C, S1, S2);
     setName(NameStr);
   }
+
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
@@ -1750,12 +1749,12 @@ protected:
 
 public:
   static SelectInst *Create(Value *C, Value *S1, Value *S2,
-                            const Twine &NameStr = "",
+                            const llvm::Twine &NameStr = "",
                             Instruction *InsertBefore = nullptr) {
     return new(3) SelectInst(C, S1, S2, NameStr, InsertBefore);
   }
   static SelectInst *Create(Value *C, Value *S1, Value *S2,
-                            const Twine &NameStr,
+                            const llvm::Twine &NameStr,
                             BasicBlock *InsertAtEnd) {
     return new(3) SelectInst(C, S1, S2, NameStr, InsertAtEnd);
   }
@@ -1783,7 +1782,7 @@ public:
     return I->getOpcode() == Instruction::Select;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -1807,14 +1806,14 @@ protected:
   VAArgInst *cloneImpl() const;
 
 public:
-  VAArgInst(Value *List, Type *Ty, const Twine &NameStr = "",
-             Instruction *InsertBefore = nullptr)
-    : UnaryInstruction(Ty, VAArg, List, InsertBefore) {
+  VAArgInst(Value *List, Type *Ty, const llvm::Twine &NameStr = "",
+            Instruction *InsertBefore = nullptr)
+      : UnaryInstruction(Ty, VAArg, List, InsertBefore) {
     setName(NameStr);
   }
-  VAArgInst(Value *List, Type *Ty, const Twine &NameStr,
+  VAArgInst(Value *List, Type *Ty, const llvm::Twine &NameStr,
             BasicBlock *InsertAtEnd)
-    : UnaryInstruction(Ty, VAArg, List, InsertAtEnd) {
+      : UnaryInstruction(Ty, VAArg, List, InsertAtEnd) {
     setName(NameStr);
   }
 
@@ -1827,7 +1826,7 @@ public:
     return I->getOpcode() == VAArg;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -1839,10 +1838,11 @@ public:
 /// element from a VectorType value
 ///
 class ExtractElementInst : public Instruction {
-  ExtractElementInst(Value *Vec, Value *Idx, const Twine &NameStr = "",
+  ExtractElementInst(Value *Vec, Value *Idx, const llvm::Twine &NameStr = "",
                      Instruction *InsertBefore = nullptr);
-  ExtractElementInst(Value *Vec, Value *Idx, const Twine &NameStr,
+  ExtractElementInst(Value *Vec, Value *Idx, const llvm::Twine &NameStr,
                      BasicBlock *InsertAtEnd);
+
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
@@ -1850,13 +1850,13 @@ protected:
 
 public:
   static ExtractElementInst *Create(Value *Vec, Value *Idx,
-                                   const Twine &NameStr = "",
-                                   Instruction *InsertBefore = nullptr) {
+                                    const llvm::Twine &NameStr = "",
+                                    Instruction *InsertBefore = nullptr) {
     return new(2) ExtractElementInst(Vec, Idx, NameStr, InsertBefore);
   }
   static ExtractElementInst *Create(Value *Vec, Value *Idx,
-                                   const Twine &NameStr,
-                                   BasicBlock *InsertAtEnd) {
+                                    const llvm::Twine &NameStr,
+                                    BasicBlock *InsertAtEnd) {
     return new(2) ExtractElementInst(Vec, Idx, NameStr, InsertAtEnd);
   }
 
@@ -1882,7 +1882,7 @@ public:
     return I->getOpcode() == Instruction::ExtractElement;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -1902,10 +1902,11 @@ DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ExtractElementInst, Value)
 ///
 class InsertElementInst : public Instruction {
   InsertElementInst(Value *Vec, Value *NewElt, Value *Idx,
-                    const Twine &NameStr = "",
+                    const llvm::Twine &NameStr = "",
                     Instruction *InsertBefore = nullptr);
   InsertElementInst(Value *Vec, Value *NewElt, Value *Idx,
-                    const Twine &NameStr, BasicBlock *InsertAtEnd);
+                    const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
+
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
@@ -1913,12 +1914,12 @@ protected:
 
 public:
   static InsertElementInst *Create(Value *Vec, Value *NewElt, Value *Idx,
-                                   const Twine &NameStr = "",
+                                   const llvm::Twine &NameStr = "",
                                    Instruction *InsertBefore = nullptr) {
     return new(3) InsertElementInst(Vec, NewElt, Idx, NameStr, InsertBefore);
   }
   static InsertElementInst *Create(Value *Vec, Value *NewElt, Value *Idx,
-                                   const Twine &NameStr,
+                                   const llvm::Twine &NameStr,
                                    BasicBlock *InsertAtEnd) {
     return new(3) InsertElementInst(Vec, NewElt, Idx, NameStr, InsertAtEnd);
   }
@@ -1942,7 +1943,7 @@ public:
     return I->getOpcode() == Instruction::InsertElement;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -1972,10 +1973,10 @@ public:
     return User::operator new(s, 3);
   }
   ShuffleVectorInst(Value *V1, Value *V2, Value *Mask,
-                    const Twine &NameStr = "",
+                    const llvm::Twine &NameStr = "",
                     Instruction *InsertBefor = nullptr);
   ShuffleVectorInst(Value *V1, Value *V2, Value *Mask,
-                    const Twine &NameStr, BasicBlock *InsertAtEnd);
+                    const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
 
   /// isValidOperands - Return true if a shufflevector instruction can be
   /// formed with the specified operands.
@@ -2006,25 +2007,25 @@ public:
 
   /// getShuffleMask - Return the full mask for this instruction, where each
   /// element is the element number and undef's are returned as -1.
-  static void getShuffleMask(Constant *Mask, SmallVectorImpl<int> &Result);
+  static void getShuffleMask(Constant *Mask,
+                             llvm::SmallVectorImpl<int> &Result);
 
-  void getShuffleMask(SmallVectorImpl<int> &Result) const {
+  void getShuffleMask(llvm::SmallVectorImpl<int> &Result) const {
     return getShuffleMask(getMask(), Result);
   }
 
-  SmallVector<int, 16> getShuffleMask() const {
-    SmallVector<int, 16> Mask;
+  llvm::SmallVector<int, 16> getShuffleMask() const {
+    llvm::SmallVector<int, 16> Mask;
     getShuffleMask(Mask);
     return Mask;
   }
-
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
     return I->getOpcode() == Instruction::ShuffleVector;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -2043,22 +2044,20 @@ DXIL_DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorInst, Value)
 /// element value from an aggregate value.
 ///
 class ExtractValueInst : public UnaryInstruction {
-  SmallVector<unsigned, 4> Indices;
+  llvm::SmallVector<unsigned, 4> Indices;
 
   ExtractValueInst(const ExtractValueInst &EVI);
-  void init(ArrayRef<unsigned> Idxs, const Twine &NameStr);
+  void init(llvm::ArrayRef<unsigned> Idxs, const llvm::Twine &NameStr);
 
   /// Constructors - Create a extractvalue instruction with a base aggregate
   /// value and a list of indices.  The first ctor can optionally insert before
   /// an existing instruction, the second appends the new instruction to the
   /// specified BasicBlock.
-  inline ExtractValueInst(Value *Agg,
-                          ArrayRef<unsigned> Idxs,
-                          const Twine &NameStr,
+  inline ExtractValueInst(Value *Agg, llvm::ArrayRef<unsigned> Idxs,
+                          const llvm::Twine &NameStr,
                           Instruction *InsertBefore);
-  inline ExtractValueInst(Value *Agg,
-                          ArrayRef<unsigned> Idxs,
-                          const Twine &NameStr, BasicBlock *InsertAtEnd);
+  inline ExtractValueInst(Value *Agg, llvm::ArrayRef<unsigned> Idxs,
+                          const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
 
   // allocate space for exactly one operand
   void *operator new(size_t s) {
@@ -2070,16 +2069,14 @@ protected:
   ExtractValueInst *cloneImpl() const;
 
 public:
-  static ExtractValueInst *Create(Value *Agg,
-                                  ArrayRef<unsigned> Idxs,
-                                  const Twine &NameStr = "",
+  static ExtractValueInst *Create(Value *Agg, llvm::ArrayRef<unsigned> Idxs,
+                                  const llvm::Twine &NameStr = "",
                                   Instruction *InsertBefore = nullptr) {
     return new
       ExtractValueInst(Agg, Idxs, NameStr, InsertBefore);
   }
-  static ExtractValueInst *Create(Value *Agg,
-                                  ArrayRef<unsigned> Idxs,
-                                  const Twine &NameStr,
+  static ExtractValueInst *Create(Value *Agg, llvm::ArrayRef<unsigned> Idxs,
+                                  const llvm::Twine &NameStr,
                                   BasicBlock *InsertAtEnd) {
     return new ExtractValueInst(Agg, Idxs, NameStr, InsertAtEnd);
   }
@@ -2088,13 +2085,13 @@ public:
   /// with an extractvalue instruction with the specified parameters.
   ///
   /// Null is returned if the indices are invalid for the specified type.
-  static Type *getIndexedType(Type *Agg, ArrayRef<unsigned> Idxs);
+  static Type *getIndexedType(Type *Agg, llvm::ArrayRef<unsigned> Idxs);
 
   typedef const unsigned* idx_iterator;
   inline idx_iterator idx_begin() const { return Indices.begin(); }
   inline idx_iterator idx_end()   const { return Indices.end(); }
-  inline iterator_range<idx_iterator> indices() const {
-    return iterator_range<idx_iterator>(idx_begin(), idx_end());
+  inline llvm::iterator_range<idx_iterator> indices() const {
+    return llvm::iterator_range<idx_iterator>(idx_begin(), idx_end());
   }
 
   Value *getAggregateOperand() {
@@ -2107,9 +2104,7 @@ public:
     return 0U;                      // get index for modifying correct operand
   }
 
-  ArrayRef<unsigned> getIndices() const {
-    return Indices;
-  }
+  llvm::ArrayRef<unsigned> getIndices() const { return Indices; }
 
   unsigned getNumIndices() const {
     return (unsigned)Indices.size();
@@ -2124,27 +2119,24 @@ public:
     return I->getOpcode() == Instruction::ExtractValue;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
-ExtractValueInst::ExtractValueInst(Value *Agg,
-                                   ArrayRef<unsigned> Idxs,
-                                   const Twine &NameStr,
+ExtractValueInst::ExtractValueInst(Value *Agg, llvm::ArrayRef<unsigned> Idxs,
+                                   const llvm::Twine &NameStr,
                                    Instruction *InsertBefore)
-  : UnaryInstruction(checkGEPType(getIndexedType(Agg->getType(), Idxs)),
-                     ExtractValue, Agg, InsertBefore) {
+    : UnaryInstruction(checkGEPType(getIndexedType(Agg->getType(), Idxs)),
+                       ExtractValue, Agg, InsertBefore) {
   init(Idxs, NameStr);
 }
-ExtractValueInst::ExtractValueInst(Value *Agg,
-                                   ArrayRef<unsigned> Idxs,
-                                   const Twine &NameStr,
+ExtractValueInst::ExtractValueInst(Value *Agg, llvm::ArrayRef<unsigned> Idxs,
+                                   const llvm::Twine &NameStr,
                                    BasicBlock *InsertAtEnd)
-  : UnaryInstruction(checkGEPType(getIndexedType(Agg->getType(), Idxs)),
-                     ExtractValue, Agg, InsertAtEnd) {
+    : UnaryInstruction(checkGEPType(getIndexedType(Agg->getType(), Idxs)),
+                       ExtractValue, Agg, InsertAtEnd) {
   init(Idxs, NameStr);
 }
-
 
 //===----------------------------------------------------------------------===//
 //                                InsertValueInst Class
@@ -2154,32 +2146,30 @@ ExtractValueInst::ExtractValueInst(Value *Agg,
 /// value into an aggregate value.
 ///
 class InsertValueInst : public Instruction {
-  SmallVector<unsigned, 4> Indices;
+  llvm::SmallVector<unsigned, 4> Indices;
 
   void *operator new(size_t, unsigned) = delete;
   InsertValueInst(const InsertValueInst &IVI);
-  void init(Value *Agg, Value *Val, ArrayRef<unsigned> Idxs,
-            const Twine &NameStr);
+  void init(Value *Agg, Value *Val, llvm::ArrayRef<unsigned> Idxs,
+            const llvm::Twine &NameStr);
 
   /// Constructors - Create a insertvalue instruction with a base aggregate
   /// value, a value to insert, and a list of indices.  The first ctor can
   /// optionally insert before an existing instruction, the second appends
   /// the new instruction to the specified BasicBlock.
-  inline InsertValueInst(Value *Agg, Value *Val,
-                         ArrayRef<unsigned> Idxs,
-                         const Twine &NameStr,
-                         Instruction *InsertBefore);
-  inline InsertValueInst(Value *Agg, Value *Val,
-                         ArrayRef<unsigned> Idxs,
-                         const Twine &NameStr, BasicBlock *InsertAtEnd);
+  inline InsertValueInst(Value *Agg, Value *Val, llvm::ArrayRef<unsigned> Idxs,
+                         const llvm::Twine &NameStr, Instruction *InsertBefore);
+  inline InsertValueInst(Value *Agg, Value *Val, llvm::ArrayRef<unsigned> Idxs,
+                         const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
 
   /// Constructors - These two constructors are convenience methods because one
   /// and two index insertvalue instructions are so common.
-  InsertValueInst(Value *Agg, Value *Val,
-                  unsigned Idx, const Twine &NameStr = "",
+  InsertValueInst(Value *Agg, Value *Val, unsigned Idx,
+                  const llvm::Twine &NameStr = "",
                   Instruction *InsertBefore = nullptr);
   InsertValueInst(Value *Agg, Value *Val, unsigned Idx,
-                  const Twine &NameStr, BasicBlock *InsertAtEnd);
+                  const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
+
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
@@ -2192,14 +2182,14 @@ public:
   }
 
   static InsertValueInst *Create(Value *Agg, Value *Val,
-                                 ArrayRef<unsigned> Idxs,
-                                 const Twine &NameStr = "",
+                                 llvm::ArrayRef<unsigned> Idxs,
+                                 const llvm::Twine &NameStr = "",
                                  Instruction *InsertBefore = nullptr) {
     return new InsertValueInst(Agg, Val, Idxs, NameStr, InsertBefore);
   }
   static InsertValueInst *Create(Value *Agg, Value *Val,
-                                 ArrayRef<unsigned> Idxs,
-                                 const Twine &NameStr,
+                                 llvm::ArrayRef<unsigned> Idxs,
+                                 const llvm::Twine &NameStr,
                                  BasicBlock *InsertAtEnd) {
     return new InsertValueInst(Agg, Val, Idxs, NameStr, InsertAtEnd);
   }
@@ -2210,8 +2200,8 @@ public:
   typedef const unsigned* idx_iterator;
   inline idx_iterator idx_begin() const { return Indices.begin(); }
   inline idx_iterator idx_end()   const { return Indices.end(); }
-  inline iterator_range<idx_iterator> indices() const {
-    return iterator_range<idx_iterator>(idx_begin(), idx_end());
+  inline llvm::iterator_range<idx_iterator> indices() const {
+    return llvm::iterator_range<idx_iterator>(idx_begin(), idx_end());
   }
 
   Value *getAggregateOperand() {
@@ -2234,9 +2224,7 @@ public:
     return 1U;                      // get index for modifying correct operand
   }
 
-  ArrayRef<unsigned> getIndices() const {
-    return Indices;
-  }
+  llvm::ArrayRef<unsigned> getIndices() const { return Indices; }
 
   unsigned getNumIndices() const {
     return (unsigned)Indices.size();
@@ -2251,7 +2239,7 @@ public:
     return I->getOpcode() == Instruction::InsertValue;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -2260,24 +2248,22 @@ struct OperandTraits<InsertValueInst> :
   public FixedNumOperandTraits<InsertValueInst, 2> {
 };
 
-InsertValueInst::InsertValueInst(Value *Agg,
-                                 Value *Val,
-                                 ArrayRef<unsigned> Idxs,
-                                 const Twine &NameStr,
+InsertValueInst::InsertValueInst(Value *Agg, Value *Val,
+                                 llvm::ArrayRef<unsigned> Idxs,
+                                 const llvm::Twine &NameStr,
                                  Instruction *InsertBefore)
-  : Instruction(Agg->getType(), InsertValue,
-                OperandTraits<InsertValueInst>::op_begin(this),
-                2, InsertBefore) {
+    : Instruction(Agg->getType(), InsertValue,
+                  OperandTraits<InsertValueInst>::op_begin(this), 2,
+                  InsertBefore) {
   init(Agg, Val, Idxs, NameStr);
 }
-InsertValueInst::InsertValueInst(Value *Agg,
-                                 Value *Val,
-                                 ArrayRef<unsigned> Idxs,
-                                 const Twine &NameStr,
+InsertValueInst::InsertValueInst(Value *Agg, Value *Val,
+                                 llvm::ArrayRef<unsigned> Idxs,
+                                 const llvm::Twine &NameStr,
                                  BasicBlock *InsertAtEnd)
-  : Instruction(Agg->getType(), InsertValue,
-                OperandTraits<InsertValueInst>::op_begin(this),
-                2, InsertAtEnd) {
+    : Instruction(Agg->getType(), InsertValue,
+                  OperandTraits<InsertValueInst>::op_begin(this), 2,
+                  InsertAtEnd) {
   init(Agg, Val, Idxs, NameStr);
 }
 
@@ -2302,21 +2288,22 @@ class PHINode : public Instruction {
     return User::operator new(s);
   }
   explicit PHINode(Type *Ty, unsigned NumReservedValues,
-                   const Twine &NameStr = "",
+                   const llvm::Twine &NameStr = "",
                    Instruction *InsertBefore = nullptr)
-    : Instruction(Ty, Instruction::PHI, nullptr, 0, InsertBefore),
-      ReservedSpace(NumReservedValues) {
+      : Instruction(Ty, Instruction::PHI, nullptr, 0, InsertBefore),
+        ReservedSpace(NumReservedValues) {
     setName(NameStr);
     allocHungoffUses(ReservedSpace);
   }
 
-  PHINode(Type *Ty, unsigned NumReservedValues, const Twine &NameStr,
+  PHINode(Type *Ty, unsigned NumReservedValues, const llvm::Twine &NameStr,
           BasicBlock *InsertAtEnd)
-    : Instruction(Ty, Instruction::PHI, nullptr, 0, InsertAtEnd),
-      ReservedSpace(NumReservedValues) {
+      : Instruction(Ty, Instruction::PHI, nullptr, 0, InsertAtEnd),
+        ReservedSpace(NumReservedValues) {
     setName(NameStr);
     allocHungoffUses(ReservedSpace);
   }
+
 protected:
   // allocHungoffUses - this is more complicated than the generic
   // User::allocHungoffUses, because we have to allocate Uses for the incoming
@@ -2333,12 +2320,12 @@ public:
   /// Constructors - NumReservedValues is a hint for the number of incoming
   /// edges that this phi node will have (use 0 if you really have no idea).
   static PHINode *Create(Type *Ty, unsigned NumReservedValues,
-                         const Twine &NameStr = "",
+                         const llvm::Twine &NameStr = "",
                          Instruction *InsertBefore = nullptr) {
     return new PHINode(Ty, NumReservedValues, NameStr, InsertBefore);
   }
   static PHINode *Create(Type *Ty, unsigned NumReservedValues,
-                         const Twine &NameStr, BasicBlock *InsertAtEnd) {
+                         const llvm::Twine &NameStr, BasicBlock *InsertAtEnd) {
     return new PHINode(Ty, NumReservedValues, NameStr, InsertAtEnd);
   }
 
@@ -2475,7 +2462,7 @@ public:
     return I->getOpcode() == Instruction::PHI;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
  private:
   void growOperands();
@@ -2513,12 +2500,13 @@ private:
     return User::operator new(s);
   }
   void growOperands(unsigned Size);
-  void init(unsigned NumReservedValues, const Twine &NameStr);
+  void init(unsigned NumReservedValues, const llvm::Twine &NameStr);
 
   explicit LandingPadInst(Type *RetTy, unsigned NumReservedValues,
-                          const Twine &NameStr, Instruction *InsertBefore);
+                          const llvm::Twine &NameStr,
+                          Instruction *InsertBefore);
   explicit LandingPadInst(Type *RetTy, unsigned NumReservedValues,
-                          const Twine &NameStr, BasicBlock *InsertAtEnd);
+                          const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
 
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
@@ -2529,10 +2517,11 @@ public:
   /// Constructors - NumReservedClauses is a hint for the number of incoming
   /// clauses that this landingpad will have (use 0 if you really have no idea).
   static LandingPadInst *Create(Type *RetTy, unsigned NumReservedClauses,
-                                const Twine &NameStr = "",
+                                const llvm::Twine &NameStr = "",
                                 Instruction *InsertBefore = nullptr);
   static LandingPadInst *Create(Type *RetTy, unsigned NumReservedClauses,
-                                const Twine &NameStr, BasicBlock *InsertAtEnd);
+                                const llvm::Twine &NameStr,
+                                BasicBlock *InsertAtEnd);
 
   /// Provide fast operand accessors
   DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
@@ -2559,12 +2548,12 @@ public:
 
   /// isCatch - Return 'true' if the clause and index Idx is a catch clause.
   bool isCatch(unsigned Idx) const {
-    return !isa<ArrayType>(getOperandList()[Idx]->getType());
+    return !llvm::isa<ArrayType>(getOperandList()[Idx]->getType());
   }
 
   /// isFilter - Return 'true' if the clause and index Idx is a filter clause.
   bool isFilter(unsigned Idx) const {
-    return isa<ArrayType>(getOperandList()[Idx]->getType());
+    return llvm::isa<ArrayType>(getOperandList()[Idx]->getType());
   }
 
   /// getNumClauses - Get the number of clauses for this landing pad.
@@ -2579,7 +2568,7 @@ public:
     return I->getOpcode() == Instruction::LandingPad;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -2650,7 +2639,7 @@ public:
     return (I->getOpcode() == Instruction::Ret);
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
  private:
   BasicBlock *getSuccessorV(unsigned idx) const override;
@@ -2733,7 +2722,7 @@ public:
 
   BasicBlock *getSuccessor(unsigned i) const {
     assert(i < getNumSuccessors() && "Successor # out of range for Branch!");
-    return cast_or_null<BasicBlock>((&Op<-1>() - i)->get());
+    return llvm::cast_if_present<BasicBlock>((&Op<-1>() - i)->get());
   }
 
   void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
@@ -2753,7 +2742,7 @@ public:
     return (I->getOpcode() == Instruction::Br);
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   BasicBlock *getSuccessorV(unsigned idx) const override;
@@ -2980,13 +2969,13 @@ public:
   }
 
   /// cases - iteration adapter for range-for loops.
-  iterator_range<CaseIt> cases() {
-    return iterator_range<CaseIt>(case_begin(), case_end());
+  llvm::iterator_range<CaseIt> cases() {
+    return llvm::iterator_range<CaseIt>(case_begin(), case_end());
   }
 
   /// cases - iteration adapter for range-for loops.
-  iterator_range<ConstCaseIt> cases() const {
-    return iterator_range<ConstCaseIt>(case_begin(), case_end());
+  llvm::iterator_range<ConstCaseIt> cases() const {
+    return llvm::iterator_range<ConstCaseIt>(case_begin(), case_end());
   }
 
   /// Returns an iterator that points to the default case.
@@ -3062,7 +3051,7 @@ public:
     return I->getOpcode() == Instruction::Switch;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   BasicBlock *getSuccessorV(unsigned idx) const override;
@@ -3161,7 +3150,7 @@ public:
     return I->getOpcode() == Instruction::IndirectBr;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   BasicBlock *getSuccessorV(unsigned idx) const override;
@@ -3187,61 +3176,65 @@ class InvokeInst : public TerminatorInst {
   FunctionType *FTy;
   InvokeInst(const InvokeInst &BI);
   void init(Value *Func, BasicBlock *IfNormal, BasicBlock *IfException,
-            ArrayRef<Value *> Args, const Twine &NameStr) {
+            llvm::ArrayRef<Value *> Args, const llvm::Twine &NameStr) {
     init(cast<FunctionType>(
              cast<PointerType>(Func->getType())->getElementType()),
          Func, IfNormal, IfException, Args, NameStr);
   }
   void init(FunctionType *FTy, Value *Func, BasicBlock *IfNormal,
-            BasicBlock *IfException, ArrayRef<Value *> Args,
-            const Twine &NameStr);
+            BasicBlock *IfException, llvm::ArrayRef<Value *> Args,
+            const llvm::Twine &NameStr);
 
   /// Construct an InvokeInst given a range of arguments.
   ///
   /// \brief Construct an InvokeInst from a range of arguments
   inline InvokeInst(Value *Func, BasicBlock *IfNormal, BasicBlock *IfException,
-                    ArrayRef<Value *> Args, unsigned Values,
-                    const Twine &NameStr, Instruction *InsertBefore)
+                    llvm::ArrayRef<Value *> Args, unsigned Values,
+                    const llvm::Twine &NameStr, Instruction *InsertBefore)
       : InvokeInst(cast<FunctionType>(
                        cast<PointerType>(Func->getType())->getElementType()),
                    Func, IfNormal, IfException, Args, Values, NameStr,
                    InsertBefore) {}
 
   inline InvokeInst(FunctionType *Ty, Value *Func, BasicBlock *IfNormal,
-                    BasicBlock *IfException, ArrayRef<Value *> Args,
-                    unsigned Values, const Twine &NameStr,
+                    BasicBlock *IfException, llvm::ArrayRef<Value *> Args,
+                    unsigned Values, const llvm::Twine &NameStr,
                     Instruction *InsertBefore);
   /// Construct an InvokeInst given a range of arguments.
   ///
   /// \brief Construct an InvokeInst from a range of arguments
   inline InvokeInst(Value *Func, BasicBlock *IfNormal, BasicBlock *IfException,
-                    ArrayRef<Value *> Args, unsigned Values,
-                    const Twine &NameStr, BasicBlock *InsertAtEnd);
+                    llvm::ArrayRef<Value *> Args, unsigned Values,
+                    const llvm::Twine &NameStr, BasicBlock *InsertAtEnd);
+
 protected:
   // Note: Instruction needs to be a friend here to call cloneImpl.
   friend class Instruction;
   InvokeInst *cloneImpl() const;
 
 public:
-  static InvokeInst *Create(Value *Func,
-                            BasicBlock *IfNormal, BasicBlock *IfException,
-                            ArrayRef<Value *> Args, const Twine &NameStr = "",
+  static InvokeInst *Create(Value *Func, BasicBlock *IfNormal,
+                            BasicBlock *IfException,
+                            llvm::ArrayRef<Value *> Args,
+                            const llvm::Twine &NameStr = "",
                             Instruction *InsertBefore = nullptr) {
     return Create(cast<FunctionType>(
                       cast<PointerType>(Func->getType())->getElementType()),
                   Func, IfNormal, IfException, Args, NameStr, InsertBefore);
   }
   static InvokeInst *Create(FunctionType *Ty, Value *Func, BasicBlock *IfNormal,
-                            BasicBlock *IfException, ArrayRef<Value *> Args,
-                            const Twine &NameStr = "",
+                            BasicBlock *IfException,
+                            llvm::ArrayRef<Value *> Args,
+                            const llvm::Twine &NameStr = "",
                             Instruction *InsertBefore = nullptr) {
     unsigned Values = unsigned(Args.size()) + 3;
     return new (Values) InvokeInst(Ty, Func, IfNormal, IfException, Args,
                                    Values, NameStr, InsertBefore);
   }
-  static InvokeInst *Create(Value *Func,
-                            BasicBlock *IfNormal, BasicBlock *IfException,
-                            ArrayRef<Value *> Args, const Twine &NameStr,
+  static InvokeInst *Create(Value *Func, BasicBlock *IfNormal,
+                            BasicBlock *IfException,
+                            llvm::ArrayRef<Value *> Args,
+                            const llvm::Twine &NameStr,
                             BasicBlock *InsertAtEnd) {
     unsigned Values = unsigned(Args.size()) + 3;
     return new(Values) InvokeInst(Func, IfNormal, IfException, Args,
@@ -3268,13 +3261,13 @@ public:
   void setArgOperand(unsigned i, Value *v) { setOperand(i, v); }
 
   /// arg_operands - iteration adapter for range-for loops.
-  iterator_range<op_iterator> arg_operands() {
-    return iterator_range<op_iterator>(op_begin(), op_end() - 3);
+  llvm::iterator_range<op_iterator> arg_operands() {
+    return llvm::iterator_range<op_iterator>(op_begin(), op_end() - 3);
   }
 
   /// arg_operands - iteration adapter for range-for loops.
-  iterator_range<const_op_iterator> arg_operands() const {
-    return iterator_range<const_op_iterator>(op_begin(), op_end() - 3);
+  llvm::iterator_range<const_op_iterator> arg_operands() const {
+    return llvm::iterator_range<const_op_iterator>(op_begin(), op_end() - 3);
   }
 
   /// \brief Wrappers for getting the \c Use of a invoke argument.
@@ -3412,7 +3405,7 @@ public:
   /// indirect function invocation.
   ///
   Function *getCalledFunction() const {
-    return dyn_cast<Function>(Op<-3>());
+    return llvm::dyn_cast<Function>(Op<-3>());
   }
 
   /// getCalledValue - Get a pointer to the function that is invoked by this
@@ -3468,7 +3461,7 @@ public:
     return (I->getOpcode() == Instruction::Invoke);
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 
 private:
@@ -3490,23 +3483,24 @@ struct OperandTraits<InvokeInst> : public VariadicOperandTraits<InvokeInst, 3> {
 };
 
 InvokeInst::InvokeInst(FunctionType *Ty, Value *Func, BasicBlock *IfNormal,
-                       BasicBlock *IfException, ArrayRef<Value *> Args,
-                       unsigned Values, const Twine &NameStr,
+                       BasicBlock *IfException, llvm::ArrayRef<Value *> Args,
+                       unsigned Values, const llvm::Twine &NameStr,
                        Instruction *InsertBefore)
     : TerminatorInst(Ty->getReturnType(), Instruction::Invoke,
                      OperandTraits<InvokeInst>::op_end(this) - Values, Values,
                      InsertBefore) {
   init(Ty, Func, IfNormal, IfException, Args, NameStr);
 }
-InvokeInst::InvokeInst(Value *Func,
-                       BasicBlock *IfNormal, BasicBlock *IfException,
-                       ArrayRef<Value *> Args, unsigned Values,
-                       const Twine &NameStr, BasicBlock *InsertAtEnd)
-  : TerminatorInst(cast<FunctionType>(cast<PointerType>(Func->getType())
-                                      ->getElementType())->getReturnType(),
-                   Instruction::Invoke,
-                   OperandTraits<InvokeInst>::op_end(this) - Values,
-                   Values, InsertAtEnd) {
+InvokeInst::InvokeInst(Value *Func, BasicBlock *IfNormal,
+                       BasicBlock *IfException, llvm::ArrayRef<Value *> Args,
+                       unsigned Values, const llvm::Twine &NameStr,
+                       BasicBlock *InsertAtEnd)
+    : TerminatorInst(cast<FunctionType>(
+                         cast<PointerType>(Func->getType())->getElementType())
+                         ->getReturnType(),
+                     Instruction::Invoke,
+                     OperandTraits<InvokeInst>::op_end(this) - Values, Values,
+                     InsertAtEnd) {
   init(Func, IfNormal, IfException, Args, NameStr);
 }
 
@@ -3550,7 +3544,7 @@ public:
     return I->getOpcode() == Instruction::Resume;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   BasicBlock *getSuccessorV(unsigned idx) const override;
@@ -3596,7 +3590,7 @@ public:
     return I->getOpcode() == Instruction::Unreachable;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 private:
   BasicBlock *getSuccessorV(unsigned idx) const override;
@@ -3618,19 +3612,19 @@ protected:
 
 public:
   /// \brief Constructor with insert-before-instruction semantics
-  TruncInst(
-    Value *S,                           ///< The value to be truncated
-    Type *Ty,                           ///< The (smaller) type to truncate to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+  TruncInst(Value *S, ///< The value to be truncated
+            Type *Ty, ///< The (smaller) type to truncate to
+            const llvm::Twine &NameStr = "", ///< A name for the new instruction
+            Instruction *InsertBefore =
+                nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   TruncInst(
-    Value *S,                     ///< The value to be truncated
-    Type *Ty,                     ///< The (smaller) type to truncate to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be truncated
+      Type *Ty,                   ///< The (smaller) type to truncate to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3638,7 +3632,7 @@ public:
     return I->getOpcode() == Trunc;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3656,19 +3650,18 @@ protected:
 
 public:
   /// \brief Constructor with insert-before-instruction semantics
-  ZExtInst(
-    Value *S,                           ///< The value to be zero extended
-    Type *Ty,                           ///< The type to zero extend to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+  ZExtInst(Value *S,                        ///< The value to be zero extended
+           Type *Ty,                        ///< The type to zero extend to
+           const llvm::Twine &NameStr = "", ///< A name for the new instruction
+           Instruction *InsertBefore =
+               nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end semantics.
-  ZExtInst(
-    Value *S,                     ///< The value to be zero extended
-    Type *Ty,                     ///< The type to zero extend to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+  ZExtInst(Value *S,                   ///< The value to be zero extended
+           Type *Ty,                   ///< The type to zero extend to
+           const llvm::Twine &NameStr, ///< A name for the new instruction
+           BasicBlock *InsertAtEnd ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3676,7 +3669,7 @@ public:
     return I->getOpcode() == ZExt;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3694,19 +3687,18 @@ protected:
 
 public:
   /// \brief Constructor with insert-before-instruction semantics
-  SExtInst(
-    Value *S,                           ///< The value to be sign extended
-    Type *Ty,                           ///< The type to sign extend to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+  SExtInst(Value *S,                        ///< The value to be sign extended
+           Type *Ty,                        ///< The type to sign extend to
+           const llvm::Twine &NameStr = "", ///< A name for the new instruction
+           Instruction *InsertBefore =
+               nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
-  SExtInst(
-    Value *S,                     ///< The value to be sign extended
-    Type *Ty,                     ///< The type to sign extend to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+  SExtInst(Value *S,                   ///< The value to be sign extended
+           Type *Ty,                   ///< The type to sign extend to
+           const llvm::Twine &NameStr, ///< A name for the new instruction
+           BasicBlock *InsertAtEnd ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3714,7 +3706,7 @@ public:
     return I->getOpcode() == SExt;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3733,18 +3725,19 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   FPTruncInst(
-    Value *S,                           ///< The value to be truncated
-    Type *Ty,                           ///< The type to truncate to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be truncated
+      Type *Ty,                        ///< The type to truncate to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-before-instruction semantics
   FPTruncInst(
-    Value *S,                     ///< The value to be truncated
-    Type *Ty,                     ///< The type to truncate to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be truncated
+      Type *Ty,                   ///< The type to truncate to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3752,7 +3745,7 @@ public:
     return I->getOpcode() == FPTrunc;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3770,19 +3763,19 @@ protected:
 
 public:
   /// \brief Constructor with insert-before-instruction semantics
-  FPExtInst(
-    Value *S,                           ///< The value to be extended
-    Type *Ty,                           ///< The type to extend to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+  FPExtInst(Value *S,                        ///< The value to be extended
+            Type *Ty,                        ///< The type to extend to
+            const llvm::Twine &NameStr = "", ///< A name for the new instruction
+            Instruction *InsertBefore =
+                nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   FPExtInst(
-    Value *S,                     ///< The value to be extended
-    Type *Ty,                     ///< The type to extend to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be extended
+      Type *Ty,                   ///< The type to extend to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3790,7 +3783,7 @@ public:
     return I->getOpcode() == FPExt;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3809,18 +3802,19 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   UIToFPInst(
-    Value *S,                           ///< The value to be converted
-    Type *Ty,                           ///< The type to convert to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be converted
+      Type *Ty,                        ///< The type to convert to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   UIToFPInst(
-    Value *S,                     ///< The value to be converted
-    Type *Ty,                     ///< The type to convert to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be converted
+      Type *Ty,                   ///< The type to convert to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3828,7 +3822,7 @@ public:
     return I->getOpcode() == UIToFP;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3847,18 +3841,19 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   SIToFPInst(
-    Value *S,                           ///< The value to be converted
-    Type *Ty,                           ///< The type to convert to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be converted
+      Type *Ty,                        ///< The type to convert to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   SIToFPInst(
-    Value *S,                     ///< The value to be converted
-    Type *Ty,                     ///< The type to convert to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be converted
+      Type *Ty,                   ///< The type to convert to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3866,7 +3861,7 @@ public:
     return I->getOpcode() == SIToFP;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3885,18 +3880,18 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   FPToUIInst(
-    Value *S,                           ///< The value to be converted
-    Type *Ty,                           ///< The type to convert to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be converted
+      Type *Ty,                        ///< The type to convert to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
-  FPToUIInst(
-    Value *S,                     ///< The value to be converted
-    Type *Ty,                     ///< The type to convert to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< Where to insert the new instruction
+  FPToUIInst(Value *S,                   ///< The value to be converted
+             Type *Ty,                   ///< The type to convert to
+             const llvm::Twine &NameStr, ///< A name for the new instruction
+             BasicBlock *InsertAtEnd ///< Where to insert the new instruction
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3904,7 +3899,7 @@ public:
     return I->getOpcode() == FPToUI;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3923,18 +3918,19 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   FPToSIInst(
-    Value *S,                           ///< The value to be converted
-    Type *Ty,                           ///< The type to convert to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be converted
+      Type *Ty,                        ///< The type to convert to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   FPToSIInst(
-    Value *S,                     ///< The value to be converted
-    Type *Ty,                     ///< The type to convert to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be converted
+      Type *Ty,                   ///< The type to convert to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -3942,7 +3938,7 @@ public:
     return I->getOpcode() == FPToSI;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -3955,18 +3951,19 @@ class IntToPtrInst : public CastInst {
 public:
   /// \brief Constructor with insert-before-instruction semantics
   IntToPtrInst(
-    Value *S,                           ///< The value to be converted
-    Type *Ty,                           ///< The type to convert to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be converted
+      Type *Ty,                        ///< The type to convert to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   IntToPtrInst(
-    Value *S,                     ///< The value to be converted
-    Type *Ty,                     ///< The type to convert to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be converted
+      Type *Ty,                   ///< The type to convert to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   // Note: Instruction needs to be a friend here to call cloneImpl.
@@ -3984,7 +3981,7 @@ public:
     return I->getOpcode() == IntToPtr;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -4003,18 +4000,19 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   PtrToIntInst(
-    Value *S,                           ///< The value to be converted
-    Type *Ty,                           ///< The type to convert to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be converted
+      Type *Ty,                        ///< The type to convert to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   PtrToIntInst(
-    Value *S,                     ///< The value to be converted
-    Type *Ty,                     ///< The type to convert to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be converted
+      Type *Ty,                   ///< The type to convert to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   /// \brief Gets the pointer operand.
@@ -4034,7 +4032,7 @@ public:
     return I->getOpcode() == PtrToInt;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -4053,18 +4051,19 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   BitCastInst(
-    Value *S,                           ///< The value to be casted
-    Type *Ty,                           ///< The type to casted to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be casted
+      Type *Ty,                        ///< The type to casted to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   BitCastInst(
-    Value *S,                     ///< The value to be casted
-    Type *Ty,                     ///< The type to casted to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be casted
+      Type *Ty,                   ///< The type to casted to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -4072,7 +4071,7 @@ public:
     return I->getOpcode() == BitCast;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -4093,18 +4092,19 @@ protected:
 public:
   /// \brief Constructor with insert-before-instruction semantics
   AddrSpaceCastInst(
-    Value *S,                           ///< The value to be casted
-    Type *Ty,                           ///< The type to casted to
-    const Twine &NameStr = "",          ///< A name for the new instruction
-    Instruction *InsertBefore = nullptr ///< Where to insert the new instruction
+      Value *S,                        ///< The value to be casted
+      Type *Ty,                        ///< The type to casted to
+      const llvm::Twine &NameStr = "", ///< A name for the new instruction
+      Instruction *InsertBefore =
+          nullptr ///< Where to insert the new instruction
   );
 
   /// \brief Constructor with insert-at-end-of-block semantics
   AddrSpaceCastInst(
-    Value *S,                     ///< The value to be casted
-    Type *Ty,                     ///< The type to casted to
-    const Twine &NameStr,         ///< A name for the new instruction
-    BasicBlock *InsertAtEnd       ///< The block to insert the instruction into
+      Value *S,                   ///< The value to be casted
+      Type *Ty,                   ///< The type to casted to
+      const llvm::Twine &NameStr, ///< A name for the new instruction
+      BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
   );
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -4112,7 +4112,7 @@ public:
     return I->getOpcode() == AddrSpaceCast;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 

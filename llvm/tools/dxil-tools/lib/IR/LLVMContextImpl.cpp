@@ -19,6 +19,8 @@
 #include <algorithm>
 using namespace llvm;
 
+namespace dxil {
+
 LLVMContextImpl::LLVMContextImpl(LLVMContext &C)
   : TheTrueVal(nullptr), TheFalseVal(nullptr),
     VoidTy(C, Type::VoidTyID),
@@ -110,13 +112,18 @@ LLVMContextImpl::~LLVMContextImpl() {
   ArrayConstants.freeConstants();
   StructConstants.freeConstants();
   VectorConstants.freeConstants();
-  DeleteContainerSeconds(CAZConstants);
-  DeleteContainerSeconds(CPNConstants);
-  DeleteContainerSeconds(UVConstants);
+  for (auto &Entry : CAZConstants)
+    delete Entry.second;
+  for (auto &Entry : CPNConstants)
+    delete Entry.second;
+  for (auto &Entry : UVConstants)
+    delete Entry.second;
   InlineAsms.freeConstants();
-  DeleteContainerSeconds(IntConstants);
-  DeleteContainerSeconds(FPConstants);
-  
+  for (auto &Entry : IntConstants)
+    delete Entry.second;
+  for (auto &Entry : FPConstants)
+    delete Entry.second;
+
   for (StringMap<ConstantDataSequential*>::iterator I = CDSConstants.begin(),
        E = CDSConstants.end(); I != E; ++I)
     delete I->second;
@@ -184,7 +191,6 @@ void Module::dropTriviallyDeadConstantArrays() {
   Context.pImpl->dropTriviallyDeadConstantArrays();
 }
 
-namespace dxil {
 /// \brief Make MDOperand transparent for hashing.
 ///
 /// This overload of an implementation detail of the hashing library makes
@@ -199,7 +205,6 @@ namespace dxil {
 /// does not cause MDOperand to be transparent.  In particular, a bare pointer
 /// doesn't get hashed before it's combined, whereas \a MDOperand would.
 static const Metadata *get_hashable_data(const MDOperand &X) { return X.get(); }
-}
 
 unsigned MDNodeOpsKey::calculateHash(MDNode *N, unsigned Offset) {
   unsigned Hash = hash_combine_range(N->op_begin() + Offset, N->op_end());
@@ -239,3 +244,4 @@ void GetElementPtrConstantExpr::anchor() { }
 
 void CompareConstantExpr::anchor() { }
 
+} // namespace dxil

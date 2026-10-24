@@ -20,18 +20,24 @@
 
 namespace dxil {
 class ValueHandleBase;
-template<typename From> struct simplify_type;
 
-// ValueHandleBase** is only 4-byte aligned.
-template<>
-class PointerLikeTypeTraits<ValueHandleBase**> {
+} // namespace dxil
+
+namespace llvm {
+
+// dxil::ValueHandleBase** is only 4-byte aligned.
+template <> struct PointerLikeTypeTraits<dxil::ValueHandleBase **> {
 public:
-  static inline void *getAsVoidPointer(ValueHandleBase** P) { return P; }
-  static inline ValueHandleBase **getFromVoidPointer(void *P) {
-    return static_cast<ValueHandleBase**>(P);
+  static inline void *getAsVoidPointer(dxil::ValueHandleBase **P) { return P; }
+  static inline dxil::ValueHandleBase **getFromVoidPointer(void *P) {
+    return static_cast<dxil::ValueHandleBase **>(P);
   }
   enum { NumLowBitsAvailable = 2 };
 };
+
+} // namespace llvm
+
+namespace dxil {
 
 /// \brief This is the common base class of value handles.
 ///
@@ -48,7 +54,7 @@ protected:
   enum HandleBaseKind { Assert, Callback, Weak, WeakTracking };
 
 private:
-  PointerIntPair<ValueHandleBase**, 2, HandleBaseKind> PrevPair;
+  llvm::PointerIntPair<ValueHandleBase **, 2, HandleBaseKind> PrevPair;
   ValueHandleBase *Next;
 
   Value *Val;
@@ -102,11 +108,7 @@ public:
 protected:
   Value *getValPtr() const { return Val; }
 
-  static bool isValid(Value *V) {
-    return V &&
-           V != DenseMapInfo<Value *>::getEmptyKey() &&
-           V != DenseMapInfo<Value *>::getTombstoneKey();
-  }
+  static bool isValid(Value *V) { return V != nullptr; }
 
 public:
   // Callbacks made from Value.
@@ -156,14 +158,22 @@ public:
 
 // Specialize simplify_type to allow WeakVH to participate in
 // dyn_cast, isa, etc.
-template <> struct simplify_type<WeakVH> {
-  typedef Value *SimpleType;
-  static SimpleType getSimplifiedValue(WeakVH &WVH) { return WVH; }
+} // namespace dxil
+
+namespace llvm {
+
+template <> struct simplify_type<dxil::WeakVH> {
+  typedef dxil::Value *SimpleType;
+  static SimpleType getSimplifiedValue(dxil::WeakVH &WVH) { return WVH; }
 };
-template <> struct simplify_type<const WeakVH> {
-  typedef Value *SimpleType;
-  static SimpleType getSimplifiedValue(const WeakVH &WVH) { return WVH; }
+template <> struct simplify_type<const dxil::WeakVH> {
+  typedef dxil::Value *SimpleType;
+  static SimpleType getSimplifiedValue(const dxil::WeakVH &WVH) { return WVH; }
 };
+
+} // namespace llvm
+
+namespace dxil {
 
 /// \brief Value handle that is nullable, but tries to track the Value.
 ///
@@ -199,16 +209,26 @@ public:
 
 // Specialize simplify_type to allow WeakTrackingVH to participate in
 // dyn_cast, isa, etc.
-template <> struct simplify_type<WeakTrackingVH> {
-  typedef Value *SimpleType;
-  static SimpleType getSimplifiedValue(WeakTrackingVH &WVH) { return WVH; }
-};
-template <> struct simplify_type<const WeakTrackingVH> {
-  typedef Value *SimpleType;
-  static SimpleType getSimplifiedValue(const WeakTrackingVH &WVH) {
+} // namespace dxil
+
+namespace llvm {
+
+template <> struct simplify_type<dxil::WeakTrackingVH> {
+  typedef dxil::Value *SimpleType;
+  static SimpleType getSimplifiedValue(dxil::WeakTrackingVH &WVH) {
     return WVH;
   }
 };
+template <> struct simplify_type<const dxil::WeakTrackingVH> {
+  typedef dxil::Value *SimpleType;
+  static SimpleType getSimplifiedValue(const dxil::WeakTrackingVH &WVH) {
+    return WVH;
+  }
+};
+
+} // namespace llvm
+
+namespace dxil {
 
 /// \brief Value handle that asserts if the Value is deleted.
 ///
@@ -231,7 +251,7 @@ class AssertingVH
   : public ValueHandleBase
 #endif
   {
-  friend struct DenseMapInfo<AssertingVH<ValueTy> >;
+  friend struct llvm::DenseMapInfo<AssertingVH<ValueTy>>;
 
 #ifndef NDEBUG
   Value *getRawValPtr() const { return ValueHandleBase::getValPtr(); }
@@ -276,36 +296,26 @@ public:
   ValueTy &operator*() const { return *getValPtr(); }
 };
 
-// Specialize DenseMapInfo to allow AssertingVH to participate in DenseMap.
-template<typename T>
-struct DenseMapInfo<AssertingVH<T> > {
-  static inline AssertingVH<T> getEmptyKey() {
-    AssertingVH<T> Res;
-    Res.setRawValPtr(DenseMapInfo<Value *>::getEmptyKey());
-    return Res;
+} // namespace dxil
+
+namespace llvm {
+
+// Specialize DenseMapInfo to allow dxil::AssertingVH to participate in
+// DenseMap.
+template <typename T> struct DenseMapInfo<dxil::AssertingVH<T>> {
+  static unsigned getHashValue(const dxil::AssertingVH<T> &Val) {
+    return DenseMapInfo<dxil::Value *>::getHashValue(Val.getRawValPtr());
   }
-  static inline AssertingVH<T> getTombstoneKey() {
-    AssertingVH<T> Res;
-    Res.setRawValPtr(DenseMapInfo<Value *>::getTombstoneKey());
-    return Res;
-  }
-  static unsigned getHashValue(const AssertingVH<T> &Val) {
-    return DenseMapInfo<Value *>::getHashValue(Val.getRawValPtr());
-  }
-  static bool isEqual(const AssertingVH<T> &LHS, const AssertingVH<T> &RHS) {
-    return DenseMapInfo<Value *>::isEqual(LHS.getRawValPtr(),
-                                          RHS.getRawValPtr());
+  static bool isEqual(const dxil::AssertingVH<T> &LHS,
+                      const dxil::AssertingVH<T> &RHS) {
+    return DenseMapInfo<dxil::Value *>::isEqual(LHS.getRawValPtr(),
+                                                RHS.getRawValPtr());
   }
 };
 
-template <typename T>
-struct isPodLike<AssertingVH<T> > {
-#ifdef NDEBUG
-  static const bool value = true;
-#else
-  static const bool value = false;
-#endif
-};
+} // namespace llvm
+
+namespace dxil {
 
 /// \brief Value handle that tracks a Value across RAUW.
 ///
@@ -346,7 +356,7 @@ public:
     // Untill we decide to pull that upstream change into DXC, DXC should follow
     // the original TrackingVH implementation. return Null is always ok here
     // instead of assert it.
-    if (InnerHandle.operator llvm::Value *() == nullptr)
+    if (InnerHandle.operator Value *() == nullptr)
       return nullptr;
     // HLSL Change end.
 
@@ -357,7 +367,7 @@ public:
     // to check this property on assignment for better debugging, but we don't
     // want to require a virtual interface on this VH. Instead we allow RAUW to
     // replace this value with a value of an invalid type, and check it here.
-    assert(isa<ValueTy>(InnerHandle) &&
+    assert(llvm::isa<ValueTy>(InnerHandle) &&
            "Tracked Value was replaced by one with an invalid type!");
     return cast<ValueTy>(InnerHandle);
   }
@@ -448,6 +458,6 @@ public:
   virtual void allUsesReplacedWith(Value *) {}
 };
 
-} // End llvm namespace
+} // namespace dxil
 
 #endif

@@ -27,6 +27,8 @@
 #include <algorithm>
 using namespace llvm;
 
+namespace dxil {
+
 //===----------------------------------------------------------------------===//
 // Attribute Construction Methods
 //===----------------------------------------------------------------------===//
@@ -38,8 +40,8 @@ Attribute Attribute::get(LLVMContext &Context, Attribute::AttrKind Kind,
   ID.AddInteger(Kind);
   if (Val) ID.AddInteger(Val);
 
-  void *InsertPoint;
-  AttributeImpl *PA = pImpl->AttrsSet.FindNodeOrInsertPos(ID, InsertPoint);
+  FoldingSetInsertToken InsertPoint;
+  AttributeImpl *PA = pImpl->AttrsSet.lookup(ID, InsertPoint);
 
   if (!PA) {
     // If we didn't find any existing attributes of the same shape then create a
@@ -48,7 +50,7 @@ Attribute Attribute::get(LLVMContext &Context, Attribute::AttrKind Kind,
       PA = new EnumAttributeImpl(Kind);
     else
       PA = new IntAttributeImpl(Kind, Val);
-    pImpl->AttrsSet.InsertNode(PA, InsertPoint);
+    pImpl->AttrsSet.insert(PA, InsertPoint);
   }
 
   // Return the Attribute that we found or created.
@@ -61,14 +63,14 @@ Attribute Attribute::get(LLVMContext &Context, StringRef Kind, StringRef Val) {
   ID.AddString(Kind);
   if (!Val.empty()) ID.AddString(Val);
 
-  void *InsertPoint;
-  AttributeImpl *PA = pImpl->AttrsSet.FindNodeOrInsertPos(ID, InsertPoint);
+  FoldingSetInsertToken InsertPoint;
+  AttributeImpl *PA = pImpl->AttrsSet.lookup(ID, InsertPoint);
 
   if (!PA) {
     // If we didn't find any existing attributes of the same shape then create a
     // new one and insert it.
     PA = new StringAttributeImpl(Kind, Val);
-    pImpl->AttrsSet.InsertNode(PA, InsertPoint);
+    pImpl->AttrsSet.insert(PA, InsertPoint);
   }
 
   // Return the Attribute that we found or created.
@@ -476,9 +478,8 @@ AttributeSetNode *AttributeSetNode::get(LLVMContext &C,
          E = SortedAttrs.end(); I != E; ++I)
     I->Profile(ID);
 
-  void *InsertPoint;
-  AttributeSetNode *PA =
-    pImpl->AttrsSetNodes.FindNodeOrInsertPos(ID, InsertPoint);
+  FoldingSetInsertToken InsertPoint;
+  AttributeSetNode *PA = pImpl->AttrsSetNodes.lookup(ID, InsertPoint);
 
   // If we didn't find any existing attributes of the same shape then create a
   // new one and insert it.
@@ -487,7 +488,7 @@ AttributeSetNode *AttributeSetNode::get(LLVMContext &C,
     void *Mem = ::operator new(sizeof(AttributeSetNode) +
                                sizeof(Attribute) * SortedAttrs.size());
     PA = new (Mem) AttributeSetNode(SortedAttrs);
-    pImpl->AttrsSetNodes.InsertNode(PA, InsertPoint);
+    pImpl->AttrsSetNodes.insert(PA, InsertPoint);
   }
 
   // Return the AttributesListNode that we found or created.
@@ -610,8 +611,8 @@ AttributeSet::getImpl(LLVMContext &C,
   FoldingSetNodeID ID;
   AttributeSetImpl::Profile(ID, Attrs);
 
-  void *InsertPoint;
-  AttributeSetImpl *PA = pImpl->AttrsLists.FindNodeOrInsertPos(ID, InsertPoint);
+  FoldingSetInsertToken InsertPoint;
+  AttributeSetImpl *PA = pImpl->AttrsLists.lookup(ID, InsertPoint);
 
   // If we didn't find any existing attributes of the same shape then
   // create a new one and insert it.
@@ -621,7 +622,7 @@ AttributeSet::getImpl(LLVMContext &C,
                                sizeof(std::pair<unsigned, AttributeSetNode *>) *
                                    Attrs.size());
     PA = new (Mem) AttributeSetImpl(C, Attrs);
-    pImpl->AttrsLists.InsertNode(PA, InsertPoint);
+    pImpl->AttrsLists.insert(PA, InsertPoint);
   }
 
   // Return the AttributesList that we found or created.
@@ -758,14 +759,14 @@ AttributeSet AttributeSet::addAttribute(LLVMContext &C, unsigned Index,
 
 AttributeSet AttributeSet::addAttribute(LLVMContext &C, unsigned Index,
                                         StringRef Kind) const {
-  llvm::AttrBuilder B;
+  AttrBuilder B;
   B.addAttribute(Kind);
   return addAttributes(C, Index, AttributeSet::get(C, Index, B));
 }
 
 AttributeSet AttributeSet::addAttribute(LLVMContext &C, unsigned Index,
                                         StringRef Kind, StringRef Value) const {
-  llvm::AttrBuilder B;
+  AttrBuilder B;
   B.addAttribute(Kind, Value);
   return addAttributes(C, Index, AttributeSet::get(C, Index, B));
 }
@@ -906,7 +907,7 @@ AttributeSet AttributeSet::removeAttributes(LLVMContext &C, unsigned Index,
 
 AttributeSet AttributeSet::addDereferenceableAttr(LLVMContext &C, unsigned Index,
                                                   uint64_t Bytes) const {
-  llvm::AttrBuilder B;
+  AttrBuilder B;
   B.addDereferenceableAttr(Bytes);
   return addAttributes(C, Index, AttributeSet::get(C, Index, B));
 }
@@ -914,7 +915,7 @@ AttributeSet AttributeSet::addDereferenceableAttr(LLVMContext &C, unsigned Index
 AttributeSet AttributeSet::addDereferenceableOrNullAttr(LLVMContext &C,
                                                         unsigned Index,
                                                         uint64_t Bytes) const {
-  llvm::AttrBuilder B;
+  AttrBuilder B;
   B.addDereferenceableOrNullAttr(Bytes);
   return addAttributes(C, Index, AttributeSet::get(C, Index, B));
 }
@@ -1144,7 +1145,7 @@ AttrBuilder &AttrBuilder::addAttribute(Attribute Attr) {
 }
 
 AttrBuilder &AttrBuilder::addAttribute(StringRef A, StringRef V) {
-  TargetDepAttrs[A] = V;
+  TargetDepAttrs[A.str()] = V.str();
   return *this;
 }
 
@@ -1190,8 +1191,8 @@ AttrBuilder &AttrBuilder::removeAttributes(AttributeSet A, uint64_t Index) {
         DerefOrNullBytes = 0;
     } else {
       assert(Attr.isStringAttribute() && "Invalid attribute type!");
-      std::map<std::string, std::string>::iterator
-        Iter = TargetDepAttrs.find(Attr.getKindAsString());
+      std::map<std::string, std::string>::iterator Iter =
+          TargetDepAttrs.find(Attr.getKindAsString().str());
       if (Iter != TargetDepAttrs.end())
         TargetDepAttrs.erase(Iter);
     }
@@ -1201,7 +1202,7 @@ AttrBuilder &AttrBuilder::removeAttributes(AttributeSet A, uint64_t Index) {
 }
 
 AttrBuilder &AttrBuilder::removeAttribute(StringRef A) {
-  std::map<std::string, std::string>::iterator I = TargetDepAttrs.find(A);
+  std::map<std::string, std::string>::iterator I = TargetDepAttrs.find(A.str());
   if (I != TargetDepAttrs.end())
     TargetDepAttrs.erase(I);
   return *this;
@@ -1305,7 +1306,7 @@ bool AttrBuilder::overlaps(const AttrBuilder &B) const {
 }
 
 bool AttrBuilder::contains(StringRef A) const {
-  return TargetDepAttrs.find(A) != TargetDepAttrs.end();
+  return TargetDepAttrs.find(A.str()) != TargetDepAttrs.end();
 }
 
 bool AttrBuilder::hasAttributes() const {
@@ -1330,7 +1331,8 @@ bool AttrBuilder::hasAttributes(AttributeSet A, uint64_t Index) const {
         return true;
     } else {
       assert(Attr.isStringAttribute() && "Invalid attribute kind!");
-      return TargetDepAttrs.find(Attr.getKindAsString())!=TargetDepAttrs.end();
+      return TargetDepAttrs.find(Attr.getKindAsString().str()) !=
+             TargetDepAttrs.end();
     }
   }
 
@@ -1406,3 +1408,5 @@ AttrBuilder AttributeFuncs::typeIncompatible(const Type *Ty) {
 
   return Incompatible;
 }
+
+} // namespace dxil

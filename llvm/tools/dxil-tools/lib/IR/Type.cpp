@@ -19,6 +19,8 @@
 #include <cstdarg>
 using namespace llvm;
 
+namespace dxil {
+
 //===----------------------------------------------------------------------===//
 //                         Type Class Implementation
 //===----------------------------------------------------------------------===//
@@ -330,9 +332,7 @@ bool IntegerType::isPowerOf2ByteWidth() const {
   return (BitWidth > 7) && isPowerOf2_32(BitWidth);
 }
 
-APInt IntegerType::getMask() const {
-  return APInt::getAllOnesValue(getBitWidth());
-}
+APInt IntegerType::getMask() const { return APInt::getAllOnes(getBitWidth()); }
 
 //===----------------------------------------------------------------------===//
 //                       FunctionType Implementation
@@ -366,9 +366,9 @@ FunctionType *FunctionType::get(Type *ReturnType,
   FunctionType *FT;
 
   if (I == pImpl->FunctionTypes.end()) {
-    FT = (FunctionType*) pImpl->TypeAllocator.
-      Allocate(sizeof(FunctionType) + sizeof(Type*) * (Params.size() + 1),
-               AlignOf<FunctionType>::Alignment);
+    FT = (FunctionType *)pImpl->TypeAllocator.Allocate(
+        sizeof(FunctionType) + sizeof(Type *) * (Params.size() + 1),
+        alignof(FunctionType));
     new (FT) FunctionType(ReturnType, Params, isVarArg);
     pImpl->FunctionTypes.insert(FT);
   } else {
@@ -379,7 +379,7 @@ FunctionType *FunctionType::get(Type *ReturnType,
 }
 
 FunctionType *FunctionType::get(Type *Result, bool isVarArg) {
-  return get(Result, None, isVarArg);
+  return get(Result, {}, isVarArg);
 }
 
 /// isValidReturnType - Return true if the specified type is valid as a return
@@ -470,7 +470,6 @@ void StructType::setName(StringRef Name) {
    
     do {
       TempStr.resize(NameSize + 1);
-      TmpStream.resync();
       TmpStream << getContext().pImpl->NamedStructTypesUniqueID++;
 
       IterBool = getContext().pImpl->NamedStructTypes.insert(
@@ -495,20 +494,20 @@ StructType *StructType::create(LLVMContext &Context, StringRef Name) {
 }
 
 StructType *StructType::get(LLVMContext &Context, bool isPacked) {
-  return get(Context, None, isPacked);
+  return get(Context, {}, isPacked);
 }
 
 StructType *StructType::get(Type *type, ...) {
   assert(type && "Cannot create a struct type with no elements with this");
   LLVMContext &Ctx = type->getContext();
   va_list ap;
-  SmallVector<llvm::Type*, 8> StructFields;
+  SmallVector<Type *, 8> StructFields;
   va_start(ap, type);
   while (type) {
     StructFields.push_back(type);
-    type = va_arg(ap, llvm::Type*);
+    type = va_arg(ap, Type *);
   }
-  auto *Ret = llvm::StructType::get(Ctx, StructFields);
+  auto *Ret = StructType::get(Ctx, StructFields);
   va_end(ap);
   return Ret;
 }
@@ -545,13 +544,13 @@ StructType *StructType::create(StringRef Name, Type *type, ...) {
   assert(type && "Cannot create a struct type with no elements with this");
   LLVMContext &Ctx = type->getContext();
   va_list ap;
-  SmallVector<llvm::Type*, 8> StructFields;
+  SmallVector<Type *, 8> StructFields;
   va_start(ap, type);
   while (type) {
     StructFields.push_back(type);
-    type = va_arg(ap, llvm::Type*);
+    type = va_arg(ap, Type *);
   }
-  auto *Ret = llvm::StructType::create(Ctx, StructFields, Name);
+  auto *Ret = StructType::create(Ctx, StructFields, Name);
   va_end(ap);
   return Ret;
 }
@@ -590,11 +589,11 @@ StringRef StructType::getName() const {
 void StructType::setBody(Type *type, ...) {
   assert(type && "Cannot create a struct type with no elements with this");
   va_list ap;
-  SmallVector<llvm::Type*, 8> StructFields;
+  SmallVector<Type *, 8> StructFields;
   va_start(ap, type);
   while (type) {
     StructFields.push_back(type);
-    type = va_arg(ap, llvm::Type*);
+    type = va_arg(ap, Type *);
   }
   setBody(StructFields);
   va_end(ap);
@@ -773,3 +772,5 @@ bool PointerType::isValidElementType(Type *ElemTy) {
 bool PointerType::isLoadableOrStorableType(Type *ElemTy) {
   return isValidElementType(ElemTy) && !ElemTy->isFunctionTy();
 }
+
+} // namespace dxil

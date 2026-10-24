@@ -167,7 +167,7 @@ public:
   void *operator new(size_t s) {
     return User::operator new(s, 1);
   }
-  ExtractValueConstantExpr(Constant *Agg, ArrayRef<unsigned> IdxList,
+  ExtractValueConstantExpr(Constant *Agg, llvm::ArrayRef<unsigned> IdxList,
                            Type *DestTy)
       : ConstantExpr(DestTy, Instruction::ExtractValue, &Op<0>(), 1),
         Indices(IdxList.begin(), IdxList.end()) {
@@ -175,7 +175,7 @@ public:
   }
 
   /// Indices - These identify which value to extract.
-  const SmallVector<unsigned, 4> Indices;
+  const llvm::SmallVector<unsigned, 4> Indices;
 
   /// Transparently provide more efficient getOperand methods.
   DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
@@ -193,7 +193,7 @@ public:
     return User::operator new(s, 2);
   }
   InsertValueConstantExpr(Constant *Agg, Constant *Val,
-                          ArrayRef<unsigned> IdxList, Type *DestTy)
+                          llvm::ArrayRef<unsigned> IdxList, Type *DestTy)
       : ConstantExpr(DestTy, Instruction::InsertValue, &Op<0>(), 2),
         Indices(IdxList.begin(), IdxList.end()) {
     Op<0>() = Agg;
@@ -201,7 +201,7 @@ public:
   }
 
   /// Indices - These identify the position for the insertion.
-  const SmallVector<unsigned, 4> Indices;
+  const llvm::SmallVector<unsigned, 4> Indices;
 
   /// Transparently provide more efficient getOperand methods.
   DXIL_DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
@@ -213,19 +213,18 @@ class GetElementPtrConstantExpr : public ConstantExpr {
   Type *SrcElementTy;
   void anchor() override;
   GetElementPtrConstantExpr(Type *SrcElementTy, Constant *C,
-                            ArrayRef<Constant *> IdxList, Type *DestTy);
+                            llvm::ArrayRef<Constant *> IdxList, Type *DestTy);
 
 public:
   static GetElementPtrConstantExpr *Create(Constant *C,
-                                           ArrayRef<Constant*> IdxList,
-                                           Type *DestTy,
-                                           unsigned Flags) {
+                                           llvm::ArrayRef<Constant *> IdxList,
+                                           Type *DestTy, unsigned Flags) {
     return Create(
         cast<PointerType>(C->getType()->getScalarType())->getElementType(), C,
         IdxList, DestTy, Flags);
   }
   static GetElementPtrConstantExpr *Create(Type *SrcElementTy, Constant *C,
-                                           ArrayRef<Constant *> IdxList,
+                                           llvm::ArrayRef<Constant *> IdxList,
                                            Type *DestTy, unsigned Flags) {
     GetElementPtrConstantExpr *Result = new (IdxList.size() + 1)
         GetElementPtrConstantExpr(SrcElementTy, C, IdxList, DestTy);
@@ -337,12 +336,14 @@ template <> struct ConstantInfo<ConstantVector> {
 };
 
 template <class ConstantClass> struct ConstantAggrKeyType {
-  ArrayRef<Constant *> Operands;
-  ConstantAggrKeyType(ArrayRef<Constant *> Operands) : Operands(Operands) {}
-  ConstantAggrKeyType(ArrayRef<Constant *> Operands, const ConstantClass *)
+  llvm::ArrayRef<Constant *> Operands;
+  ConstantAggrKeyType(llvm::ArrayRef<Constant *> Operands)
+      : Operands(Operands) {}
+  ConstantAggrKeyType(llvm::ArrayRef<Constant *> Operands,
+                      const ConstantClass *)
       : Operands(Operands) {}
   ConstantAggrKeyType(const ConstantClass *C,
-                      SmallVectorImpl<Constant *> &Storage) {
+                      llvm::SmallVectorImpl<Constant *> &Storage) {
     assert(Storage.empty() && "Expected empty storage");
     for (unsigned I = 0, E = C->getNumOperands(); I != E; ++I)
       Storage.push_back(C->getOperand(I));
@@ -361,7 +362,7 @@ template <class ConstantClass> struct ConstantAggrKeyType {
     return true;
   }
   unsigned getHash() const {
-    return hash_combine_range(Operands.begin(), Operands.end());
+    return llvm::hash_combine_range(Operands.begin(), Operands.end());
   }
 
   typedef typename ConstantInfo<ConstantClass>::TypeClass TypeClass;
@@ -371,19 +372,19 @@ template <class ConstantClass> struct ConstantAggrKeyType {
 };
 
 struct InlineAsmKeyType {
-  StringRef AsmString;
-  StringRef Constraints;
+  llvm::StringRef AsmString;
+  llvm::StringRef Constraints;
   bool HasSideEffects;
   bool IsAlignStack;
   InlineAsm::AsmDialect AsmDialect;
 
-  InlineAsmKeyType(StringRef AsmString, StringRef Constraints,
+  InlineAsmKeyType(llvm::StringRef AsmString, llvm::StringRef Constraints,
                    bool HasSideEffects, bool IsAlignStack,
                    InlineAsm::AsmDialect AsmDialect)
       : AsmString(AsmString), Constraints(Constraints),
         HasSideEffects(HasSideEffects), IsAlignStack(IsAlignStack),
         AsmDialect(AsmDialect) {}
-  InlineAsmKeyType(const InlineAsm *Asm, SmallVectorImpl<Constant *> &)
+  InlineAsmKeyType(const InlineAsm *Asm, llvm::SmallVectorImpl<Constant *> &)
       : AsmString(Asm->getAsmString()), Constraints(Asm->getConstraintString()),
         HasSideEffects(Asm->hasSideEffects()),
         IsAlignStack(Asm->isAlignStack()), AsmDialect(Asm->getDialect()) {}
@@ -401,8 +402,8 @@ struct InlineAsmKeyType {
            Constraints == Asm->getConstraintString();
   }
   unsigned getHash() const {
-    return hash_combine(AsmString, Constraints, HasSideEffects, IsAlignStack,
-                        AsmDialect);
+    return llvm::hash_combine(AsmString, Constraints, HasSideEffects,
+                              IsAlignStack, AsmDialect);
   }
 
   typedef ConstantInfo<InlineAsm>::TypeClass TypeClass;
@@ -416,29 +417,32 @@ struct ConstantExprKeyType {
   uint8_t Opcode;
   uint8_t SubclassOptionalData;
   uint16_t SubclassData;
-  ArrayRef<Constant *> Ops;
-  ArrayRef<unsigned> Indexes;
+  llvm::ArrayRef<Constant *> Ops;
+  llvm::ArrayRef<unsigned> Indexes;
   Type *ExplicitTy;
 
-  ConstantExprKeyType(unsigned Opcode, ArrayRef<Constant *> Ops,
+  ConstantExprKeyType(unsigned Opcode, llvm::ArrayRef<Constant *> Ops,
                       unsigned short SubclassData = 0,
                       unsigned short SubclassOptionalData = 0,
-                      ArrayRef<unsigned> Indexes = None,
+                      llvm::ArrayRef<unsigned> Indexes = {},
                       Type *ExplicitTy = nullptr)
       : Opcode(Opcode), SubclassOptionalData(SubclassOptionalData),
         SubclassData(SubclassData), Ops(Ops), Indexes(Indexes),
         ExplicitTy(ExplicitTy) {}
-  ConstantExprKeyType(ArrayRef<Constant *> Operands, const ConstantExpr *CE)
+  ConstantExprKeyType(llvm::ArrayRef<Constant *> Operands,
+                      const ConstantExpr *CE)
       : Opcode(CE->getOpcode()),
         SubclassOptionalData(CE->getRawSubclassOptionalData()),
         SubclassData(CE->isCompare() ? CE->getPredicate() : 0), Ops(Operands),
-        Indexes(CE->hasIndices() ? CE->getIndices() : ArrayRef<unsigned>()) {}
+        Indexes(CE->hasIndices() ? CE->getIndices()
+                                 : llvm::ArrayRef<unsigned>()) {}
   ConstantExprKeyType(const ConstantExpr *CE,
-                      SmallVectorImpl<Constant *> &Storage)
+                      llvm::SmallVectorImpl<Constant *> &Storage)
       : Opcode(CE->getOpcode()),
         SubclassOptionalData(CE->getRawSubclassOptionalData()),
         SubclassData(CE->isCompare() ? CE->getPredicate() : 0),
-        Indexes(CE->hasIndices() ? CE->getIndices() : ArrayRef<unsigned>()) {
+        Indexes(CE->hasIndices() ? CE->getIndices()
+                                 : llvm::ArrayRef<unsigned>()) {
     assert(Storage.empty() && "Expected empty storage");
     for (unsigned I = 0, E = CE->getNumOperands(); I != E; ++I)
       Storage.push_back(CE->getOperand(I));
@@ -463,15 +467,17 @@ struct ConstantExprKeyType {
     for (unsigned I = 0, E = Ops.size(); I != E; ++I)
       if (Ops[I] != CE->getOperand(I))
         return false;
-    if (Indexes != (CE->hasIndices() ? CE->getIndices() : ArrayRef<unsigned>()))
+    if (Indexes !=
+        (CE->hasIndices() ? CE->getIndices() : llvm::ArrayRef<unsigned>()))
       return false;
     return true;
   }
 
   unsigned getHash() const {
-    return hash_combine(Opcode, SubclassOptionalData, SubclassData,
-                        hash_combine_range(Ops.begin(), Ops.end()),
-                        hash_combine_range(Indexes.begin(), Indexes.end()));
+    return llvm::hash_combine(
+        Opcode, SubclassOptionalData, SubclassData,
+        llvm::hash_combine_range(Ops.begin(), Ops.end()),
+        llvm::hash_combine_range(Indexes.begin(), Indexes.end()));
   }
 
   typedef ConstantInfo<ConstantExpr>::TypeClass TypeClass;
@@ -521,26 +527,17 @@ public:
 
 private:
   struct MapInfo {
-    typedef DenseMapInfo<ConstantClass *> ConstantClassInfo;
-    static inline ConstantClass *getEmptyKey() {
-      return ConstantClassInfo::getEmptyKey();
-    }
-    static inline ConstantClass *getTombstoneKey() {
-      return ConstantClassInfo::getTombstoneKey();
-    }
     static unsigned getHashValue(const ConstantClass *CP) {
-      SmallVector<Constant *, 8> Storage;
+      llvm::SmallVector<Constant *, 8> Storage;
       return getHashValue(LookupKey(CP->getType(), ValType(CP, Storage)));
     }
     static bool isEqual(const ConstantClass *LHS, const ConstantClass *RHS) {
       return LHS == RHS;
     }
     static unsigned getHashValue(const LookupKey &Val) {
-      return hash_combine(Val.first, Val.second.getHash());
+      return llvm::hash_combine(Val.first, Val.second.getHash());
     }
     static bool isEqual(const LookupKey &LHS, const ConstantClass *RHS) {
-      if (RHS == getEmptyKey() || RHS == getTombstoneKey())
-        return false;
       if (LHS.first != RHS->getType())
         return false;
       return LHS.second == RHS;
@@ -548,7 +545,7 @@ private:
   };
 
 public:
-  typedef DenseMap<ConstantClass *, char, MapInfo> MapTy;
+  typedef llvm::DenseMap<ConstantClass *, char, MapInfo> MapTy;
 
 private:
   MapTy Map;
@@ -605,7 +602,7 @@ public:
     Map.erase(I);
   }
 
-  ConstantClass *replaceOperandsInPlace(ArrayRef<Constant *> Operands,
+  ConstantClass *replaceOperandsInPlace(llvm::ArrayRef<Constant *> Operands,
                                         ConstantClass *CP, Value *From,
                                         Constant *To, unsigned NumUpdated = 0,
                                         unsigned OperandNo = ~0u) {
@@ -630,7 +627,9 @@ public:
     return nullptr;
   }
 
-  void dump() const { DEBUG(dbgs() << "Constant.cpp: ConstantUniqueMap\n"); }
+  void dump() const {
+    LLVM_DEBUG(llvm::dbgs() << "Constant.cpp: ConstantUniqueMap\n");
+  }
 };
 
 } // end namespace llvm

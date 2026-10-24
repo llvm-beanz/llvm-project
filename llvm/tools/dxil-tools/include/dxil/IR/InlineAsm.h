@@ -48,9 +48,9 @@ private:
   bool IsAlignStack;
   AsmDialect Dialect;
 
-  InlineAsm(PointerType *Ty, const std::string &AsmString,
-            const std::string &Constraints, bool hasSideEffects,
-            bool isAlignStack, AsmDialect asmDialect);
+  InlineAsm(PointerType *Ty, llvm::StringRef AsmString,
+            llvm::StringRef Constraints, bool hasSideEffects, bool isAlignStack,
+            AsmDialect asmDialect);
   ~InlineAsm() override;
 
   /// When the ConstantUniqueMap merges two types and makes two InlineAsms

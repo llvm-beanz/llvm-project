@@ -8,27 +8,35 @@
 //===----------------------------------------------------------------------===//
 
 #include "dxil/IR/Attributes.h"
+#include "dxil/IR/CFG.h"
 #include "dxil/IR/Comdat.h"
+#include "dxil/IR/Constants.h"
+#include "dxil/IR/DebugInfoMetadata.h"
 #include "dxil/IR/DerivedTypes.h"
 #include "dxil/IR/Function.h"
 #include "dxil/IR/GlobalValue.h"
 #include "dxil/IR/InlineAsm.h"
-#include "dxil/IR/InstrTypes.h"
 #include "dxil/IR/InstIterator.h"
+#include "dxil/IR/InstrTypes.h"
 #include "dxil/IR/LLVMContext.h"
 #include "dxil/IR/Metadata.h"
 #include "dxil/IR/Module.h"
 #include "dxil/IR/TrackingMDRef.h"
 #include "dxil/IR/User.h"
+#include "dxil/IR/ValueHandle.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Comdat.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/User.h"
+#include "llvm/IR/ValueHandle.h"
 #include "gtest/gtest.h"
 #include <type_traits>
 #include <utility>
@@ -52,6 +60,32 @@ static_assert(!std::is_same_v<dxil::BasicBlock, llvm::BasicBlock>);
 static_assert(!std::is_same_v<dxil::Instruction, llvm::Instruction>);
 static_assert(!std::is_same_v<dxil::Metadata, llvm::Metadata>);
 static_assert(!std::is_same_v<dxil::Module, llvm::Module>);
+static_assert(!std::is_same_v<dxil::ConstantInt, llvm::ConstantInt>);
+static_assert(!std::is_same_v<dxil::DILocation, llvm::DILocation>);
+static_assert(!std::is_same_v<dxil::WeakTrackingVH, llvm::WeakTrackingVH>);
+static_assert(
+    std::is_same_v<llvm::simplify_type<dxil::WeakTrackingVH>::SimpleType,
+                   dxil::Value *>);
+static_assert(
+    std::is_same_v<llvm::simplify_type<const dxil::DITypeRef>::SimpleType,
+                   dxil::Metadata *>);
+static_assert(std::is_same_v<llvm::GraphTraits<dxil::Function *>::NodeRef,
+                             dxil::BasicBlock *>);
+static_assert(std::is_same_v<llvm::GraphTraits<const dxil::Function *>::NodeRef,
+                             const dxil::BasicBlock *>);
+static_assert(
+    std::is_same_v<std::remove_reference_t<
+                       decltype(*std::declval<llvm::GraphTraits<
+                                    dxil::Function *>::nodes_iterator>())>,
+                   dxil::BasicBlock *>);
+static_assert(std::is_same_v<
+              std::remove_reference_t<
+                  decltype(*std::declval<llvm::GraphTraits<
+                               const dxil::Function *>::nodes_iterator>())>,
+              const dxil::BasicBlock *>);
+static_assert(std::is_same_v<
+              llvm::GraphTraits<llvm::Inverse<dxil::BasicBlock *>>::NodeRef,
+              dxil::BasicBlock *>);
 static_assert(std::is_base_of_v<
               llvm::iplist_impl<llvm::simple_ilist<dxil::Instruction>,
                                 dxil::SymbolTableListTraits<dxil::Instruction,
@@ -92,6 +126,10 @@ static_assert(dxil::Type::X86_MMXTyID == 9);
 static_assert(dxil::Type::IntegerTyID == 10);
 static_assert(dxil::Type::PointerTyID == 14);
 static_assert(dxil::Type::VectorTyID == 15);
+static_assert(dxil::Instruction::Ret == 1);
+static_assert(dxil::Instruction::FAdd == 9);
+static_assert(dxil::Instruction::AtomicRMW == 32);
+static_assert(dxil::Instruction::Call == 49);
 
 namespace {
 

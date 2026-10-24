@@ -15,10 +15,11 @@
 #ifndef DXIL_IR_CFG_H
 #define DXIL_IR_CFG_H
 
-#include "llvm/ADT/GraphTraits.h"
-#include "llvm/ADT/iterator_range.h"
 #include "dxil/IR/Function.h"
 #include "dxil/IR/InstrTypes.h"
+#include "llvm/ADT/GraphTraits.h"
+#include "llvm/ADT/iterator.h"
+#include "llvm/ADT/iterator_range.h"
 
 namespace dxil {
 
@@ -44,7 +45,7 @@ private:
 
   inline void advancePastNonTerminators() {
     // Loop to ignore non-terminator uses (for example BlockAddresses).
-    while (!It.atEnd() && !isa<TerminatorInst>(*It))
+    while (!It.atEnd() && !llvm::isa<TerminatorInst>(*It))
       ++It;
   }
 
@@ -287,12 +288,9 @@ inline succ_const_range successors(const BasicBlock *BB) {
   return succ_const_range(succ_begin(BB), succ_end(BB));
 }
 
+} // namespace dxil
 
-template <typename T, typename U> struct isPodLike<SuccIterator<T, U> > {
-  static const bool value = isPodLike<T>::value;
-};
-
-
+namespace llvm {
 
 //===--------------------------------------------------------------------===//
 // GraphTraits specializations for basic block graphs (CFGs)
@@ -301,31 +299,27 @@ template <typename T, typename U> struct isPodLike<SuccIterator<T, U> > {
 // Provide specializations of GraphTraits to be able to treat a function as a
 // graph of basic blocks...
 
-template <> struct GraphTraits<BasicBlock*> {
-  typedef BasicBlock NodeType;
-  typedef succ_iterator ChildIteratorType;
+template <> struct GraphTraits<dxil::BasicBlock *> {
+  using NodeRef = dxil::BasicBlock *;
+  typedef dxil::succ_iterator ChildIteratorType;
 
-  static NodeType *getEntryNode(BasicBlock *BB) { return BB; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static NodeRef getEntryNode(dxil::BasicBlock *BB) { return BB; }
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return succ_begin(N);
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return succ_end(N);
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return succ_end(N); }
 };
 
-template <> struct GraphTraits<const BasicBlock*> {
-  typedef const BasicBlock NodeType;
-  typedef succ_const_iterator ChildIteratorType;
+template <> struct GraphTraits<const dxil::BasicBlock *> {
+  using NodeRef = const dxil::BasicBlock *;
+  typedef dxil::succ_const_iterator ChildIteratorType;
 
-  static NodeType *getEntryNode(const BasicBlock *BB) { return BB; }
+  static NodeRef getEntryNode(const dxil::BasicBlock *BB) { return BB; }
 
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return succ_begin(N);
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return succ_end(N);
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return succ_end(N); }
 };
 
 // Provide specializations of GraphTraits to be able to treat a function as a
@@ -333,33 +327,27 @@ template <> struct GraphTraits<const BasicBlock*> {
 // a function is considered to be when traversing the predecessor edges of a BB
 // instead of the successor edges.
 //
-template <> struct GraphTraits<Inverse<BasicBlock*> > {
-  typedef BasicBlock NodeType;
-  typedef pred_iterator ChildIteratorType;
-  static NodeType *getEntryNode(Inverse<BasicBlock *> G) { return G.Graph; }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+template <> struct GraphTraits<Inverse<dxil::BasicBlock *>> {
+  using NodeRef = dxil::BasicBlock *;
+  typedef dxil::pred_iterator ChildIteratorType;
+  static NodeRef getEntryNode(Inverse<dxil::BasicBlock *> G) { return G.Graph; }
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return pred_begin(N);
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return pred_end(N);
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return pred_end(N); }
 };
 
-template <> struct GraphTraits<Inverse<const BasicBlock*> > {
-  typedef const BasicBlock NodeType;
-  typedef const_pred_iterator ChildIteratorType;
-  static NodeType *getEntryNode(Inverse<const BasicBlock*> G) {
+template <> struct GraphTraits<Inverse<const dxil::BasicBlock *>> {
+  using NodeRef = const dxil::BasicBlock *;
+  typedef dxil::const_pred_iterator ChildIteratorType;
+  static NodeRef getEntryNode(Inverse<const dxil::BasicBlock *> G) {
     return G.Graph;
   }
-  static inline ChildIteratorType child_begin(NodeType *N) {
+  static inline ChildIteratorType child_begin(NodeRef N) {
     return pred_begin(N);
   }
-  static inline ChildIteratorType child_end(NodeType *N) {
-    return pred_end(N);
-  }
+  static inline ChildIteratorType child_end(NodeRef N) { return pred_end(N); }
 };
-
-
 
 //===--------------------------------------------------------------------===//
 // GraphTraits specializations for function basic block graphs (CFGs)
@@ -369,45 +357,58 @@ template <> struct GraphTraits<Inverse<const BasicBlock*> > {
 // graph of basic blocks... these are the same as the basic block iterators,
 // except that the root node is implicitly the first node of the function.
 //
-template <> struct GraphTraits<Function*> : public GraphTraits<BasicBlock*> {
-  static NodeType *getEntryNode(Function *F) { return &F->getEntryBlock(); }
+template <>
+struct GraphTraits<dxil::Function *> : public GraphTraits<dxil::BasicBlock *> {
+  static NodeRef getEntryNode(dxil::Function *F) { return &F->getEntryBlock(); }
 
   // nodes_iterator/begin/end - Allow iteration over all nodes in the graph
-  typedef Function::iterator nodes_iterator;
-  static nodes_iterator nodes_begin(Function *F) { return F->begin(); }
-  static nodes_iterator nodes_end  (Function *F) { return F->end(); }
-  static size_t         size       (Function *F) { return F->size(); }
+  using nodes_iterator = pointer_iterator<dxil::Function::iterator>;
+  static nodes_iterator nodes_begin(dxil::Function *F) {
+    return nodes_iterator(F->begin());
+  }
+  static nodes_iterator nodes_end(dxil::Function *F) {
+    return nodes_iterator(F->end());
+  }
+  static size_t size(dxil::Function *F) { return F->size(); }
 };
-template <> struct GraphTraits<const Function*> :
-  public GraphTraits<const BasicBlock*> {
-  static NodeType *getEntryNode(const Function *F) {return &F->getEntryBlock();}
+template <>
+struct GraphTraits<const dxil::Function *>
+    : public GraphTraits<const dxil::BasicBlock *> {
+  static NodeRef getEntryNode(const dxil::Function *F) {
+    return &F->getEntryBlock();
+  }
 
   // nodes_iterator/begin/end - Allow iteration over all nodes in the graph
-  typedef Function::const_iterator nodes_iterator;
-  static nodes_iterator nodes_begin(const Function *F) { return F->begin(); }
-  static nodes_iterator nodes_end  (const Function *F) { return F->end(); }
-  static size_t         size       (const Function *F) { return F->size(); }
+  using nodes_iterator = pointer_iterator<dxil::Function::const_iterator>;
+  static nodes_iterator nodes_begin(const dxil::Function *F) {
+    return nodes_iterator(F->begin());
+  }
+  static nodes_iterator nodes_end(const dxil::Function *F) {
+    return nodes_iterator(F->end());
+  }
+  static size_t size(const dxil::Function *F) { return F->size(); }
 };
-
 
 // Provide specializations of GraphTraits to be able to treat a function as a
 // graph of basic blocks... and to walk it in inverse order.  Inverse order for
 // a function is considered to be when traversing the predecessor edges of a BB
 // instead of the successor edges.
 //
-template <> struct GraphTraits<Inverse<Function*> > :
-  public GraphTraits<Inverse<BasicBlock*> > {
-  static NodeType *getEntryNode(Inverse<Function*> G) {
+template <>
+struct GraphTraits<Inverse<dxil::Function *>>
+    : public GraphTraits<Inverse<dxil::BasicBlock *>> {
+  static NodeRef getEntryNode(Inverse<dxil::Function *> G) {
     return &G.Graph->getEntryBlock();
   }
 };
-template <> struct GraphTraits<Inverse<const Function*> > :
-  public GraphTraits<Inverse<const BasicBlock*> > {
-  static NodeType *getEntryNode(Inverse<const Function *> G) {
+template <>
+struct GraphTraits<Inverse<const dxil::Function *>>
+    : public GraphTraits<Inverse<const dxil::BasicBlock *>> {
+  static NodeRef getEntryNode(Inverse<const dxil::Function *> G) {
     return &G.Graph->getEntryBlock();
   }
 };
 
-} // End llvm namespace
+} // namespace llvm
 
 #endif

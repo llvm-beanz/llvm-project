@@ -48,8 +48,8 @@ class ConstantInt : public Constant {
   void anchor() override;
   void *operator new(size_t, unsigned) = delete;
   ConstantInt(const ConstantInt &) = delete;
-  ConstantInt(IntegerType *Ty, const APInt& V);
-  APInt Val;
+  ConstantInt(IntegerType *Ty, const llvm::APInt &V);
+  llvm::APInt Val;
 
   friend class Constant;
   void destroyConstantImpl();
@@ -80,32 +80,29 @@ public:
                           bool isSigned = false);
 
   /// Return a ConstantInt with the specified value for the specified type. The
-  /// value V will be canonicalized to a an unsigned APInt. Accessing it with
-  /// either getSExtValue() or getZExtValue() will yield a correctly sized and
-  /// signed value for the type Ty.
+  /// value V will be canonicalized to a an unsigned llvm::APInt. Accessing it
+  /// with either getSExtValue() or getZExtValue() will yield a correctly sized
+  /// and signed value for the type Ty.
   /// @brief Get a ConstantInt for a specific signed value.
   static ConstantInt *getSigned(IntegerType *Ty, int64_t V);
   static Constant *getSigned(Type *Ty, int64_t V);
 
   /// Return a ConstantInt with the specified value and an implied Type. The
   /// type is the integer type that corresponds to the bit width of the value.
-  static ConstantInt *get(LLVMContext &Context, const APInt &V);
+  static ConstantInt *get(LLVMContext &Context, const llvm::APInt &V);
 
   /// Return a ConstantInt constructed from the string strStart with the given
   /// radix.
-  static ConstantInt *get(IntegerType *Ty, StringRef Str,
-                          uint8_t radix);
+  static ConstantInt *get(IntegerType *Ty, llvm::StringRef Str, uint8_t radix);
 
   /// If Ty is a vector type, return a Constant with a splat of the given
   /// value. Otherwise return a ConstantInt for the given value.
-  static Constant *get(Type* Ty, const APInt& V);
+  static Constant *get(Type *Ty, const llvm::APInt &V);
 
-  /// Return the constant as an APInt value reference. This allows clients to
-  /// obtain a copy of the value, with all its precision in tact.
+  /// Return the constant as an llvm::APInt value reference. This allows clients
+  /// to obtain a copy of the value, with all its precision in tact.
   /// @brief Return the constant's value.
-  inline const APInt &getValue() const {
-    return Val;
-  }
+  inline const llvm::APInt &getValue() const { return Val; }
 
   /// getBitWidth - Return the bitwidth of this constant.
   unsigned getBitWidth() const { return Val.getBitWidth(); }
@@ -174,9 +171,7 @@ public:
   /// to true.
   /// @returns true iff this constant's bits are all set to true.
   /// @brief Determine if the value is all ones.
-  bool isMinusOne() const {
-    return Val.isAllOnesValue();
-  }
+  bool isMinusOne() const { return Val.isAllOnes(); }
 
   /// This function will return true iff this constant represents the largest
   /// value that may be represented by the constant's type.
@@ -231,7 +226,7 @@ public:
 /// ConstantFP - Floating Point Values [float, double]
 ///
 class ConstantFP : public Constant {
-  APFloat Val;
+  llvm::APFloat Val;
   void anchor() override;
   void *operator new(size_t, unsigned) = delete;
   ConstantFP(const ConstantFP &) = delete;
@@ -242,7 +237,8 @@ class ConstantFP : public Constant {
   Value *handleOperandChangeImpl(Value *From, Value *To, Use *U);
 
 protected:
-  ConstantFP(Type *Ty, const APFloat& V);
+  ConstantFP(Type *Ty, const llvm::APFloat &V);
+
 protected:
   // allocate space for exactly zero operands
   void *operator new(size_t s) {
@@ -259,15 +255,15 @@ public:
   /// only be used for simple constant values like 2.0/1.0 etc, that are
   /// known-valid both as host double and as the target format.
   static Constant *get(Type* Ty, double V);
-  static Constant *get(Type* Ty, StringRef Str);
-  static ConstantFP *get(LLVMContext &Context, const APFloat &V);
+  static Constant *get(Type *Ty, llvm::StringRef Str);
+  static ConstantFP *get(LLVMContext &Context, const llvm::APFloat &V);
   static Constant *getNaN(Type *Ty, bool Negative = false, unsigned type = 0);
   static Constant *getNegativeZero(Type *Ty);
   static Constant *getInfinity(Type *Ty, bool Negative = false);
 
   /// isValueValidForType - return true if Ty is big enough to represent V.
-  static bool isValueValidForType(Type *Ty, const APFloat &V);
-  inline const APFloat &getValueAPF() const { return Val; }
+  static bool isValueValidForType(Type *Ty, const llvm::APFloat &V);
+  inline const llvm::APFloat &getValueAPF() const { return Val; }
 
   /// isZero - Return true if the value is positive or negative zero.
   bool isZero() const { return Val.isZero(); }
@@ -287,12 +283,13 @@ public:
   /// two floating point values.  The version with a double operand is retained
   /// because it's so convenient to write isExactlyValue(2.0), but please use
   /// it only for simple constants.
-  bool isExactlyValue(const APFloat &V) const;
+  bool isExactlyValue(const llvm::APFloat &V) const;
 
   bool isExactlyValue(double V) const {
     bool ignored;
-    APFloat FV(V);
-    FV.convert(Val.getSemantics(), APFloat::rmNearestTiesToEven, &ignored);
+    llvm::APFloat FV(V);
+    FV.convert(Val.getSemantics(), llvm::APFloat::rmNearestTiesToEven,
+               &ignored);
     return isExactlyValue(FV);
   }
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -362,13 +359,14 @@ class ConstantArray : public Constant {
   Value *handleOperandChangeImpl(Value *From, Value *To, Use *U);
 
 protected:
-  ConstantArray(ArrayType *T, ArrayRef<Constant *> Val);
+  ConstantArray(ArrayType *T, llvm::ArrayRef<Constant *> Val);
+
 public:
   // ConstantArray accessors
-  static Constant *get(ArrayType *T, ArrayRef<Constant*> V);
+  static Constant *get(ArrayType *T, llvm::ArrayRef<Constant *> V);
 
 private:
-  static Constant *getImpl(ArrayType *T, ArrayRef<Constant *> V);
+  static Constant *getImpl(ArrayType *T, llvm::ArrayRef<Constant *> V);
 
 public:
   /// Transparently provide more efficient getOperand methods.
@@ -406,30 +404,31 @@ class ConstantStruct : public Constant {
   Value *handleOperandChangeImpl(Value *From, Value *To, Use *U);
 
 protected:
-  ConstantStruct(StructType *T, ArrayRef<Constant *> Val);
+  ConstantStruct(StructType *T, llvm::ArrayRef<Constant *> Val);
+
 public:
   // ConstantStruct accessors
-  static Constant *get(StructType *T, ArrayRef<Constant*> V);
-  static Constant *get(StructType *T, ...) LLVM_END_WITH_NULL;
+  static Constant *get(StructType *T, llvm::ArrayRef<Constant *> V);
+  static Constant *get(StructType *T, ...);
 
   /// getAnon - Return an anonymous struct that has the specified
   /// elements.  If the struct is possibly empty, then you must specify a
   /// context.
-  static Constant *getAnon(ArrayRef<Constant*> V, bool Packed = false) {
+  static Constant *getAnon(llvm::ArrayRef<Constant *> V, bool Packed = false) {
     return get(getTypeForElements(V, Packed), V);
   }
-  static Constant *getAnon(LLVMContext &Ctx,
-                           ArrayRef<Constant*> V, bool Packed = false) {
+  static Constant *getAnon(LLVMContext &Ctx, llvm::ArrayRef<Constant *> V,
+                           bool Packed = false) {
     return get(getTypeForElements(Ctx, V, Packed), V);
   }
 
   /// getTypeForElements - Return an anonymous struct type to use for a constant
   /// with the specified set of elements.  The list must not be empty.
-  static StructType *getTypeForElements(ArrayRef<Constant*> V,
+  static StructType *getTypeForElements(llvm::ArrayRef<Constant *> V,
                                         bool Packed = false);
   /// getTypeForElements - This version of the method allows an empty list.
   static StructType *getTypeForElements(LLVMContext &Ctx,
-                                        ArrayRef<Constant*> V,
+                                        llvm::ArrayRef<Constant *> V,
                                         bool Packed = false);
 
   /// Transparently provide more efficient getOperand methods.
@@ -466,13 +465,14 @@ class ConstantVector : public Constant {
   Value *handleOperandChangeImpl(Value *From, Value *To, Use *U);
 
 protected:
-  ConstantVector(VectorType *T, ArrayRef<Constant *> Val);
+  ConstantVector(VectorType *T, llvm::ArrayRef<Constant *> Val);
+
 public:
   // ConstantVector accessors
-  static Constant *get(ArrayRef<Constant*> V);
+  static Constant *get(llvm::ArrayRef<Constant *> V);
 
 private:
-  static Constant *getImpl(ArrayRef<Constant *> V);
+  static Constant *getImpl(llvm::ArrayRef<Constant *> V);
 
 public:
   /// getSplat - Return a ConstantVector with the specified constant in each
@@ -576,7 +576,7 @@ protected:
     : Constant(ty, VT, nullptr, 0), DataElements(Data), Next(nullptr) {}
   ~ConstantDataSequential() override { delete Next; }
 
-  static Constant *getImpl(StringRef Bytes, Type *Ty);
+  static Constant *getImpl(llvm::StringRef Bytes, Type *Ty);
 
 protected:
   // allocate space for exactly zero operands.
@@ -596,8 +596,8 @@ public:
   uint64_t getElementAsInteger(unsigned i) const;
 
   /// getElementAsAPFloat - If this is a sequential container of floating point
-  /// type, return the specified element as an APFloat.
-  APFloat getElementAsAPFloat(unsigned i) const;
+  /// type, return the specified element as an llvm::APFloat.
+  llvm::APFloat getElementAsAPFloat(unsigned i) const;
 
   /// getElementAsFloat - If this is an sequential container of floats, return
   /// the specified element as a float.
@@ -639,27 +639,27 @@ public:
   bool isCString() const;
 
   /// getAsString - If this array is isString(), then this method returns the
-  /// array as a StringRef.  Otherwise, it asserts out.
+  /// array as a llvm::StringRef.  Otherwise, it asserts out.
   ///
-  StringRef getAsString() const {
+  llvm::StringRef getAsString() const {
     assert(isString() && "Not a string");
     return getRawDataValues();
   }
 
   /// getAsCString - If this array is isCString(), then this method returns the
-  /// array (without the trailing null byte) as a StringRef. Otherwise, it
+  /// array (without the trailing null byte) as a llvm::StringRef. Otherwise, it
   /// asserts out.
   ///
-  StringRef getAsCString() const {
+  llvm::StringRef getAsCString() const {
     assert(isCString() && "Isn't a C string");
-    StringRef Str = getAsString();
+    llvm::StringRef Str = getAsString();
     return Str.substr(0, Str.size()-1);
   }
 
   /// getRawDataValues - Return the raw, underlying, bytes of this data.  Note
   /// that this is an extremely tricky thing to work with, as it exposes the
   /// host endianness of the data elements.
-  StringRef getRawDataValues() const;
+  llvm::StringRef getRawDataValues() const;
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   ///
@@ -690,32 +690,31 @@ protected:
     return User::operator new(s, 0);
   }
 public:
-
   /// get() constructors - Return a constant with array type with an element
-  /// count and element type matching the ArrayRef passed in.  Note that this
-  /// can return a ConstantAggregateZero object.
-  static Constant *get(LLVMContext &Context, ArrayRef<uint8_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<uint16_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<uint32_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<uint64_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<float> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<double> Elts);
+  /// count and element type matching the llvm::ArrayRef passed in.  Note that
+  /// this can return a ConstantAggregateZero object.
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint8_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint16_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint32_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint64_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<float> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<double> Elts);
 
   /// getFP() constructors - Return a constant with array type with an element
   /// count and element type of float with precision matching the number of
-  /// bits in the ArrayRef passed in. (i.e. half for 16bits, float for 32bits,
-  /// double for 64bits) Note that this can return a ConstantAggregateZero
-  /// object.
-  static Constant *getFP(LLVMContext &Context, ArrayRef<uint16_t> Elts);
-  static Constant *getFP(LLVMContext &Context, ArrayRef<uint32_t> Elts);
-  static Constant *getFP(LLVMContext &Context, ArrayRef<uint64_t> Elts);
+  /// bits in the llvm::ArrayRef passed in. (i.e. half for 16bits, float for
+  /// 32bits, double for 64bits) Note that this can return a
+  /// ConstantAggregateZero object.
+  static Constant *getFP(LLVMContext &Context, llvm::ArrayRef<uint16_t> Elts);
+  static Constant *getFP(LLVMContext &Context, llvm::ArrayRef<uint32_t> Elts);
+  static Constant *getFP(LLVMContext &Context, llvm::ArrayRef<uint64_t> Elts);
 
   /// getString - This method constructs a CDS and initializes it with a text
   /// string. The default behavior (AddNull==true) causes a null terminator to
   /// be placed at the end of the array (increasing the length of the string by
-  /// one more than the StringRef would normally indicate.  Pass AddNull=false
-  /// to disable this behavior.
-  static Constant *getString(LLVMContext &Context, StringRef Initializer,
+  /// one more than the llvm::StringRef would normally indicate.  Pass
+  /// AddNull=false to disable this behavior.
+  static Constant *getString(LLVMContext &Context, llvm::StringRef Initializer,
                              bool AddNull = true);
 
   /// getType - Specialize the getType() method to always return an ArrayType,
@@ -751,25 +750,24 @@ protected:
     return User::operator new(s, 0);
   }
 public:
-
   /// get() constructors - Return a constant with vector type with an element
-  /// count and element type matching the ArrayRef passed in.  Note that this
-  /// can return a ConstantAggregateZero object.
-  static Constant *get(LLVMContext &Context, ArrayRef<uint8_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<uint16_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<uint32_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<uint64_t> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<float> Elts);
-  static Constant *get(LLVMContext &Context, ArrayRef<double> Elts);
+  /// count and element type matching the llvm::ArrayRef passed in.  Note that
+  /// this can return a ConstantAggregateZero object.
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint8_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint16_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint32_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<uint64_t> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<float> Elts);
+  static Constant *get(LLVMContext &Context, llvm::ArrayRef<double> Elts);
 
   /// getFP() constructors - Return a constant with vector type with an element
   /// count and element type of float with the precision matching the number of
-  /// bits in the ArrayRef passed in.  (i.e. half for 16bits, float for 32bits,
-  /// double for 64bits) Note that this can return a ConstantAggregateZero
-  /// object.
-  static Constant *getFP(LLVMContext &Context, ArrayRef<uint16_t> Elts);
-  static Constant *getFP(LLVMContext &Context, ArrayRef<uint32_t> Elts);
-  static Constant *getFP(LLVMContext &Context, ArrayRef<uint64_t> Elts);
+  /// bits in the llvm::ArrayRef passed in.  (i.e. half for 16bits, float for
+  /// 32bits, double for 64bits) Note that this can return a
+  /// ConstantAggregateZero object.
+  static Constant *getFP(LLVMContext &Context, llvm::ArrayRef<uint16_t> Elts);
+  static Constant *getFP(LLVMContext &Context, llvm::ArrayRef<uint32_t> Elts);
+  static Constant *getFP(LLVMContext &Context, llvm::ArrayRef<uint64_t> Elts);
 
   /// getSplat - Return a ConstantVector with the specified constant in each
   /// element.  The specified constant has to be a of a compatible type (i8/i16/
@@ -1088,41 +1086,42 @@ public:
   ///
   /// \param OnlyIfReducedTy see \a getWithOperands() docs.
   static Constant *getGetElementPtr(Type *Ty, Constant *C,
-                                    ArrayRef<Constant *> IdxList,
+                                    llvm::ArrayRef<Constant *> IdxList,
                                     bool InBounds = false,
                                     Type *OnlyIfReducedTy = nullptr) {
     return getGetElementPtr(
-        Ty, C, makeArrayRef((Value * const *)IdxList.data(), IdxList.size()),
+        Ty, C, llvm::ArrayRef((Value *const *)IdxList.data(), IdxList.size()),
         InBounds, OnlyIfReducedTy);
   }
   static Constant *getGetElementPtr(Type *Ty, Constant *C, Constant *Idx,
                                     bool InBounds = false,
                                     Type *OnlyIfReducedTy = nullptr) {
     // This form of the function only exists to avoid ambiguous overload
-    // warnings about whether to convert Idx to ArrayRef<Constant *> or
-    // ArrayRef<Value *>.
+    // warnings about whether to convert Idx to llvm::ArrayRef<Constant *> or
+    // llvm::ArrayRef<Value *>.
     return getGetElementPtr(Ty, C, cast<Value>(Idx), InBounds, OnlyIfReducedTy);
   }
   static Constant *getGetElementPtr(Type *Ty, Constant *C,
-                                    ArrayRef<Value *> IdxList,
+                                    llvm::ArrayRef<Value *> IdxList,
                                     bool InBounds = false,
                                     Type *OnlyIfReducedTy = nullptr);
 
   /// Create an "inbounds" getelementptr. See the documentation for the
   /// "inbounds" flag in LangRef.html for details.
-  static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
-                                            ArrayRef<Constant *> IdxList) {
+  static Constant *
+  getInBoundsGetElementPtr(Type *Ty, Constant *C,
+                           llvm::ArrayRef<Constant *> IdxList) {
     return getGetElementPtr(Ty, C, IdxList, true);
   }
   static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
                                             Constant *Idx) {
     // This form of the function only exists to avoid ambiguous overload
-    // warnings about whether to convert Idx to ArrayRef<Constant *> or
-    // ArrayRef<Value *>.
+    // warnings about whether to convert Idx to llvm::ArrayRef<Constant *> or
+    // llvm::ArrayRef<Value *>.
     return getGetElementPtr(Ty, C, Idx, true);
   }
   static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
-                                            ArrayRef<Value *> IdxList) {
+                                            llvm::ArrayRef<Value *> IdxList) {
     return getGetElementPtr(Ty, C, IdxList, true);
   }
 
@@ -1132,10 +1131,10 @@ public:
                                     Type *OnlyIfReducedTy = nullptr);
   static Constant *getShuffleVector(Constant *V1, Constant *V2, Constant *Mask,
                                     Type *OnlyIfReducedTy = nullptr);
-  static Constant *getExtractValue(Constant *Agg, ArrayRef<unsigned> Idxs,
+  static Constant *getExtractValue(Constant *Agg, llvm::ArrayRef<unsigned> Idxs,
                                    Type *OnlyIfReducedTy = nullptr);
   static Constant *getInsertValue(Constant *Agg, Constant *Val,
-                                  ArrayRef<unsigned> Idxs,
+                                  llvm::ArrayRef<unsigned> Idxs,
                                   Type *OnlyIfReducedTy = nullptr);
 
   /// getOpcode - Return the opcode at the root of this constant expression
@@ -1147,7 +1146,7 @@ public:
 
   /// getIndices - Assert that this is an insertvalue or exactvalue
   /// expression and return the list of indices.
-  ArrayRef<unsigned> getIndices() const;
+  llvm::ArrayRef<unsigned> getIndices() const;
 
   /// getOpcodeName - Return a string representation for an opcode.
   const char *getOpcodeName() const;
@@ -1159,7 +1158,7 @@ public:
   /// getWithOperands - This returns the current constant expression with the
   /// operands replaced with the specified values.  The specified array must
   /// have the same number of operands as our current one.
-  Constant *getWithOperands(ArrayRef<Constant*> Ops) const {
+  Constant *getWithOperands(llvm::ArrayRef<Constant *> Ops) const {
     return getWithOperands(Ops, getType());
   }
 
@@ -1172,7 +1171,7 @@ public:
   /// If \c OnlyIfReduced is \c true, nullptr will be returned unless something
   /// gets constant-folded, the type changes, or the expression is otherwise
   /// canonicalized.  This parameter should almost always be \c false.
-  Constant *getWithOperands(ArrayRef<Constant *> Ops, Type *Ty,
+  Constant *getWithOperands(llvm::ArrayRef<Constant *> Ops, Type *Ty,
                             bool OnlyIfReduced = false) const;
 
   /// getAsInstruction - Returns an Instruction which implements the same

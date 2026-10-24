@@ -6,6 +6,7 @@ set_target_properties(DXILUnitTests PROPERTIES FOLDER "LLVM/Tests")
 add_unittest(DXILUnitTests DXILTests
   AttributeImplTest.cpp
   BitcodeHeaderTest.cpp
+  ConstantsContextTest.cpp
   IRHeadersTest.cpp
   UseTest.cpp
   ../lib/IR/Use.cpp

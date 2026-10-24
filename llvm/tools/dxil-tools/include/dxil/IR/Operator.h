@@ -46,7 +46,7 @@ protected:
 public:
   /// Return the opcode for this Instruction or ConstantExpr.
   unsigned getOpcode() const {
-    if (const Instruction *I = dyn_cast<Instruction>(this))
+    if (const Instruction *I = llvm::dyn_cast<Instruction>(this))
       return I->getOpcode();
     return cast<ConstantExpr>(this)->getOpcode();
   }
@@ -54,9 +54,9 @@ public:
   /// If V is an Instruction or ConstantExpr, return its opcode.
   /// Otherwise return UserOp1.
   static unsigned getOpcode(const Value *V) {
-    if (const Instruction *I = dyn_cast<Instruction>(V))
+    if (const Instruction *I = llvm::dyn_cast<Instruction>(V))
       return I->getOpcode();
-    if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(V))
+    if (const ConstantExpr *CE = llvm::dyn_cast<ConstantExpr>(V))
       return CE->getOpcode();
     return Instruction::UserOp1;
   }
@@ -64,7 +64,7 @@ public:
   static inline bool classof(const Instruction *) { return true; }
   static inline bool classof(const ConstantExpr *) { return true; }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) || isa<ConstantExpr>(V);
+    return llvm::isa<Instruction>(V) || llvm::isa<ConstantExpr>(V);
   }
 };
 
@@ -116,8 +116,8 @@ public:
            CE->getOpcode() == Instruction::Shl;
   }
   static inline bool classof(const Value *V) {
-    return (isa<Instruction>(V) && classof(cast<Instruction>(V))) ||
-           (isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V)));
+    return (llvm::isa<Instruction>(V) && classof(cast<Instruction>(V))) ||
+           (llvm::isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V)));
   }
 };
 
@@ -155,8 +155,8 @@ public:
     return isPossiblyExactOpcode(I->getOpcode());
   }
   static inline bool classof(const Value *V) {
-    return (isa<Instruction>(V) && classof(cast<Instruction>(V))) ||
-           (isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V)));
+    return (llvm::isa<Instruction>(V) && classof(cast<Instruction>(V))) ||
+           (llvm::isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V)));
   }
 };
 
@@ -318,7 +318,7 @@ public:
       I->getOpcode() == Instruction::FCmp;
   }
   static inline bool classof(const Value *V) {
-    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    return llvm::isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 };
 
@@ -334,8 +334,8 @@ public:
     return CE->getOpcode() == Opc;
   }
   static inline bool classof(const Value *V) {
-    return (isa<Instruction>(V) && classof(cast<Instruction>(V))) ||
-           (isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V)));
+    return (llvm::isa<Instruction>(V) && classof(cast<Instruction>(V))) ||
+           (llvm::isa<ConstantExpr>(V) && classof(cast<ConstantExpr>(V)));
   }
 };
 
@@ -429,7 +429,7 @@ public:
   /// value, just potentially different types.
   bool hasAllZeroIndices() const {
     for (const_op_iterator I = idx_begin(), E = idx_end(); I != E; ++I) {
-      if (ConstantInt *C = dyn_cast<ConstantInt>(I))
+      if (ConstantInt *C = llvm::dyn_cast<ConstantInt>(I))
         if (C->isZero())
           continue;
       return false;
@@ -442,7 +442,7 @@ public:
   /// a constant offset between them.
   bool hasAllConstantIndices() const {
     for (const_op_iterator I = idx_begin(), E = idx_end(); I != E; ++I) {
-      if (!isa<ConstantInt>(I))
+      if (!llvm::isa<ConstantInt>(I))
         return false;
     }
     return true;
@@ -450,13 +450,14 @@ public:
 
   /// \brief Accumulate the constant address offset of this GEP if possible.
   ///
-  /// This routine accepts an APInt into which it will accumulate the constant
-  /// offset of this GEP if the GEP is in fact constant. If the GEP is not
-  /// all-constant, it returns false and the value of the offset APInt is
-  /// undefined (it is *not* preserved!). The APInt passed into this routine
-  /// must be at exactly as wide as the IntPtr type for the address space of the
-  /// base GEP pointer.
-  bool accumulateConstantOffset(const DataLayout &DL, APInt &Offset) const;
+  /// This routine accepts an llvm::APInt into which it will accumulate the
+  /// constant offset of this GEP if the GEP is in fact constant. If the GEP is
+  /// not all-constant, it returns false and the value of the offset llvm::APInt
+  /// is undefined (it is *not* preserved!). The llvm::APInt passed into this
+  /// routine must be at exactly as wide as the IntPtr type for the address
+  /// space of the base GEP pointer.
+  bool accumulateConstantOffset(const DataLayout &DL,
+                                llvm::APInt &Offset) const;
 };
 
 class PtrToIntOperator

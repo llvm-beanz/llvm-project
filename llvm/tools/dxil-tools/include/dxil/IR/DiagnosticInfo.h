@@ -22,6 +22,11 @@
 #include "llvm/Support/Casting.h"
 #include <functional>
 
+namespace llvm {
+class Twine;
+class SMDiagnostic;
+} // namespace llvm
+
 namespace dxil {
 
 // Forward declarations.
@@ -29,10 +34,8 @@ class DiagnosticPrinter;
 class Function;
 class Instruction;
 class LLVMContextImpl;
-class Twine;
 class Value;
 class DebugLoc;
-class SMDiagnostic;
 
 /// \brief Defines the different supported severity of a diagnostic.
 enum DiagnosticSeverity {
@@ -111,7 +114,7 @@ private:
   /// Optional line information. 0 if not set.
   unsigned LocCookie;
   /// Message to be reported.
-  const Twine &MsgStr;
+  const llvm::Twine &MsgStr;
   /// Optional origin of the problem.
   const Instruction *Instr;
 
@@ -119,7 +122,7 @@ public:
   /// \p MsgStr is the message to be reported to the frontend.
   /// This class does not copy \p MsgStr, therefore the reference must be valid
   /// for the whole life time of the Diagnostic.
-  DiagnosticInfoInlineAsm(const Twine &MsgStr,
+  DiagnosticInfoInlineAsm(const llvm::Twine &MsgStr,
                           DiagnosticSeverity Severity = DS_Error)
       : DiagnosticInfo(DK_InlineAsm, Severity), LocCookie(0), MsgStr(MsgStr),
         Instr(nullptr) {}
@@ -128,7 +131,7 @@ public:
   /// \p MsgStr gives the message.
   /// This class does not copy \p MsgStr, therefore the reference must be valid
   /// for the whole life time of the Diagnostic.
-  DiagnosticInfoInlineAsm(unsigned LocCookie, const Twine &MsgStr,
+  DiagnosticInfoInlineAsm(unsigned LocCookie, const llvm::Twine &MsgStr,
                           DiagnosticSeverity Severity = DS_Error)
       : DiagnosticInfo(DK_InlineAsm, Severity), LocCookie(LocCookie),
         MsgStr(MsgStr), Instr(nullptr) {}
@@ -138,11 +141,11 @@ public:
   /// This class does not copy \p MsgStr, therefore the reference must be valid
   /// for the whole life time of the Diagnostic.
   /// Same for \p I.
-  DiagnosticInfoInlineAsm(const Instruction &I, const Twine &MsgStr,
+  DiagnosticInfoInlineAsm(const Instruction &I, const llvm::Twine &MsgStr,
                           DiagnosticSeverity Severity = DS_Error);
 
   unsigned getLocCookie() const { return LocCookie; }
-  const Twine &getMsgStr() const { return MsgStr; }
+  const llvm::Twine &getMsgStr() const { return MsgStr; }
   const Instruction *getInstruction() const { return Instr; }
 
   /// \see DiagnosticInfo::print.
@@ -212,15 +215,15 @@ public:
 class DiagnosticInfoSampleProfile : public DiagnosticInfo {
 public:
   DiagnosticInfoSampleProfile(const char *FileName, unsigned LineNum,
-                              const Twine &Msg,
+                              const llvm::Twine &Msg,
                               DiagnosticSeverity Severity = DS_Error)
       : DiagnosticInfo(DK_SampleProfile, Severity), FileName(FileName),
         LineNum(LineNum), Msg(Msg) {}
-  DiagnosticInfoSampleProfile(const char *FileName, const Twine &Msg,
+  DiagnosticInfoSampleProfile(const char *FileName, const llvm::Twine &Msg,
                               DiagnosticSeverity Severity = DS_Error)
       : DiagnosticInfo(DK_SampleProfile, Severity), FileName(FileName),
         LineNum(0), Msg(Msg) {}
-  DiagnosticInfoSampleProfile(const Twine &Msg,
+  DiagnosticInfoSampleProfile(const llvm::Twine &Msg,
                               DiagnosticSeverity Severity = DS_Error)
       : DiagnosticInfo(DK_SampleProfile, Severity), FileName(nullptr),
         LineNum(0), Msg(Msg) {}
@@ -234,7 +237,7 @@ public:
 
   const char *getFileName() const { return FileName; }
   unsigned getLineNum() const { return LineNum; }
-  const Twine &getMsg() const { return Msg; }
+  const llvm::Twine &getMsg() const { return Msg; }
 
 private:
   /// Name of the input file associated with this diagnostic.
@@ -245,7 +248,7 @@ private:
   unsigned LineNum;
 
   /// Message to report.
-  const Twine &Msg;
+  const llvm::Twine &Msg;
 };
 
 /// Common features for diagnostics dealing with optimization remarks.
@@ -261,7 +264,7 @@ public:
   DiagnosticInfoOptimizationBase(enum DiagnosticKind Kind,
                                  enum DiagnosticSeverity Severity,
                                  const char *PassName, const Function &Fn,
-                                 const DebugLoc &DLoc, const Twine &Msg)
+                                 const DebugLoc &DLoc, const llvm::Twine &Msg)
       : DiagnosticInfo(Kind, Severity), PassName(PassName), Fn(Fn), DLoc(DLoc),
         Msg(Msg) {}
 
@@ -289,12 +292,13 @@ public:
 
   /// Return location information for this diagnostic in three parts:
   /// the source file name, line number and column.
-  void getLocation(StringRef *Filename, unsigned *Line, unsigned *Column) const;
+  void getLocation(llvm::StringRef *Filename, unsigned *Line,
+                   unsigned *Column) const;
 
-  StringRef getPassName() const { return PassName; }
+  llvm::StringRef getPassName() const { return PassName; }
   const Function &getFunction() const { return Fn; }
   const DebugLoc &getDebugLoc() const { return DLoc; }
-  const Twine &getMsg() const { return Msg; }
+  const llvm::Twine &getMsg() const { return Msg; }
 
 private:
   /// Name of the pass that triggers this report. If this matches the
@@ -309,7 +313,7 @@ private:
   DebugLoc DLoc;
 
   /// Message to report.
-  const Twine &Msg;
+  const llvm::Twine &Msg;
 };
 
 /// Diagnostic information for applied optimization remarks.
@@ -324,7 +328,7 @@ public:
   /// Note that this class does not copy this message, so this reference
   /// must be valid for the whole life time of the diagnostic.
   DiagnosticInfoOptimizationRemark(const char *PassName, const Function &Fn,
-                                   const DebugLoc &DLoc, const Twine &Msg)
+                                   const DebugLoc &DLoc, const llvm::Twine &Msg)
       : DiagnosticInfoOptimizationBase(DK_OptimizationRemark, DS_Remark,
                                        PassName, Fn, DLoc, Msg) {}
 
@@ -350,7 +354,8 @@ public:
   /// must be valid for the whole life time of the diagnostic.
   DiagnosticInfoOptimizationRemarkMissed(const char *PassName,
                                          const Function &Fn,
-                                         const DebugLoc &DLoc, const Twine &Msg)
+                                         const DebugLoc &DLoc,
+                                         const llvm::Twine &Msg)
       : DiagnosticInfoOptimizationBase(DK_OptimizationRemarkMissed, DS_Remark,
                                        PassName, Fn, DLoc, Msg) {}
 
@@ -377,7 +382,7 @@ public:
   DiagnosticInfoOptimizationRemarkAnalysis(const char *PassName,
                                            const Function &Fn,
                                            const DebugLoc &DLoc,
-                                           const Twine &Msg)
+                                           const llvm::Twine &Msg)
       : DiagnosticInfoOptimizationBase(DK_OptimizationRemarkAnalysis, DS_Remark,
                                        PassName, Fn, DLoc, Msg) {}
 
@@ -391,14 +396,14 @@ public:
 
 /// Diagnostic information for machine IR parser.
 class DiagnosticInfoMIRParser : public DiagnosticInfo {
-  const SMDiagnostic &Diagnostic;
+  const llvm::SMDiagnostic &Diagnostic;
 
 public:
   DiagnosticInfoMIRParser(DiagnosticSeverity Severity,
-                          const SMDiagnostic &Diagnostic)
+                          const llvm::SMDiagnostic &Diagnostic)
       : DiagnosticInfo(DK_MIRParser, Severity), Diagnostic(Diagnostic) {}
 
-  const SMDiagnostic &getDiagnostic() const { return Diagnostic; }
+  const llvm::SMDiagnostic &getDiagnostic() const { return Diagnostic; }
 
   void print(DiagnosticPrinter &DP) const override;
 
@@ -417,7 +422,7 @@ DEFINE_SIMPLE_CONVERSION_FUNCTIONS(DiagnosticInfo, LLVMDiagnosticInfoRef)
 /// the diagnostic is generated. \p Msg is the message string to use.
 void emitOptimizationRemark(LLVMContext &Ctx, const char *PassName,
                             const Function &Fn, const DebugLoc &DLoc,
-                            const Twine &Msg);
+                            const llvm::Twine &Msg);
 
 /// Emit an optimization-missed message. \p PassName is the name of the
 /// pass emitting the message. If -Rpass-missed= is given and \p PassName
@@ -427,7 +432,7 @@ void emitOptimizationRemark(LLVMContext &Ctx, const char *PassName,
 /// message string to use.
 void emitOptimizationRemarkMissed(LLVMContext &Ctx, const char *PassName,
                                   const Function &Fn, const DebugLoc &DLoc,
-                                  const Twine &Msg);
+                                  const llvm::Twine &Msg);
 
 /// Emit an optimization analysis remark message. \p PassName is the name of
 /// the pass emitting the message. If -Rpass-analysis= is given and \p
@@ -437,7 +442,7 @@ void emitOptimizationRemarkMissed(LLVMContext &Ctx, const char *PassName,
 /// to use.
 void emitOptimizationRemarkAnalysis(LLVMContext &Ctx, const char *PassName,
                                     const Function &Fn, const DebugLoc &DLoc,
-                                    const Twine &Msg);
+                                    const llvm::Twine &Msg);
 
 /// Diagnostic information for optimization failures.
 class DiagnosticInfoOptimizationFailure
@@ -450,7 +455,7 @@ public:
   /// copy this message, so this reference must be valid for the whole life time
   /// of the diagnostic.
   DiagnosticInfoOptimizationFailure(const Function &Fn, const DebugLoc &DLoc,
-                                    const Twine &Msg)
+                                    const llvm::Twine &Msg)
       : DiagnosticInfoOptimizationBase(DK_OptimizationFailure, DS_Warning,
                                        nullptr, Fn, DLoc, Msg) {}
 
@@ -466,13 +471,13 @@ public:
 /// function triggering the warning, \p DLoc is the debug location where the
 /// diagnostic is generated. \p Msg is the message string to use.
 void emitLoopVectorizeWarning(LLVMContext &Ctx, const Function &Fn,
-                              const DebugLoc &DLoc, const Twine &Msg);
+                              const DebugLoc &DLoc, const llvm::Twine &Msg);
 
 /// Emit a warning when loop interleaving is specified but fails. \p Fn is the
 /// function triggering the warning, \p DLoc is the debug location where the
 /// diagnostic is generated. \p Msg is the message string to use.
 void emitLoopInterleaveWarning(LLVMContext &Ctx, const Function &Fn,
-                               const DebugLoc &DLoc, const Twine &Msg);
+                               const DebugLoc &DLoc, const llvm::Twine &Msg);
 
 // HLSL Change start - Dxil Diagnostic Info reporter
 
@@ -487,30 +492,31 @@ private:
   bool HasLocation = false;
   unsigned Line = 0;
   unsigned Column = 0;
-  StringRef FileName;
+  llvm::StringRef FileName;
 
   /// Message to be reported.
-  const Twine &MsgStr;
-
+  const llvm::Twine &MsgStr;
 
 public:
   /// This class does not copy \p MsgStr, therefore the reference must be valid
   /// for the whole life time of the Diagnostic.
-  /// 
-  DiagnosticInfoDxil(const Function *F, const Twine &MsgStr, DiagnosticSeverity Severity) :
-    DiagnosticInfo(DK_DXIL, Severity), Func(F), MsgStr(MsgStr)
-  {}
-  DiagnosticInfoDxil(const Function *F, const DILocation *Loc, const Twine &MsgStr,
-                      DiagnosticSeverity Severity = DS_Error);
-  DiagnosticInfoDxil(const Function *F, const DIGlobalVariable *DGV, const Twine &MsgStr,
-                      DiagnosticSeverity Severity = DS_Error);
+  ///
+  DiagnosticInfoDxil(const Function *F, const llvm::Twine &MsgStr,
+                     DiagnosticSeverity Severity)
+      : DiagnosticInfo(DK_DXIL, Severity), Func(F), MsgStr(MsgStr) {}
+  DiagnosticInfoDxil(const Function *F, const DILocation *Loc,
+                     const llvm::Twine &MsgStr,
+                     DiagnosticSeverity Severity = DS_Error);
+  DiagnosticInfoDxil(const Function *F, const DIGlobalVariable *DGV,
+                     const llvm::Twine &MsgStr,
+                     DiagnosticSeverity Severity = DS_Error);
 
   const Function *getFunction() const { return Func; }
-  const Twine &getMsgStr() const { return MsgStr; }
+  const llvm::Twine &getMsgStr() const { return MsgStr; }
   bool hasLocation() const { return HasLocation; }
   unsigned getLine() const { return Line; }
   unsigned getColumn() const { return Column; }
-  StringRef getFileName() const { return FileName; }
+  llvm::StringRef getFileName() const { return FileName; }
 
   /// \see DiagnosticInfo::print.
   void print(DiagnosticPrinter &DP) const override;

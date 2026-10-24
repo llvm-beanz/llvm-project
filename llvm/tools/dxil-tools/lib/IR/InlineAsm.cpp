@@ -19,6 +19,8 @@
 #include <cctype>
 using namespace llvm;
 
+namespace dxil {
+
 // Implement the first virtual method in this class in this file so the
 // InlineAsm vtable is emitted here.
 InlineAsm::~InlineAsm() {
@@ -34,13 +36,12 @@ InlineAsm *InlineAsm::get(FunctionType *Ty, StringRef AsmString,
   return pImpl->InlineAsms.getOrCreate(PointerType::getUnqual(Ty), Key);
 }
 
-InlineAsm::InlineAsm(PointerType *Ty, const std::string &asmString,
-                     const std::string &constraints, bool hasSideEffects,
+InlineAsm::InlineAsm(PointerType *Ty, StringRef asmString,
+                     StringRef constraints, bool hasSideEffects,
                      bool isAlignStack, AsmDialect asmDialect)
-  : Value(Ty, Value::InlineAsmVal),
-    AsmString(asmString), Constraints(constraints),
-    HasSideEffects(hasSideEffects), IsAlignStack(isAlignStack),
-    Dialect(asmDialect) {
+    : Value(Ty, Value::InlineAsmVal), AsmString(asmString.str()),
+      Constraints(constraints.str()), HasSideEffects(hasSideEffects),
+      IsAlignStack(isAlignStack), Dialect(asmDialect) {
 
   // Do various checks on the constraint string and type.
   assert(Verify(getFunctionType(), constraints) &&
@@ -293,3 +294,4 @@ bool InlineAsm::Verify(FunctionType *Ty, StringRef ConstStr) {
   return true;
 }
 
+} // namespace dxil
