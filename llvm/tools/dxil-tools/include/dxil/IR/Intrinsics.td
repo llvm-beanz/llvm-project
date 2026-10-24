@@ -225,25 +225,12 @@ class Intrinsic<list<LLVMType> ret_types,
                 list<IntrinsicProperty> properties = [],
                 string name = ""> : SDPatternOperator {
   string LLVMName = name;
-  string TargetPrefix = "";   // Set to a prefix for target-specific intrinsics.
   list<LLVMType> RetTypes = ret_types;
   list<LLVMType> ParamTypes = param_types;
   list<IntrinsicProperty> Properties = properties;
 
   bit isTarget = 0;
 }
-
-/// GCCBuiltin - If this intrinsic exactly corresponds to a GCC builtin, this
-/// specifies the name of the builtin.  This provides automatic CBE and CFE
-/// support.
-class GCCBuiltin<string name> {
-  string GCCBuiltinName = name;
-}
-
-class MSBuiltin<string name> {
-  string MSBuiltinName = name;
-}
-
 
 //===--------------- Variable Argument Handling Intrinsics ----------------===//
 //
@@ -287,10 +274,8 @@ def int_localrecover : Intrinsic<[llvm_ptr_ty],
                                  [IntrNoMem]>;
 // Note: we treat stacksave/stackrestore as writemem because we don't otherwise
 // model their dependencies on allocas.
-def int_stacksave     : Intrinsic<[llvm_ptr_ty]>,
-                        GCCBuiltin<"__builtin_stack_save">;
-def int_stackrestore  : Intrinsic<[], [llvm_ptr_ty]>,
-                        GCCBuiltin<"__builtin_stack_restore">;
+def int_stacksave     : Intrinsic<[llvm_ptr_ty]>;
+def int_stackrestore  : Intrinsic<[], [llvm_ptr_ty]>;
 
 // IntrReadWriteArgMem is more pessimistic than strictly necessary for prefetch,
 // however it does conveniently prevent the prefetch from being reordered
@@ -382,8 +367,7 @@ def int_siglongjmp : Intrinsic<[], [llvm_ptr_ty, llvm_i32_ty], [IntrNoReturn]>;
 
 // Internal interface for object size checking
 def int_objectsize : Intrinsic<[llvm_anyint_ty], [llvm_anyptr_ty, llvm_i1_ty],
-                               [IntrNoMem]>,
-                               GCCBuiltin<"__builtin_object_size">;
+                               [IntrNoMem]>;
 
 //===------------------------- Expect Intrinsics --------------------------===//
 //
@@ -443,8 +427,7 @@ def int_eh_exceptioncode : Intrinsic<[llvm_i32_ty], [], [IntrReadMem]>;
 // __builtin_unwind_init is an undocumented GCC intrinsic that causes all
 // callee-saved registers to be saved and restored (regardless of whether they
 // are used) in the calling function. It is used by libgcc_eh.
-def int_eh_unwind_init: Intrinsic<[]>,
-                        GCCBuiltin<"__builtin_unwind_init">;
+def int_eh_unwind_init: Intrinsic<[]>;
 
 def int_eh_dwarf_cfa  : Intrinsic<[llvm_ptr_ty], [llvm_i32_ty]>;
 
@@ -475,12 +458,10 @@ def int_annotation : Intrinsic<[llvm_anyint_ty],
 //
 def int_init_trampoline : Intrinsic<[],
                                     [llvm_ptr_ty, llvm_ptr_ty, llvm_ptr_ty],
-                                    [IntrReadWriteArgMem, NoCapture<0>]>,
-                                   GCCBuiltin<"__builtin_init_trampoline">;
+                                    [IntrReadWriteArgMem, NoCapture<0>]>;
 
 def int_adjust_trampoline : Intrinsic<[llvm_ptr_ty], [llvm_ptr_ty],
-                                      [IntrReadArgMem]>,
-                                     GCCBuiltin<"__builtin_adjust_trampoline">;
+                                      [IntrReadArgMem]>;
 
 //===------------------------ Overflow Intrinsics -------------------------===//
 //
@@ -561,12 +542,9 @@ def int_experimental_gc_result_ptr : Intrinsic<[llvm_anyptr_ty], [llvm_i32_ty]>;
 
 //===-------------------------- Other Intrinsics --------------------------===//
 //
-def int_flt_rounds : Intrinsic<[llvm_i32_ty]>,
-                     GCCBuiltin<"__builtin_flt_rounds">;
-def int_trap : Intrinsic<[], [], [IntrNoReturn]>,
-               GCCBuiltin<"__builtin_trap">;
-def int_debugtrap : Intrinsic<[]>,
-                    GCCBuiltin<"__builtin_debugtrap">;
+def int_flt_rounds : Intrinsic<[llvm_i32_ty]>;
+def int_trap : Intrinsic<[], [], [IntrNoReturn]>;
+def int_debugtrap : Intrinsic<[]>;
 
 // NOP: calls/invokes to this intrinsic are removed by codegen
 def int_donothing : Intrinsic<[], [], [IntrNoMem]>;
@@ -632,23 +610,3 @@ def int_masked_scatter: Intrinsic<[],
 // Intrinsics to support bit sets.
 def int_bitset_test : Intrinsic<[llvm_i1_ty], [llvm_ptr_ty, llvm_metadata_ty],
                                 [IntrNoMem]>;
-
-//===----------------------------------------------------------------------===//
-// Target-specific intrinsics
-//===----------------------------------------------------------------------===//
-
-// HLSL Change Starts - remove platform intrinsics
-// include "llvm/IR/IntrinsicsPowerPC.td"
-// include "llvm/IR/IntrinsicsX86.td"
-// include "llvm/IR/IntrinsicsARM.td"
-// include "llvm/IR/IntrinsicsAArch64.td"
-// include "llvm/IR/IntrinsicsXCore.td"
-// include "llvm/IR/IntrinsicsHexagon.td"
-// include "llvm/IR/IntrinsicsNVVM.td"
-// include "llvm/IR/IntrinsicsMips.td"
-// include "llvm/IR/IntrinsicsAMDGPU.td"
-// include "llvm/IR/IntrinsicsBPF.td"
-// include "llvm/IR/IntrinsicsSystemZ.td"
-// include "llvm/IR/IntrinsicsWebAssembly.td"
-// include "llvm/IR/IntrinsicsHLSL.td"
-// HLSL Change Ends - remove platform intrinsics

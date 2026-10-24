@@ -44,5 +44,15 @@ TEST(Intrinsics, RejectsUnknownNames) {
   EXPECT_EQ(Intrinsic::not_intrinsic, recognizeIntrinsic("llvm.log2"));
 }
 
+TEST(Intrinsics, TargetIntrinsicsAreNotRecognized) {
+  for (llvm::StringRef Name :
+       {"llvm.aarch64.neon.abs.v4i32", "llvm.amdgcn.workitem.id.x",
+        "llvm.arm.neon.vabs.v4i32", "llvm.bpf.load.byte", "llvm.hexagon.A2.abs",
+        "llvm.mips.absq.s.ph", "llvm.nvvm.barrier0", "llvm.ppc.altivec.lvx",
+        "llvm.s390.tbegin", "llvm.wasm.memory.size", "llvm.x86.sse.add.ss",
+        "llvm.xcore.getid"})
+    EXPECT_EQ(Intrinsic::not_intrinsic, recognizeIntrinsic(Name)) << Name.str();
+}
+
 } // namespace
 } // namespace dxil

@@ -26,12 +26,9 @@ namespace dxil {
 namespace {
 class IntrinsicEmitter {
   const RecordKeeper &Records;
-  bool TargetOnly;
-  std::string TargetPrefix;
 
 public:
-  IntrinsicEmitter(const RecordKeeper &R, bool T)
-    : Records(R), TargetOnly(T) {}
+  explicit IntrinsicEmitter(const RecordKeeper &R) : Records(R) {}
 
   void run(raw_ostream &OS);
 
@@ -50,12 +47,6 @@ public:
                      raw_ostream &OS);
   void EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints,
                       raw_ostream &OS);
-  void EmitModRefBehavior(const std::vector<CodeGenIntrinsic> &Ints,
-                          raw_ostream &OS);
-  void EmitIntrinsicToGCCBuiltinMap(const std::vector<CodeGenIntrinsic> &Ints,
-                                    raw_ostream &OS);
-  void EmitIntrinsicToMSBuiltinMap(const std::vector<CodeGenIntrinsic> &Ints,
-                                   raw_ostream &OS);
   void EmitSuffix(raw_ostream &OS);
 };
 } // End anonymous namespace
@@ -67,10 +58,7 @@ public:
 void IntrinsicEmitter::run(raw_ostream &OS) {
   emitSourceFileHeader("Intrinsic Function Source Fragment", OS);
 
-  std::vector<CodeGenIntrinsic> Ints = LoadIntrinsics(Records, TargetOnly);
-
-  if (TargetOnly && !Ints.empty())
-    TargetPrefix = Ints[0].TargetPrefix;
+  std::vector<CodeGenIntrinsic> Ints = LoadIntrinsics(Records);
 
   EmitPrefix(OS);
 
@@ -91,15 +79,6 @@ void IntrinsicEmitter::run(raw_ostream &OS) {
 
   // Emit the intrinsic parameter attributes.
   EmitAttributes(Ints, OS);
-
-  // Emit intrinsic alias analysis mod/ref behavior.
-  EmitModRefBehavior(Ints, OS);
-
-  // Emit code to translate GCC builtins into LLVM intrinsics.
-  EmitIntrinsicToGCCBuiltinMap(Ints, OS);
-
-  // Emit code to translate MS builtins into LLVM intrinsics.
-  EmitIntrinsicToMSBuiltinMap(Ints, OS);
 
   EmitSuffix(OS);
 }
@@ -167,8 +146,7 @@ EmitFnNameRecognizer(const std::vector<CodeGenIntrinsic> &Ints,
 
     for (unsigned i = 0, e = IntList.size(); i != e; ++i) {
       unsigned IntNo = IntList[i];
-      std::string Result = "return " + TargetPrefix + "Intrinsic::" +
-        Ints[IntNo].EnumName + ";";
+      std::string Result = "return Intrinsic::" + Ints[IntNo].EnumName + ";";
 
       if (!Ints[IntNo].isOverloaded) {
         MatchTable.push_back(std::make_pair(Ints[IntNo].Name.substr(6),Result));
@@ -558,11 +536,7 @@ void IntrinsicEmitter::
 EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
   OS << "// Add parameter attributes that are not common to all intrinsics.\n";
   OS << "#ifdef GET_INTRINSIC_ATTRIBUTES\n";
-  if (TargetOnly)
-    OS << "static AttributeSet getAttributes(LLVMContext &C, " << TargetPrefix
-       << "Intrinsic::ID id) {\n";
-  else
-    OS << "AttributeSet Intrinsic::getAttributes(LLVMContext &C, ID id) {\n";
+  OS << "AttributeSet Intrinsic::getAttributes(LLVMContext &C, ID id) {\n";
 
   // Compute the maximum number of attribute arguments and the map
   typedef std::map<const CodeGenIntrinsic*, unsigned,
@@ -595,12 +569,7 @@ EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
   OS << "  AttributeSet AS[" << maxArgAttrs+1 << "];\n";
   OS << "  unsigned NumAttrs = 0;\n";
   OS << "  if (id != 0) {\n";
-  OS << "    switch(IntrinsicsToAttributesMap[id - ";
-  if (TargetOnly)
-    OS << "Intrinsic::num_intrinsics";
-  else
-    OS << "1";
-  OS << "]) {\n";
+  OS << "    switch(IntrinsicsToAttributesMap[id - 1]) {\n";
   OS << "    default: llvm_unreachable(\"Invalid attribute number\");\n";
   for (UniqAttrMapTy::const_iterator I = UniqAttributes.begin(),
        E = UniqAttributes.end(); I != E; ++I) {
@@ -714,167 +683,8 @@ EmitAttributes(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS) {
   OS << "#endif // GET_INTRINSIC_ATTRIBUTES\n\n";
 }
 
-/// EmitModRefBehavior - Determine intrinsic alias analysis mod/ref behavior.
-void IntrinsicEmitter::
-EmitModRefBehavior(const std::vector<CodeGenIntrinsic> &Ints, raw_ostream &OS){
-  OS << "// Determine intrinsic alias analysis mod/ref behavior.\n"
-     << "#ifdef GET_INTRINSIC_MODREF_BEHAVIOR\n"
-     << "assert(iid <= Intrinsic::" << Ints.back().EnumName << " && "
-     << "\"Unknown intrinsic.\");\n\n";
-
-  OS << "static const uint8_t IntrinsicModRefBehavior[] = {\n"
-     << "  /* invalid */ UnknownModRefBehavior,\n";
-  for (unsigned i = 0, e = Ints.size(); i != e; ++i) {
-    OS << "  /* " << TargetPrefix << Ints[i].EnumName << " */ ";
-    switch (Ints[i].ModRef) {
-    case CodeGenIntrinsic::NoMem:
-      OS << "DoesNotAccessMemory,\n";
-      break;
-    case CodeGenIntrinsic::ReadArgMem:
-      OS << "OnlyReadsArgumentPointees,\n";
-      break;
-    case CodeGenIntrinsic::ReadMem:
-      OS << "OnlyReadsMemory,\n";
-      break;
-    case CodeGenIntrinsic::ReadWriteArgMem:
-      OS << "OnlyAccessesArgumentPointees,\n";
-      break;
-    case CodeGenIntrinsic::ReadWriteMem:
-      OS << "UnknownModRefBehavior,\n";
-      break;
-    }
-  }
-  OS << "};\n\n"
-     << "return static_cast<ModRefBehavior>(IntrinsicModRefBehavior[iid]);\n"
-     << "#endif // GET_INTRINSIC_MODREF_BEHAVIOR\n\n";
-}
-
-/// EmitTargetBuiltins - All of the builtins in the specified map are for the
-/// same target, and we already checked it.
-static void EmitTargetBuiltins(const std::map<std::string, std::string> &BIM,
-                               const std::string &TargetPrefix,
-                               raw_ostream &OS) {
-
-  std::vector<StringMatcher::StringPair> Results;
-
-  for (std::map<std::string, std::string>::const_iterator I = BIM.begin(),
-       E = BIM.end(); I != E; ++I) {
-    std::string ResultCode =
-    "return " + TargetPrefix + "Intrinsic::" + I->second + ";";
-    Results.emplace_back(I->first, ResultCode);
-  }
-
-  StringMatcher("BuiltinName", Results, OS).Emit();
-}
-
-
-void IntrinsicEmitter::
-EmitIntrinsicToGCCBuiltinMap(const std::vector<CodeGenIntrinsic> &Ints,
-                             raw_ostream &OS) {
-  typedef std::map<std::string, std::map<std::string, std::string> > BIMTy;
-  BIMTy BuiltinMap;
-  for (unsigned i = 0, e = Ints.size(); i != e; ++i) {
-    if (!Ints[i].GCCBuiltinName.empty()) {
-      // Get the map for this target prefix.
-      std::map<std::string, std::string> &BIM =BuiltinMap[Ints[i].TargetPrefix];
-
-      if (!BIM.insert(std::make_pair(Ints[i].GCCBuiltinName,
-                                     Ints[i].EnumName)).second)
-        PrintFatalError("Intrinsic '" + Ints[i].TheDef->getName() +
-              "': duplicate GCC builtin name!");
-    }
-  }
-
-  OS << "// Get the LLVM intrinsic that corresponds to a GCC builtin.\n";
-  OS << "// This is used by the C front-end.  The GCC builtin name is passed\n";
-  OS << "// in as BuiltinName, and a target prefix (e.g. 'ppc') is passed\n";
-  OS << "// in as TargetPrefix.  The result is assigned to 'IntrinsicID'.\n";
-  OS << "#ifdef GET_LLVM_INTRINSIC_FOR_GCC_BUILTIN\n";
-
-  if (TargetOnly) {
-    OS << "static " << TargetPrefix << "Intrinsic::ID "
-       << "getIntrinsicForGCCBuiltin(const char "
-       << "*TargetPrefixStr, const char *BuiltinNameStr) {\n";
-  } else {
-    OS << "Intrinsic::ID Intrinsic::getIntrinsicForGCCBuiltin(const char "
-       << "*TargetPrefixStr, const char *BuiltinNameStr) {\n";
-  }
-
-  OS << "  StringRef BuiltinName(BuiltinNameStr);\n";
-  OS << "  StringRef TargetPrefix(TargetPrefixStr);\n\n";
-
-  // Note: this could emit significantly better code if we cared.
-  for (BIMTy::iterator I = BuiltinMap.begin(), E = BuiltinMap.end();I != E;++I){
-    OS << "  ";
-    if (!I->first.empty())
-      OS << "if (TargetPrefix == \"" << I->first << "\") ";
-    else
-      OS << "/* Target Independent Builtins */ ";
-    OS << "{\n";
-
-    // Emit the comparisons for this target prefix.
-    EmitTargetBuiltins(I->second, TargetPrefix, OS);
-    OS << "  }\n";
-  }
-  OS << "  return ";
-  if (!TargetPrefix.empty())
-    OS << "(" << TargetPrefix << "Intrinsic::ID)";
-  OS << "Intrinsic::not_intrinsic;\n";
-  OS << "}\n";
-  OS << "#endif\n\n";
-}
-
-void IntrinsicEmitter::
-EmitIntrinsicToMSBuiltinMap(const std::vector<CodeGenIntrinsic> &Ints,
-                            raw_ostream &OS) {
-  std::map<std::string, std::map<std::string, std::string>> TargetBuiltins;
-
-  for (const auto &Intrinsic : Ints) {
-    if (Intrinsic.MSBuiltinName.empty())
-      continue;
-
-    auto &Builtins = TargetBuiltins[Intrinsic.TargetPrefix];
-    if (!Builtins.insert(std::make_pair(Intrinsic.MSBuiltinName,
-                                        Intrinsic.EnumName)).second)
-      PrintFatalError("Intrinsic '" + Intrinsic.TheDef->getName() + "': "
-                      "duplicate MS builtin name!");
-  }
-
-  OS << "// Get the LLVM intrinsic that corresponds to a MS builtin.\n"
-        "// This is used by the C front-end.  The MS builtin name is passed\n"
-        "// in as a BuiltinName, and a target prefix (e.g. 'arm') is passed\n"
-        "// in as a TargetPrefix.  The result is assigned to 'IntrinsicID'.\n"
-        "#ifdef GET_LLVM_INTRINSIC_FOR_MS_BUILTIN\n";
-
-  OS << (TargetOnly ? "static " + TargetPrefix : "") << "Intrinsic::ID "
-     << (TargetOnly ? "" : "Intrinsic::")
-     << "getIntrinsicForMSBuiltin(const char *TP, const char *BN) {\n";
-  OS << "  StringRef BuiltinName(BN);\n"
-        "  StringRef TargetPrefix(TP);\n"
-        "\n";
-
-  for (const auto &Builtins : TargetBuiltins) {
-    OS << "  ";
-    if (Builtins.first.empty())
-      OS << "/* Target Independent Builtins */ ";
-    else
-      OS << "if (TargetPrefix == \"" << Builtins.first << "\") ";
-    OS << "{\n";
-    EmitTargetBuiltins(Builtins.second, TargetPrefix, OS);
-    OS << "}";
-  }
-
-  OS << "  return ";
-  if (!TargetPrefix.empty())
-    OS << "(" << TargetPrefix << "Intrinsic::ID)";
-  OS << "Intrinsic::not_intrinsic;\n";
-  OS << "}\n";
-
-  OS << "#endif\n\n";
-}
-
 void EmitIntrinsics(const RecordKeeper &RK, raw_ostream &OS) {
-  IntrinsicEmitter(RK, false).run(OS);
+  IntrinsicEmitter(RK).run(OS);
 }
 
 } // namespace dxil

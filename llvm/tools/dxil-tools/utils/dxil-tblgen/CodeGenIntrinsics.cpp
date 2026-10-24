@@ -25,8 +25,7 @@ MVT::SimpleValueType getValueType(const Record *Rec) {
   return static_cast<MVT::SimpleValueType>(Rec->getValueAsInt("Value"));
 }
 
-std::vector<CodeGenIntrinsic> LoadIntrinsics(const RecordKeeper &RC,
-                                             bool TargetOnly) {
+std::vector<CodeGenIntrinsic> LoadIntrinsics(const RecordKeeper &RC) {
   auto Definitions = llvm::to_vector(RC.getAllDerivedDefinitions("Intrinsic"));
   // Modern TableGen uses natural ordering; preserve DXC's intrinsic IDs.
   llvm::sort(Definitions, [](const Record *L, const Record *R) {
@@ -34,7 +33,7 @@ std::vector<CodeGenIntrinsic> LoadIntrinsics(const RecordKeeper &RC,
   });
   std::vector<CodeGenIntrinsic> Result;
   for (const Record *R : Definitions)
-    if (R->getValueAsBit("isTarget") == TargetOnly)
+    if (!R->getValueAsBit("isTarget"))
       Result.emplace_back(R);
   return Result;
 }
@@ -55,11 +54,6 @@ CodeGenIntrinsic::CodeGenIntrinsic(const Record *R) {
                     "Intrinsic '" + DefName + "' does not start with 'int_'!");
   EnumName = DefName.substr(4);
 
-  if (R->getValue("GCCBuiltinName"))
-    GCCBuiltinName = R->getValueAsString("GCCBuiltinName");
-  if (R->getValue("MSBuiltinName"))
-    MSBuiltinName = R->getValueAsString("MSBuiltinName");
-  TargetPrefix = R->getValueAsString("TargetPrefix");
   Name = R->getValueAsString("LLVMName");
 
   if (Name.empty()) {
@@ -69,12 +63,6 @@ CodeGenIntrinsic::CodeGenIntrinsic(const Record *R) {
     PrintFatalError(R, "Intrinsic '" + DefName +
                            "'s name does not start with 'llvm.'!");
   }
-
-  if (!TargetPrefix.empty() &&
-      !StringRef(Name).starts_with("llvm." + TargetPrefix + "."))
-    PrintFatalError(R, "Intrinsic '" + DefName +
-                           "' does not start with 'llvm." + TargetPrefix +
-                           ".'!");
 
   std::vector<MVT::SimpleValueType> OverloadedVTs;
   const ListInit *TypeList = R->getValueAsListInit("RetTypes");

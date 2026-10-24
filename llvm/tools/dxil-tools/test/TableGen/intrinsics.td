@@ -1,4 +1,4 @@
-// RUN: dxil-tblgen -gen-intrinsic -I %dxil_include %s | FileCheck %s
+// RUN: dxil-tblgen -gen-intrinsic -I %dxil_include %s | FileCheck %s --implicit-check-not=GET_INTRINSIC_MODREF_BEHAVIOR --implicit-check-not=GET_LLVM_INTRINSIC_FOR_GCC_BUILTIN --implicit-check-not=GET_LLVM_INTRINSIC_FOR_MS_BUILTIN
 
 include "dxil/IR/Intrinsics.td"
 
@@ -19,6 +19,3 @@ include "dxil/IR/Intrinsics.td"
 // CHECK:      static const unsigned char IIT_LongEncodingTable[] = {
 // CHECK-NEXT: /* 0 */ 0, 15, 3, 31, 3, 4, 30, 3, 1, 0,
 // CHECK:      #ifdef GET_INTRINSIC_ATTRIBUTES
-// CHECK:      #ifdef GET_INTRINSIC_MODREF_BEHAVIOR
-// CHECK:      #ifdef GET_LLVM_INTRINSIC_FOR_GCC_BUILTIN
-// CHECK:      #ifdef GET_LLVM_INTRINSIC_FOR_MS_BUILTIN

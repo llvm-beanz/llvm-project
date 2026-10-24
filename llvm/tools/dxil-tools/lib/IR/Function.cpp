@@ -868,18 +868,6 @@ Function *Intrinsic::getDeclaration(Module *M, ID id, ArrayRef<Type*> Tys) {
                                           getType(M->getContext(), id, Tys)));
 }
 
-// This defines the "Intrinsic::getIntrinsicForGCCBuiltin()" method.
-//#pragma optimize("", off) // HLSL Change - comment out pragma optimize directive
-#define GET_LLVM_INTRINSIC_FOR_GCC_BUILTIN
-#include "dxil/IR/Intrinsics.gen"
-#undef GET_LLVM_INTRINSIC_FOR_GCC_BUILTIN
-//#pragma optimize("", on)  // HLSL Change - comment out pragma optimize directive
-
-// This defines the "Intrinsic::getIntrinsicForMSBuiltin()" method.
-#define GET_LLVM_INTRINSIC_FOR_MS_BUILTIN
-#include "dxil/IR/Intrinsics.gen"
-#undef GET_LLVM_INTRINSIC_FOR_MS_BUILTIN
-
 /// hasAddressTaken - returns true if there are any uses of this function
 /// other than direct calls or invokes to it.
 bool Function::hasAddressTaken(const User* *PutOffender) const {

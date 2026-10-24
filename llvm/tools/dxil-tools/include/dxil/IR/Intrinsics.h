@@ -43,7 +43,8 @@ namespace Intrinsic {
     , num_intrinsics
   };
 
-  /// Return the LLVM name for an intrinsic, such as "llvm.ppc.altivec.lvx".
+  /// Return the LLVM name for an intrinsic, such as
+  /// "llvm.memcpy.p0i8.p0i8.i32".
   std::string getName(ID id, llvm::ArrayRef<Type *> Tys = {});
 
   /// Return the function type for an intrinsic.
@@ -69,12 +70,6 @@ namespace Intrinsic {
   /// intrinsic, Tys must provide exactly one type for each overloaded type in
   /// the intrinsic.
   Function *getDeclaration(Module *M, ID id, llvm::ArrayRef<Type *> Tys = {});
-
-  /// Map a GCC builtin name to an intrinsic ID.
-  ID getIntrinsicForGCCBuiltin(const char *Prefix, const char *BuiltinName);
-
-  /// Map a MS builtin name to an intrinsic ID.
-  ID getIntrinsicForMSBuiltin(const char *Prefix, const char *BuiltinName);
 
   /// This is a type descriptor which explains the type requirements of an
   /// intrinsic. This is returned by getIntrinsicInfoTableEntries.

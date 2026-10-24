@@ -25,7 +25,6 @@ add_llvm_library(DXILCore
   LLVMContext.cpp
   LLVMContextImpl.cpp
   MDBuilder.cpp
-  Mangler.cpp
   Metadata.cpp
   MetadataTracking.cpp
   Module.cpp

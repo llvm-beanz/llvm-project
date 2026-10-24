@@ -36,9 +36,6 @@ namespace dxil {
     const Record *TheDef;      // The actual record defining this intrinsic.
     std::string Name;          // The name of the LLVM function "llvm.bswap.i32"
     std::string EnumName;      // The name of the enum "bswap_i32"
-    std::string GCCBuiltinName;// Name of the corresponding GCC builtin, or "".
-    std::string MSBuiltinName; // Name of the corresponding MS builtin, or "".
-    std::string TargetPrefix;  // Target prefix, e.g. "ppc" for t-s intrinsics.
 
     /// IntrinsicSignature - This structure holds the return values and
     /// parameter values of an intrinsic. If the number of return values is > 1,
@@ -104,8 +101,7 @@ namespace dxil {
 
   /// LoadIntrinsics - Read all of the intrinsics defined in the specified
   /// .td file.
-  std::vector<CodeGenIntrinsic> LoadIntrinsics(const RecordKeeper &RC,
-                                               bool TargetOnly);
+  std::vector<CodeGenIntrinsic> LoadIntrinsics(const RecordKeeper &RC);
 }
 
 #endif
