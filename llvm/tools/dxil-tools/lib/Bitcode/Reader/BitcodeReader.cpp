@@ -402,12 +402,6 @@ static std::error_code error(DiagnosticHandlerFunction DiagnosticHandler,
 }
 
 // HLSL Change: remove unused function
-#if 0
-static std::error_code error(DiagnosticHandlerFunction DiagnosticHandler,
-                             std::error_code EC) {
-  return error(DiagnosticHandler, EC, EC.message());
-}
-#endif
 
 static std::error_code error(DiagnosticHandlerFunction DiagnosticHandler,
                              const Twine &Message) {
@@ -425,11 +419,6 @@ std::error_code BitcodeReader::error(const Twine &Message) {
 }
 
 // HLSL Change: remove unused function
-#if 0
-std::error_code BitcodeReader::error(BitcodeError E) {
-  return ::error(DiagnosticHandler, make_error_code(E));
-}
-#endif
 
 static DiagnosticHandlerFunction getDiagHandler(DiagnosticHandlerFunction F,
                                                 LLVMContext &C) {
@@ -2367,12 +2356,8 @@ std::error_code BitcodeReader::parseMetadata() {
       break;
     }
     case bitc::METADATA_STRING: {
-#if 0
-      std::string String(Record.begin(), Record.end());
-#else
       String.resize(Uint8Record.size());
       memcpy(&String[0], Uint8Record.data(), Uint8Record.size());
-#endif
       llvm::UpgradeMDStringConstant(String);
       Metadata *MD = MDString::get(Context, String);
       MDValueList.assignValue(MD, NextMDValueNo++);

@@ -47,75 +47,17 @@ enum PassDebugLevel {
 };
 }
 
-#if 0 // HLSL Change Starts - option pending
-static cl::opt<enum PassDebugLevel>
-PassDebugging("debug-pass", cl::Hidden,
-                  cl::desc("Print PassManager debugging information"),
-                  cl::values(
-  clEnumVal(Disabled  , "disable debug output"),
-  clEnumVal(Arguments , "print pass arguments to pass to 'opt'"),
-  clEnumVal(Structure , "print pass structure before run()"),
-  clEnumVal(Executions, "print pass name before it is executed"),
-  clEnumVal(Details   , "print pass details when it is executed"),
-                             clEnumValEnd));
-#else
 static const PassDebugLevel PassDebugging  = PassDebugLevel::Disabled;
-#endif // HLSL Change Ends
 
 namespace {
 typedef llvm::cl::list<const llvm::PassInfo *, bool, PassNameParser>
 PassOptionList;
 }
 
-#if 0 // HLSL Change Starts - option pending
-// Print IR out before/after specified passes.
-static PassOptionList
-PrintBefore("print-before",
-            llvm::cl::desc("Print IR before specified passes"),
-            cl::Hidden);
-
-static PassOptionList
-PrintAfter("print-after",
-           llvm::cl::desc("Print IR after specified passes"),
-           cl::Hidden);
-
-static cl::opt<bool>
-PrintBeforeAll("print-before-all",
-               llvm::cl::desc("Print IR before each pass"),
-               cl::init(false));
-static cl::opt<bool>
-PrintAfterAll("print-after-all",
-              llvm::cl::desc("Print IR after each pass"),
-              cl::init(false));
-#endif // HLSL Change Ends
 
 /// This is a helper to determine whether to print IR before or
 /// after a pass.
 
-#if 0 // HLSL Change
-static bool ShouldPrintBeforeOrAfterPass(const PassInfo *PI,
-                                         PassOptionList &PassesToPrint) {
-  for (auto *PassInf : PassesToPrint) {
-    if (PassInf)
-      if (PassInf->getPassArgument() == PI->getPassArgument()) {
-        return true;
-      }
-  }
-  return false;
-}
-
-/// This is a utility to check whether a pass should have IR dumped
-/// before it.
-static bool ShouldPrintBeforePass(const PassInfo *PI) {
-  return PrintBeforeAll || ShouldPrintBeforeOrAfterPass(PI, PrintBefore);
-}
-
-/// This is a utility to check whether a pass should have IR dumped
-/// after it.
-static bool ShouldPrintAfterPass(const PassInfo *PI) {
-  return PrintAfterAll || ShouldPrintBeforeOrAfterPass(PI, PrintAfter);
-}
-#endif // HLSL Change Ends
 
 /// isPassDebuggingExecutionsOrMore - Return true if -debug-pass=Executions
 /// or higher is specified.
@@ -1818,11 +1760,6 @@ bool PassManager::run(Module &M) {
 // TimingInfo implementation
 
 bool llvm::TimePassesIsEnabled = false;
-#if 0 // HLSL Change Starts - option pending
-static cl::opt<bool,true>
-EnableTiming("time-passes", cl::location(TimePassesIsEnabled),
-            cl::desc("Time each pass, printing elapsed time for each on exit"));
-#endif
 
 // createTheTimeInfo - This method either initializes the TheTimeInfo pointer to
 // a non-null value (if the -time-passes option is enabled) or it leaves it

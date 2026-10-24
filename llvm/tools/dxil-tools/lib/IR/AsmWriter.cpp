@@ -14,11 +14,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallString.h"
-#include "llvm/ADT/StringExtras.h"
 #include "dxil/IR/AssemblyAnnotationWriter.h"
 #include "dxil/IR/CFG.h"
 #include "dxil/IR/CallingConv.h"
@@ -36,8 +31,13 @@
 #include "dxil/IR/TypeFinder.h"
 #include "dxil/IR/UseListOrder.h"
 #include "dxil/IR/ValueSymbolTable.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/MathExtras.h"
@@ -45,6 +45,8 @@
 #include <algorithm>
 #include <cctype>
 using namespace llvm;
+
+namespace dxil {
 
 // Make virtual table appear in this compilation unit.
 AssemblyAnnotationWriter::~AssemblyAnnotationWriter() {}
@@ -545,7 +547,6 @@ void TypePrinting::printStructBody(StructType *STy, raw_ostream &OS) {
     OS << '>';
 }
 
-namespace dxil {
 //===----------------------------------------------------------------------===//
 // SlotTracker Class: Enumerate slot numbers for unnamed values
 //===----------------------------------------------------------------------===//
@@ -664,7 +665,6 @@ private:
   SlotTracker(const SlotTracker &) = delete;
   void operator=(const SlotTracker &) = delete;
 };
-} // namespace llvm
 
 ModuleSlotTracker::ModuleSlotTracker(SlotTracker &Machine, const Module *M,
                                      const Function *F)
@@ -691,12 +691,6 @@ void ModuleSlotTracker::incorporateFunction(const Function &F) {
   this->F = &F;
 }
 
-#if 0 // HLSL Change - Unused
-static SlotTracker *createSlotTracker(const Module *M) {
-  return new SlotTracker(M);
-}
-#endif
-
 static SlotTracker *createSlotTracker(const Value *V) {
   if (const Argument *FA = dyn_cast<Argument>(V))
     return new SlotTracker(FA->getParent());
@@ -719,12 +713,6 @@ static SlotTracker *createSlotTracker(const Value *V) {
 
   return nullptr;
 }
-
-#if 0
-#define ST_DEBUG(X) dbgs() << X
-#else
-#define ST_DEBUG(X)
-#endif
 
 // Module level constructor. Causes the contents of the Module (sans functions)
 // to be added to the slot table.
@@ -754,7 +742,6 @@ inline void SlotTracker::initialize() {
 // Iterate through all the global variables, functions, and global
 // variable initializers and create slots for them.
 void SlotTracker::processModule() {
-  ST_DEBUG("begin processModule!\n");
 
   // Add all of the unnamed global variables to the value table.
   for (const GlobalVariable &Var : TheModule->globals()) {
@@ -788,21 +775,17 @@ void SlotTracker::processModule() {
       CreateAttributeSetSlot(FnAttrs);
   }
 
-  ST_DEBUG("end processModule!\n");
 }
 
 // Process the arguments, basic blocks, and instructions  of a function.
 void SlotTracker::processFunction() {
-  ST_DEBUG("begin processFunction!\n");
   fNext = 0;
 
   // Add all the function arguments with no names.
   for(Function::const_arg_iterator AI = TheFunction->arg_begin(),
       AE = TheFunction->arg_end(); AI != AE; ++AI)
     if (!AI->hasName())
-      CreateFunctionSlot(AI);
-
-  ST_DEBUG("Inserting Instructions:\n");
+      CreateFunctionSlot(&*AI);
 
   // Process function metadata if it wasn't hit at the module-level.
   if (!ShouldInitializeAllMetadata)
@@ -835,7 +818,6 @@ void SlotTracker::processFunction() {
 
   FunctionProcessed = true;
 
-  ST_DEBUG("end processFunction!\n");
 }
 
 void SlotTracker::processFunctionMetadata(const Function &F) {
@@ -872,11 +854,9 @@ void SlotTracker::processInstructionMetadata(const Instruction &I) {
 /// the function incorporation state that affects get*Slot/Create*Slot. Function
 /// incorporation state is indicated by TheFunction != 0.
 void SlotTracker::purgeFunction() {
-  ST_DEBUG("begin purgeFunction!\n");
   fMap.clear(); // Simply discard the function level map
   TheFunction = nullptr;
   FunctionProcessed = false;
-  ST_DEBUG("end purgeFunction!\n");
 }
 
 /// getGlobalSlot - Get the slot number of a global value.
@@ -929,12 +909,6 @@ void SlotTracker::CreateModuleSlot(const GlobalValue *V) {
   unsigned DestSlot = mNext++;
   mMap[V] = DestSlot;
 
-  ST_DEBUG("  Inserting value [" << V->getType() << "] = " << V << " slot=" <<
-           DestSlot << " [");
-  // G = Global, F = Function, A = Alias, o = other
-  ST_DEBUG((isa<GlobalVariable>(V) ? 'G' :
-            (isa<Function>(V) ? 'F' :
-             (isa<GlobalAlias>(V) ? 'A' : 'o'))) << "]\n");
 }
 
 /// CreateSlot - Create a new slot for the specified value if it has no name.
@@ -944,9 +918,6 @@ void SlotTracker::CreateFunctionSlot(const Value *V) {
   unsigned DestSlot = fNext++;
   fMap[V] = DestSlot;
 
-  // G = Global, F = Function, o = other
-  ST_DEBUG("  Inserting value [" << V->getType() << "] = " << V << " slot=" <<
-           DestSlot << " [o]\n");
 }
 
 /// CreateModuleSlot - Insert the specified MDNode* into the slot table.
@@ -1088,16 +1059,17 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
   }
 
   if (const ConstantFP *CFP = dyn_cast<ConstantFP>(CV)) {
-    if (&CFP->getValueAPF().getSemantics() == &APFloat::IEEEsingle ||
-        &CFP->getValueAPF().getSemantics() == &APFloat::IEEEdouble) {
+    if (&CFP->getValueAPF().getSemantics() == &APFloat::IEEEsingle() ||
+        &CFP->getValueAPF().getSemantics() == &APFloat::IEEEdouble()) {
       // We would like to output the FP constant value in exponential notation,
       // but we cannot do this if doing so will lose precision.  Check here to
       // make sure that we only output it in exponential format if we can parse
       // the value back and get the same value.
       //
       bool ignored;
-      bool isHalf = &CFP->getValueAPF().getSemantics()==&APFloat::IEEEhalf;
-      bool isDouble = &CFP->getValueAPF().getSemantics()==&APFloat::IEEEdouble;
+      bool isHalf = &CFP->getValueAPF().getSemantics() == &APFloat::IEEEhalf();
+      bool isDouble =
+          &CFP->getValueAPF().getSemantics() == &APFloat::IEEEdouble();
       bool isInf = CFP->getValueAPF().isInfinity();
       bool isNaN = CFP->getValueAPF().isNaN();
       if (!isHalf && !isInf && !isNaN) {
@@ -1114,7 +1086,7 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
             ((StrVal[0] == '-' || StrVal[0] == '+') &&
              (StrVal[1] >= '0' && StrVal[1] <= '9'))) {
           // Reparse stringized version!
-          if (APFloat(APFloat::IEEEdouble, StrVal).convertToDouble() == Val) {
+          if (APFloat(APFloat::IEEEdouble(), StrVal).convertToDouble() == Val) {
             Out << StrVal;
             return;
           }
@@ -1126,15 +1098,12 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
       // x86, so we must not use these types.
       static_assert(sizeof(double) == sizeof(uint64_t),
                     "assuming that double is 64 bits!");
-      char Buffer[40];
       APFloat apf = CFP->getValueAPF();
       // Halves and floats are represented in ASCII IR as double, convert.
       if (!isDouble)
-        apf.convert(APFloat::IEEEdouble, APFloat::rmNearestTiesToEven,
-                          &ignored);
-      Out << "0x" <<
-              utohex_buffer(uint64_t(apf.bitcastToAPInt().getZExtValue()),
-                            Buffer+40);
+        apf.convert(APFloat::IEEEdouble(), APFloat::rmNearestTiesToEven,
+                    &ignored);
+      Out << "0x" << utohexstr(apf.bitcastToAPInt().getZExtValue());
       return;
     }
 
@@ -1145,7 +1114,7 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
     // Bit position, in the current word, of the next nibble to print.
     int shiftcount;
 
-    if (&CFP->getValueAPF().getSemantics() == &APFloat::x87DoubleExtended) {
+    if (&CFP->getValueAPF().getSemantics() == &APFloat::x87DoubleExtended()) {
       Out << 'K';
       // api needed to prevent premature destruction
       APInt api = CFP->getValueAPF().bitcastToAPInt();
@@ -1167,13 +1136,14 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
         }
       }
       return;
-    } else if (&CFP->getValueAPF().getSemantics() == &APFloat::IEEEquad) {
+    } else if (&CFP->getValueAPF().getSemantics() == &APFloat::IEEEquad()) {
       shiftcount = 60;
       Out << 'L';
-    } else if (&CFP->getValueAPF().getSemantics() == &APFloat::PPCDoubleDouble) {
+    } else if (&CFP->getValueAPF().getSemantics() ==
+               &APFloat::PPCDoubleDouble()) {
       shiftcount = 60;
       Out << 'M';
-    } else if (&CFP->getValueAPF().getSemantics() == &APFloat::IEEEhalf) {
+    } else if (&CFP->getValueAPF().getSemantics() == &APFloat::IEEEhalf()) {
       shiftcount = 12;
       Out << 'H';
     } else
@@ -1428,7 +1398,11 @@ struct MDFieldPrinter {
 
 void MDFieldPrinter::printTag(const DINode *N) {
   Out << FS << "tag: ";
-  if (const char *Tag = dwarf::TagString(N->getTag()))
+  if (N->getTag() == DW_TAG_auto_variable)
+    Out << "DW_TAG_auto_variable";
+  else if (N->getTag() == DW_TAG_arg_variable)
+    Out << "DW_TAG_arg_variable";
+  else if (StringRef Tag = dwarf::TagString(N->getTag()); !Tag.empty())
     Out << Tag;
   else
     Out << N->getTag();
@@ -1502,7 +1476,7 @@ void MDFieldPrinter::printDwarfEnum(StringRef Name, IntTy Value,
     return;
 
   Out << FS << Name << ": ";
-  if (const char *S = toString(Value))
+  if (StringRef S = toString(Value); !S.empty())
     Out << S;
   else
     Out << Value;
@@ -1796,7 +1770,7 @@ static void writeDILocalVariable(raw_ostream &Out, const DILocalVariable *N,
   Printer.printString("name", N->getName());
   Printer.printInt("arg", N->getArg(),
                    /* ShouldSkipZero */
-                   N->getTag() == dwarf::DW_TAG_auto_variable);
+                   N->getTag() == DW_TAG_auto_variable);
   Printer.printMetadata("scope", N->getRawScope(), /* ShouldSkipNull */ false);
   Printer.printMetadata("file", N->getRawFile());
   Printer.printInt("line", N->getLine());
@@ -1812,8 +1786,8 @@ static void writeDIExpression(raw_ostream &Out, const DIExpression *N,
   FieldSeparator FS;
   if (N->isValid()) {
     for (auto I = N->expr_op_begin(), E = N->expr_op_end(); I != E; ++I) {
-      const char *OpStr = dwarf::OperationEncodingString(I->getOp());
-      assert(OpStr && "Expected valid opcode");
+      StringRef OpStr = dwarf::OperationEncodingString(I->getOp());
+      assert(!OpStr.empty() && "Expected valid opcode");
 
       Out << FS << OpStr;
       for (unsigned A = 0, AE = I->getNumArgs(); A != AE; ++A)
@@ -1962,7 +1936,7 @@ static void WriteAsOperandInternal(raw_ostream &Out, const Metadata *MD,
   if (const MDNode *N = dyn_cast<MDNode>(MD)) {
     std::unique_ptr<SlotTracker> MachineStorage;
     if (!Machine) {
-      MachineStorage = make_unique<SlotTracker>(Context);
+      MachineStorage = std::make_unique<SlotTracker>(Context);
       Machine = MachineStorage.get();
     }
     int Slot = Machine->getMetadataSlot(N);
@@ -1996,7 +1970,6 @@ namespace {
 class AssemblyWriter {
   formatted_raw_ostream &Out;
   const Module *TheModule;
-  std::unique_ptr<SlotTracker> SlotTrackerStorage;
   SlotTracker &Machine;
   TypePrinting TypePrinter;
   AssemblyAnnotationWriter *AnnotationWriter;
@@ -2008,11 +1981,6 @@ class AssemblyWriter {
 public:
   /// Construct an AssemblyWriter with an external SlotTracker
   AssemblyWriter(formatted_raw_ostream &o, SlotTracker &Mac, const Module *M,
-                 AssemblyAnnotationWriter *AAW,
-                 bool ShouldPreserveUseListOrder = false);
-
-  /// Construct an AssemblyWriter with an internally allocated SlotTracker
-  AssemblyWriter(formatted_raw_ostream &o, const Module *M,
                  AssemblyAnnotationWriter *AAW,
                  bool ShouldPreserveUseListOrder = false);
 
@@ -2082,17 +2050,6 @@ AssemblyWriter::AssemblyWriter(formatted_raw_ostream &o, SlotTracker &Mac,
       ShouldPreserveUseListOrder(ShouldPreserveUseListOrder) {
   init();
 }
-
-#if 0 // HLSL Change - Unused
-AssemblyWriter::AssemblyWriter(formatted_raw_ostream &o, const Module *M,
-                               AssemblyAnnotationWriter *AAW,
-                               bool ShouldPreserveUseListOrder)
-    : Out(o), TheModule(M), SlotTrackerStorage(createSlotTracker(M)),
-      Machine(*SlotTrackerStorage), AnnotationWriter(AAW),
-      ShouldPreserveUseListOrder(ShouldPreserveUseListOrder) {
-  init();
-}
-#endif
 
 void AssemblyWriter::writeOperand(const Value *Operand, bool PrintType) {
   if (!Operand) {
@@ -2549,7 +2506,7 @@ void AssemblyWriter::printFunction(const Function *F) {
          I != E; ++I) {
       // Insert commas as we go... the first arg doesn't get a comma
       if (I != F->arg_begin()) Out << ", ";
-      printArgument(I, Attrs, Idx);
+      printArgument(&*I, Attrs, Idx);
       Idx++;
     }
   } else {
@@ -2609,7 +2566,7 @@ void AssemblyWriter::printFunction(const Function *F) {
     Out << " {";
     // Output all of the function's basic blocks.
     for (Function::const_iterator I = F->begin(), E = F->end(); I != E; ++I)
-      printBasicBlock(I);
+      printBasicBlock(&*I);
 
     // Output the function's use-lists.
     printUseLists(F);
@@ -3396,3 +3353,5 @@ void Metadata::dump(const Module *M) const {
   print(dbgs(), M);
   dbgs() << '\n';
 }
+
+} // namespace dxil

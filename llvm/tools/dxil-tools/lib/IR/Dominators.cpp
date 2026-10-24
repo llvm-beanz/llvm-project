@@ -35,11 +35,6 @@ static bool VerifyDomInfo = true;
 #else
 static bool VerifyDomInfo = false;
 #endif
-#if 0 // HLSL Change Starts - option pending
-static cl::opt<bool,true>
-VerifyDomInfoX("verify-dom-info", cl::location(VerifyDomInfo),
-               cl::desc("Verify dominator info (time consuming)"));
-#endif // HLSL Change Ends
 
 bool BasicBlockEdge::isSingleEdge() const {
   const TerminatorInst *TI = Start->getTerminator();

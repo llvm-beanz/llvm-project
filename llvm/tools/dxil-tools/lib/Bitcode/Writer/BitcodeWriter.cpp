@@ -2036,11 +2036,6 @@ static void WriteValueSymbolTable(const ValueSymbolTable &VST,
   for (const ValueName *SI : SortedTable) {
     auto &Name = *SI;
 // HLSL Change - End
-#if 0 // HLSL Change
-  for (ValueSymbolTable::const_iterator SI = VST.begin(), SE = VST.end();
-       SI != SE; ++SI) {
-    const ValueName &Name = *SI;
-#endif // HLSL Change
 
     // Figure out the encoding to use for the name.
     bool is7Bit = true;

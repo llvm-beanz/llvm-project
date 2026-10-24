@@ -320,7 +320,7 @@ private:
 class DiagnosticInfoOptimizationRemark : public DiagnosticInfoOptimizationBase {
 public:
   /// \p PassName is the name of the pass emitting this diagnostic. If
-  /// this name matches the regular expression given in -Rpass=, then the
+  /// this name matches the regular expression given in -pass-remarks=, then the
   /// diagnostic will be emitted. \p Fn is the function where the diagnostic
   /// is being emitted. \p DLoc is the location information to use in the
   /// diagnostic. If line table information is available, the diagnostic
@@ -345,10 +345,10 @@ class DiagnosticInfoOptimizationRemarkMissed
     : public DiagnosticInfoOptimizationBase {
 public:
   /// \p PassName is the name of the pass emitting this diagnostic. If
-  /// this name matches the regular expression given in -Rpass-missed=, then the
-  /// diagnostic will be emitted. \p Fn is the function where the diagnostic
-  /// is being emitted. \p DLoc is the location information to use in the
-  /// diagnostic. If line table information is available, the diagnostic
+  /// this name matches the regular expression given in -pass-remarks-missed=,
+  /// then the diagnostic will be emitted. \p Fn is the function where the
+  /// diagnostic is being emitted. \p DLoc is the location information to use in
+  /// the diagnostic. If line table information is available, the diagnostic
   /// will include the source code location. \p Msg is the message to show.
   /// Note that this class does not copy this message, so this reference
   /// must be valid for the whole life time of the diagnostic.
@@ -372,13 +372,13 @@ class DiagnosticInfoOptimizationRemarkAnalysis
     : public DiagnosticInfoOptimizationBase {
 public:
   /// \p PassName is the name of the pass emitting this diagnostic. If
-  /// this name matches the regular expression given in -Rpass-analysis=, then
-  /// the diagnostic will be emitted. \p Fn is the function where the diagnostic
-  /// is being emitted. \p DLoc is the location information to use in the
-  /// diagnostic. If line table information is available, the diagnostic will
-  /// include the source code location. \p Msg is the message to show. Note that
-  /// this class does not copy this message, so this reference must be valid for
-  /// the whole life time of the diagnostic.
+  /// this name matches the regular expression given in -pass-remarks-analysis=,
+  /// then the diagnostic will be emitted. \p Fn is the function where the
+  /// diagnostic is being emitted. \p DLoc is the location information to use in
+  /// the diagnostic. If line table information is available, the diagnostic
+  /// will include the source code location. \p Msg is the message to show. Note
+  /// that this class does not copy this message, so this reference must be
+  /// valid for the whole life time of the diagnostic.
   DiagnosticInfoOptimizationRemarkAnalysis(const char *PassName,
                                            const Function &Fn,
                                            const DebugLoc &DLoc,

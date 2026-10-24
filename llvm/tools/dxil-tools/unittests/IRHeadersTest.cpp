@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "dxil/IR/AssemblyAnnotationWriter.h"
 #include "dxil/IR/Attributes.h"
 #include "dxil/IR/CFG.h"
 #include "dxil/IR/CallSite.h"
@@ -18,6 +19,7 @@
 #include "dxil/IR/DiagnosticPrinter.h"
 #include "dxil/IR/Function.h"
 #include "dxil/IR/GlobalValue.h"
+#include "dxil/IR/IRPrintingPasses.h"
 #include "dxil/IR/InlineAsm.h"
 #include "dxil/IR/InstIterator.h"
 #include "dxil/IR/InstrTypes.h"
@@ -27,9 +29,11 @@
 #include "dxil/IR/Module.h"
 #include "dxil/IR/Statepoint.h"
 #include "dxil/IR/TrackingMDRef.h"
+#include "dxil/IR/TypeFinder.h"
 #include "dxil/IR/User.h"
 #include "dxil/IR/ValueHandle.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Comdat.h"
@@ -40,10 +44,12 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/TypeFinder.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/ValueHandle.h"
 #include "gtest/gtest.h"
@@ -74,6 +80,17 @@ static_assert(!std::is_same_v<dxil::DILocation, llvm::DILocation>);
 static_assert(!std::is_same_v<dxil::WeakTrackingVH, llvm::WeakTrackingVH>);
 static_assert(!std::is_same_v<dxil::IntrinsicInst, llvm::IntrinsicInst>);
 static_assert(!std::is_same_v<dxil::DiagnosticInfo, llvm::DiagnosticInfo>);
+static_assert(!std::is_same_v<dxil::TypeFinder, llvm::TypeFinder>);
+static_assert(!std::is_same_v<dxil::AssemblyAnnotationWriter,
+                              llvm::AssemblyAnnotationWriter>);
+static_assert(
+    std::is_constructible_v<dxil::PrintModulePass, llvm::raw_ostream &>);
+static_assert(
+    std::is_same_v<decltype(&dxil::AssemblyAnnotationWriter::printInfoComment),
+                   void (dxil::AssemblyAnnotationWriter::*)(
+                       const dxil::Value &, llvm::formatted_raw_ostream &)>);
+static_assert(dxil::DW_TAG_auto_variable == 0x0100);
+static_assert(dxil::DW_TAG_arg_variable == 0x0101);
 static_assert(!std::is_abstract_v<dxil::DiagnosticPrinterRawOStream>);
 static_assert(std::is_constructible_v<dxil::DiagnosticPrinterRawOStream,
                                       llvm::raw_ostream &>);

@@ -30,9 +30,9 @@ class Value;
 class TypeFinder {
   // To avoid walking constant expressions multiple times and other IR
   // objects, we keep several helper maps.
-  DenseSet<const Value*> VisitedConstants;
-  DenseSet<const MDNode *> VisitedMetadata;
-  DenseSet<Type*> VisitedTypes;
+  llvm::DenseSet<const Value *> VisitedConstants;
+  llvm::DenseSet<const MDNode *> VisitedMetadata;
+  llvm::DenseSet<Type *> VisitedTypes;
 
   std::vector<StructType*> StructTypes;
   bool OnlyNamed;

@@ -41,6 +41,12 @@
 
 namespace dxil {
 
+// These LLVM 3.7 metadata tags are not part of modern DWARF.
+enum LegacyDwarfTag {
+  DW_TAG_auto_variable = 0x0100,
+  DW_TAG_arg_variable = 0x0101
+};
+
 /// \brief Pointer union between a subclass of DINode and MDString.
 ///
 /// \a DICompositeType can be referenced via an \a MDString unique identifier.
