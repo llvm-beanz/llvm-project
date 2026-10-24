@@ -406,12 +406,6 @@ std::error_code Module::materializeMetadata() {
   return Materializer->materializeMetadata();
 }
 
-std::error_code Module::materializeSelectNamedMetadata(ArrayRef<StringRef> NamedMetadata) {
-  if (!Materializer)
-    return std::error_code();
-  return Materializer->materializeSelectNamedMetadata(NamedMetadata);
-}
-
 //===----------------------------------------------------------------------===//
 // Other module related stuff.
 //

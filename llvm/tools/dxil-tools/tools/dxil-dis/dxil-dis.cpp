@@ -34,18 +34,17 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include <system_error>
 using namespace llvm;
-using dxil::AssemblyAnnotationWriter;
-using dxil::DbgDeclareInst;
-using dxil::DbgValueInst;
-using dxil::DebugLoc;
-using dxil::DiagnosticInfo;
-using dxil::DiagnosticPrinterRawOStream;
-using dxil::DILocation;
-using dxil::Function;
-using dxil::Instruction;
-using dxil::LLVMContext;
-using dxil::Module;
-using dxil::Value;
+using ::dxil::AssemblyAnnotationWriter;
+using ::dxil::DbgDeclareInst;
+using ::dxil::DbgValueInst;
+using ::dxil::DebugLoc;
+using ::dxil::DiagnosticInfo;
+using ::dxil::DiagnosticPrinterRawOStream;
+using ::dxil::DILocation;
+using ::dxil::Function;
+using ::dxil::Instruction;
+using ::dxil::Module;
+using ::dxil::Value;
 
 static cl::opt<std::string>
     InputFilename(cl::Positional, cl::desc("<input bitcode>"), cl::init("-"));
@@ -65,7 +64,7 @@ static cl::opt<bool>
                     cl::desc("Add informational comments to the .ll file"));
 
 static cl::opt<bool> PreserveAssemblyUseListOrder(
-    "preserve-ll-uselistorder",
+    "preserve-dxil-uselistorder",
     cl::desc("Preserve use-list order when writing LLVM assembly."),
     cl::init(false), cl::Hidden);
 
@@ -127,16 +126,16 @@ static void diagnosticHandler(const DiagnosticInfo *DI, void *Context) {
   raw_ostream &OS = errs();
   OS << (char *)Context << ": ";
   switch (DI->getSeverity()) {
-  case dxil::DS_Error:
+  case ::dxil::DS_Error:
     OS << "error: ";
     break;
-  case dxil::DS_Warning:
+  case ::dxil::DS_Warning:
     OS << "warning: ";
     break;
-  case dxil::DS_Remark:
+  case ::dxil::DS_Remark:
     OS << "remark: ";
     break;
-  case dxil::DS_Note:
+  case ::dxil::DS_Note:
     OS << "note: ";
     break;
   }
@@ -145,13 +144,13 @@ static void diagnosticHandler(const DiagnosticInfo *DI, void *Context) {
   DI->print(DP);
   OS << '\n';
 
-  if (DI->getSeverity() == dxil::DS_Error)
+  if (DI->getSeverity() == ::dxil::DS_Error)
     exit(1);
 }
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
-  LLVMContext Context;
+  ::dxil::LLVMContext Context;
 
   Context.setDiagnosticHandler(diagnosticHandler, argv[0]);
 
@@ -172,7 +171,7 @@ int main(int argc, char **argv) {
   std::unique_ptr<MemoryBuffer> &Buf = FileOrErr.get();
   MemoryBufferRef BitcodeData = Buf->getMemBufferRef();
   if (Buf->getBuffer().starts_with("DXBC")) {
-    ExitOnError ExitOnErr(Twine(argv[0]) + ": " + InputFilename + ": ");
+    ExitOnError ExitOnErr((Twine(argv[0]) + ": " + InputFilename + ": ").str());
     auto Container = ExitOnErr(object::DXContainer::create(BitcodeData));
     const auto &DXIL = Container.getDXIL(/*Debug=*/false);
     if (!DXIL) {
@@ -186,7 +185,7 @@ int main(int argc, char **argv) {
   }
 
   ErrorOr<std::unique_ptr<Module>> MOrErr =
-      dxil::parseBitcodeFile(BitcodeData, Context);
+      ::dxil::parseBitcodeFile(BitcodeData, Context);
   if (std::error_code EC = MOrErr.getError()) {
     errs() << argv[0] << ": "
            << "Could not load bitcode from file '" << InputFilename

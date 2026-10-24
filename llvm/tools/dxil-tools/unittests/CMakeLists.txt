@@ -7,6 +7,7 @@ add_unittest(DXILUnitTests DXILTests
   AsmParserTest.cpp
   AttributeImplTest.cpp
   BitcodeHeaderTest.cpp
+  BitcodeTest.cpp
   ConstantsContextTest.cpp
   IRHeadersTest.cpp
   IRTest.cpp
@@ -19,7 +20,7 @@ add_unittest(DXILUnitTests DXILTests
   intrinsics_gen
   )
 
-target_link_libraries(DXILTests PRIVATE DXILAsmParser DXILCore)
+target_link_libraries(DXILTests PRIVATE DXILAsmParser DXILBitReader DXILBitWriter DXILCore)
 
 add_custom_target(check-dxil-tools-unit
   COMMAND $<TARGET_FILE:DXILTests>

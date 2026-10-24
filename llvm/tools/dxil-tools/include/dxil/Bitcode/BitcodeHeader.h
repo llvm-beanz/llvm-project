@@ -34,8 +34,7 @@ inline bool isBitcode(const unsigned char *Begin, const unsigned char *End) {
 }
 
 /// Skip a legacy bitcode wrapper. Return true on failure without changing the
-/// input range. VerifyBufferSize may be disabled by the legacy streaming
-/// reader, which initially has only the wrapper header available.
+/// input range. VerifyBufferSize controls validation of the payload size.
 inline bool SkipBitcodeWrapperHeader(const unsigned char *&Begin,
                                      const unsigned char *&End,
                                      bool VerifyBufferSize) {

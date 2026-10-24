@@ -3,6 +3,15 @@
 ; RUN: dxil-as -preserve-bc-uselistorder=false %s -o %t.no-uselist.bc
 ; RUN: llvm-bcanalyzer -dump %t.no-uselist.bc | FileCheck %s
 ; RUN: dxil-as -disable-output %s
+; RUN: dxil-dis %t.bc -o %t.ll
+; RUN: dxil-as %t.ll -o %t.roundtrip.bc
+; RUN: cmp %t.bc %t.roundtrip.bc
+; RUN: dxil-dis -preserve-dxil-uselistorder %t.bc -o - | dxil-as -o %t.uselists.bc
+; RUN: cmp %t.bc %t.uselists.bc
+; RUN: dxil-dis -show-annotations %t.bc -o - | FileCheck %s --check-prefix=ANNOTATIONS
+; RUN: dxil-dis -disable-output %t.bc
+; ANNOTATIONS: define i32 @choose
+; ANNOTATIONS: ; [#uses=
 
 ; Check legacy IR records, not only the generic bitstream signature.
 ; CHECK: <MODULE_BLOCK

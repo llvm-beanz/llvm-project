@@ -23,27 +23,18 @@
 #include <string>
 
 namespace dxil {
-  class DataStreamer;
   class LLVMContext;
   class Module;
 
   /// Read the header of the specified bitcode buffer and prepare for lazy
   /// deserialization of function bodies. If ShouldLazyLoadMetadata is true,
-  /// lazily load metadata as well. If successful, this moves Buffer. On
-  /// error, this *does not* move Buffer.
+  /// lazily load metadata as well. Take ownership of Buffer, including on
+  /// error.
   llvm::ErrorOr<std::unique_ptr<Module>>
   getLazyBitcodeModule(std::unique_ptr<llvm::MemoryBuffer> &&Buffer,
                        LLVMContext &Context,
                        DiagnosticHandlerFunction DiagnosticHandler = nullptr,
-                       bool ShouldLazyLoadMetadata = false,
-                       bool ShouldTrackBitstreamUsage = false);
-
-  /// Read the header of the specified stream and prepare for lazy
-  /// deserialization and streaming of function bodies.
-  llvm::ErrorOr<std::unique_ptr<Module>> getStreamedBitcodeModule(
-      llvm::StringRef Name, std::unique_ptr<DataStreamer> Streamer,
-      LLVMContext &Context,
-      DiagnosticHandlerFunction DiagnosticHandler = nullptr);
+                       bool ShouldLazyLoadMetadata = false);
 
   /// Read the header of the specified bitcode buffer and extract just the
   /// triple information. If successful, this returns a string. On error, this
@@ -55,8 +46,7 @@ namespace dxil {
   /// Read the specified bitcode file, returning the module.
   llvm::ErrorOr<std::unique_ptr<Module>>
   parseBitcodeFile(llvm::MemoryBufferRef Buffer, LLVMContext &Context,
-                   DiagnosticHandlerFunction DiagnosticHandler = nullptr,
-                   bool ShouldTrackBitstreamUsage = false); // HLSL Change
+                   DiagnosticHandlerFunction DiagnosticHandler = nullptr);
 
   /// \brief Write the specified module to the specified raw output stream.
   ///
