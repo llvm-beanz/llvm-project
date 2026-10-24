@@ -23,6 +23,8 @@
 #include "llvm/Support/ErrorHandling.h"
 using namespace llvm;
 
+namespace dxil {
+
 //===----------------------------------------------------------------------===//
 //                            GlobalValue Class
 //===----------------------------------------------------------------------===//
@@ -178,7 +180,8 @@ GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool constant,
   }
 
   if (Before)
-    Before->getParent()->getGlobalList().insert(Before, this);
+    Before->getParent()->getGlobalList().insert(Module::global_iterator(Before),
+                                                this);
   else
     M.getGlobalList().push_back(this);
 }
@@ -285,3 +288,5 @@ void GlobalAlias::setAliasee(Constant *Aliasee) {
          "Alias and aliasee types should match!");
   setOperand(0, Aliasee);
 }
+
+} // namespace dxil

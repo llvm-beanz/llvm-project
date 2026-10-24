@@ -17,21 +17,23 @@
 //===----------------------------------------------------------------------===//
 
 #include "dxil/IR/DataLayout.h"
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/Triple.h"
 #include "dxil/IR/Constants.h"
 #include "dxil/IR/DerivedTypes.h"
 #include "dxil/IR/GetElementPtrTypeIterator.h"
 #include "dxil/IR/Module.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Mutex.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cstdlib>
 using namespace llvm;
+
+namespace dxil {
 
 //===----------------------------------------------------------------------===//
 // Support for StructLayout
@@ -50,7 +52,7 @@ StructLayout::StructLayout(StructType *ST, const DataLayout &DL) {
 
     // Add padding if necessary to align the data element properly.
     if ((StructSize & (TyAlign-1)) != 0)
-      StructSize = RoundUpToAlignment(StructSize, TyAlign);
+      StructSize = alignTo(StructSize, TyAlign);
 
     // Keep track of maximum alignment constraint.
     StructAlignment = std::max(TyAlign, StructAlignment);
@@ -65,7 +67,7 @@ StructLayout::StructLayout(StructType *ST, const DataLayout &DL) {
   // Add padding to the end of the struct so that it could be put in an array
   // and all array elements would be aligned correctly.
   if ((StructSize & (StructAlignment-1)) != 0)
-    StructSize = RoundUpToAlignment(StructSize, StructAlignment);
+    StructSize = alignTo(StructSize, StructAlignment);
 }
 
 
@@ -189,7 +191,8 @@ void DataLayout::reset(StringRef Desc) {
 }
 
 /// Checked version of split, to ensure mandatory subparts.
-static std::pair<StringRef, StringRef> split(StringRef Str, char Separator) {
+static std::pair<StringRef, StringRef> splitLayoutSpec(StringRef Str,
+                                                       char Separator) {
   assert(!Str.empty() && "parse error, string can't be empty here");
   std::pair<StringRef, StringRef> Split = Str.split(Separator);
   if (Split.second.empty() && Split.first != Str)
@@ -219,11 +222,11 @@ void DataLayout::parseSpecifier(StringRef Desc) {
   StringRepresentation = Desc;
   while (!Desc.empty()) {
     // Split at '-'.
-    std::pair<StringRef, StringRef> Split = split(Desc, '-');
+    std::pair<StringRef, StringRef> Split = splitLayoutSpec(Desc, '-');
     Desc = Split.second;
 
     // Split at ':'.
-    Split = split(Split.first, ':');
+    Split = splitLayoutSpec(Split.first, ':');
 
     // Aliases used below.
     StringRef &Tok  = Split.first;  // Current token.
@@ -253,7 +256,7 @@ void DataLayout::parseSpecifier(StringRef Desc) {
       if (Rest.empty())
         report_fatal_error(
             "Missing size specification for pointer in datalayout string");
-      Split = split(Rest, ':');
+      Split = splitLayoutSpec(Rest, ':');
       unsigned PointerMemSize = inBytes(getInt(Tok));
       if (!PointerMemSize)
         report_fatal_error("Invalid pointer size of 0 bytes");
@@ -262,7 +265,7 @@ void DataLayout::parseSpecifier(StringRef Desc) {
       if (Rest.empty())
         report_fatal_error(
             "Missing alignment specification for pointer in datalayout string");
-      Split = split(Rest, ':');
+      Split = splitLayoutSpec(Rest, ':');
       unsigned PointerABIAlign = inBytes(getInt(Tok));
       if (!isPowerOf2_64(PointerABIAlign))
         report_fatal_error(
@@ -271,7 +274,7 @@ void DataLayout::parseSpecifier(StringRef Desc) {
       // Preferred alignment.
       unsigned PointerPrefAlign = PointerABIAlign;
       if (!Rest.empty()) {
-        Split = split(Rest, ':');
+        Split = splitLayoutSpec(Rest, ':');
         PointerPrefAlign = inBytes(getInt(Tok));
         if (!isPowerOf2_64(PointerPrefAlign))
           report_fatal_error(
@@ -306,7 +309,7 @@ void DataLayout::parseSpecifier(StringRef Desc) {
       if (Rest.empty())
         report_fatal_error(
             "Missing alignment specification in datalayout string");
-      Split = split(Rest, ':');
+      Split = splitLayoutSpec(Rest, ':');
       unsigned ABIAlign = inBytes(getInt(Tok));
       if (AlignType != AGGREGATE_ALIGN && !ABIAlign)
         report_fatal_error(
@@ -315,7 +318,7 @@ void DataLayout::parseSpecifier(StringRef Desc) {
       // Preferred alignment.
       unsigned PrefAlign = ABIAlign;
       if (!Rest.empty()) {
-        Split = split(Rest, ':');
+        Split = splitLayoutSpec(Rest, ':');
         PrefAlign = inBytes(getInt(Tok));
       }
 
@@ -332,7 +335,7 @@ void DataLayout::parseSpecifier(StringRef Desc) {
         LegalIntWidths.push_back(Width);
         if (Rest.empty())
           break;
-        Split = split(Rest, ':');
+        Split = splitLayoutSpec(Rest, ':');
       }
       break;
     case 'S': { // Stack natural alignment.
@@ -789,3 +792,4 @@ unsigned DataLayout::getPreferredAlignmentLog(const GlobalVariable *GV) const {
   return Log2_32(getPreferredAlignment(GV));
 }
 
+} // namespace dxil

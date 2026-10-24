@@ -57,7 +57,7 @@ template <typename T> inline OneUse_match<T> m_OneUse(const T &SubPattern) {
 }
 
 template <typename Class> struct class_match {
-  template <typename ITy> bool match(ITy *V) { return isa<Class>(V); }
+  template <typename ITy> bool match(ITy *V) { return llvm::isa<Class>(V); }
 };
 
 /// \brief Match an arbitrary value and ignore it.
@@ -126,7 +126,7 @@ inline match_combine_and<LTy, RTy> m_CombineAnd(const LTy &L, const RTy &R) {
 
 struct match_zero {
   template <typename ITy> bool match(ITy *V) {
-    if (const auto *C = dyn_cast<Constant>(V))
+    if (const auto *C = llvm::dyn_cast<Constant>(V))
       return C->isNullValue();
     return false;
   }
@@ -138,7 +138,7 @@ inline match_zero m_Zero() { return match_zero(); }
 
 struct match_neg_zero {
   template <typename ITy> bool match(ITy *V) {
-    if (const auto *C = dyn_cast<Constant>(V))
+    if (const auto *C = llvm::dyn_cast<Constant>(V))
       return C->isNegativeZeroValue();
     return false;
   }
@@ -158,16 +158,17 @@ inline match_combine_or<match_zero, match_neg_zero> m_AnyZero() {
 }
 
 struct apint_match {
-  const APInt *&Res;
-  apint_match(const APInt *&R) : Res(R) {}
+  const llvm::APInt *&Res;
+  apint_match(const llvm::APInt *&R) : Res(R) {}
   template <typename ITy> bool match(ITy *V) {
-    if (auto *CI = dyn_cast<ConstantInt>(V)) {
+    if (auto *CI = llvm::dyn_cast<ConstantInt>(V)) {
       Res = &CI->getValue();
       return true;
     }
     if (V->getType()->isVectorTy())
-      if (const auto *C = dyn_cast<Constant>(V))
-        if (auto *CI = dyn_cast_or_null<ConstantInt>(C->getSplatValue())) {
+      if (const auto *C = llvm::dyn_cast<Constant>(V))
+        if (auto *CI =
+                llvm::dyn_cast_or_null<ConstantInt>(C->getSplatValue())) {
           Res = &CI->getValue();
           return true;
         }
@@ -176,13 +177,13 @@ struct apint_match {
 };
 
 /// \brief Match a ConstantInt or splatted ConstantVector, binding the
-/// specified pointer to the contained APInt.
-inline apint_match m_APInt(const APInt *&Res) { return Res; }
+/// specified pointer to the contained llvm::APInt.
+inline apint_match m_APInt(const llvm::APInt *&Res) { return Res; }
 
 template <int64_t Val> struct constantint_match {
   template <typename ITy> bool match(ITy *V) {
-    if (const auto *CI = dyn_cast<ConstantInt>(V)) {
-      const APInt &CIV = CI->getValue();
+    if (const auto *CI = llvm::dyn_cast<ConstantInt>(V)) {
+      const llvm::APInt &CIV = CI->getValue();
       if (Val >= 0)
         return CIV == static_cast<uint64_t>(Val);
       // If Val is negative, and CI is shorter than it, truncate to the right
@@ -203,30 +204,31 @@ template <int64_t Val> inline constantint_match<Val> m_ConstantInt() {
 /// satisfy a specified predicate.
 template <typename Predicate> struct cst_pred_ty : public Predicate {
   template <typename ITy> bool match(ITy *V) {
-    if (const auto *CI = dyn_cast<ConstantInt>(V))
+    if (const auto *CI = llvm::dyn_cast<ConstantInt>(V))
       return this->isValue(CI->getValue());
     if (V->getType()->isVectorTy())
-      if (const auto *C = dyn_cast<Constant>(V))
-        if (const auto *CI = dyn_cast_or_null<ConstantInt>(C->getSplatValue()))
+      if (const auto *C = llvm::dyn_cast<Constant>(V))
+        if (const auto *CI =
+                llvm::dyn_cast_or_null<ConstantInt>(C->getSplatValue()))
           return this->isValue(CI->getValue());
     return false;
   }
 };
 
 /// \brief This helper class is used to match scalar and vector constants that
-/// satisfy a specified predicate, and bind them to an APInt.
+/// satisfy a specified predicate, and bind them to an llvm::APInt.
 template <typename Predicate> struct api_pred_ty : public Predicate {
-  const APInt *&Res;
-  api_pred_ty(const APInt *&R) : Res(R) {}
+  const llvm::APInt *&Res;
+  api_pred_ty(const llvm::APInt *&R) : Res(R) {}
   template <typename ITy> bool match(ITy *V) {
-    if (const auto *CI = dyn_cast<ConstantInt>(V))
+    if (const auto *CI = llvm::dyn_cast<ConstantInt>(V))
       if (this->isValue(CI->getValue())) {
         Res = &CI->getValue();
         return true;
       }
     if (V->getType()->isVectorTy())
-      if (const auto *C = dyn_cast<Constant>(V))
-        if (auto *CI = dyn_cast_or_null<ConstantInt>(C->getSplatValue()))
+      if (const auto *C = llvm::dyn_cast<Constant>(V))
+        if (auto *CI = llvm::dyn_cast_or_null<ConstantInt>(C->getSplatValue()))
           if (this->isValue(CI->getValue())) {
             Res = &CI->getValue();
             return true;
@@ -237,54 +239,56 @@ template <typename Predicate> struct api_pred_ty : public Predicate {
 };
 
 struct is_one {
-  bool isValue(const APInt &C) { return C == 1; }
+  bool isValue(const llvm::APInt &C) { return C == 1; }
 };
 
 /// \brief Match an integer 1 or a vector with all elements equal to 1.
 inline cst_pred_ty<is_one> m_One() { return cst_pred_ty<is_one>(); }
-inline api_pred_ty<is_one> m_One(const APInt *&V) { return V; }
+inline api_pred_ty<is_one> m_One(const llvm::APInt *&V) { return V; }
 
 struct is_all_ones {
-  bool isValue(const APInt &C) { return C.isAllOnesValue(); }
+  bool isValue(const llvm::APInt &C) { return C.isAllOnes(); }
 };
 
 /// \brief Match an integer or vector with all bits set to true.
 inline cst_pred_ty<is_all_ones> m_AllOnes() {
   return cst_pred_ty<is_all_ones>();
 }
-inline api_pred_ty<is_all_ones> m_AllOnes(const APInt *&V) { return V; }
+inline api_pred_ty<is_all_ones> m_AllOnes(const llvm::APInt *&V) { return V; }
 
 struct is_sign_bit {
-  bool isValue(const APInt &C) { return C.isSignBit(); }
+  bool isValue(const llvm::APInt &C) { return C.isMinSignedValue(); }
 };
 
 /// \brief Match an integer or vector with only the sign bit(s) set.
 inline cst_pred_ty<is_sign_bit> m_SignBit() {
   return cst_pred_ty<is_sign_bit>();
 }
-inline api_pred_ty<is_sign_bit> m_SignBit(const APInt *&V) { return V; }
+inline api_pred_ty<is_sign_bit> m_SignBit(const llvm::APInt *&V) { return V; }
 
 struct is_power2 {
-  bool isValue(const APInt &C) { return C.isPowerOf2(); }
+  bool isValue(const llvm::APInt &C) { return C.isPowerOf2(); }
 };
 
 /// \brief Match an integer or vector power of 2.
 inline cst_pred_ty<is_power2> m_Power2() { return cst_pred_ty<is_power2>(); }
-inline api_pred_ty<is_power2> m_Power2(const APInt *&V) { return V; }
+inline api_pred_ty<is_power2> m_Power2(const llvm::APInt *&V) { return V; }
 
 struct is_maxsignedvalue {
-  bool isValue(const APInt &C) { return C.isMaxSignedValue(); }
+  bool isValue(const llvm::APInt &C) { return C.isMaxSignedValue(); }
 };
 
 inline cst_pred_ty<is_maxsignedvalue> m_MaxSignedValue() { return cst_pred_ty<is_maxsignedvalue>(); }
-inline api_pred_ty<is_maxsignedvalue> m_MaxSignedValue(const APInt *&V) { return V; }
+inline api_pred_ty<is_maxsignedvalue> m_MaxSignedValue(const llvm::APInt *&V) {
+  return V;
+}
 
 template <typename Class> struct bind_ty {
   Class *&VR;
   bind_ty(Class *&V) : VR(V) {}
 
   template <typename ITy> bool match(ITy *V) {
-    if (auto *CV = dyn_cast<Class>(V)) {
+    if (auto *CV = llvm::dyn_cast<Class>(V)) {
       VR = CV;
       return true;
     }
@@ -328,11 +332,11 @@ struct specific_fpval {
   specific_fpval(double V) : Val(V) {}
 
   template <typename ITy> bool match(ITy *V) {
-    if (const auto *CFP = dyn_cast<ConstantFP>(V))
+    if (const auto *CFP = llvm::dyn_cast<ConstantFP>(V))
       return CFP->isExactlyValue(Val);
     if (V->getType()->isVectorTy())
-      if (const auto *C = dyn_cast<Constant>(V))
-        if (auto *CFP = dyn_cast_or_null<ConstantFP>(C->getSplatValue()))
+      if (const auto *C = llvm::dyn_cast<Constant>(V))
+        if (auto *CFP = llvm::dyn_cast_or_null<ConstantFP>(C->getSplatValue()))
           return CFP->isExactlyValue(Val);
     return false;
   }
@@ -350,7 +354,7 @@ struct bind_const_intval_ty {
   bind_const_intval_ty(uint64_t &V) : VR(V) {}
 
   template <typename ITy> bool match(ITy *V) {
-    if (const auto *CV = dyn_cast<ConstantInt>(V))
+    if (const auto *CV = llvm::dyn_cast<ConstantInt>(V))
       if (CV->getBitWidth() <= 64) {
         VR = CV->getZExtValue();
         return true;
@@ -366,10 +370,10 @@ struct specific_intval {
   specific_intval(uint64_t V) : Val(V) {}
 
   template <typename ITy> bool match(ITy *V) {
-    const auto *CI = dyn_cast<ConstantInt>(V);
+    const auto *CI = llvm::dyn_cast<ConstantInt>(V);
     if (!CI && V->getType()->isVectorTy())
-      if (const auto *C = dyn_cast<Constant>(V))
-        CI = dyn_cast_or_null<ConstantInt>(C->getSplatValue());
+      if (const auto *C = llvm::dyn_cast<Constant>(V))
+        CI = llvm::dyn_cast_or_null<ConstantInt>(C->getSplatValue());
 
     if (CI && CI->getBitWidth() <= 64)
       return CI->getZExtValue() == Val;
@@ -396,7 +400,7 @@ template <typename LHS_t, typename RHS_t> struct AnyBinaryOp_match {
   AnyBinaryOp_match(const LHS_t &LHS, const RHS_t &RHS) : L(LHS), R(RHS) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *I = dyn_cast<BinaryOperator>(V))
+    if (auto *I = llvm::dyn_cast<BinaryOperator>(V))
       return L.match(I->getOperand(0)) && R.match(I->getOperand(1));
     return false;
   }
@@ -420,10 +424,10 @@ struct BinaryOp_match {
 
   template <typename OpTy> bool match(OpTy *V) {
     if (V->getValueID() == Value::InstructionVal + Opcode) {
-      auto *I = cast<BinaryOperator>(V);
+      auto *I = llvm::cast<BinaryOperator>(V);
       return L.match(I->getOperand(0)) && R.match(I->getOperand(1));
     }
-    if (auto *CE = dyn_cast<ConstantExpr>(V))
+    if (auto *CE = llvm::dyn_cast<ConstantExpr>(V))
       return CE->getOpcode() == Opcode && L.match(CE->getOperand(0)) &&
              R.match(CE->getOperand(1));
     return false;
@@ -548,7 +552,7 @@ struct OverflowingBinaryOp_match {
       : L(LHS), R(RHS) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *Op = dyn_cast<OverflowingBinaryOperator>(V)) {
+    if (auto *Op = llvm::dyn_cast<OverflowingBinaryOperator>(V)) {
       if (Op->getOpcode() != Opcode)
         return false;
       if (WrapFlags & OverflowingBinaryOperator::NoUnsignedWrap &&
@@ -642,10 +646,10 @@ struct BinOp2_match {
   template <typename OpTy> bool match(OpTy *V) {
     if (V->getValueID() == Value::InstructionVal + Opc1 ||
         V->getValueID() == Value::InstructionVal + Opc2) {
-      auto *I = cast<BinaryOperator>(V);
+      auto *I = llvm::cast<BinaryOperator>(V);
       return L.match(I->getOperand(0)) && R.match(I->getOperand(1));
     }
-    if (auto *CE = dyn_cast<ConstantExpr>(V))
+    if (auto *CE = llvm::dyn_cast<ConstantExpr>(V))
       return (CE->getOpcode() == Opc1 || CE->getOpcode() == Opc2) &&
              L.match(CE->getOperand(0)) && R.match(CE->getOperand(1));
     return false;
@@ -682,7 +686,7 @@ template <typename SubPattern_t> struct Exact_match {
   Exact_match(const SubPattern_t &SP) : SubPattern(SP) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (PossiblyExactOperator *PEO = dyn_cast<PossiblyExactOperator>(V))
+    if (PossiblyExactOperator *PEO = llvm::dyn_cast<PossiblyExactOperator>(V))
       return PEO->isExact() && SubPattern.match(V);
     return false;
   }
@@ -706,7 +710,7 @@ struct CmpClass_match {
       : Predicate(Pred), L(LHS), R(RHS) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (Class *I = dyn_cast<Class>(V))
+    if (Class *I = llvm::dyn_cast<Class>(V))
       if (L.match(I->getOperand(0)) && R.match(I->getOperand(1))) {
         Predicate = I->getPredicate();
         return true;
@@ -747,7 +751,7 @@ struct SelectClass_match {
       : C(Cond), L(LHS), R(RHS) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *I = dyn_cast<SelectInst>(V))
+    if (auto *I = llvm::dyn_cast<SelectInst>(V))
       return C.match(I->getOperand(0)) && L.match(I->getOperand(1)) &&
              R.match(I->getOperand(2));
     return false;
@@ -778,7 +782,7 @@ template <typename Op_t, unsigned Opcode> struct CastClass_match {
   CastClass_match(const Op_t &OpMatch) : Op(OpMatch) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *O = dyn_cast<Operator>(V))
+    if (auto *O = llvm::dyn_cast<Operator>(V))
       return O->getOpcode() == Opcode && Op.match(O->getOperand(0));
     return false;
   }
@@ -836,7 +840,7 @@ template <typename LHS_t> struct not_match {
   not_match(const LHS_t &LHS) : L(LHS) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *O = dyn_cast<Operator>(V))
+    if (auto *O = llvm::dyn_cast<Operator>(V))
       if (O->getOpcode() == Instruction::Xor)
         return matchIfNot(O->getOperand(0), O->getOperand(1));
     return false;
@@ -844,10 +848,10 @@ template <typename LHS_t> struct not_match {
 
 private:
   bool matchIfNot(Value *LHS, Value *RHS) {
-    return (isa<ConstantInt>(RHS) || isa<ConstantDataVector>(RHS) ||
+    return (llvm::isa<ConstantInt>(RHS) || llvm::isa<ConstantDataVector>(RHS) ||
             // FIXME: Remove CV.
-            isa<ConstantVector>(RHS)) &&
-           cast<Constant>(RHS)->isAllOnesValue() && L.match(LHS);
+            llvm::isa<ConstantVector>(RHS)) &&
+           llvm::cast<Constant>(RHS)->isAllOnesValue() && L.match(LHS);
   }
 };
 
@@ -859,7 +863,7 @@ template <typename LHS_t> struct neg_match {
   neg_match(const LHS_t &LHS) : L(LHS) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *O = dyn_cast<Operator>(V))
+    if (auto *O = llvm::dyn_cast<Operator>(V))
       if (O->getOpcode() == Instruction::Sub)
         return matchIfNeg(O->getOperand(0), O->getOperand(1));
     return false;
@@ -867,8 +871,9 @@ template <typename LHS_t> struct neg_match {
 
 private:
   bool matchIfNeg(Value *LHS, Value *RHS) {
-    return ((isa<ConstantInt>(LHS) && cast<ConstantInt>(LHS)->isZero()) ||
-            isa<ConstantAggregateZero>(LHS)) &&
+    return ((llvm::isa<ConstantInt>(LHS) &&
+             llvm::cast<ConstantInt>(LHS)->isZero()) ||
+            llvm::isa<ConstantAggregateZero>(LHS)) &&
            L.match(RHS);
   }
 };
@@ -882,7 +887,7 @@ template <typename LHS_t> struct fneg_match {
   fneg_match(const LHS_t &LHS) : L(LHS) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *O = dyn_cast<Operator>(V))
+    if (auto *O = llvm::dyn_cast<Operator>(V))
       if (O->getOpcode() == Instruction::FSub)
         return matchIfFNeg(O->getOperand(0), O->getOperand(1));
     return false;
@@ -890,7 +895,7 @@ template <typename LHS_t> struct fneg_match {
 
 private:
   bool matchIfFNeg(Value *LHS, Value *RHS) {
-    if (const auto *C = dyn_cast<ConstantFP>(LHS))
+    if (const auto *C = llvm::dyn_cast<ConstantFP>(LHS))
       return C->isNegativeZeroValue() && L.match(RHS);
     return false;
   }
@@ -910,7 +915,7 @@ struct br_match {
   br_match(BasicBlock *&Succ) : Succ(Succ) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *BI = dyn_cast<BranchInst>(V))
+    if (auto *BI = llvm::dyn_cast<BranchInst>(V))
       if (BI->isUnconditional()) {
         Succ = BI->getSuccessor(0);
         return true;
@@ -928,7 +933,7 @@ template <typename Cond_t> struct brc_match {
       : Cond(C), T(t), F(f) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (auto *BI = dyn_cast<BranchInst>(V))
+    if (auto *BI = llvm::dyn_cast<BranchInst>(V))
       if (BI->isConditional() && Cond.match(BI->getCondition())) {
         T = BI->getSuccessor(0);
         F = BI->getSuccessor(1);
@@ -956,10 +961,10 @@ struct MaxMin_match {
 
   template <typename OpTy> bool match(OpTy *V) {
     // Look for "(x pred y) ? x : y" or "(x pred y) ? y : x".
-    auto *SI = dyn_cast<SelectInst>(V);
+    auto *SI = llvm::dyn_cast<SelectInst>(V);
     if (!SI)
       return false;
-    auto *Cmp = dyn_cast<CmpInst_t>(SI->getCondition());
+    auto *Cmp = llvm::dyn_cast<CmpInst_t>(SI->getCondition());
     if (!Cmp)
       return false;
     // At this point we have a select conditioned on a comparison.  Check that
@@ -1190,7 +1195,7 @@ struct IntrinsicID_match {
   IntrinsicID_match(Intrinsic::ID IntrID) : ID(IntrID) {}
 
   template <typename OpTy> bool match(OpTy *V) {
-    if (const auto *CI = dyn_cast<CallInst>(V))
+    if (const auto *CI = llvm::dyn_cast<CallInst>(V))
       if (const auto *F = CI->getCalledFunction())
         return F->getIntrinsicID() == ID;
     return false;
@@ -1273,6 +1278,6 @@ inline typename m_Intrinsic_Ty<Opnd0, Opnd1>::Ty m_FMax(const Opnd0 &Op0,
 }
 
 } // end namespace PatternMatch
-} // end namespace llvm
+} // namespace dxil
 
 #endif

@@ -8,6 +8,7 @@ add_unittest(DXILUnitTests DXILTests
   BitcodeHeaderTest.cpp
   ConstantsContextTest.cpp
   IRHeadersTest.cpp
+  PatternMatchTest.cpp
   UseTest.cpp
   ../lib/IR/Use.cpp
 

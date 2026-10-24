@@ -34,7 +34,9 @@
 #include "llvm/Support/MathExtras.h"
 #include <limits>
 using namespace llvm;
-using namespace llvm::PatternMatch;
+
+namespace dxil {
+using namespace PatternMatch;
 
 //===----------------------------------------------------------------------===//
 //                ConstantFold*Instruction Implementations
@@ -521,8 +523,7 @@ static Constant *getFoldedOffsetOf(Type *Ty, Constant *FieldNo,
   return C;
 }
 
-Constant *llvm::ConstantFoldCastInstruction(unsigned opc, Constant *V,
-                                            Type *DestTy) {
+Constant *ConstantFoldCastInstruction(unsigned opc, Constant *V, Type *DestTy) {
   if (isa<UndefValue>(V)) {
     // zext(undef) = 0, because the top bits will be zero.
     // sext(undef) = 0, because the top bits will all be the same.
@@ -590,13 +591,13 @@ Constant *llvm::ConstantFoldCastInstruction(unsigned opc, Constant *V,
     if (ConstantFP *FPC = dyn_cast<ConstantFP>(V)) {
       bool ignored;
       APFloat Val = FPC->getValueAPF();
-      Val.convert(DestTy->isHalfTy() ? APFloat::IEEEhalf :
-                  DestTy->isFloatTy() ? APFloat::IEEEsingle :
-                  DestTy->isDoubleTy() ? APFloat::IEEEdouble :
-                  DestTy->isX86_FP80Ty() ? APFloat::x87DoubleExtended :
-                  DestTy->isFP128Ty() ? APFloat::IEEEquad :
-                  DestTy->isPPC_FP128Ty() ? APFloat::PPCDoubleDouble :
-                  APFloat::Bogus,
+      Val.convert(DestTy->isHalfTy()        ? APFloat::IEEEhalf()
+                  : DestTy->isFloatTy()     ? APFloat::IEEEsingle()
+                  : DestTy->isDoubleTy()    ? APFloat::IEEEdouble()
+                  : DestTy->isX86_FP80Ty()  ? APFloat::x87DoubleExtended()
+                  : DestTy->isFP128Ty()     ? APFloat::IEEEquad()
+                  : DestTy->isPPC_FP128Ty() ? APFloat::PPCDoubleDouble()
+                                            : APFloat::Bogus(),
                   APFloat::rmNearestTiesToEven, &ignored);
       return ConstantFP::get(V->getContext(), Val);
     }
@@ -672,7 +673,7 @@ Constant *llvm::ConstantFoldCastInstruction(unsigned opc, Constant *V,
     if (ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
       APInt api = CI->getValue();
       APFloat apf(DestTy->getFltSemantics(),
-                  APInt::getNullValue(DestTy->getPrimitiveSizeInBits()));
+                  APInt::getZero(DestTy->getPrimitiveSizeInBits()));
       if (APFloat::opOverflow &
           apf.convertFromAPInt(api, opc==Instruction::SIToFP,
                               APFloat::rmNearestTiesToEven)) {
@@ -724,8 +725,8 @@ Constant *llvm::ConstantFoldCastInstruction(unsigned opc, Constant *V,
   }
 }
 
-Constant *llvm::ConstantFoldSelectInstruction(Constant *Cond,
-                                              Constant *V1, Constant *V2) {
+Constant *ConstantFoldSelectInstruction(Constant *Cond, Constant *V1,
+                                        Constant *V2) {
   // Check for i1 and vector true/false conditions.
   if (Cond->isNullValue()) return V2;
   if (Cond->isAllOnesValue()) return V1;
@@ -779,8 +780,7 @@ Constant *llvm::ConstantFoldSelectInstruction(Constant *Cond,
   return nullptr;
 }
 
-Constant *llvm::ConstantFoldExtractElementInstruction(Constant *Val,
-                                                      Constant *Idx) {
+Constant *ConstantFoldExtractElementInstruction(Constant *Val, Constant *Idx) {
   if (isa<UndefValue>(Val))  // ee(undef, x) -> undef
     return UndefValue::get(Val->getType()->getVectorElementType());
   if (Val->isNullValue())  // ee(zero, x) -> zero
@@ -798,9 +798,8 @@ Constant *llvm::ConstantFoldExtractElementInstruction(Constant *Val,
   return nullptr;
 }
 
-Constant *llvm::ConstantFoldInsertElementInstruction(Constant *Val,
-                                                     Constant *Elt,
-                                                     Constant *Idx) {
+Constant *ConstantFoldInsertElementInstruction(Constant *Val, Constant *Elt,
+                                               Constant *Idx) {
   if (isa<UndefValue>(Idx))
     return UndefValue::get(Val->getType());
 
@@ -828,9 +827,8 @@ Constant *llvm::ConstantFoldInsertElementInstruction(Constant *Val,
   return ConstantVector::get(Result);
 }
 
-Constant *llvm::ConstantFoldShuffleVectorInstruction(Constant *V1,
-                                                     Constant *V2,
-                                                     Constant *Mask) {
+Constant *ConstantFoldShuffleVectorInstruction(Constant *V1, Constant *V2,
+                                               Constant *Mask) {
   unsigned MaskNumElts = Mask->getType()->getVectorNumElements();
   Type *EltTy = V1->getType()->getVectorElementType();
 
@@ -869,8 +867,8 @@ Constant *llvm::ConstantFoldShuffleVectorInstruction(Constant *V1,
   return ConstantVector::get(Result);
 }
 
-Constant *llvm::ConstantFoldExtractValueInstruction(Constant *Agg,
-                                                    ArrayRef<unsigned> Idxs) {
+Constant *ConstantFoldExtractValueInstruction(Constant *Agg,
+                                              ArrayRef<unsigned> Idxs) {
   // Base case: no indices, so return the entire value.
   if (Idxs.empty())
     return Agg;
@@ -881,9 +879,8 @@ Constant *llvm::ConstantFoldExtractValueInstruction(Constant *Agg,
   return nullptr;
 }
 
-Constant *llvm::ConstantFoldInsertValueInstruction(Constant *Agg,
-                                                   Constant *Val,
-                                                   ArrayRef<unsigned> Idxs) {
+Constant *ConstantFoldInsertValueInstruction(Constant *Agg, Constant *Val,
+                                             ArrayRef<unsigned> Idxs) {
   // Base case: no indices, so replace the entire value.
   if (Idxs.empty())
     return Val;
@@ -914,9 +911,8 @@ Constant *llvm::ConstantFoldInsertValueInstruction(Constant *Agg,
   return ConstantVector::get(Result);
 }
 
-
-Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
-                                              Constant *C1, Constant *C2) {
+Constant *ConstantFoldBinaryInstruction(unsigned Opcode, Constant *C1,
+                                        Constant *C2) {
   // Handle UndefValue up front.
   if (isa<UndefValue>(C1) || isa<UndefValue>(C2)) {
     switch (Opcode) {
@@ -1122,7 +1118,7 @@ Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
         return ConstantInt::get(CI1->getContext(), C1V.udiv(C2V));
       case Instruction::SDiv:
         assert(!CI2->isNullValue() && "Div by zero handled above");
-        if (C2V.isAllOnesValue() && C1V.isMinSignedValue())
+        if (C2V.isAllOnes() && C1V.isMinSignedValue())
           return UndefValue::get(CI1->getType());   // MIN_INT / -1 -> undef
         return ConstantInt::get(CI1->getContext(), C1V.sdiv(C2V));
       case Instruction::URem:
@@ -1130,7 +1126,7 @@ Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
         return ConstantInt::get(CI1->getContext(), C1V.urem(C2V));
       case Instruction::SRem:
         assert(!CI2->isNullValue() && "Div by zero handled above");
-        if (C2V.isAllOnesValue() && C1V.isMinSignedValue())
+        if (C2V.isAllOnes() && C1V.isMinSignedValue())
           return UndefValue::get(CI1->getType());   // MIN_INT % -1 -> undef
         return ConstantInt::get(CI1->getContext(), C1V.srem(C2V));
       case Instruction::And:
@@ -1188,7 +1184,7 @@ Constant *llvm::ConstantFoldBinaryInstruction(unsigned Opcode,
         (void)C3V.divide(C2V, APFloat::rmNearestTiesToEven);
         return ConstantFP::get(C1->getContext(), C3V);
       case Instruction::FRem:
-        (void)C3V.mod(C2V, APFloat::rmNearestTiesToEven);
+        (void)C3V.mod(C2V);
         return ConstantFP::get(C1->getContext(), C3V);
       }
     }
@@ -1657,8 +1653,8 @@ static ICmpInst::Predicate evaluateICmpRelation(Constant *V1, Constant *V2,
   return ICmpInst::BAD_ICMP_PREDICATE;
 }
 
-Constant *llvm::ConstantFoldCompareInstruction(unsigned short pred, 
-                                               Constant *C1, Constant *C2) {
+Constant *ConstantFoldCompareInstruction(unsigned short pred, Constant *C1,
+                                         Constant *C2) {
   Type *ResultTy;
   if (VectorType *VT = dyn_cast<VectorType>(C1->getType()))
     ResultTy = VectorType::get(Type::getInt1Ty(C1->getContext()),
@@ -2235,30 +2231,28 @@ static Constant *ConstantFoldGetElementPtrImpl(Type *PointeeTy, Constant *C,
   return nullptr;
 }
 
-Constant *llvm::ConstantFoldGetElementPtr(Constant *C,
-                                          bool inBounds,
-                                          ArrayRef<Constant *> Idxs) {
+Constant *ConstantFoldGetElementPtr(Constant *C, bool inBounds,
+                                    ArrayRef<Constant *> Idxs) {
   return ConstantFoldGetElementPtrImpl(
       cast<PointerType>(C->getType()->getScalarType())->getElementType(), C,
       inBounds, Idxs);
 }
 
-Constant *llvm::ConstantFoldGetElementPtr(Constant *C,
-                                          bool inBounds,
-                                          ArrayRef<Value *> Idxs) {
+Constant *ConstantFoldGetElementPtr(Constant *C, bool inBounds,
+                                    ArrayRef<Value *> Idxs) {
   return ConstantFoldGetElementPtrImpl(
       cast<PointerType>(C->getType()->getScalarType())->getElementType(), C,
       inBounds, Idxs);
 }
 
-Constant *llvm::ConstantFoldGetElementPtr(Type *Ty, Constant *C,
-                                          bool inBounds,
-                                          ArrayRef<Constant *> Idxs) {
+Constant *ConstantFoldGetElementPtr(Type *Ty, Constant *C, bool inBounds,
+                                    ArrayRef<Constant *> Idxs) {
   return ConstantFoldGetElementPtrImpl(Ty, C, inBounds, Idxs);
 }
 
-Constant *llvm::ConstantFoldGetElementPtr(Type *Ty, Constant *C,
-                                          bool inBounds,
-                                          ArrayRef<Value *> Idxs) {
+Constant *ConstantFoldGetElementPtr(Type *Ty, Constant *C, bool inBounds,
+                                    ArrayRef<Value *> Idxs) {
   return ConstantFoldGetElementPtrImpl(Ty, C, inBounds, Idxs);
 }
+
+} // namespace dxil

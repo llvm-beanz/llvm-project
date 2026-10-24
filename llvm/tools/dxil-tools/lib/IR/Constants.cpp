@@ -36,6 +36,8 @@
 #include <cstdarg>
 using namespace llvm;
 
+namespace dxil {
+
 //===----------------------------------------------------------------------===//
 //                              Constant Class
 //===----------------------------------------------------------------------===//
@@ -92,7 +94,7 @@ bool Constant::isAllOnesValue() const {
 
   // Check for FP which are bitcasted from -1 integers
   if (const ConstantFP *CFP = dyn_cast<ConstantFP>(this))
-    return CFP->getValueAPF().bitcastToAPInt().isAllOnesValue();
+    return CFP->getValueAPF().bitcastToAPInt().isAllOnes();
 
   // Check for constant vectors which are splats of -1 values.
   if (const ConstantVector *CV = dyn_cast<ConstantVector>(this))
@@ -181,23 +183,22 @@ Constant *Constant::getNullValue(Type *Ty) {
     return ConstantInt::get(Ty, 0);
   case Type::HalfTyID:
     return ConstantFP::get(Ty->getContext(),
-                           APFloat::getZero(APFloat::IEEEhalf));
+                           APFloat::getZero(APFloat::IEEEhalf()));
   case Type::FloatTyID:
     return ConstantFP::get(Ty->getContext(),
-                           APFloat::getZero(APFloat::IEEEsingle));
+                           APFloat::getZero(APFloat::IEEEsingle()));
   case Type::DoubleTyID:
     return ConstantFP::get(Ty->getContext(),
-                           APFloat::getZero(APFloat::IEEEdouble));
+                           APFloat::getZero(APFloat::IEEEdouble()));
   case Type::X86_FP80TyID:
     return ConstantFP::get(Ty->getContext(),
-                           APFloat::getZero(APFloat::x87DoubleExtended));
+                           APFloat::getZero(APFloat::x87DoubleExtended()));
   case Type::FP128TyID:
     return ConstantFP::get(Ty->getContext(),
-                           APFloat::getZero(APFloat::IEEEquad));
+                           APFloat::getZero(APFloat::IEEEquad()));
   case Type::PPC_FP128TyID:
-    return ConstantFP::get(Ty->getContext(),
-                           APFloat(APFloat::PPCDoubleDouble,
-                                   APInt::getNullValue(128)));
+    return ConstantFP::get(Ty->getContext(), APFloat(APFloat::PPCDoubleDouble(),
+                                                     APInt::getZero(128)));
   case Type::PointerTyID:
     return ConstantPointerNull::get(cast<PointerType>(Ty));
   case Type::StructTyID:
@@ -230,11 +231,10 @@ Constant *Constant::getIntegerValue(Type *Ty, const APInt &V) {
 Constant *Constant::getAllOnesValue(Type *Ty) {
   if (IntegerType *ITy = dyn_cast<IntegerType>(Ty))
     return ConstantInt::get(Ty->getContext(),
-                            APInt::getAllOnesValue(ITy->getBitWidth()));
+                            APInt::getAllOnes(ITy->getBitWidth()));
 
   if (Ty->isFloatingPointTy()) {
-    APFloat FL = APFloat::getAllOnesValue(Ty->getPrimitiveSizeInBits(),
-                                          !Ty->isPPC_FP128Ty());
+    APFloat FL = APFloat::getAllOnesValue(Ty->getFltSemantics());
     return ConstantFP::get(Ty->getContext(), FL);
   }
 
@@ -630,18 +630,18 @@ void ConstantInt::destroyConstantImpl() {
 
 static const fltSemantics *TypeToFloatSemantics(Type *Ty) {
   if (Ty->isHalfTy())
-    return &APFloat::IEEEhalf;
+    return &APFloat::IEEEhalf();
   if (Ty->isFloatTy())
-    return &APFloat::IEEEsingle;
+    return &APFloat::IEEEsingle();
   if (Ty->isDoubleTy())
-    return &APFloat::IEEEdouble;
+    return &APFloat::IEEEdouble();
   if (Ty->isX86_FP80Ty())
-    return &APFloat::x87DoubleExtended;
+    return &APFloat::x87DoubleExtended();
   else if (Ty->isFP128Ty())
-    return &APFloat::IEEEquad;
+    return &APFloat::IEEEquad();
 
   assert(Ty->isPPC_FP128Ty() && "Unknown FP format");
-  return &APFloat::PPCDoubleDouble;
+  return &APFloat::PPCDoubleDouble();
 }
 
 void ConstantFP::anchor() { }
@@ -718,18 +718,18 @@ ConstantFP* ConstantFP::get(LLVMContext &Context, const APFloat& V) {
 
   if (!Slot) {
     Type *Ty;
-    if (&V.getSemantics() == &APFloat::IEEEhalf)
+    if (&V.getSemantics() == &APFloat::IEEEhalf())
       Ty = Type::getHalfTy(Context);
-    else if (&V.getSemantics() == &APFloat::IEEEsingle)
+    else if (&V.getSemantics() == &APFloat::IEEEsingle())
       Ty = Type::getFloatTy(Context);
-    else if (&V.getSemantics() == &APFloat::IEEEdouble)
+    else if (&V.getSemantics() == &APFloat::IEEEdouble())
       Ty = Type::getDoubleTy(Context);
-    else if (&V.getSemantics() == &APFloat::x87DoubleExtended)
+    else if (&V.getSemantics() == &APFloat::x87DoubleExtended())
       Ty = Type::getX86_FP80Ty(Context);
-    else if (&V.getSemantics() == &APFloat::IEEEquad)
+    else if (&V.getSemantics() == &APFloat::IEEEquad())
       Ty = Type::getFP128Ty(Context);
     else {
-      assert(&V.getSemantics() == &APFloat::PPCDoubleDouble && 
+      assert(&V.getSemantics() == &APFloat::PPCDoubleDouble() &&
              "Unknown FP format");
       Ty = Type::getPPC_FP128Ty(Context);
     }
@@ -1037,7 +1037,7 @@ Constant *ConstantStruct::get(StructType *T, ...) {
   va_list ap;
   SmallVector<Constant*, 8> Values;
   va_start(ap, T);
-  while (Constant *Val = va_arg(ap, llvm::Constant*))
+  while (Constant *Val = va_arg(ap, Constant *))
     Values.push_back(Val);
   va_end(ap);
   return get(T, Values);
@@ -1333,40 +1333,42 @@ bool ConstantFP::isValueValidForType(Type *Ty, const APFloat& Val) {
 
   // FIXME rounding mode needs to be more flexible
   case Type::HalfTyID: {
-    if (&Val2.getSemantics() == &APFloat::IEEEhalf)
+    if (&Val2.getSemantics() == &APFloat::IEEEhalf())
       return true;
-    Val2.convert(APFloat::IEEEhalf, APFloat::rmNearestTiesToEven, &losesInfo);
+    Val2.convert(APFloat::IEEEhalf(), APFloat::rmNearestTiesToEven, &losesInfo);
     return !losesInfo;
   }
   case Type::FloatTyID: {
-    if (&Val2.getSemantics() == &APFloat::IEEEsingle)
+    if (&Val2.getSemantics() == &APFloat::IEEEsingle())
       return true;
-    Val2.convert(APFloat::IEEEsingle, APFloat::rmNearestTiesToEven, &losesInfo);
+    Val2.convert(APFloat::IEEEsingle(), APFloat::rmNearestTiesToEven,
+                 &losesInfo);
     return !losesInfo;
   }
   case Type::DoubleTyID: {
-    if (&Val2.getSemantics() == &APFloat::IEEEhalf ||
-        &Val2.getSemantics() == &APFloat::IEEEsingle ||
-        &Val2.getSemantics() == &APFloat::IEEEdouble)
+    if (&Val2.getSemantics() == &APFloat::IEEEhalf() ||
+        &Val2.getSemantics() == &APFloat::IEEEsingle() ||
+        &Val2.getSemantics() == &APFloat::IEEEdouble())
       return true;
-    Val2.convert(APFloat::IEEEdouble, APFloat::rmNearestTiesToEven, &losesInfo);
+    Val2.convert(APFloat::IEEEdouble(), APFloat::rmNearestTiesToEven,
+                 &losesInfo);
     return !losesInfo;
   }
   case Type::X86_FP80TyID:
-    return &Val2.getSemantics() == &APFloat::IEEEhalf ||
-           &Val2.getSemantics() == &APFloat::IEEEsingle || 
-           &Val2.getSemantics() == &APFloat::IEEEdouble ||
-           &Val2.getSemantics() == &APFloat::x87DoubleExtended;
+    return &Val2.getSemantics() == &APFloat::IEEEhalf() ||
+           &Val2.getSemantics() == &APFloat::IEEEsingle() ||
+           &Val2.getSemantics() == &APFloat::IEEEdouble() ||
+           &Val2.getSemantics() == &APFloat::x87DoubleExtended();
   case Type::FP128TyID:
-    return &Val2.getSemantics() == &APFloat::IEEEhalf ||
-           &Val2.getSemantics() == &APFloat::IEEEsingle || 
-           &Val2.getSemantics() == &APFloat::IEEEdouble ||
-           &Val2.getSemantics() == &APFloat::IEEEquad;
+    return &Val2.getSemantics() == &APFloat::IEEEhalf() ||
+           &Val2.getSemantics() == &APFloat::IEEEsingle() ||
+           &Val2.getSemantics() == &APFloat::IEEEdouble() ||
+           &Val2.getSemantics() == &APFloat::IEEEquad();
   case Type::PPC_FP128TyID:
-    return &Val2.getSemantics() == &APFloat::IEEEhalf ||
-           &Val2.getSemantics() == &APFloat::IEEEsingle || 
-           &Val2.getSemantics() == &APFloat::IEEEdouble ||
-           &Val2.getSemantics() == &APFloat::PPCDoubleDouble;
+    return &Val2.getSemantics() == &APFloat::IEEEhalf() ||
+           &Val2.getSemantics() == &APFloat::IEEEsingle() ||
+           &Val2.getSemantics() == &APFloat::IEEEdouble() ||
+           &Val2.getSemantics() == &APFloat::PPCDoubleDouble();
   }
 }
 
@@ -2064,8 +2066,7 @@ Constant *ConstantExpr::getGetElementPtr(Type *Ty, Constant *C,
     ArgVec.push_back(cast<Constant>(Idxs[i]));
   }
   const ConstantExprKeyType Key(Instruction::GetElementPtr, ArgVec, 0,
-                                InBounds ? GEPOperator::IsInBounds : 0, None,
-                                Ty);
+                                InBounds ? GEPOperator::IsInBounds : 0, {}, Ty);
 
   LLVMContextImpl *pImpl = C->getContext().pImpl;
   return pImpl->ExprConstants.getOrCreate(ReqTy, Key);
@@ -2613,8 +2614,7 @@ Constant *ConstantDataArray::getString(LLVMContext &Context,
                                        StringRef Str, bool AddNull) {
   if (!AddNull) {
     const uint8_t *Data = reinterpret_cast<const uint8_t *>(Str.data());
-    return get(Context, makeArrayRef(const_cast<uint8_t *>(Data),
-               Str.size()));
+    return get(Context, ArrayRef(Data, Str.size()));
   }
 
   SmallVector<uint8_t, 64> ElementVals;
@@ -2750,11 +2750,11 @@ APFloat ConstantDataSequential::getElementAsAPFloat(unsigned Elt) const {
     llvm_unreachable("Accessor can only be used when element is float/double!");
   case Type::FloatTyID: {
     auto EltVal = *reinterpret_cast<const uint32_t *>(EltPtr);
-    return APFloat(APFloat::IEEEsingle, APInt(32, EltVal));
+    return APFloat(APFloat::IEEEsingle(), APInt(32, EltVal));
   }
   case Type::DoubleTyID: {
     auto EltVal = *reinterpret_cast<const uint64_t *>(EltPtr);
-    return APFloat(APFloat::IEEEdouble, APInt(64, EltVal));
+    return APFloat(APFloat::IEEEdouble(), APInt(64, EltVal));
   }
   }
 }
@@ -3088,3 +3088,5 @@ Instruction *ConstantExpr::getAsInstruction() {
     return BO;
   }
 }
+
+} // namespace dxil

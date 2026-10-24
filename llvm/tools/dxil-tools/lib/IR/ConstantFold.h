@@ -40,21 +40,21 @@ namespace dxil {
   Constant *ConstantFoldShuffleVectorInstruction(Constant *V1, Constant *V2,
                                                  Constant *Mask);
   Constant *ConstantFoldExtractValueInstruction(Constant *Agg,
-                                                ArrayRef<unsigned> Idxs);
+                                                llvm::ArrayRef<unsigned> Idxs);
   Constant *ConstantFoldInsertValueInstruction(Constant *Agg, Constant *Val,
-                                               ArrayRef<unsigned> Idxs);
+                                               llvm::ArrayRef<unsigned> Idxs);
   Constant *ConstantFoldBinaryInstruction(unsigned Opcode, Constant *V1,
                                           Constant *V2);
   Constant *ConstantFoldCompareInstruction(unsigned short predicate, 
                                            Constant *C1, Constant *C2);
   Constant *ConstantFoldGetElementPtr(Constant *C, bool inBounds,
-                                      ArrayRef<Constant *> Idxs);
+                                      llvm::ArrayRef<Constant *> Idxs);
   Constant *ConstantFoldGetElementPtr(Constant *C, bool inBounds,
-                                      ArrayRef<Value *> Idxs);
+                                      llvm::ArrayRef<Value *> Idxs);
   Constant *ConstantFoldGetElementPtr(Type *Ty, Constant *C, bool inBounds,
-                                      ArrayRef<Constant *> Idxs);
+                                      llvm::ArrayRef<Constant *> Idxs);
   Constant *ConstantFoldGetElementPtr(Type *Ty, Constant *C, bool inBounds,
-                                      ArrayRef<Value *> Idxs);
-} // End llvm namespace
+                                      llvm::ArrayRef<Value *> Idxs);
+  } // namespace dxil
 
 #endif
