@@ -111,6 +111,16 @@ TEST(IR, IntrinsicTypeMangling) {
   EXPECT_FALSE(verifyModule(M));
 }
 
+TEST(IR, LegacyIntegerTruncation) {
+  LLVMContext C;
+  for (unsigned Width : {1u, 8u, 32u, 64u}) {
+    auto *Ty = IntegerType::get(C, Width);
+    EXPECT_TRUE(ConstantInt::get(Ty, UINT64_MAX)->isMinusOne());
+    EXPECT_TRUE(ConstantInt::getSigned(Ty, -1)->isMinusOne());
+    EXPECT_EQ(Width < 9 ? 1u : 257u, ConstantInt::get(Ty, 257)->getZExtValue());
+  }
+}
+
 TEST(IR, FunctionEntryCountMetadata) {
   LLVMContext C;
   Module M("profile", C);

@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DXContainer.h"
 #include "dxil/AsmParser/Parser.h"
 #include "dxil/Bitcode/ReaderWriter.h"
 #include "dxil/IR/LLVMContext.h"
@@ -28,12 +29,18 @@
 #include "llvm/Support/ToolOutputFile.h"
 #include <memory>
 using namespace llvm;
-using dxil::LLVMContext;
-using dxil::Module;
+using ::dxil::LLVMContext;
+using ::dxil::Module;
 
-static cl::opt<std::string> InputFilename(cl::Positional,
-                                          cl::desc("<input .llvm file>"),
-                                          cl::init("-"));
+enum class FileType { Bitcode, DXContainer };
+static cl::opt<FileType> OutputType(
+    "filetype", cl::desc("Output format"), cl::init(FileType::Bitcode),
+    cl::values(clEnumValN(FileType::Bitcode, "bc", "LLVM 3.7 bitcode"),
+               clEnumValN(FileType::DXContainer, "dxcontainer",
+                          "Compute shader DXContainer (unsigned)")));
+
+static cl::opt<std::string>
+    InputFilename(cl::Positional, cl::desc("<input .ll file>"), cl::init("-"));
 
 static cl::opt<std::string> OutputFilename("o",
                                            cl::desc("Override output filename"),
@@ -56,7 +63,14 @@ static cl::opt<bool> PreserveBitcodeUseListOrder(
     cl::desc("Preserve use-list order when writing LLVM bitcode."),
     cl::init(true), cl::Hidden);
 
-static void WriteOutputFile(const Module *M) {
+static Error WriteOutputFile(const Module *M) {
+  std::string Container;
+  if (OutputType == FileType::DXContainer) {
+    auto Data = ::dxil::assembleDXContainer(*M, PreserveBitcodeUseListOrder);
+    if (!Data)
+      return Data.takeError();
+    Container = std::move(*Data);
+  }
   // Infer the output filename if needed.
   if (OutputFilename.empty()) {
     if (InputFilename == "-") {
@@ -64,33 +78,45 @@ static void WriteOutputFile(const Module *M) {
     } else {
       StringRef IFN = InputFilename;
       OutputFilename = (IFN.ends_with(".ll") ? IFN.drop_back(3) : IFN).str();
-      OutputFilename += ".bc";
+      OutputFilename += OutputType == FileType::DXContainer ? ".dxil" : ".bc";
     }
   }
 
   std::error_code EC;
   ToolOutputFile Out(OutputFilename, EC, sys::fs::OF_None);
   if (EC) {
-    errs() << EC.message() << '\n';
-    exit(1);
+    return errorCodeToError(EC);
   }
 
-  if (Force || !CheckBitcodeOutputToConsole(Out.os()))
-    dxil::WriteBitcodeToFile(M, Out.os(), PreserveBitcodeUseListOrder);
+  if (!Force && CheckBitcodeOutputToConsole(Out.os()))
+    return createStringError(inconvertibleErrorCode(),
+                             "refusing binary output to a terminal");
+  if (OutputType == FileType::DXContainer)
+    Out.os() << Container;
+  else
+    ::dxil::WriteBitcodeToFile(M, Out.os(), PreserveBitcodeUseListOrder);
+  Out.os().flush();
+  if (Out.os().has_error()) {
+    EC = Out.os().error();
+    Out.os().clear_error();
+    return errorCodeToError(EC);
+  }
 
   // Declare success.
   Out.keep();
+  return Error::success();
 }
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
   LLVMContext Context;
-  cl::ParseCommandLineOptions(argc, argv, "DXIL .ll -> .bc assembler\n");
+  cl::ParseCommandLineOptions(
+      argc, argv, "DXIL assembly to LLVM 3.7 bitcode or DXContainer\n");
 
   // Parse the file now...
   SMDiagnostic Err;
   std::unique_ptr<Module> M =
-      dxil::parseAssemblyFile(InputFilename, Err, Context);
+      ::dxil::parseAssemblyFile(InputFilename, Err, Context);
   if (!M.get()) {
     Err.print(argv[0], errs());
     return 1;
@@ -99,7 +125,7 @@ int main(int argc, char **argv) {
   if (!DisableVerify) {
     std::string ErrorStr;
     raw_string_ostream OS(ErrorStr);
-    if (dxil::verifyModule(*M, &OS)) {
+    if (::dxil::verifyModule(*M, &OS)) {
       errs() << argv[0]
              << ": assembly parsed, but does not verify as correct!\n";
       errs() << OS.str();
@@ -110,8 +136,18 @@ int main(int argc, char **argv) {
   if (DumpAsm)
     errs() << "Here's the assembly:\n" << *M.get();
 
-  if (!DisableOutput)
-    WriteOutputFile(M.get());
+  if (DisableOutput && OutputType == FileType::DXContainer) {
+    auto Data = ::dxil::assembleDXContainer(*M, PreserveBitcodeUseListOrder);
+    if (!Data) {
+      logAllUnhandledErrors(Data.takeError(), errs(), argv[0] + Twine(": "));
+      return 1;
+    }
+  } else if (!DisableOutput) {
+    if (Error E = WriteOutputFile(M.get())) {
+      logAllUnhandledErrors(std::move(E), errs(), argv[0] + Twine(": "));
+      return 1;
+    }
+  }
 
   return 0;
 }

@@ -75,6 +75,7 @@ public:
   /// to fit the type, unless isSigned is true, in which case the value will
   /// be interpreted as a 64-bit signed integer and sign-extended to fit
   /// the type.
+  /// Narrower types truncate the value to their bit width.
   /// @brief Get a ConstantInt for a specific value.
   static ConstantInt *get(IntegerType *Ty, uint64_t V,
                           bool isSigned = false);

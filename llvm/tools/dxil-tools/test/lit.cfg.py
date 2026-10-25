@@ -11,7 +11,8 @@ config.test_exec_root = config.dxil_test_exec_root
 
 llvm_config.use_default_substitutions()
 llvm_config.add_tool_substitutions(
-    ["dxil-as", "dxil-dis", "dxil-tblgen", "llvm-bcanalyzer", "FileCheck"],
+    ["dxil-as", "dxil-dis", "dxil-tblgen", "llvm-bcanalyzer", "llvm-objdump",
+     "obj2yaml", "split-file", "FileCheck"],
     [config.llvm_tools_dir],
 )
 config.substitutions.append(("%dxil_include", config.dxil_include_dir))

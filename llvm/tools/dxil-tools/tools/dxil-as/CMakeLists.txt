@@ -1,8 +1,10 @@
 set(LLVM_LINK_COMPONENTS
+  MC
   Support
   )
 
 add_llvm_tool(dxil-as
+  DXContainer.cpp
   dxil-as.cpp
 
   DEPENDS
