@@ -6,7 +6,6 @@ add_llvm_library(DXILCore
   Comdat.cpp
   ConstantFold.cpp
   Constants.cpp
-  DIBuilder.cpp
   DataLayout.cpp
   DebugInfo.cpp
   DebugInfoMetadata.cpp
@@ -17,14 +16,12 @@ add_llvm_library(DXILCore
   Function.cpp
   GVMaterializer.cpp
   Globals.cpp
-  IRBuilder.cpp
   InlineAsm.cpp
   Instruction.cpp
   Instructions.cpp
   IntrinsicInst.cpp
   LLVMContext.cpp
   LLVMContextImpl.cpp
-  MDBuilder.cpp
   Metadata.cpp
   MetadataTracking.cpp
   Module.cpp

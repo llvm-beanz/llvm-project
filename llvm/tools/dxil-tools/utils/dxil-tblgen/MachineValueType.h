@@ -7,25 +7,18 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines the set of machine-level target independent types which
-// legal values in the code generator use.
+// This file preserves the legacy value type numbers and queries used by the
+// intrinsic generator.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef DXIL_TOOLS_TABLEGEN_MACHINEVALUETYPE_H
 #define DXIL_TOOLS_TABLEGEN_MACHINEVALUETYPE_H
 
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/MathExtras.h"
 
 namespace dxil {
 
-  class Type;
-
-  /// MVT - Machine Value Type. Every type that is supported natively by some
-  /// processor targeted by LLVM occurs here. This means that any legal value
-  /// type can be represented by an MVT.
 class MVT {
   public:
     enum SimpleValueType {
@@ -162,31 +155,8 @@ class MVT {
 
     SimpleValueType SimpleTy;
 
-    constexpr MVT() : SimpleTy(INVALID_SIMPLE_VALUE_TYPE) {}
     constexpr MVT(SimpleValueType SVT) : SimpleTy(SVT) { }
 
-    bool operator>(const MVT& S)  const { return SimpleTy >  S.SimpleTy; }
-    bool operator<(const MVT& S)  const { return SimpleTy <  S.SimpleTy; }
-    bool operator==(const MVT& S) const { return SimpleTy == S.SimpleTy; }
-    bool operator!=(const MVT& S) const { return SimpleTy != S.SimpleTy; }
-    bool operator>=(const MVT& S) const { return SimpleTy >= S.SimpleTy; }
-    bool operator<=(const MVT& S) const { return SimpleTy <= S.SimpleTy; }
-
-    /// isValid - Return true if this is a valid simple valuetype.
-    bool isValid() const {
-      return (SimpleTy >= MVT::FIRST_VALUETYPE &&
-              SimpleTy < MVT::LAST_VALUETYPE);
-    }
-
-    /// isFloatingPoint - Return true if this is a FP, or a vector FP type.
-    bool isFloatingPoint() const {
-      return ((SimpleTy >= MVT::FIRST_FP_VALUETYPE &&
-               SimpleTy <= MVT::LAST_FP_VALUETYPE) ||
-              (SimpleTy >= MVT::FIRST_FP_VECTOR_VALUETYPE &&
-               SimpleTy <= MVT::LAST_FP_VECTOR_VALUETYPE));
-    }
-
-    /// isInteger - Return true if this is an integer, or a vector integer type.
     bool isInteger() const {
       return ((SimpleTy >= MVT::FIRST_INTEGER_VALUETYPE &&
                SimpleTy <= MVT::LAST_INTEGER_VALUETYPE) ||
@@ -194,88 +164,15 @@ class MVT {
                SimpleTy <= MVT::LAST_INTEGER_VECTOR_VALUETYPE));
     }
 
-    /// isVector - Return true if this is a vector value type.
     bool isVector() const {
       return (SimpleTy >= MVT::FIRST_VECTOR_VALUETYPE &&
               SimpleTy <= MVT::LAST_VECTOR_VALUETYPE);
     }
 
-    /// is16BitVector - Return true if this is a 16-bit vector type.
-    bool is16BitVector() const {
-      return (SimpleTy == MVT::v2i8  || SimpleTy == MVT::v1i16 ||
-              SimpleTy == MVT::v16i1);
-    }
-
-    /// is32BitVector - Return true if this is a 32-bit vector type.
-    bool is32BitVector() const {
-      return (SimpleTy == MVT::v4i8  || SimpleTy == MVT::v2i16 ||
-              SimpleTy == MVT::v1i32 || SimpleTy == MVT::v2f16 ||
-              SimpleTy == MVT::v1f32);
-    }
-
-    /// is64BitVector - Return true if this is a 64-bit vector type.
-    bool is64BitVector() const {
-      return (SimpleTy == MVT::v8i8  || SimpleTy == MVT::v4i16 ||
-              SimpleTy == MVT::v2i32 || SimpleTy == MVT::v1i64 ||
-              SimpleTy == MVT::v4f16 || SimpleTy == MVT::v2f32 ||
-              SimpleTy == MVT::v1f64);
-    }
-
-    /// is128BitVector - Return true if this is a 128-bit vector type.
-    bool is128BitVector() const {
-      return (SimpleTy == MVT::v16i8  || SimpleTy == MVT::v8i16 ||
-              SimpleTy == MVT::v4i32  || SimpleTy == MVT::v2i64 ||
-              SimpleTy == MVT::v1i128 || SimpleTy == MVT::v8f16 ||
-              SimpleTy == MVT::v4f32  || SimpleTy == MVT::v2f64);
-    }
-
-    /// is256BitVector - Return true if this is a 256-bit vector type.
-    bool is256BitVector() const {
-      return (SimpleTy == MVT::v8f32 || SimpleTy == MVT::v4f64  ||
-              SimpleTy == MVT::v32i8 || SimpleTy == MVT::v16i16 ||
-              SimpleTy == MVT::v8i32 || SimpleTy == MVT::v4i64);
-    }
-
-    /// is512BitVector - Return true if this is a 512-bit vector type.
-    bool is512BitVector() const {
-      return (SimpleTy == MVT::v8f64 || SimpleTy == MVT::v16f32 ||
-              SimpleTy == MVT::v64i8 || SimpleTy == MVT::v32i16 ||
-              SimpleTy == MVT::v8i64 || SimpleTy == MVT::v16i32);
-    }
-
-    /// is1024BitVector - Return true if this is a 1024-bit vector type.
-    bool is1024BitVector() const {
-      return (SimpleTy == MVT::v16i64);
-    }
-
-    /// isOverloaded - Return true if this is an overloaded type for TableGen.
     bool isOverloaded() const {
       return (SimpleTy==MVT::Any  ||
               SimpleTy==MVT::iAny || SimpleTy==MVT::fAny ||
               SimpleTy==MVT::vAny || SimpleTy==MVT::iPTRAny);
-    }
-
-    /// isPow2VectorType - Returns true if the given vector is a power of 2.
-    bool isPow2VectorType() const {
-      unsigned NElts = getVectorNumElements();
-      return !(NElts & (NElts - 1));
-    }
-
-    /// getPow2VectorType - Widens the length of the given vector MVT up to
-    /// the nearest power of 2 and returns that type.
-    MVT getPow2VectorType() const {
-      if (isPow2VectorType())
-        return *this;
-
-      unsigned NElts = getVectorNumElements();
-      unsigned Pow2NElts = 1 << llvm::Log2_32_Ceil(NElts);
-      return MVT::getVectorVT(getVectorElementType(), Pow2NElts);
-    }
-
-    /// getScalarType - If this is a vector type, return the element type,
-    /// otherwise return this.
-    MVT getScalarType() const {
-      return isVector() ? getVectorElementType() : *this;
     }
 
     MVT getVectorElementType() const {
@@ -449,201 +346,8 @@ class MVT {
       case v16i64:return 1024;
       }
     }
+};
 
-    unsigned getScalarSizeInBits() const {
-      return getScalarType().getSizeInBits();
-    }
-
-    /// getStoreSize - Return the number of bytes overwritten by a store
-    /// of the specified value type.
-    unsigned getStoreSize() const {
-      return (getSizeInBits() + 7) / 8;
-    }
-
-    /// getStoreSizeInBits - Return the number of bits overwritten by a store
-    /// of the specified value type.
-    unsigned getStoreSizeInBits() const {
-      return getStoreSize() * 8;
-    }
-
-    /// Return true if this has more bits than VT.
-    bool bitsGT(MVT VT) const {
-      return getSizeInBits() > VT.getSizeInBits();
-    }
-
-    /// Return true if this has no less bits than VT.
-    bool bitsGE(MVT VT) const {
-      return getSizeInBits() >= VT.getSizeInBits();
-    }
-
-    /// Return true if this has less bits than VT.
-    bool bitsLT(MVT VT) const {
-      return getSizeInBits() < VT.getSizeInBits();
-    }
-
-    /// Return true if this has no more bits than VT.
-    bool bitsLE(MVT VT) const {
-      return getSizeInBits() <= VT.getSizeInBits();
-    }
-
-
-    static MVT getFloatingPointVT(unsigned BitWidth) {
-      switch (BitWidth) {
-      default:
-        llvm_unreachable("Bad bit width!");
-      case 16:
-        return MVT::f16;
-      case 32:
-        return MVT::f32;
-      case 64:
-        return MVT::f64;
-      case 80:
-        return MVT::f80;
-      case 128:
-        return MVT::f128;
-      }
-    }
-
-    static MVT getIntegerVT(unsigned BitWidth) {
-      switch (BitWidth) {
-      default:
-        return (MVT::SimpleValueType)(MVT::INVALID_SIMPLE_VALUE_TYPE);
-      case 1:
-        return MVT::i1;
-      case 8:
-        return MVT::i8;
-      case 16:
-        return MVT::i16;
-      case 32:
-        return MVT::i32;
-      case 64:
-        return MVT::i64;
-      case 128:
-        return MVT::i128;
-      }
-    }
-
-    static MVT getVectorVT(MVT VT, unsigned NumElements) {
-      switch (VT.SimpleTy) {
-      default:
-        break;
-      case MVT::i1:
-        if (NumElements == 2)  return MVT::v2i1;
-        if (NumElements == 4)  return MVT::v4i1;
-        if (NumElements == 8)  return MVT::v8i1;
-        if (NumElements == 16) return MVT::v16i1;
-        if (NumElements == 32) return MVT::v32i1;
-        if (NumElements == 64) return MVT::v64i1;
-        break;
-      case MVT::i8:
-        if (NumElements == 1)  return MVT::v1i8;
-        if (NumElements == 2)  return MVT::v2i8;
-        if (NumElements == 4)  return MVT::v4i8;
-        if (NumElements == 8)  return MVT::v8i8;
-        if (NumElements == 16) return MVT::v16i8;
-        if (NumElements == 32) return MVT::v32i8;
-        if (NumElements == 64) return MVT::v64i8;
-        break;
-      case MVT::i16:
-        if (NumElements == 1)  return MVT::v1i16;
-        if (NumElements == 2)  return MVT::v2i16;
-        if (NumElements == 4)  return MVT::v4i16;
-        if (NumElements == 8)  return MVT::v8i16;
-        if (NumElements == 16) return MVT::v16i16;
-        if (NumElements == 32) return MVT::v32i16;
-        break;
-      case MVT::i32:
-        if (NumElements == 1)  return MVT::v1i32;
-        if (NumElements == 2)  return MVT::v2i32;
-        if (NumElements == 4)  return MVT::v4i32;
-        if (NumElements == 8)  return MVT::v8i32;
-        if (NumElements == 16) return MVT::v16i32;
-        break;
-      case MVT::i64:
-        if (NumElements == 1)  return MVT::v1i64;
-        if (NumElements == 2)  return MVT::v2i64;
-        if (NumElements == 4)  return MVT::v4i64;
-        if (NumElements == 8)  return MVT::v8i64;
-        if (NumElements == 16) return MVT::v16i64;
-        break;
-      case MVT::i128:
-        if (NumElements == 1)  return MVT::v1i128;
-        break;
-      case MVT::f16:
-        if (NumElements == 2)  return MVT::v2f16;
-        if (NumElements == 4)  return MVT::v4f16;
-        if (NumElements == 8)  return MVT::v8f16;
-        break;
-      case MVT::f32:
-        if (NumElements == 1)  return MVT::v1f32;
-        if (NumElements == 2)  return MVT::v2f32;
-        if (NumElements == 4)  return MVT::v4f32;
-        if (NumElements == 8)  return MVT::v8f32;
-        if (NumElements == 16) return MVT::v16f32;
-        break;
-      case MVT::f64:
-        if (NumElements == 1)  return MVT::v1f64;
-        if (NumElements == 2)  return MVT::v2f64;
-        if (NumElements == 4)  return MVT::v4f64;
-        if (NumElements == 8)  return MVT::v8f64;
-        break;
-      }
-      return (MVT::SimpleValueType)(MVT::INVALID_SIMPLE_VALUE_TYPE);
-    }
-
-    /// Return the value type corresponding to the specified type.  This returns
-    /// all pointers as iPTR.  If HandleUnknown is true, unknown types are
-    /// returned as Other, otherwise they are invalid.
-    static MVT getVT(Type *Ty, bool HandleUnknown = false);
-
-  private:
-    /// A simple iterator over the MVT::SimpleValueType enum.
-    struct mvt_iterator {
-      SimpleValueType VT;
-      mvt_iterator(SimpleValueType VT) : VT(VT) {}
-      MVT operator*() const { return VT; }
-      bool operator!=(const mvt_iterator &LHS) const { return VT != LHS.VT; }
-      mvt_iterator& operator++() {
-        VT = (MVT::SimpleValueType)((int)VT + 1);
-        assert((int)VT <= MVT::MAX_ALLOWED_VALUETYPE &&
-               "MVT iterator overflowed.");
-        return *this;
-      }
-    };
-    /// A range of the MVT::SimpleValueType enum.
-    typedef llvm::iterator_range<mvt_iterator> mvt_range;
-
-  public:
-    /// SimpleValueType Iteration
-    /// @{
-    static mvt_range all_valuetypes() {
-      return mvt_range(MVT::FIRST_VALUETYPE, MVT::LAST_VALUETYPE);
-    }
-    static mvt_range integer_valuetypes() {
-      return mvt_range(MVT::FIRST_INTEGER_VALUETYPE,
-                       (MVT::SimpleValueType)(MVT::LAST_INTEGER_VALUETYPE + 1));
-    }
-    static mvt_range fp_valuetypes() {
-      return mvt_range(MVT::FIRST_FP_VALUETYPE,
-                       (MVT::SimpleValueType)(MVT::LAST_FP_VALUETYPE + 1));
-    }
-    static mvt_range vector_valuetypes() {
-      return mvt_range(MVT::FIRST_VECTOR_VALUETYPE,
-                       (MVT::SimpleValueType)(MVT::LAST_VECTOR_VALUETYPE + 1));
-    }
-    static mvt_range integer_vector_valuetypes() {
-      return mvt_range(
-          MVT::FIRST_INTEGER_VECTOR_VALUETYPE,
-          (MVT::SimpleValueType)(MVT::LAST_INTEGER_VECTOR_VALUETYPE + 1));
-    }
-    static mvt_range fp_vector_valuetypes() {
-      return mvt_range(
-          MVT::FIRST_FP_VECTOR_VALUETYPE,
-          (MVT::SimpleValueType)(MVT::LAST_FP_VECTOR_VALUETYPE + 1));
-    }
-    /// @}
-  };
-
-} // End dxil namespace
+} // namespace dxil
 
 #endif

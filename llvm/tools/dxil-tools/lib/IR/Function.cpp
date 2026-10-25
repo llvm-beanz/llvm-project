@@ -23,7 +23,6 @@
 #include "dxil/IR/InstIterator.h"
 #include "dxil/IR/IntrinsicInst.h"
 #include "dxil/IR/LLVMContext.h"
-#include "dxil/IR/MDBuilder.h"
 #include "dxil/IR/Metadata.h"
 #include "dxil/IR/Module.h"
 using namespace llvm;
@@ -970,8 +969,11 @@ void Function::setPrologueData(Constant *PrologueData) {
 }
 
 void Function::setEntryCount(uint64_t Count) {
-  MDBuilder MDB(getContext());
-  setMetadata(LLVMContext::MD_prof, MDB.createFunctionEntryCount(Count));
+  LLVMContext &C = getContext();
+  Metadata *Ops[] = {
+      MDString::get(C, "function_entry_count"),
+      ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(C), Count))};
+  setMetadata(LLVMContext::MD_prof, MDNode::get(C, Ops));
 }
 
 std::optional<uint64_t> Function::getEntryCount() const {

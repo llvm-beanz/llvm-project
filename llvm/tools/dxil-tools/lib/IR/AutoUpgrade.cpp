@@ -17,11 +17,9 @@
 #include "dxil/IR/CFG.h"
 #include "dxil/IR/CallSite.h"
 #include "dxil/IR/Constants.h"
-#include "dxil/IR/DIBuilder.h"
 #include "dxil/IR/DebugInfo.h"
 #include "dxil/IR/DiagnosticInfo.h"
 #include "dxil/IR/Function.h"
-#include "dxil/IR/IRBuilder.h"
 #include "dxil/IR/Instruction.h"
 #include "dxil/IR/IntrinsicInst.h"
 #include "dxil/IR/LLVMContext.h"
@@ -127,8 +125,6 @@ bool UpgradeGlobalVariable(GlobalVariable *GV) {
 void UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
   Function *F = CI->getCalledFunction();
   LLVMContext &C = CI->getContext();
-  IRBuilder<> Builder(C);
-  Builder.SetInsertPoint(CI);
 
   assert(F && "Intrinsic call is not direct?");
 
@@ -143,6 +139,7 @@ void UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
   if (!Name.empty())
     CI->setName(Name + ".old");
 
+  CallInst *NewCall;
   switch (NewFn->getIntrinsicID()) {
   default:
     llvm_unreachable("Unknown function for CallInst upgrade.");
@@ -151,24 +148,23 @@ void UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
   case Intrinsic::cttz:
     assert(CI->getNumArgOperands() == 1 &&
            "Mismatch between function args and call args");
-    CI->replaceAllUsesWith(Builder.CreateCall(
-        NewFn, {CI->getArgOperand(0), Builder.getFalse()}, Name));
-    CI->eraseFromParent();
-    return;
+    NewCall = CallInst::Create(
+        NewFn, {CI->getArgOperand(0), ConstantInt::getFalse(C)}, Name, CI);
+    break;
 
   case Intrinsic::objectsize:
-    CI->replaceAllUsesWith(Builder.CreateCall(
-        NewFn, {CI->getArgOperand(0), CI->getArgOperand(1)}, Name));
-    CI->eraseFromParent();
-    return;
+    NewCall = CallInst::Create(
+        NewFn, {CI->getArgOperand(0), CI->getArgOperand(1)}, Name, CI);
+    break;
 
   case Intrinsic::ctpop: {
-    CI->replaceAllUsesWith(Builder.CreateCall(NewFn, {CI->getArgOperand(0)}));
-    CI->eraseFromParent();
-    return;
+    NewCall = CallInst::Create(NewFn, {CI->getArgOperand(0)}, "", CI);
+    break;
   }
 
   }
+  CI->replaceAllUsesWith(NewCall);
+  CI->eraseFromParent();
 }
 
 // This tests each Function to determine if it needs upgrading. When we find

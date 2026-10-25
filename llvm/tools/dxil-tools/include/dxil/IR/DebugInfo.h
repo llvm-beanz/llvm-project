@@ -19,19 +19,13 @@
 
 #include "dxil/IR/DebugInfoMetadata.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
-#include <iterator>
 
 namespace dxil {
 class Module;
-class DbgDeclareInst;
-class DbgValueInst;
 
 /// \brief Maps from type identifier to the actual MDNode.
 typedef llvm::DenseMap<const MDString *, DIType *> DITypeIdentifierMap;
@@ -61,97 +55,6 @@ bool stripDebugInfo(Function &F);
 /// \brief Return Debug Info Metadata Version by checking module flags.
 unsigned getDebugMetadataVersionFromModule(const Module &M);
 bool hasDebugInfo(const Module &M); // HLSL Change - Helper function to check if there's real debug info (variables, types)
-
-/// \brief Utility to find all debug info in a module.
-///
-/// DebugInfoFinder tries to list all debug info MDNodes used in a module. To
-/// list debug info MDNodes used by an instruction, DebugInfoFinder uses
-/// processDeclare, processValue and processLocation to handle DbgDeclareInst,
-/// DbgValueInst and DbgLoc attached to instructions. processModule will go
-/// through all DICompileUnits in llvm.dbg.cu and list debug info MDNodes
-/// used by the CUs.
-class DebugInfoFinder {
-public:
-  DebugInfoFinder() : TypeMapInitialized(false) {}
-
-  /// \brief Process entire module and collect debug info anchors.
-  void processModule(const Module &M);
-
-  /// \brief Process DbgDeclareInst.
-  void processDeclare(const Module &M, const DbgDeclareInst *DDI);
-  /// \brief Process DbgValueInst.
-  void processValue(const Module &M, const DbgValueInst *DVI);
-  /// \brief Process debug info location.
-  void processLocation(const Module &M, const DILocation *Loc);
-
-  /// \brief Clear all lists.
-  void reset();
-
-  // HLSL Change Begins.
-  /// \brief Append new global variable.
-  bool appendGlobalVariable(DIGlobalVariable *DIG);
-  // HLSL Change Ends.
-private:
-  void InitializeTypeMap(const Module &M);
-
-  void processType(DIType *DT);
-  void processSubprogram(DISubprogram *SP);
-  void processScope(DIScope *Scope);
-  bool addCompileUnit(DICompileUnit *CU);
-  bool addGlobalVariable(DIGlobalVariable *DIG);
-  bool addSubprogram(DISubprogram *SP);
-  bool addType(DIType *DT);
-  bool addScope(DIScope *Scope);
-
-public:
-  typedef llvm::SmallVectorImpl<DICompileUnit *>::const_iterator
-      compile_unit_iterator;
-  typedef llvm::SmallVectorImpl<DISubprogram *>::const_iterator
-      subprogram_iterator;
-  typedef llvm::SmallVectorImpl<DIGlobalVariable *>::const_iterator
-      global_variable_iterator;
-  typedef llvm::SmallVectorImpl<DIType *>::const_iterator type_iterator;
-  typedef llvm::SmallVectorImpl<DIScope *>::const_iterator scope_iterator;
-
-  llvm::iterator_range<compile_unit_iterator> compile_units() const {
-    return llvm::iterator_range<compile_unit_iterator>(CUs.begin(), CUs.end());
-  }
-
-  llvm::iterator_range<subprogram_iterator> subprograms() const {
-    return llvm::iterator_range<subprogram_iterator>(SPs.begin(), SPs.end());
-  }
-
-  llvm::iterator_range<global_variable_iterator> global_variables() const {
-    return llvm::iterator_range<global_variable_iterator>(GVs.begin(),
-                                                          GVs.end());
-  }
-
-  llvm::iterator_range<type_iterator> types() const {
-    return llvm::iterator_range<type_iterator>(TYs.begin(), TYs.end());
-  }
-
-  llvm::iterator_range<scope_iterator> scopes() const {
-    return llvm::iterator_range<scope_iterator>(Scopes.begin(), Scopes.end());
-  }
-
-  unsigned compile_unit_count() const { return CUs.size(); }
-  unsigned global_variable_count() const { return GVs.size(); }
-  unsigned subprogram_count() const { return SPs.size(); }
-  unsigned type_count() const { return TYs.size(); }
-  unsigned scope_count() const { return Scopes.size(); }
-
-private:
-  llvm::SmallVector<DICompileUnit *, 8> CUs;
-  llvm::SmallVector<DISubprogram *, 8> SPs;
-  llvm::SmallVector<DIGlobalVariable *, 8> GVs;
-  llvm::SmallVector<DIType *, 8> TYs;
-  llvm::SmallVector<DIScope *, 8> Scopes;
-  llvm::SmallPtrSet<const MDNode *, 32> NodesSeen;
-  DITypeIdentifierMap TypeIdentifierMap;
-
-  /// \brief Specify if TypeIdentifierMap is initialized.
-  bool TypeMapInitialized;
-};
 
 llvm::DenseMap<const Function *, DISubprogram *>
 makeSubprogramMap(const Module &M);
