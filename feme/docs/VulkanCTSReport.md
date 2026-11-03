@@ -116,6 +116,52 @@ Unrun until individually diagnosed. Roadmap `ENV7` keeps these five cases
 and the 16 experimental InternalErrors open. Do not combine the compiler
 refresh below with this earlier, source-pinned full-audit snapshot.
 
+## ENV7(d): three GraphicsFuzz crash diagnoses (2026-11-03, later session)
+
+Root-caused and fixed all three incomplete-case crashes from the full-audit
+table above. All three shared one root cause in
+`LoopLinearizer::linearizeCycle`: `flattenTaintedBranchesInRegion` can
+flatten a `PreRegion`-resident diamond whose own reconvergence block is
+`CheckBlock` itself; `DiamondFlattener` then replaces `CheckBlock`'s own
+condition phi with a freshly built `select` via RAUW and erases the
+original phi. `CheckExit->Cond` was a raw, non-`WeakTrackingVH` `Value *`
+snapshot taken before this call, left dangling after the erase -- every
+later read of it observed freed/reused memory, surfacing downstream as a
+bogus-width `xor`/`select` (the `cast<VectorType>` assertion and both
+"mismatched `xor` operand types" verifier failures were symptoms of this
+single use-after-free, not three independent bugs). Fixed by refreshing
+`CheckExit->Cond` from `CheckExit->Br->getCondition()` immediately after
+the flatten (`CheckExit->Br` is never itself replaced by this flatten, so
+any RAUW of its condition operand is reflected automatically by re-reading
+it).
+
+Isolated standalone, non-`deqp-vk` reproducers for all three cases from
+the retained `env7d-20261103/*-module-*.ll` dumps (`FEME_DUMP_IR_PRELINEARIZE
+=1`-style captures from the earlier full audit), bisected the exact
+mutation window with temporary `FEME_DEBUG_ENV7`-gated print statements
+(not retained), and reduced a minimal lit regression test via
+`llvm-reduce` (`Transforms/CPU/loop-divergent-exit-prereconverge-flatten-
+stale-cond.ll`, confirmed fail-before/pass-after via `git stash`).
+`check-feme`: 3882/3886 Passed, 4 unsupported, 0 regressions.
+
+Re-ran all three cases against a freshly rebuilt `libfeme_vulkan.so` and
+the real ICD (`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device`):
+
+| Case | Before | After |
+|---|---|---|
+| `graphicsfuzz.cov-discard-condition-loop-same-condition-again` | crash (`cast<VectorType>` assertion) | **Pass** |
+| `graphicsfuzz.cov-fragcoord-clamp-array-access` | crash (mismatched `xor` operand types) | **Pass** |
+| `graphicsfuzz.stable-colorgrid-modulo-vec3-values-from-matrix` | crash (mismatched `xor` operand types) | compiles and renders cleanly, but **Fail**: `Histogram EMD value of 0.044064 is greater than tolerance of 0.005000` |
+
+The third case's residual image-correctness `Fail` is a distinct,
+not-yet-diagnosed issue, broken out as roadmap `ENV7(f)`; it is not a
+regression (the case was previously an Unrun/crash, never a measured
+Pass), but it is also not yet a clean conformance Pass. Do not count any
+of these three cases as resolved Unrun records in the full-audit totals
+above without a dedicated re-measurement pass; this section only confirms
+the compiler-level crash diagnosis and its `deqp-vk` effect on these three
+specific cases in isolation.
+
 ## Exit-check capture repair (2026-11-03)
 
 Completed `ENV6(c)(2)(d)` and the remaining capture gap in `(l)`.
