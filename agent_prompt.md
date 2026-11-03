@@ -84,3 +84,6 @@ steps:
    priority, unchanged for many sessions.
 4. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+Copilot hit network errors on the last attempt. Please attempt to resume. Any
+intermediate artifacts will be committeed in a git stash.
