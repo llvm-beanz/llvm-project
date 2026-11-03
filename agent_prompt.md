@@ -1,6 +1,5 @@
 ---
-model: gpt-6.1-sol
-resume: f579c0f5-a2af-489a-b35f-136cf34ac067
+model: claude-5.5-sonnet
 ---
 # Initial Guidelines
 
