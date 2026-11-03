@@ -13,7 +13,11 @@ derived from the FeMe Vulkan ICD manifests:
 
 Current registry: VK-GL-CTS `880f31a2bd9c`, Vulkan-Docs `f84d432d5b89`
 (`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 362).
-Regenerated during the 2026-10-20 clean-container baseline. The ICD itself
+Regenerated during the 2026-11-03 clean-container setup. The generated
+table is unchanged from the previous registry audit. Direct instance and
+device extension queries of the built FeMe ICD match all 50 advertised
+names exactly; loader- and layer-provided extensions are not counted as
+ICD advertisements. The ICD itself
 is compiled against the container's Vulkan headers 1.4.341. Counts describe
 advertisements, not passing CTS coverage.
 
