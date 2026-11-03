@@ -131309,3 +131309,67 @@ now been wrong twice in exactly this way.
    priority, unchanged for many sessions.
 4. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
+
+# 2026-11-03: finish the exit-check capture fix after the interrupted resume
+
+**Completed `ENV6(c)(2)(d)` and the remaining capture gap in `(l)`.**
+The pillars CTS case now passes, without losing the complex nested-loop,
+stale-PDT, or uniform-vector cases. The fix is committed as `055056dde13f`;
+the second captured regression is committed as `1531ab22bc60`.
+
+## Decisions and evidence
+
+1. Recaptured the live complex fragment because neither the old session
+   artifact nor a stash was present. Both nested reproducers are now
+   persistent compiler tests, not assumptions about `/tmp` contents.
+2. Freeze nonconstant check captures on every merge path. Constant exit
+   tags do not advance between rounds; shadowing `false` introduced poison
+   and broke `loop.exit.guard1`'s uniform pass-through shape.
+3. Preserve the natural header value even when its raw capture equals
+   the check capture. The check shadow may still be poison on a lane
+   that only takes the header exit.
+4. Diagnose actual capture divergence using independent fresh cycle and
+   dominator information after closing the backedge. Invalidate only
+   genuinely divergent users of changed captures; blanket invalidation
+   falsely rejects uniform nested induction-variable checks. Consume the
+   current condition verdict, not the old terminator-cache verdict.
+
+No nested-cycle skip, boundary relaxation, or successful-test-to-diagnostic
+conversion was needed. Temporary investigative changes were removed.
+The CPU design and FeMe process instructions document the analysis change.
+
+## Verified results
+
+- Device check: `FeMe CPU Vulkan Device`.
+- Cached assertion build, no precompiled headers; `check-feme` builds its
+  dependencies and reports **3,881 Pass / 4 Unsupported / zero failures**.
+- Complete 757-case GraphicsFuzz comparison: **666 to 667 Pass**, **88 to
+  87 serially verified Fail**, the same **3 Unrun**, and **zero regressions**.
+  Pillars is the only newly passing case in the final precise measurement.
+  The additional complete GLSL loop/demote and SPIR-V loop-control families
+  have **642 Pass / 17 verified Fail / zero Unrun**, matching the full-audit
+  baseline's exact failure set across all 659 cases.
+- Both inventory generators reproduce their tables exactly; no feature
+  bit or extension advertisement changed.
+- Published the previously completed full audit separately: **3,269,358
+  completed records**, **258 verified Fail**, **16 InternalError**, and
+  **5 Unrun**, from 3,269,363 requested cases. This is not a conformance
+  pass and is not a new full-audit measurement of the capture fix.
+
+Full-audit artifacts are in `VK-GL-CTS/run/feme-20261103-full/`.
+This investigation's baseline, precise measurement, captured IR, and
+logs are in `VK-GL-CTS/run/env6-freeze-20261103/`.
+The full-audit recovery logs identify three compiler failures; the two
+experimental use-after-free logs do not establish a mechanism. ENV7
+remains partial rather than pretending those cases completed.
+
+## Suggested next steps
+
+1. Open `ENV7(d)` in `feme/docs/Roadmap.md` and its three isolated recovery
+   logs. Build minimal reproducers for the remaining assertion/type failures.
+2. Keep `ENV6(c)(3)` and `ENV6(d)` as separate architecture efforts; this
+   session did not attempt either milestone.
+3. Diagnose experimental postmortem Unrun/InternalError outcomes separately
+   from canonical Vulkan coverage (`ENV7(e)`).
+4. Hull lockstep barriers and offload upstreaming remain lower-priority
+   work; push access was not changed by this session.
