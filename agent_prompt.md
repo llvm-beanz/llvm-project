@@ -69,22 +69,11 @@ mid-investigation to avoid losing documentation.
 Can you continue the vulkan ICD development. The last session suggested the next
 steps:
 
-1. **`ENV6(c)(2)(d)`/`(l)`, dedicated session, budget the full chase
-   (~half a day)**: don't bisect-and-revert a third time. Use the saved
-   reproducer (`env6c2d-complex-nested-loops-regression-repro.ll` in
-   this session's workspace — move it into
-   `/tmp/complex_frag.ll` or similar to resume) and actually finish
-   reading `collectUniformPassThroughRegion` to find the precise
-   precondition the Part-A shadow-phi insertion breaks for
-   `loop.exit.guard1`'s shape. Once known, the fix is probably small;
-   the cost so far has all been in diagnosis, not implementation.
-2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
-   multi-session architecture efforts, unchanged.
-3. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
-   priority, unchanged for many sessions.
-4. offload-test-suite upstreaming (3 patches): blocked on push access,
-   unchanged for many sessions.
-
-Copilot hit network errors on the last attempt. Please attempt to resume. Any
-intermediate artifacts will be committeed in a git stash.
-
+1. Open `ENV7(d)` in `feme/docs/Roadmap.md` and its three isolated recovery
+   logs. Build minimal reproducers for the remaining assertion/type failures.
+2. Keep `ENV6(c)(3)` and `ENV6(d)` as separate architecture efforts; this
+   session did not attempt either milestone.
+3. Diagnose experimental postmortem Unrun/InternalError outcomes separately
+   from canonical Vulkan coverage (`ENV7(e)`).
+4. Hull lockstep barriers and offload upstreaming remain lower-priority
+   work; push access was not changed by this session.
