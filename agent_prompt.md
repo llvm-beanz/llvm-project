@@ -66,8 +66,8 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-Can you continue the vulkan ICD development. The last session suggested the next
-steps:
+You are building a Vulkan CPU reference rasterizer. Can you continue the vulkan
+ICD development. The last session suggested the next steps:
 
 1. Open `ENV7(d)` in `feme/docs/Roadmap.md` and its three isolated recovery
    logs. Build minimal reproducers for the remaining assertion/type failures.
