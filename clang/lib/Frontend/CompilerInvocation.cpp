@@ -1854,6 +1854,10 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
 #include "clang/Options/Options.inc"
 #undef CODEGEN_OPTION_WITH_MARSHALLING
 
+  // HLSL resource storage may contain any nonzero representation of true.
+  if (LangOpts->HLSL && !Args.hasArg(OPT_load_bool_from_mem))
+    Opts.setLoadBoolFromMem(CodeGenOptions::BoolFromMem::NonZero);
+
   // At O0 we want to fully disable inlining outside of cases marked with
   // 'alwaysinline' that are required for correctness.
   if (Opts.OptimizationLevel == 0) {
