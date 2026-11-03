@@ -51,6 +51,7 @@ Usage:
       --output-dir /path/to/run/output \
       [--batch-size 1800] [--workers 6] \
       [--recovery-batch-sizes 200,20,1] [--final-timeout 60] \
+      [--batch-timeout 7200] \
       [--deqp-vk-arg=--deqp-log-images=disable ...] \
       [--baseline-qpa baseline.qpa ...] [--expected-failures failures.txt] \
       [--write-verified-failures verified-failures.txt]
@@ -67,6 +68,10 @@ The run proceeds in rounds:
    process that dies mid-case leaves that case, and everything after it in
    that batch, with no completed record at all -- ordinary nonzero exit
    status from ordinary test failures is not evidence of this).
+   `--batch-timeout`, when supplied, bounds each initial process and each
+   multi-case recovery process. Completed records survive a timeout;
+   incomplete cases proceed to recovery rather than being classified as
+   individually timed out.
 2. **Recovery rounds**: whatever cases still have no completed record are
    re-split at each of `--recovery-batch-sizes`' progressively finer sizes
    in turn (200, then 20, then 1 case per process, by default) and re-run,
@@ -125,8 +130,7 @@ def run_one_batch(deqp_vk, case_list_path, qpa_path, log_path, extra_args,
     exit status is deliberately ignored: `deqp-vk` exits nonzero for
     ordinary test failures too, so it carries no information a completed
     QPA record does not already carry more precisely. A process that
-    exceeds `timeout` (only ever passed for the finest, single-case
-    recovery/verification rounds -- see the module docstring) is killed;
+    exceeds `timeout` is killed;
     either way, whatever the process managed to write to `qpa_path` before
     stopping is left for the caller to reconcile. Returns `True` if the
     process was killed for exceeding `timeout`, `False` otherwise (including
@@ -237,6 +241,10 @@ def main(argv):
                         help="per-process timeout in seconds, applied only "
                              "at the finest recovery size and the "
                              "verification round (default: %(default)s)")
+    parser.add_argument("--batch-timeout", type=float,
+                        help="optional per-process timeout in seconds for "
+                             "initial and multi-case recovery batches; "
+                             "incomplete cases are retried individually")
     parser.add_argument("--deqp-vk-arg", action="append", default=[],
                         help="extra argument to pass through to every "
                              "deqp-vk invocation (may repeat)")
@@ -253,6 +261,8 @@ def main(argv):
                         help="write the final reconciliation report here "
                              "(default: <output-dir>/report.txt)")
     args = parser.parse_args(argv)
+    if args.batch_timeout is not None and args.batch_timeout <= 0:
+        parser.error("--batch-timeout must be positive")
 
     try:
         recovery_sizes = parse_recovery_sizes(args.recovery_batch_sizes)
@@ -277,16 +287,14 @@ def main(argv):
     # was never attempted at all).
     timed_out = {}
 
-    merged, unrun, round_timed_out = run_round(
+    merged, unrun, _ = run_round(
         args.deqp_vk, chunk(cases, args.batch_size), args.output_dir,
-        "initial", args.workers, args.deqp_vk_arg, args.cwd)
-    for case_name in round_timed_out:
-        timed_out[case_name] = "TimedOut"
-
+        "initial", args.workers, args.deqp_vk_arg, args.cwd,
+        timeout=args.batch_timeout)
     for round_index, size in enumerate(recovery_sizes, start=1):
         if not unrun:
             break
-        timeout = args.final_timeout if size == 1 else None
+        timeout = args.final_timeout if size == 1 else args.batch_timeout
         round_results, unrun, round_timed_out = run_round(
             args.deqp_vk, chunk(unrun, size), args.output_dir,
             "recovery-%d" % round_index, args.workers, args.deqp_vk_arg,

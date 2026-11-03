@@ -167,6 +167,13 @@ exit code: successful reconciliation can still contain failures or unrun
 cases. Preserve assertion-crash logs separately; do not turn missing QPA
 completion records into invented Pass results.
 
+For a full run, supply `--batch-timeout 7200` as well as
+`--final-timeout 600`. The former bounds initial and multi-case recovery
+processes, including a process stuck after writing a result; unfinished
+cases are retried, not assigned a speculative per-case timeout. The latter
+bounds single-case recovery and serial failure verification. Without
+`--batch-timeout`, the initial and multi-case rounds remain unbounded.
+
 Record the exact source revisions, registry and tested case list alongside
 results. A sample or partial run is not a replacement for a complete
 full-list baseline. Use the inventory generators documented in
