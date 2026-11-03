@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5.5
+resume: 867b2fbf-2238-40d8-8a30-ea8036208e37
 ---
 # Initial Guidelines
 
@@ -68,11 +69,16 @@ mid-investigation to avoid losing documentation.
 You are building a Vulkan CPU reference rasterizer. Can you continue the vulkan
 ICD development. The last session suggested the next steps:
 
-1. Open `ENV7(d)` in `feme/docs/Roadmap.md` and its three isolated recovery
-   logs. Build minimal reproducers for the remaining assertion/type failures.
-2. Keep `ENV6(c)(3)` and `ENV6(d)` as separate architecture efforts; this
-   session did not attempt either milestone.
-3. Diagnose experimental postmortem Unrun/InternalError outcomes separately
-   from canonical Vulkan coverage (`ENV7(e)`).
-4. Hull lockstep barriers and offload upstreaming remain lower-priority
-   work; push access was not changed by this session.
+1. **`ENV7(f)`** (new, this session): build a minimal standalone
+   reproducer for `stable-colorgrid-modulo-vec3-values-from-matrix`'s
+   residual image Fail, isolate whether it's a live `ENV6(c)(2)(h)`-shape
+   recurrence or something new. Likely 1-3 hours given a repro already
+   exists (`env7d-20261103/stable-colorgrid-...-module-3.ll`).
+2. **`ENV7(e)`**: diagnose the two `use_after_free` Unrun cases and 16
+   InternalErrors, separately from canonical conformance. Untouched for
+   several sessions now.
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, unchanged.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier) / offload-test-suite
+   upstreaming: lowest priority, unchanged for many sessions, push
+   access still not granted.
