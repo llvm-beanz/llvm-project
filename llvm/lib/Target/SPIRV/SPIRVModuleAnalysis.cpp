@@ -1073,6 +1073,7 @@ void RequirementHandler::initAvailableCapabilitiesForVulkan(
   addAvailableCaps({Capability::Int64,
                     Capability::Float16,
                     Capability::Float64,
+                    Capability::SampleRateShading,
                     Capability::GroupNonUniform,
                     Capability::Image1D,
                     Capability::SampledBuffer,

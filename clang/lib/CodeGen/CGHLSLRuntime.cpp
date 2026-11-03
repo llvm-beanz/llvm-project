@@ -1105,34 +1105,45 @@ static void addSPIRVBuiltinDecoration(llvm::GlobalVariable *GV,
   GV->addMetadata("spirv.Decorations", *Decoration);
 }
 
-static void addLocationDecoration(llvm::GlobalVariable *GV, unsigned Location) {
+static void addLocationDecoration(llvm::GlobalVariable *GV, unsigned Location,
+                                  llvm::dxbc::PSV::InterpolationMode Mode) {
+  using llvm::dxbc::PSV::InterpolationMode;
   LLVMContext &Ctx = GV->getContext();
   IRBuilder<> B(*GV->getParent());
-  MDNode *Operands =
+  SmallVector<Metadata *, 3> Decorations;
+  Decorations.push_back(
       MDNode::get(Ctx, {ConstantAsMetadata::get(B.getInt32(/* Location */ 30)),
-                        ConstantAsMetadata::get(B.getInt32(Location))});
-  MDNode *Decoration = MDNode::get(Ctx, {Operands});
-  GV->addMetadata("spirv.Decorations", *Decoration);
-}
-
-// A fragment shader input interface variable whose base type is an integer or
-// a 64-bit float (double) cannot be interpolated by the rasterizer. The Vulkan
-// specification requires these variables to be decorated with Flat (see
-// VUID-StandaloneSpirv-Flat-04744). Arrays and vectors are unwrapped to inspect
-// their base scalar type.
-static bool inputRequiresFlatDecoration(llvm::Type *Ty) {
-  while (true) {
-    if (auto *AT = dyn_cast<llvm::ArrayType>(Ty)) {
-      Ty = AT->getElementType();
-      continue;
-    }
-    if (auto *VT = dyn_cast<llvm::FixedVectorType>(Ty)) {
-      Ty = VT->getElementType();
-      continue;
-    }
+                        ConstantAsMetadata::get(B.getInt32(Location))}));
+  auto AddDecoration = [&](unsigned Decoration) {
+    Decorations.push_back(
+        MDNode::get(Ctx, {ConstantAsMetadata::get(B.getInt32(Decoration))}));
+  };
+  switch (Mode) {
+  case InterpolationMode::Constant:
+    AddDecoration(/* Flat */ 14);
+    break;
+  case InterpolationMode::LinearNoperspective:
+  case InterpolationMode::LinearNoperspectiveCentroid:
+  case InterpolationMode::LinearNoperspectiveSample:
+    AddDecoration(/* NoPerspective */ 13);
+    break;
+  default:
     break;
   }
-  return Ty->isIntegerTy() || Ty->isDoubleTy();
+  switch (Mode) {
+  case InterpolationMode::LinearCentroid:
+  case InterpolationMode::LinearNoperspectiveCentroid:
+    AddDecoration(/* Centroid */ 16);
+    break;
+  case InterpolationMode::LinearSample:
+  case InterpolationMode::LinearNoperspectiveSample:
+    AddDecoration(/* Sample */ 17);
+    break;
+  default:
+    break;
+  }
+  // Keep all decorations in one node; the backend consumes only one attachment.
+  GV->addMetadata("spirv.Decorations", *MDNode::get(Ctx, Decorations));
 }
 
 static llvm::Value *createSPIRVBuiltinLoad(IRBuilder<> &B, llvm::Module &M,
@@ -1148,9 +1159,10 @@ static llvm::Value *createSPIRVBuiltinLoad(IRBuilder<> &B, llvm::Module &M,
   return B.CreateLoad(Ty, GV);
 }
 
-static llvm::Value *createSPIRVLocationLoad(IRBuilder<> &B, llvm::Module &M,
-                                            llvm::Type *Ty, unsigned Location,
-                                            StringRef Name, bool NeedsFlat) {
+static llvm::Value *
+createSPIRVLocationLoad(IRBuilder<> &B, llvm::Module &M, llvm::Type *Ty,
+                        unsigned Location, StringRef Name,
+                        llvm::dxbc::PSV::InterpolationMode Mode) {
   auto *GV = new llvm::GlobalVariable(
       M, Ty, /* isConstant= */ true, llvm::GlobalValue::ExternalLinkage,
       /* Initializer= */ nullptr, /* Name= */ Name, /* insertBefore= */ nullptr,
@@ -1158,28 +1170,15 @@ static llvm::Value *createSPIRVLocationLoad(IRBuilder<> &B, llvm::Module &M,
       /* AddressSpace */ 7, /* isExternallyInitialized= */ true);
   GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
 
-  // Emit all decorations as a single `spirv.Decorations` node. Attaching
-  // multiple `spirv.Decorations` metadata nodes to the same global is not
-  // supported by the SPIR-V backend and results in all but one being dropped.
-  LLVMContext &Ctx = GV->getContext();
-  SmallVector<Metadata *, 2> Decorations;
-  Decorations.push_back(
-      MDNode::get(Ctx, {ConstantAsMetadata::get(
-                            B.getInt32(/* SPIRV::Decoration::Location */ 30)),
-                        ConstantAsMetadata::get(B.getInt32(Location))}));
-  if (NeedsFlat)
-    Decorations.push_back(
-        MDNode::get(Ctx, {ConstantAsMetadata::get(
-                             B.getInt32(/* SPIRV::Decoration::Flat */ 14))}));
-  GV->addMetadata("spirv.Decorations", *MDNode::get(Ctx, Decorations));
+  addLocationDecoration(GV, Location, Mode);
 
   return B.CreateLoad(Ty, GV);
 }
 
 llvm::Value *CGHLSLRuntime::emitSPIRVUserSemanticLoad(
-    llvm::IRBuilder<> &B, const FunctionDecl *FD, llvm::Type *Type,
-    const clang::DeclaratorDecl *Decl, HLSLAppliedSemanticAttr *Semantic,
-    std::optional<unsigned> Index) {
+    llvm::IRBuilder<> &B, llvm::Type *Type, const clang::DeclaratorDecl *Decl,
+    HLSLAppliedSemanticAttr *Semantic, std::optional<unsigned> Index,
+    llvm::dxbc::PSV::InterpolationMode Mode) {
   Twine BaseName = Twine(Semantic->getAttrName()->getName());
   Twine VariableName = BaseName.concat(Twine(Index.value_or(0)));
 
@@ -1193,19 +1192,14 @@ llvm::Value *CGHLSLRuntime::emitSPIRVUserSemanticLoad(
   unsigned ElementCount = AT ? AT->getNumElements() : 1;
   SPIRVLastAssignedInputSemanticLocation += ElementCount;
 
-  const auto *ShaderAttr = FD->getAttr<HLSLShaderAttr>();
-  bool NeedsFlat =
-      ShaderAttr &&
-      ShaderAttr->getType() == llvm::Triple::EnvironmentType::Pixel &&
-      inputRequiresFlatDecoration(Type);
-
   return createSPIRVLocationLoad(B, CGM.getModule(), Type, Location,
-                                 VariableName.str(), NeedsFlat);
+                                 VariableName.str(), Mode);
 }
 
 static void createSPIRVLocationStore(IRBuilder<> &B, llvm::Module &M,
                                      llvm::Value *Source, unsigned Location,
-                                     StringRef Name) {
+                                     StringRef Name,
+                                     llvm::dxbc::PSV::InterpolationMode Mode) {
   auto *GV = new llvm::GlobalVariable(
       M, Source->getType(), /* isConstant= */ false,
       llvm::GlobalValue::ExternalLinkage,
@@ -1213,14 +1207,14 @@ static void createSPIRVLocationStore(IRBuilder<> &B, llvm::Module &M,
       llvm::GlobalVariable::GeneralDynamicTLSModel,
       /* AddressSpace */ 8, /* isExternallyInitialized= */ false);
   GV->setVisibility(llvm::GlobalValue::HiddenVisibility);
-  addLocationDecoration(GV, Location);
+  addLocationDecoration(GV, Location, Mode);
   B.CreateStore(Source, GV);
 }
 
 void CGHLSLRuntime::emitSPIRVUserSemanticStore(
     llvm::IRBuilder<> &B, llvm::Value *Source,
     const clang::DeclaratorDecl *Decl, HLSLAppliedSemanticAttr *Semantic,
-    std::optional<unsigned> Index) {
+    std::optional<unsigned> Index, llvm::dxbc::PSV::InterpolationMode Mode) {
   Twine BaseName = Twine(Semantic->getAttrName()->getName());
   Twine VariableName = BaseName.concat(Twine(Index.value_or(0)));
 
@@ -1234,7 +1228,7 @@ void CGHLSLRuntime::emitSPIRVUserSemanticStore(
   unsigned ElementCount = AT ? AT->getNumElements() : 1;
   SPIRVLastAssignedOutputSemanticLocation += ElementCount;
   createSPIRVLocationStore(B, CGM.getModule(), Source, Location,
-                           VariableName.str());
+                           VariableName.str(), Mode);
 }
 
 namespace {
@@ -1426,11 +1420,11 @@ void CGHLSLRuntime::emitDXILUserSemanticStore(llvm::IRBuilder<> &B,
 }
 
 llvm::Value *CGHLSLRuntime::emitUserSemanticLoad(
-    IRBuilder<> &B, const FunctionDecl *FD, llvm::Type *Type,
-    const clang::DeclaratorDecl *Decl, HLSLAppliedSemanticAttr *Semantic,
-    std::optional<unsigned> Index, SemanticSignatures &Signature) {
+    IRBuilder<> &B, llvm::Type *Type, const clang::DeclaratorDecl *Decl,
+    HLSLAppliedSemanticAttr *Semantic, std::optional<unsigned> Index,
+    SemanticSignatures &Signature, llvm::dxbc::PSV::InterpolationMode Mode) {
   if (CGM.getTarget().getTriple().isSPIRV())
-    return emitSPIRVUserSemanticLoad(B, FD, Type, Decl, Semantic, Index);
+    return emitSPIRVUserSemanticLoad(B, Type, Decl, Semantic, Index, Mode);
 
   if (CGM.getTarget().getTriple().isDXIL())
     return emitDXILUserSemanticLoad(B, Type, Decl, Semantic, Index, Signature);
@@ -1438,13 +1432,12 @@ llvm::Value *CGHLSLRuntime::emitUserSemanticLoad(
   llvm_unreachable("Unsupported target for user-semantic load.");
 }
 
-void CGHLSLRuntime::emitUserSemanticStore(IRBuilder<> &B, llvm::Value *Source,
-                                          const clang::DeclaratorDecl *Decl,
-                                          HLSLAppliedSemanticAttr *Semantic,
-                                          std::optional<unsigned> Index,
-                                          SemanticSignatures &Signature) {
+void CGHLSLRuntime::emitUserSemanticStore(
+    IRBuilder<> &B, llvm::Value *Source, const clang::DeclaratorDecl *Decl,
+    HLSLAppliedSemanticAttr *Semantic, std::optional<unsigned> Index,
+    SemanticSignatures &Signature, llvm::dxbc::PSV::InterpolationMode Mode) {
   if (CGM.getTarget().getTriple().isSPIRV())
-    return emitSPIRVUserSemanticStore(B, Source, Decl, Semantic, Index);
+    return emitSPIRVUserSemanticStore(B, Source, Decl, Semantic, Index, Mode);
 
   if (CGM.getTarget().getTriple().isDXIL())
     return emitDXILUserSemanticStore(B, Source, Decl, Semantic, Index,
@@ -1634,7 +1627,7 @@ void CGHLSLRuntime::emitSystemSemanticStore(
 llvm::Value *CGHLSLRuntime::handleScalarSemanticLoad(
     IRBuilder<> &B, const FunctionDecl *FD, llvm::Type *Type,
     const clang::DeclaratorDecl *Decl, HLSLAppliedSemanticAttr *Semantic,
-    SemanticSignatures &Signature) {
+    SemanticSignatures &Signature, llvm::dxbc::PSV::InterpolationMode Mode) {
 
   std::optional<unsigned> Index = Semantic->getSemanticIndex();
   llvm::dxbc::PSV::SemanticKind SemanticKind =
@@ -1647,17 +1640,16 @@ llvm::Value *CGHLSLRuntime::handleScalarSemanticLoad(
   assert(Interpretation != llvm::hlsl::SemanticInterpretation::Invalid &&
          "invalid semantic should have been diagnosed by Sema");
   if (Interpretation == llvm::hlsl::SemanticInterpretation::Arbitrary)
-    return emitUserSemanticLoad(B, FD, Type, Decl, Semantic, Index, Signature);
+    return emitUserSemanticLoad(B, Type, Decl, Semantic, Index, Signature,
+                                Mode);
   return emitSystemSemanticLoad(B, Type, Decl, Semantic, SemanticKind,
                                 ShaderAttr->getType(), Index, Signature);
 }
 
-void CGHLSLRuntime::handleScalarSemanticStore(IRBuilder<> &B,
-                                              const FunctionDecl *FD,
-                                              llvm::Value *Source,
-                                              const clang::DeclaratorDecl *Decl,
-                                              HLSLAppliedSemanticAttr *Semantic,
-                                              SemanticSignatures &Signature) {
+void CGHLSLRuntime::handleScalarSemanticStore(
+    IRBuilder<> &B, const FunctionDecl *FD, llvm::Value *Source,
+    const clang::DeclaratorDecl *Decl, HLSLAppliedSemanticAttr *Semantic,
+    SemanticSignatures &Signature, llvm::dxbc::PSV::InterpolationMode Mode) {
   std::optional<unsigned> Index = Semantic->getSemanticIndex();
   llvm::dxbc::PSV::SemanticKind SemanticKind =
       llvm::hlsl::getSemanticKind(Semantic->getAttrName()->getName());
@@ -1671,7 +1663,8 @@ void CGHLSLRuntime::handleScalarSemanticStore(IRBuilder<> &B,
          "invalid semantic should have been diagnosed by Sema");
 
   if (Interpretation == llvm::hlsl::SemanticInterpretation::Arbitrary)
-    return emitUserSemanticStore(B, Source, Decl, Semantic, Index, Signature);
+    return emitUserSemanticStore(B, Source, Decl, Semantic, Index, Signature,
+                                 Mode);
   emitSystemSemanticStore(B, Source, Decl, Semantic, SemanticKind,
                           ShaderAttr->getType(), Index, Signature);
 }
@@ -1754,17 +1747,21 @@ CGHLSLRuntime::handleSemanticLoad(
 
   HLSLAppliedSemanticAttr *Attr = *AttrBegin;
   ++AttrBegin;
+  auto Mode = llvm::hlsl::normalizeInterpolationMode(
+      llvm::hlsl::getInterpolationMode(Modifiers),
+      getSignatureComponentType(
+          CGM, getSemanticShape(CGM.getContext(), getSemanticLeafType(Decl))
+                   .RowType),
+      llvm::hlsl::getSemanticKind(Attr->getAttrName()->getName()),
+      FD->getAttr<HLSLShaderAttr>()->getType(), llvm::hlsl::IOType::In);
   size_t PreviousSize = Signature.size();
   llvm::Value *Value =
-      handleScalarSemanticLoad(B, FD, Type, Decl, Attr, Signature);
+      handleScalarSemanticLoad(B, FD, Type, Decl, Attr, Signature, Mode);
   // Intrinsic-only system values and SPIR-V loads do not add DXIL signature
   // elements. Non-pixel inputs retain Undefined.
   if (Signature.size() != PreviousSize) {
     auto &Element = Signature.back();
-    Element.InterpMode = llvm::hlsl::normalizeInterpolationMode(
-        llvm::hlsl::getInterpolationMode(Modifiers), Element.CompType,
-        Element.SemanticKind, FD->getAttr<HLSLShaderAttr>()->getType(),
-        llvm::hlsl::IOType::In);
+    Element.InterpMode = Mode;
   }
   return std::make_pair(Value, AttrBegin);
 }
@@ -1788,14 +1785,18 @@ CGHLSLRuntime::handleSemanticStore(
 
   HLSLAppliedSemanticAttr *Attr = *AttrBegin;
   ++AttrBegin;
+  auto Mode = llvm::hlsl::normalizeInterpolationMode(
+      llvm::hlsl::getInterpolationMode(Modifiers),
+      getSignatureComponentType(
+          CGM, getSemanticShape(CGM.getContext(), getSemanticLeafType(Decl))
+                   .RowType),
+      llvm::hlsl::getSemanticKind(Attr->getAttrName()->getName()),
+      FD->getAttr<HLSLShaderAttr>()->getType(), llvm::hlsl::IOType::Out);
   size_t PreviousSize = Signature.size();
-  handleScalarSemanticStore(B, FD, Source, Decl, Attr, Signature);
+  handleScalarSemanticStore(B, FD, Source, Decl, Attr, Signature, Mode);
   if (Signature.size() != PreviousSize) {
     auto &Element = Signature.back();
-    Element.InterpMode = llvm::hlsl::normalizeInterpolationMode(
-        llvm::hlsl::getInterpolationMode(Modifiers), Element.CompType,
-        Element.SemanticKind, FD->getAttr<HLSLShaderAttr>()->getType(),
-        llvm::hlsl::IOType::Out);
+    Element.InterpMode = Mode;
   }
   return AttrBegin;
 }
