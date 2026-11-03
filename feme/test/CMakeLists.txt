@@ -31,6 +31,7 @@ set(FEME_TEST_DEPENDS
   feme-cpu-restructure-fuzzer
   FeMeUnitTests
   llc
+  mlir-translate
   llvm-as
   llvm-nm
   llvm-readobj
