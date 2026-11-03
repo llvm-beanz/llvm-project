@@ -131373,3 +131373,130 @@ remains partial rather than pretending those cases completed.
    from canonical Vulkan coverage (`ENV7(e)`).
 4. Hull lockstep barriers and offload upstreaming remain lower-priority
    work; push access was not changed by this session.
+
+# 2026-11-03: ENV7(d) fixed — one use-after-free explains all three GraphicsFuzz crashes
+
+**Do next (2 min)**: nothing blocking — `ENV7(d)` is done (partial, see
+below). Pick up `ENV7(f)` (new, see Roadmap) or `ENV6(c)(3)`/`ENV6(d)`
+(separate architecture efforts, still untouched).
+
+## What's fixed
+
+All three `ENV7(d)` GraphicsFuzz crashes (`cast<VectorType>` assertion on
+`cov-discard-condition-loop-same-condition-again`, and "mismatched `xor`
+operand types" on `cov-fragcoord-clamp-array-access` /
+`stable-colorgrid-modulo-vec3-values-from-matrix`) turned out to be **one
+single bug**, not three. Fixed in one line, in one commit:
+`CheckExit->Cond = CheckExit->Br->getCondition();` added right after the
+`flattenTaintedBranchesInRegion(*PreRegion, ...)` call in
+`LoopLinearizer::linearizeCycle` (`feme/lib/Transforms/CPU/Linearize.cpp`).
+
+## How it was found (for the next session's own pattern-matching)
+
+1. Found this session's own previous (stashed) debug instrumentation
+   already in the tree — a `WeakTrackingVH DebugCond` shadow of
+   `CheckExit->Cond`, plus a `LinearizePass::run`-level `Audit` lambda
+   that flags any instruction whose operand silently died. Restored it
+   (`git stash pop`), confirming this bug class was already suspected.
+2. Standalone, non-`deqp-vk` repro already existed from an earlier phase
+   of this same investigation: `build/bin/feme-opt --llvm
+   -passes=feme-cpu-linearize -S env7d-20261103/cov-discard-...-module-2
+   .ll`. ~1 second per run, no CTS needed — this is what made rapid
+   bisection possible.
+3. GDB was a dead end: `feme-opt` has no DWARF line info despite being
+   unstripped (symbolized backtraces, but no `break File.cpp:N`). Fell
+   back to print-statement bisection, rebuilding via `ninja -C build
+   feme-opt` (~5-20s thanks to ccache) after each added marker.
+4. Bisected by adding `errs()` prints (gated on `getenv("FEME_DEBUG_ENV7")`)
+   at each major mutation point inside `linearizeCycle`, watching when
+   `CheckExit->Cond`'s `getParent()` flipped from a real block name to
+   `null`/garbage. Pinned it to the gap between the `PreRegion` masking
+   loop and `BEFORE-APPLYSTAGEMASKS`.
+5. Read `flattenTaintedBranchesInRegion`'s source: it calls
+   `DiamondFlattener::flattenKnownDivergentBranch` on any `PreRegion`
+   block whose branch *became* divergent after masking. The diamond it
+   flattens can reconverge at `CheckBlock` itself — which is exactly
+   what happened here (`Flow5`, `CheckExit->Cond`'s own home block).
+   `DiamondFlattener` RAUWs `CheckBlock`'s own phi with a new `select`
+   and erases the phi. `CheckExit->Cond` is a raw `Value *`, not a
+   `WeakTrackingVH` — dangling pointer, not a type bug. The "mismatched
+   xor operand types" / `cast<VectorType>` crashes were just whichever
+   assertion fired first on reused heap memory — unreliable as a
+   fingerprint, don't trust the literal crash signature for this bug
+   class.
+6. Fix: since `CheckExit->Br` (the block's own terminator) is never
+   itself replaced, and any RAUW of its condition operand is applied
+   automatically to all its uses including its own, re-reading
+   `CheckExit->Br->getCondition()` right after the flatten call always
+   gives the correct, live value.
+
+## Verified
+
+- `vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+  (confirmed at session start, as always).
+- Confirmed fail-before/pass-after on all three original crash repros
+  (`feme-opt` built both with and without the fix via `git stash`).
+- New regression lit test, minimized with `llvm-reduce` (50 lines) from
+  the real `cov-discard-condition-loop-same-condition-again` module
+  dump: `feme/test/Transforms/CPU/loop-divergent-exit-prereconverge-
+  flatten-stale-cond.ll`. Confirmed fail-before/pass-after.
+- `check-feme` (with `mlir-translate` + `feme-opt` deps built fresh):
+  **3882/3886 Passed, 4 Unsupported, 0 regressions**.
+- Real `deqp-vk` re-run against a freshly rebuilt `libfeme_vulkan.so`:
+  - `cov-discard-condition-loop-same-condition-again`: crash → **Pass**
+  - `cov-fragcoord-clamp-array-access`: crash → **Pass**
+  - `stable-colorgrid-modulo-vec3-values-from-matrix`: crash → compiles
+    clean, but **Fail** (image comparison, `Histogram EMD value of
+    0.044064 > tolerance 0.005000`) — a new, separate, not-yet-diagnosed
+    bug. Broken out as `ENV7(f)` in the Roadmap (not a regression — this
+    case was never a measured Pass before, it was an Unrun crash).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: unchanged
+  (internal compiler-correctness fix only, no new feature/extension
+  surface), consistent with precedent for this class of fix.
+
+## Commits (3, each independently buildable/testable)
+
+1. `1de1cd7285a0` — the one-line fix + explanatory comment.
+2. `f42c1ca65d8f` — the regression lit test.
+3. `e7b13a9fb482` — Roadmap + VulkanCTSReport updates.
+
+## State restated
+
+- `ENV7(d)`: **done (partial)** — struck through in Roadmap. All 3
+  crashes fixed; 2/3 cases now Pass; 1/3 remains Fail via new `ENV7(f)`.
+- `ENV7(f)` (new): `stable-colorgrid-modulo-vec3-values-from-matrix`'s
+  residual image-correctness `Fail`. Not yet diagnosed — next session
+  should start here if continuing this case. One of its fragment-stage
+  modules (`-module-3.ll` in `env7d-20261103/`) separately hits an old
+  "shared merge point this milestone does not yet generalize to"
+  diagnostic whose message text is inherited from the old
+  `ENV6(c)(2)(h)` fix — but that milestone series is itself fully
+  resolved, so this needs isolating: is it a live recurrence of that
+  shape in a form the existing fix doesn't cover, or unrelated (e.g. a
+  numerics/precision bug in the modulo/matrix math)? Build a minimal
+  standalone reproducer before attempting a fix.
+- `ENV6(c)(3)`/`ENV6(d)`: untouched this session, as instructed.
+- `ENV7(e)` (experimental postmortem Unrun/InternalError outcomes):
+  untouched this session, as instructed — still open.
+- No `.instructions.md` changes needed this session (no new
+  environment/process gotcha found; the "no DWARF line info in
+  `feme-opt`" observation is a one-off tooling note, not a recurring
+  process trap worth codifying — the print-statement bisection approach
+  it fell back to is fine for this bug class).
+- No changes outside `feme/` this session (no upstream LLVM bug found).
+
+## Suggested next steps (ranked)
+
+1. **`ENV7(f)`** (new, this session): build a minimal standalone
+   reproducer for `stable-colorgrid-modulo-vec3-values-from-matrix`'s
+   residual image Fail, isolate whether it's a live `ENV6(c)(2)(h)`-shape
+   recurrence or something new. Likely 1-3 hours given a repro already
+   exists (`env7d-20261103/stable-colorgrid-...-module-3.ll`).
+2. **`ENV7(e)`**: diagnose the two `use_after_free` Unrun cases and 16
+   InternalErrors, separately from canonical conformance. Untouched for
+   several sessions now.
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, unchanged.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier) / offload-test-suite
+   upstreaming: lowest priority, unchanged for many sessions, push
+   access still not granted.
