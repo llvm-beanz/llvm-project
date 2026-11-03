@@ -131093,6 +131093,111 @@ scratch.
 4. offload-test-suite upstreaming (3 patches): blocked on push access,
    unchanged for many sessions.
 
+# 2026-11-03: clean-container FeMe development and full CTS baseline
+
+## Requested outcome and scope
+
+Configure the clean container, build FeMe and Vulkan CTS with object caching,
+assertions enabled and no precompiled headers, run the complete generated
+Vulkan corpus, and publish measured results. The request's final sentence
+ends at "Once those results are ready please"; no unspecified follow-on
+work is assumed. This entry records decisions, outcomes and next steps,
+not private reasoning.
+
+## Setup completed
+
+1. The mandatory first command found llvmpipe, not FeMe. Created
+   `~/.config/feme/env.sh`, its `~/.profile` hook, and the private runtime
+   directory; driver confirmation must follow the actual ICD build.
+2. Configured the main `build/` with Clang/LLD, Release assertions, ccache,
+   PCH disabled, and all six documented backend targets. Raised ccache's
+   limit from 5 GB to 40 GB. A cold `check-feme` invocation builds its own
+   6,831 dependency steps; building `all` first would hide missing test
+   dependencies and is deliberately avoided.
+3. Restored offload's FeMe integration from the fetched `feme` branch and
+   applied the three checked-in harness patches. Set Git identity locally
+   only where absent.
+4. Installed Xvfb/xauth after refreshing initially empty APT indexes.
+   Committed this setup requirement and the missing login hook in
+   `feme/.instructions.md` and `Development.md`.
+
+## Measured setup outcomes
+
+1. FeMe now identifies itself as `FeMe CPU Vulkan Device`, vendor
+   `0x10000`. The cold regression run exposed a missing `mlir-translate`
+   dependency; added it to `FEME_TEST_DEPENDS`. The existing shared-name
+   SPIR-V deserialization regression reproduced the missing executable.
+   `check-feme` then completed: 3,877 Pass, five Unsupported (CTS discovery
+   intentionally disabled until the separate binary existed), no Fail.
+2. Added an opt-in `--batch-timeout` to the CTS runner to prevent an
+   initial/coarse batch from waiting forever. Completed records survive;
+   incomplete cases get the final solo budget. Scheduling regression tests
+   cover default behavior, multi-case recovery, and a shorter initial
+   single-case timeout that must not overwrite a later Pass. The existing
+   subprocess timeout and reconciliation tests also pass.
+3. Corrected offload's WaveActiveMax buffer bounds, output races and Vulkan
+   negative-infinity expectation in its own external commit. Both compilers
+   pass the isolated case on FeMe and lavapipe. Separately scoped the stale
+   DXC push-constant matrix-array XFAIL away from FeMe. Preserved both
+   external corrections as patches `0004` and `0005` for fresh mirrors.
+   The DXC suite now has 497 Pass, 275 Unsupported, 27 XFAIL, no Fail/XPASS.
+4. CTS built with exact pinned dependencies, ccache, assertions and no PCH.
+   Its independently committed host std430 correction is `528efe566`;
+   the historical local commit was unavailable. The canonical corpus has
+   3,244,369 cases; another 24,994 experimental cases are generated
+   separately. Exact pins, flags and hashes are in `setup-report.json`.
+5. Regenerated both inventories; generated tables are byte-for-byte
+   unchanged. Direct ICD queries match all 97 true core feature names and
+   all 50 instance/device extension names. `vulkaninfo` also reports
+   loader/layer extensions, which must not be mistaken for FeMe support.
+
+## Work still in progress
+
+The full CTS audit is running; its final outcomes are not yet available.
+The compiler investigation completed in two self-contained outside-FeMe
+commits: `f01aedcb0a17` fixes HLSL boolean memory conversion, and
+`a6575fe98c1d` emits normalized SPIR-V interpolation decorations and
+SampleRateShading capability. Fifty-one targeted Clang tests, four LLVM
+tests, SPIR-V validation and the three original offload reproducers pass.
+No failure was hidden by restoring stale expected failures.
+
+Final suites with CTS enabled: `check-feme` 3,878 Pass / 4 Unsupported;
+DXC offload 497 Pass / 275 Unsupported / 27 XFAIL; Clang offload 392 Pass /
+271 Unsupported / 136 XFAIL. All have zero Fail/XPASS. The isolated
+80-case CTS std430 reproducer passes all 80; the complete 560-case mesh
+interface family has 160 Pass and 400 NotSupported.
+
+The full job was launched explicitly detached at 02:57 UTC, using the
+unchanging launch build at `a6575fe98c1d`. It requests all 3,269,363
+generated canonical and experimental names, not a selected sample.
+Runner PID at launch: 84760. All inspected QPA vendors are `0x10000`;
+338,222 initial-round records were complete at 03:08 UTC, with active
+binding-model batches still writing Pass results. These provisional
+records are not advertised as final verified outcomes.
+
+Updated the CTS report with truthful running status, exact source/binary
+and case-list provenance, measured setup results and outstanding work.
+Added `ENV7(a)`-`ENV7(c)` as a one-letter-deep breakdown; no unfinished
+milestone is struck through. No implementation design was changed.
+
+## Next action
+
+Check for
+`/home/dev/dev/VK-GL-CTS/run/feme-20261103-full/full-audit/report.txt`.
+It appears after recovery and serial failure verification finish. Until
+then, keep the detached audit running and do not rebuild the ICD.
+Once present, account for every requested case, inspect residual
+Unrun/TimedOut/crash outcomes on an idle host, publish separate canonical
+and experimental totals in `VulkanCTSReport.md`, and complete `ENV7`.
+
+## Session completion boundary
+
+Development setup, fixes, suites and inventory regeneration are complete;
+the requested full-CTS result publication is **not complete**. The detached
+job and raw artifacts persist beyond this CLI session. This final notes
+entry is committed separately so a later session can finish from measured
+results rather than start another cold build or invent a full-run total.
+
 # Session: ENV6(c)(2)(d)/(l) retried, landed partway, found a second regression, reverted again
 
 **Bottom line up front: no code shipped. Tree is clean at the same
