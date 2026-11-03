@@ -30,7 +30,21 @@ Priorities are relative, not scheduled:
   landed depends on it.
 - **P2** — genuinely later; listed so it isn't rediscovered as a surprise.
 
-**Current-container audit (2026-10-20):** the clean AArch64 container now
+**Current-container audit (2026-11-03):** cached, assertion-enabled,
+PCH-free FeMe and CTS builds are configured, and the real ICD is selected.
+`check-feme` has 3,878 Pass and four Unsupported. DXC offload has 497 Pass,
+275 Unsupported and 27 expected failures; Clang offload has 392 Pass,
+271 Unsupported and 136 expected failures. Neither suite has a failure
+or unexpected pass. Independently tested Clang/LLVM fixes resolve the
+newly exposed boolean-load and interpolation regressions.
+
+The complete generated non-video CTS corpus, including experimental cases,
+is running detached: 3,269,363 requested names. Final solo verification
+and outcome publication are **not complete**. Do not replace these pending
+measurements with historical full-run counts or initial batch outcomes.
+See [VulkanCTSReport.md](VulkanCTSReport.md) and `ENV7` below.
+
+**Previous container audit (2026-10-20):** the clean AArch64 container now
 builds with ccache, assertions enabled and PCH disabled. `check-feme`
 passes 3,803 tests with four unsupported; DXC offload passes all expected
 outcomes; Clang offload retains one real Mandelbrot compiler failure.
@@ -55,6 +69,10 @@ breakdowns must use at most one lowercase suffix, such as `ENV3(a)`.
 
 | Milestone | Acceptance and next work | Priority |
 |---|---|---|
+| ENV7: complete 2026-11-03 full CTS refresh | Finish the detached 3,269,363-case audit and publish actual reconciled canonical/experimental totals, not historical or sampled counts. | P0, running |
+| ENV7(a): complete initial and recovery rounds | Monitor `VK-GL-CTS/run/feme-20261103-full/full-audit/`; retain all completed QPA records and verify vendor `0x10000`. No ICD rebuild during collection. | P0, running |
+| ENV7(b): verify residual outcomes | Let serial Fail/DeviceLost verification finish; inspect Unrun/TimedOut and crash logs individually on an idle host. | P0, pending |
+| ENV7(c): publish final results | Regenerate the current CTS report from final artifacts, separate canonical and experimental results, and strike through ENV7 only when every requested case is accounted for. | P0, pending |
 | ~~ENV1: reproducible development environment~~ | ~~Configure both builds with object caching, assertions and no PCH; restore offload FeMe targets; build `check-feme` from clean dependencies; select the real ICD; install Xvfb and persist the non-login environment.~~ Complete; see [Development.md](Development.md). | done |
 | ~~ENV2: measured initial container baseline~~ | ~~Run both offload suites and a declared cross-group CTS selection; fix auxiliary harness defects in isolated commits; regenerate inventories from reconciled manifests.~~ Complete for the 132,345-case selection, not full CTS. | done |
 | ~~ENV3: compiler stability and offload correctness~~ | ~~Done: all 6 `assertion-crash-cases.txt` reproducers complete without abort (`ENV3(a)`, `L462`/`L463`); Clang Mandelbrot's divergent-branch SIMDization failure is fixed (`ENV3(b)`, `L464`); and Mandelbrot's residual `PixelPercent` pixel-diff is fixed (`ENV3(c)`, `L465`-`L467` plus `ENV3(c)(10)`'s own fix), dropping from 1.245630% to 0.160%, under the suite's 0.2% threshold, with the real `Basic/Mandelbrot.test` lit test now passing. `check-feme`: 3822/3826 passed, 4 unsupported, 0 regressions across every fix in this milestone.~~ | done |

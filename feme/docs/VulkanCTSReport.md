@@ -1,6 +1,104 @@
 # Vulkan CTS status
 
-## Current container baseline (2026-10-20)
+## Clean-container full audit (2026-11-03; running)
+
+**FeMe development setup is complete. The new full CTS audit is running,
+not reconciled; no final full-run outcome counts are claimed here.**
+It includes all **3,244,369 canonical `dEQP-VK` cases** and all
+**24,994 generated experimental cases**, for **3,269,363 requested cases**.
+Video was disabled at CTS build time and is not claimed as tested coverage.
+The historical measurements below are not substituted for this run.
+
+### Tested setup
+
+| Component | State |
+|---|---|
+| LLVM/Clang/FeMe source at launch | `a6575fe98c1d020f3d49037fb63d52e9da8f2a56` |
+| CTS upstream | `880f31a2bd9cd0659f84f3f80dafd07f2e693f6d` |
+| CTS tested | `528efe566fcd0d1aa35f8891005936cbb9f9ab23`, std430 host-layout correction |
+| Registry | Vulkan-Docs `f84d432d5b89`, header version 362 |
+| Driver build headers | System Vulkan 1.4.341 |
+| Builds | AArch64; Clang/LLD; ccache; Release assertions; no PCH |
+| LLVM targets | AArch64, AMDGPU, DirectX, NVPTX, SPIRV, X86 |
+| Offload tested | `08f9358`, FeMe integration plus five external harness patches |
+| Driver | `FeMe CPU Vulkan Device`; QPA vendor `0x10000` |
+| Runtime | Both ICD variables select FeMe; safety-net timeout 30000 ms; Xvfb |
+
+The ICD SHA-256 is
+`f3247b18c0499c4cd148884d91af9c6dc1b9ec013d8621b6ec74fbf300c92e4a`.
+The CTS binary SHA-256 is
+`a48b3d9de2df588d4a6deb488c709398ad609ebea4037bdf83c69e2b6ff7c74b`.
+Both inventory generators reproduce their existing tables exactly. Direct
+ICD queries match all 97 advertised core feature bits and all 50 extension
+names; loader/layer extensions are excluded from the driver inventory.
+
+| Completed validation | Pass | Unsupported | Expected failure | Failure |
+|---|---:|---:|---:|---:|
+| `check-feme`, CTS enabled | 3,878 | 4 | 0 | 0 |
+| DXC `check-hlsl-feme-vk` | 497 | 275 | 27 | 0 |
+| Clang `check-hlsl-clang-feme-vk` | 392 | 271 | 136 | 0 |
+| Isolated CTS `mesh_shader.ext.in_out.with_f16` | 80 | 0 | 0 | 0 |
+| Complete CTS `mesh_shader.ext.in_out` | 160 | 400 | 0 | 0 |
+
+The 80-case reproducer is contained in the 560-case family, not additional
+coverage. The cold `check-feme` invocation exposed and fixed its missing
+`mlir-translate` dependency before the final run; no preliminary `all`
+build masked that dependency. Compiler, regression and offload builds were
+finished before launching the full sweep.
+
+External corrections are independently committed and tested:
+CTS `528efe566` fixes 12-byte host vec3 arrays to use std430's 16-byte
+element stride; offload `cdec5de` fixes WaveActiveMax bounds/races and its
+Vulkan negative-infinity expectation; offload `08f9358` narrows a stale
+DXC matrix-array XFAIL. LLVM checkout commits `f01aedcb0a17` and
+`a6575fe98c1d` touch only Clang/LLVM: they fix boolean resource-load
+conversion and SPIR-V interpolation decorations/capability emission.
+Their isolated frontend, backend, SPIR-V validation and original offload
+regressions pass. The Clang interpolation reproducer now returns
+`[3,12,2,3]`, not `[3,3,3,3]`.
+
+### Full-run artifacts and remaining work
+
+Artifacts are retained under
+`/home/dev/dev/VK-GL-CTS/run/feme-20261103-full/`.
+`setup-report.json` records exact pinned dependency revisions and hashes.
+`all-packages-cases.txt` has SHA-256
+`e5459189d8e4fdf128e1cbf9e2a37cc34b5e4be3b1b815a71910e1786a0c81c9`.
+The canonical-only `all-cases.txt` has SHA-256
+`7e0cec65cdb883a45c6bedda5094b8c053866d791bc5e068eddedb98f0a1f57d`.
+
+```shell
+. /home/dev/.config/feme/env.sh
+run=/home/dev/dev/VK-GL-CTS/run/feme-20261103-full
+xvfb-run -a python3 feme/utils/run_vulkan_cts.py \
+  --deqp-vk "$FEME_VULKAN_CTS_DEQP_VK" \
+  --cwd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan \
+  --case-list "$run/all-packages-cases.txt" \
+  --output-dir "$run/full-audit" \
+  --workers 6 --batch-size 1800 --batch-timeout 7200 --final-timeout 600 \
+  --deqp-vk-arg=--deqp-log-images=disable \
+  --write-verified-failures "$run/verified-failures.txt"
+```
+
+This invocation was launched with the CLI's explicitly detached process
+mode at **2026-11-03 02:57 UTC**, so it survives this session. The runner
+PID at launch was **84760**; inspect the command and artifact path before
+relying on a PID in a later session. All inspected QPA sessions identify
+vendor `0x10000`. At 03:08 UTC, 338,222 completed initial-round records
+were present; that is a progress snapshot, **not verified final coverage**.
+Active binding-model batches continued writing Pass results.
+
+The runner retains completed records from bounded batches, recovers
+incomplete cases at 200/20/1-case granularity, and verifies Fail/DeviceLost
+outcomes with one worker. Its final `full-audit/report.txt` and
+`verified-failures.txt` are produced only after those rounds finish.
+**Final outcome publication remains pending:** reconcile that report with
+all requested names, inspect remaining Unrun/TimedOut cases and crash logs,
+then replace this running status with canonical and experimental totals.
+Do not rebuild the ICD during this measurement or classify initial failures
+as verified. Roadmap `ENV7` tracks the remaining work.
+
+## Previous container baseline (2026-10-20)
 
 **The container is configured and both auxiliary suites run against FeMe.
 The current CTS measurement is a 132,345-case selection, not a full CTS

@@ -153,12 +153,19 @@ Feed the resulting bare names to `feme/utils/run_vulkan_cts.py` with
 process logs and `report.txt` under `/home/dev/dev/VK-GL-CTS/run/`, not
 `/tmp`. Verify each QPA session identifies vendor `0x10000`.
 
-The tested auxiliary tips are offload `aae728a` and CTS `0c4f09a1f`.
+The 2026-11-03 tested auxiliary tips are offload `08f9358` and CTS
+`528efe566`; the historical local CTS correction `0c4f09a1f` was not
+available in the clean checkout and was independently reapplied.
 They include independently committed test/harness corrections, not driver
 changes. See [VulkanCTSReport.md](VulkanCTSReport.md) for the isolated
 reproducers and final offload counts. A clean auxiliary checkout may not
 contain these local commits; inspect/reapply the corrections before
 comparing results.
+
+The full current run, including generated experimental cases, is retained
+under `/home/dev/dev/VK-GL-CTS/run/feme-20261103-full/`. See the current
+section of [VulkanCTSReport.md](VulkanCTSReport.md) for source revisions,
+case-list hashes and whether final reconciliation has completed.
 
 The CTS runner parallelizes initial and recovery batches but must verify
 Fail/DeviceLost outcomes with **one worker**. One case per process alone
