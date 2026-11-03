@@ -1,6 +1,5 @@
 ---
-model: claude-sonnet-5
-resume: 1b814ab3-f423-4724-ae98-f676112844de
+model: gpt-6.1-sol
 ---
 # Initial Guidelines
 
@@ -66,20 +65,6 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-Please continue working on the FeMe Vulkan ICD. The previous session suggested
-the next steps:
-
-1. **`ENV6(c)(2)(d)`/`ENV6(c)(2)(l)` fix, own session (~2-4 hours)**:
-   root-cause the outer-cycle `DiamondFlattener::flattenLoopBodyRegion`
-   interaction. Start by building a minimal, from-scratch nested-cycle
-   reduction (inner cycle with a `LatchIdx == -1` relay merge, wrapped
-   in one outer cycle) rather than fighting `env6c2p`'s own unrelated
-   history directly — much smaller surface to reason about. Once the
-   invariant `DiamondFlattener` expects is known, pick approach (a) fix
-   it directly, or (b) scope the freeze to skip nested `Header`s.
-2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
-   multi-session architecture efforts, unchanged.
-3. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest
-   priority, unchanged for many sessions.
-4. offload-test-suite upstreaming (3 patches): blocked on push access,
-   unchanged for many sessions.
+This is a clean container. Can you please configure it for development on the
+feme Vulkan ICD, then build and run the full Vulkan CTS and regenerate the
+VulkanCTSReport. Once those results are ready please
