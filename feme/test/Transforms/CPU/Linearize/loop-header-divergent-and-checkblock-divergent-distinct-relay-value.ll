@@ -45,9 +45,9 @@
 ; now be merged via a `select` keyed on the loop-carried
 ; `%exited.via.check.next` flag, not silently collapsed to one or the
 ; other.
-; CHECK: %.exit.merge = select i1 %[[NEXT]], i1 false, i1 true
+; CHECK: %.exit.merge{{[0-9]*}} = select i1 %[[NEXT]], i1 false, i1 true
 ; CHECK: loop.exit.guard:
-; CHECK-NEXT: %Guard..inv = xor i1 %.exit.merge, true
+; CHECK-NEXT: %Guard..inv = xor i1 %.exit.merge{{[0-9]*}}, true
 
 declare i32 @llvm.spv.thread.id.i32(i32) #0
 

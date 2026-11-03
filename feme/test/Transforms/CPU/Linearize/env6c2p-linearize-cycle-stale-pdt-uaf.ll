@@ -1,4 +1,5 @@
-; RUN: feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
+; RUN: feme-opt --llvm -passes=feme-cpu-linearize,verify -S %s | FileCheck %s
+; RUN: feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize,verify -S %s -o /dev/null
 
 ; Roadmap ENV6(c)(2)(p): a real, captured pre-`feme-cpu-linearize` IR
 ; reduction of `graphicsfuzz/cov-two-nested-loops-switch-case-matrix-
@@ -58,15 +59,15 @@
 ; alongside `CheckBlock`'s own edge -- used to be unsupported here too
 ; (this file's own `CHECK` line, before the `ENV6(c)(2)(o)` fix landed,
 ; asserted on that diagnostic instead of success). It is now handled by
-; physically restoring `CheckExit->StayInLoop`'s single-entry invariant
-; via `SplitBlockPredecessors`, which this test's own `.o.merge` block
-; below (and `LoopLinearizer::DeferredSplitMergeFixups`'s cross-cycle
-; dominance sweep, needed for the `chaingate.merge.*` phis gated behind
-; `%.Flow227_crit_edge` just below) now confirms end-to-end.
+; physically restoring `CheckExit->StayInLoop`'s single-entry invariant.
+; Freezing the check captures keeps their values live across later rounds.
+; The enclosing cycle must recognize their dispatch as divergent rather
+; than reuse its pre-mutation uniformity verdict.
 
 ; CHECK: .o.merge:
-; CHECK-NEXT: %.ph = phi i1 [ %.linearized{{[0-9]+}}, %loop.exit.guard120 ], [ poison, %.Flow227_crit_edge ]
+; CHECK-NEXT: %.ph = phi i1 [ %exit.relay.shadow.frozen{{[0-9]+}}, %loop.exit.guard120 ], [ poison, %.Flow227_crit_edge ]
 ; CHECK: %chaingate.merge.live = phi i1 [ %{{[A-Za-z0-9.]+}}, %loop.exit.guard120 ], [ %{{[A-Za-z0-9.]+}}, %.Flow227_crit_edge ]
+; CHECK: %exit.relay.shadow.frozen{{[0-9]*}} = select i1 %exited.via.check.this.iter, i1 %.linearized{{[0-9]+}}, i1 %exit.relay.shadow{{[0-9]*}}
 
 ; ModuleID = '<in-memory object>'
 source_filename = "LLVMDialectModule"

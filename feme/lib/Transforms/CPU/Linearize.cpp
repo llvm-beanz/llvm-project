@@ -3431,7 +3431,9 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
     bool CondTainted =
         dependsOnTaintedValue(Br->getCondition(), MaskedLoadResults, Visited);
 
-    if (!UI.isDivergentTerminator(Br) && !CondTainted) {
+    // Capturing an exit value can invalidate the condition's uniformity
+    // without updating the original block-keyed terminator cache.
+    if (!UI.isDivergentAtDef(Br->getCondition()) && !CondTainted) {
       // Uniform: the real branch stays; each arm is flattened on its own,
       // still reconverging at the same `R`. Uniform control flow cannot
       // itself narrow the live/side-effect masks (only a
@@ -3796,12 +3798,11 @@ private:
   /// same, already-mutated `CI` here previously crashed
   /// `GenericUniformityInfo`'s own cycle traversal exactly this way on a
   /// real, nested-loop `dEQP-VK.mesh_shader.ext.misc.maximize_primitives`
-  /// shader. The original, pre-mutation `UI` remains valid for every
-  /// block this pass still cares about below (`Header`/`Latch` are never
-  /// peeled or folded away, and `PeeledFrom` -- not `UI` -- is what
-  /// disambiguates a peeled pass-through block from a genuine divergent
-  /// check; see `collectUniformPassThroughRegion`'s own comment) -- so
-  /// there is no need to recompute it at all.
+  /// shader. Preserve this snapshot for cycle traversal, but invalidate
+  /// value verdicts when new exit captures make their users divergent.
+  /// That targeted check uses independent, freshly computed cycle
+  /// information after the current cycle's masks and backedge are complete,
+  /// never the partially mutated `CI` retained here.
   UniformityInfo &UI;
 
   /// Roadmap L196: values this pass itself has synthesized and separately
@@ -8076,8 +8077,19 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       (Source == RelaySource::Header ? Entry.first : Entry.second) = V;
     }
     IRBuilder<> RelayRestoreBuilder(Latch->getTerminator());
+    SmallVector<WeakTrackingVH, 4> ChangedCaptures;
     for (auto &[PN, HeaderAndCheck] : MergedRelayValues) {
       auto &[HeaderValue, CheckValue] = HeaderAndCheck;
+      // Constants cannot advance on later rounds. Shadowing an exit tag
+      // instead introduces poison and can make an enclosing dispatch
+      // spuriously divergent.
+      if (CheckValue && !isa<Constant>(CheckValue)) {
+        CheckValue = freezeExitRelayValue(
+            Header, Latch, CheckValue,
+            [&] { return EffectiveDivergedViaCheckThisIter; },
+            /*OutShadow=*/nullptr, /*ForceShadow=*/true);
+        ChangedCaptures.push_back(PN);
+      }
       if (int LatchIdx = PN->getBasicBlockIndex(Latch); LatchIdx != -1) {
         // Roadmap ENV6(c)(2)(q): `PN`'s pre-existing `Latch`-incoming
         // value (`NaturalValue`) is this loop's own natural, un-captured
@@ -8106,14 +8118,10 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         if (!CheckValue)
           continue;
         Value *NaturalValue = PN->getIncomingValue(LatchIdx);
-        Value *FrozenCheckValue = freezeExitRelayValue(
-            Header, Latch, CheckValue,
-            [&] { return EffectiveDivergedViaCheckThisIter; },
-            /*OutShadow=*/nullptr, /*ForceShadow=*/true);
-        PN->setIncomingValue(
-            LatchIdx, RelayRestoreBuilder.CreateSelect(
-                          EffectiveExitedViaCheckNext, FrozenCheckValue,
-                          NaturalValue, PN->getName() + ".exit.merge"));
+        PN->setIncomingValue(LatchIdx,
+                             RelayRestoreBuilder.CreateSelect(
+                                 EffectiveExitedViaCheckNext, CheckValue,
+                                 NaturalValue, PN->getName() + ".exit.merge"));
         continue;
       }
       Value *Restored;
@@ -8138,6 +8146,29 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                                   RelayCapturedHeaderPhis.end()),
         ExitBlock);
     addLatchIncoming(EntryMasks, EffectiveMasksAfterCheck);
+    if (!ChangedCaptures.empty()) {
+      // A capture can make an enclosing dispatch divergent, but a uniform
+      // check still captures uniformly. Analyze the completed CFG with
+      // independent cycle information; CI retains the pre-mutation cycles.
+      DominatorTree CaptureDT(F);
+      CycleInfo CaptureCI;
+      CaptureCI.compute(F);
+      UniformityInfo CaptureUI = computeWaveUniformity(F, CaptureDT, CaptureCI);
+      SmallVector<Value *, 8> Worklist;
+      for (const WeakTrackingVH &Capture : ChangedCaptures)
+        if (Capture)
+          Worklist.push_back(Capture);
+      SmallPtrSet<Value *, 8> Visited;
+      while (!Worklist.empty()) {
+        Value *V = Worklist.pop_back_val();
+        if (!Visited.insert(V).second || isKnownUniform(V) ||
+            !CaptureUI.isDivergentAtDef(V))
+          continue;
+        UI.forgetValue(V);
+        for (User *U : V->users())
+          Worklist.push_back(U);
+      }
+    }
     // Roadmap L282: record this cycle's own entry masks so an *enclosing*
     // cycle (linearized afterward, post-order) can retroactively narrow
     // them via `rethreadNestedEntryMasks` if it turns out this cycle's

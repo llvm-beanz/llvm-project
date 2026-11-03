@@ -4212,4 +4212,71 @@ TEST(LinearizeTest,
          "not read fresh every round";
 }
 
+TEST(LinearizeTest, FreezesCheckCaptureWithoutNaturalLatchExit) {
+  for (bool DistinctCaptures : {false, true}) {
+    LLVMContext Ctx;
+    std::string Assembly = R"(
+      define void @main(i32 %n) #0 {
+      entry:
+        %tid = call i32 @llvm.dx.thread.id(i32 0)
+        br label %header
+      header:
+        %i = phi i32 [0, %entry], [%inc, %latch]
+        %v = phi i32 [%tid, %entry], [%v.next, %latch]
+        %more = icmp slt i32 %v, %n
+        br i1 %more, label %body, label %exit
+      body:
+        %break.cond = icmp eq i32 %tid, %i
+        br i1 %break.cond, label %exit, label %latch
+      latch:
+        %v.next = add i32 %v, 2
+        %inc = add i32 %i, 1
+        br label %header
+      exit:
+        %v.exit = phi i32 [)";
+    Assembly += DistinctCaptures ? "%n" : "%v";
+    Assembly += R"(, %header], [%v, %body]
+        %chk = icmp eq i32 %v.exit, 3
+        ret void
+      }
+      declare i32 @llvm.dx.thread.id(i32)
+      attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+    )";
+    SCOPED_TRACE(DistinctCaptures);
+    auto M = parseIR(Ctx, Assembly);
+    ASSERT_TRUE(M);
+    EXPECT_TRUE(run(*M));
+    EXPECT_FALSE(verifyModule(*M, &errs()));
+
+    Function *F = M->getFunction("main");
+    ASSERT_TRUE(F);
+    SelectInst *Frozen = nullptr;
+    for (Instruction &I : instructions(F))
+      if (auto *Sel = dyn_cast<SelectInst>(&I);
+          Sel && Sel->getName().starts_with("exit.relay.shadow.frozen") &&
+          Sel->getCondition()->getName() == "exited.via.check.this.iter")
+        Frozen = Sel;
+    ASSERT_TRUE(Frozen);
+    EXPECT_EQ(Frozen->getTrueValue()->getName(), "v");
+    auto *Shadow = dyn_cast<PHINode>(Frozen->getFalseValue());
+    ASSERT_TRUE(Shadow);
+    ASSERT_EQ(Shadow->getNumIncomingValues(), 2u);
+    EXPECT_EQ(Shadow->getIncomingValueForBlock(Frozen->getParent()), Frozen);
+    EXPECT_EQ(Frozen->getCondition()->getName(), "exited.via.check.this.iter");
+
+    SelectInst *Merge = nullptr;
+    for (Instruction &I : instructions(F))
+      if (I.getName() == "v.exit.exit.merge")
+        Merge = dyn_cast<SelectInst>(&I);
+    ASSERT_TRUE(Merge);
+    EXPECT_EQ(Merge->getTrueValue(), Frozen);
+    if (DistinctCaptures)
+      EXPECT_NE(Merge->getFalseValue(), Frozen);
+    else
+      EXPECT_EQ(Merge->getFalseValue(), Frozen->getTrueValue())
+          << "even equal raw captures need the natural header value when "
+             "no divergent check exit has occurred";
+  }
+}
+
 } // namespace
