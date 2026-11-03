@@ -285,6 +285,89 @@ static void narrowCallMask(CallInst *Call, unsigned MaskArgIdx, Value *Mask) {
     Call->setArgOperand(MaskArgIdx, Mask);
 }
 
+/// (Roadmap ENV7(f)) Re-narrows \p Call's own mask operand from \p OldLive/
+/// \p OldSideEffect down to \p NewLive/\p NewSideEffect, but *only* by exact
+/// identity (unlike `narrowCallMask`'s own "only if still constant" guard,
+/// which deliberately never overwrites an already-non-constant mask -- see
+/// its own comment). Exists solely for
+/// `DiamondFlattener::flattenKnownDivergentBranch`'s own two call sites: its
+/// only caller (`LoopLinearizer::flattenTaintedBranchesInRegion`) is reached
+/// only *after* `LoopLinearizer::linearizeCycle`'s own blanket
+/// `applyStageMasks(*BB, Masks)` loop over the whole `PreRegion` (including
+/// `T`'s/`Fsucc`'s own interior -- `collectUniformPassThroughRegion` cannot
+/// yet tell a soon-to-be-divergent diamond's two arms apart from any other
+/// `PreRegion` block, since the branch gating them still looks uniform
+/// before that very masking narrows the load/image/resource call its
+/// condition depends on) already converted every stage op in `T`/`Fsucc`
+/// into its final, masked form using that one coarse, whole-region
+/// `Masks.Live`/`Masks.SideEffect` -- `flattenKnownDivergentBranch`'s own
+/// freshly-computed, properly per-arm `TMasks`/`FMasks` then have nothing
+/// left to apply to: `applyStageMasks`'s ordinary `LoadInst`/`StoreInst`
+/// cases, which only ever run once per instruction, have already replaced
+/// every one of `T`'s/`Fsucc`'s raw memory ops with a masked call baked to
+/// the coarse mask, and `narrowCallMask`'s "only if still constant" guard
+/// (relied on everywhere else to protect an already-correctly-narrowed
+/// mask from being clobbered) means the ordinary resource/image path does
+/// not fix this either. Left unfixed, every lane merely *entering* `T`
+/// (rather than only the lanes `Cond` genuinely selects) still runs `T`'s
+/// side effects -- found reducing
+/// `dEQP-VK.graphicsfuzz.stable-colorgrid-modulo-vec3-values-from-matrix`'s
+/// own `if (c[i] >= 1.0) { c[i] *= c[i]; if (cond) break; }` loop-body
+/// diamond: the inner `break` is exactly what makes
+/// `collectUniformPassThroughRegion`'s own pre-masking uniformity check
+/// miss this diamond's outer `if`, routing it through this exact
+/// mask-already-baked path instead of the ordinary, already-correct
+/// `DiamondFlattener::flatten` case. Identity (rather than
+/// `isKnownConstantMask`) is the right, sound test here: `OldLive`/
+/// `OldSideEffect` are literally the same `Value *` the blanket pass just
+/// used a moment ago in this exact lexical scope, so any call whose mask
+/// operand is *not* that same value was narrowed by some other, unrelated
+/// walk and must be left alone.
+static void renarrowAlreadyMaskedOp(CallInst *Call, Value *OldLive,
+                                    Value *NewLive, Value *OldSideEffect,
+                                    Value *NewSideEffect) {
+  if (std::optional<MatchedMaskedMemOp> M = matchMaskedLoad(*Call)) {
+    if (M->Mask == OldLive)
+      Call->setArgOperand(2, NewLive);
+    return;
+  }
+  if (std::optional<MatchedMaskedMemOp> M = matchMaskedStore(*Call)) {
+    if (M->Mask == OldSideEffect)
+      Call->setArgOperand(3, NewSideEffect);
+    return;
+  }
+  if (std::optional<MatchedResourceCall> M = matchResourceCall(*Call)) {
+    if (!M->Mask)
+      return;
+    bool IsLoad = isLoad(M->Kind);
+    if (M->Mask == (IsLoad ? OldLive : OldSideEffect))
+      Call->setArgOperand(Call->arg_size() - 1,
+                          IsLoad ? NewLive : NewSideEffect);
+    return;
+  }
+  if (std::optional<MatchedImageCall> M = matchImageCall(*Call)) {
+    if (!M->Mask)
+      return;
+    bool UsesSideEffect = M->Texel || M->AtomicValue;
+    if (M->Mask == (UsesSideEffect ? OldSideEffect : OldLive))
+      Call->setArgOperand(Call->arg_size() - 1,
+                          UsesSideEffect ? NewSideEffect : NewLive);
+  }
+}
+
+/// Calls `renarrowAlreadyMaskedOp` (see its own comment) on every `CallInst`
+/// in each of \p Blocks, re-narrowing any stage op the enclosing blanket
+/// `applyStageMasks` pass already masked with \p Old down to \p New.
+static void renarrowAlreadyMaskedOpsInBlocks(
+    const SmallPtrSetImpl<BasicBlock *> &Blocks, const MaskPair &Old,
+    const MaskPair &New) {
+  for (BasicBlock *BB : Blocks)
+    for (Instruction &I : *BB)
+      if (auto *Call = dyn_cast<CallInst>(&I))
+        renarrowAlreadyMaskedOp(Call, Old.Live, New.Live, Old.SideEffect,
+                                New.SideEffect);
+}
+
 /// (Roadmap L419(w)) Folds each of \p MaskPhis -- `LoopLinearizer::
 /// makeActivePNPair`'s own `active.live`/`active.sideeffect` phis, just
 /// after `addLatchIncoming` has filled in their real backedge values --
@@ -3205,8 +3288,21 @@ DiamondFlattener::flattenKnownDivergentBranch(BasicBlock *Start,
   // them.
   CycleBoundaryBlocks.clear();
   LastRegionVisited.clear();
-  if (!validate(T, R, /*Quiet=*/true) || !validate(Fsucc, R, /*Quiet=*/true))
+  if (!validate(T, R, /*Quiet=*/true))
     return std::nullopt;
+  // Roadmap ENV7(f): captured as two separate sets (rather than one
+  // combined `LastRegionVisited` the way every other caller of `validate`
+  // does) so `renarrowAlreadyMaskedOpsInBlocks` below can apply `T`'s own
+  // `TMasks` only to `T`'s own arm, and `Fsucc`'s own `FMasks` only to
+  // `Fsucc`'s -- see that function's own comment for why this split
+  // matters.
+  SmallPtrSet<BasicBlock *, 16> TRegionBlocks(LastRegionVisited.begin(),
+                                              LastRegionVisited.end());
+  LastRegionVisited.clear();
+  if (!validate(Fsucc, R, /*Quiet=*/true))
+    return std::nullopt;
+  SmallPtrSet<BasicBlock *, 16> FRegionBlocks(LastRegionVisited.begin(),
+                                              LastRegionVisited.end());
   for (BasicBlock *BB : CycleBoundaryBlocks) {
     auto *BBr = dyn_cast<CondBrInst>(BB->getTerminator());
     bool Tolerable = BBr && CycleBoundaryEnd.lookup(BB) == R &&
@@ -3214,7 +3310,8 @@ DiamondFlattener::flattenKnownDivergentBranch(BasicBlock *Start,
     if (!Tolerable)
       return std::nullopt;
   }
-  ResolvedBlocks.insert(LastRegionVisited.begin(), LastRegionVisited.end());
+  ResolvedBlocks.insert(TRegionBlocks.begin(), TRegionBlocks.end());
+  ResolvedBlocks.insert(FRegionBlocks.begin(), FRegionBlocks.end());
 
   // Mirrors `flatten`'s own divergent-branch case exactly (see its
   // comment) -- `TPred`/`FPred` identified by dominance before either arm
@@ -3251,6 +3348,20 @@ DiamondFlattener::flattenKnownDivergentBranch(BasicBlock *Start,
 
   UncondBrInst::Create(T, Br->getIterator());
   Br->eraseFromParent();
+
+  // Roadmap ENV7(f): re-narrow any stage op `LoopLinearizer`'s own
+  // blanket `applyStageMasks(*BB, Masks)` loop over the whole `PreRegion`
+  // already masked-and-erased inside `T`'s/`Fsucc`'s own interior, down
+  // from that one coarse `Masks` to this diamond's own, properly per-arm
+  // `TMasks`/`FMasks` -- see `renarrowAlreadyMaskedOp`'s own comment for
+  // the full root-cause writeup. Must run before the `flatten` calls
+  // below: those still correctly mask any ordinary `LoadInst`/`StoreInst`
+  // this diamond's own arms contain that the blanket pass never reached
+  // (not every `PreRegion` member is necessarily `T`'s/`Fsucc`'s own
+  // ancestor), but have nothing left to do for a stage op the blanket
+  // pass already converted to its final, masked call form.
+  renarrowAlreadyMaskedOpsInBlocks(TRegionBlocks, Masks, TMasks);
+  renarrowAlreadyMaskedOpsInBlocks(FRegionBlocks, Masks, FMasks);
 
   // Each arm's own exit `MaskPair` is intentionally discarded here: unlike
   // `flatten`'s own divergent-branch case, this method's only caller
