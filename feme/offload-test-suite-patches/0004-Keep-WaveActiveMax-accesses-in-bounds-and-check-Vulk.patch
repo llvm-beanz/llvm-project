@@ -1,0 +1,65 @@
+From cdec5de3038e264b51d9695d49452ac619560ff9 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 02:25:27 +0000
+Subject: [PATCH] Keep WaveActiveMax accesses in bounds and check Vulkan
+ negative infinity
+
+The isolated test dispatches 32 threads with eight indices into four-element buffers and races on output elements. Use four unique in-bounds invocations and expect the specified -INF reduction identity on Vulkan while preserving other API expectations. DXC and Clang pass on both FeMe and lavapipe; remove the now-stale arm64 lavapipe XFAIL.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ test/WaveOps/WaveActiveMax.test | 21 +++++++++++----------
+ 1 file changed, 11 insertions(+), 10 deletions(-)
+
+diff --git a/test/WaveOps/WaveActiveMax.test b/test/WaveOps/WaveActiveMax.test
+index 3d74d36..3d9a1e5 100644
+--- a/test/WaveOps/WaveActiveMax.test
++++ b/test/WaveOps/WaveActiveMax.test
+@@ -4,12 +4,12 @@ RWStructuredBuffer<float> Infs : register(u1);
+ RWStructuredBuffer<float> NegInfs : register(u2);
+ RWStructuredBuffer<float> Mix : register(u3);
+ 
+-[numthreads(32,1,1)]
++[numthreads(4,1,1)]
+ void main(uint3 TID : SV_GroupThreadID) {
+-  Nans[TID.x % 8] = WaveActiveMax(Nans[TID.x % 8]);
+-  Infs[TID.x % 8] = WaveActiveMax(Infs[TID.x % 8]);
+-  NegInfs[TID.x % 8] = WaveActiveMax(NegInfs[TID.x % 8]);
+-  Mix[TID.x % 8] = WaveActiveMax(Mix[TID.x % 8]);
++  Nans[TID.x] = WaveActiveMax(Nans[TID.x]);
++  Infs[TID.x] = WaveActiveMax(Infs[TID.x]);
++  NegInfs[TID.x] = WaveActiveMax(NegInfs[TID.x]);
++  Mix[TID.x] = WaveActiveMax(Mix[TID.x]);
+ }
+ //--- pipeline.yaml
+ 
+@@ -81,12 +81,11 @@ DescriptorSets:
+ # Also SPIR-V states:
+ # > The identity I for Operation is -INF.
+ 
+-# This makes it defined that any lane value of -INF is ignored.
+-# DirectX driver implementations seem to match SPIR-V, except WARP, which does
+-# not treat -INF as an identity.
++# Reducing only -INF values therefore produces -INF in Vulkan.
++# Four invocations keep every access within the four-element buffers and
++# avoid multiple invocations racing to write the same element.
+ 
+ # XFAIL: arm64 && DirectX && WARP
+-# XFAIL: Lavapipe && host-arm64
+ 
+ # CHECK: Name: Nans
+ # CHECK-NEXT: Format: Float32
+@@ -98,7 +97,9 @@ DescriptorSets:
+ # CHECK-NEXT: Data: [ inf, inf, inf, inf ]
+ # CHECK: Name: NegInfs
+ # CHECK-NEXT: Format: Float32
+-# CHECK-NEXT: Data: [ 0, 0, 0, 0 ]
++# METAL-NEXT: Data: [ 0, 0, 0, 0 ]
++# DX-NEXT: Data: [ 0, 0, 0, 0 ]
++# VULKAN-NEXT: Data: [ -inf, -inf, -inf, -inf ]
+ # CHECK: Name: Mix
+ # CHECK-NEXT: Format: Float32
+ # CHECK-NEXT: Data: [ inf, inf, inf, inf ]
+-- 
+2.53.0
+

@@ -7,9 +7,10 @@ outside this project's control (see `feme/.instructions.md`). This repo has
 no push access to `llvm-beanz/offload-test-suite`, so any local commits made
 there during a session do not persist to the next one.
 
-These patches fix genuine, isolated, unit-tested bugs in `offload-test-suite`
+These patches fix genuine, isolated, tested bugs in `offload-test-suite`
 discovered while validating the Clang Mandelbrot fix (FeMe Roadmap `ENV3(b)`,
-`L464`). Re-apply them after the standard `llvm-beanz/feme` cherry-pick each session,
+`L464`) and the 2026-11-03 clean-container setup. Re-apply them after the
+standard `llvm-beanz/feme` cherry-pick each session,
 in order, until they are upstreamed to `llvm-beanz/offload-test-suite`:
 
 ```sh
@@ -41,3 +42,12 @@ Then re-run `cmake .` in the `llvm-project` build directory so the new
    shell's override of FeMe's wait-safety-net bound is no longer silently
    dropped for lit-driven runs (lit's default `config.environment` is a
    curated whitelist, not a copy of the ambient environment).
+4. `0004-...-WaveActiveMax-...patch` -- uses four unique, in-bounds
+   invocations for four-element buffers, eliminating out-of-bounds accesses
+   and output write races. Checks the specified negative-infinity reduction
+   on Vulkan and removes the stale arm64 lavapipe expected failure. The
+   isolated test passes with both DXC and Clang on FeMe and lavapipe.
+5. `0005-...-DXC-push-constant-...patch` -- excludes FeMe from the stale
+   DXC matrix-array expected failure, without changing expectations for
+   Clang or other drivers. The isolated FeMe DXC test passes; the Clang
+   configuration remains an expected failure.
