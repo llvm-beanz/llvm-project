@@ -17,6 +17,15 @@ or committing. Do not overwrite a pre-existing identity. Increase ccache's
 default 5 GB limit if necessary; this container uses 40 GB in
 `/home/dev/.cache/ccache`.
 
+If the clean image has no APT package indexes, installing Xvfb reports
+`Unable to locate package`. Refresh the indexes before installing the
+missing virtual-framebuffer tools:
+
+```shell
+sudo apt-get update
+sudo apt-get install xvfb xauth
+```
+
 ## Main build and offload-test-suite
 
 The auxiliary checkout may start at `origin/main` without the FeMe targets.
@@ -103,9 +112,17 @@ export XDG_RUNTIME_DIR=/home/dev/.cache/feme-runtime
 export PATH="$FEME_BUILD_DIR/bin:$PATH"
 ```
 
-Create the runtime directory with mode 700. This container's login profile
-sources `~/.config/feme/env.sh`. Explicitly source it in non-login shells
-too:
+Create `~/.config/feme/` before writing the environment file, and create
+the runtime directory with mode 700. A clean image may not have the
+login-profile hook; add it to `~/.profile` if absent:
+
+```shell
+if [ -f "$HOME/.config/feme/env.sh" ]; then
+    . "$HOME/.config/feme/env.sh"
+fi
+```
+
+Explicitly source it in non-login shells too:
 
 ```shell
 . /home/dev/.config/feme/env.sh
