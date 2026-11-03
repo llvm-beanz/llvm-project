@@ -1,13 +1,26 @@
 # Vulkan CTS status
 
-## Clean-container full audit (2026-11-03; running)
+## Clean-container full audit (2026-11-03; completed)
 
-**FeMe development setup is complete. The new full CTS audit is running,
-not reconciled; no final full-run outcome counts are claimed here.**
+**The full audit completed at 11:18 UTC. Five requested cases still have
+no completed QPA record; this is not a conformance pass.**
 It includes all **3,244,369 canonical `dEQP-VK` cases** and all
 **24,994 generated experimental cases**, for **3,269,363 requested cases**.
 Video was disabled at CTS build time and is not claimed as tested coverage.
 The historical measurements below are not substituted for this run.
+
+| Package | Requested | Pass | NotSupported | Fail | QualityWarning | InternalError | Unrun |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Canonical `dEQP-VK` | 3,244,369 | 727,848 | 2,516,215 | 257 | 46 | 0 | 3 |
+| Experimental | 24,994 | 1 | 24,974 | 1 | 0 | 16 | 2 |
+| **Total** | **3,269,363** | **727,849** | **2,541,189** | **258** | **46** | **16** | **5** |
+
+These are reconciled completed-record statuses, with Fail/DeviceLost
+outcomes reverified serially by the runner. No TimedOut status was recorded.
+`final-summary.json` separates packages from `full-audit/report.txt`;
+`verified-failures.txt` contains the 258 Fail names. The experimental Fail
+is `postmortem.device_loss.maintenance5`. InternalError and Unrun are not
+counted as Pass or NotSupported.
 
 ### Tested setup
 
@@ -57,7 +70,7 @@ Their isolated frontend, backend, SPIR-V validation and original offload
 regressions pass. The Clang interpolation reproducer now returns
 `[3,12,2,3]`, not `[3,3,3,3]`.
 
-### Full-run artifacts and remaining work
+### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
 `/home/dev/dev/VK-GL-CTS/run/feme-20261103-full/`.
@@ -80,23 +93,73 @@ xvfb-run -a python3 feme/utils/run_vulkan_cts.py \
   --write-verified-failures "$run/verified-failures.txt"
 ```
 
-This invocation was launched with the CLI's explicitly detached process
-mode at **2026-11-03 02:57 UTC**, so it survives this session. The runner
-PID at launch was **84760**; inspect the command and artifact path before
-relying on a PID in a later session. All inspected QPA sessions identify
-vendor `0x10000`. At 03:08 UTC, 338,222 completed initial-round records
-were present; that is a progress snapshot, **not verified final coverage**.
-Active binding-model batches continued writing Pass results.
+This invocation ran from **2026-11-03 02:57 UTC to 11:18 UTC**. No sweep
+process remained at reconciliation. All inspected QPA sessions identify
+vendor `0x10000`. The ICD was not rebuilt during this full measurement.
 
 The runner retains completed records from bounded batches, recovers
 incomplete cases at 200/20/1-case granularity, and verifies Fail/DeviceLost
-outcomes with one worker. Its final `full-audit/report.txt` and
-`verified-failures.txt` are produced only after those rounds finish.
-**Final outcome publication remains pending:** reconcile that report with
-all requested names, inspect remaining Unrun/TimedOut cases and crash logs,
-then replace this running status with canonical and experimental totals.
-Do not rebuild the ICD during this measurement or classify initial failures
-as verified. Roadmap `ENV7` tracks the remaining work.
+outcomes with one worker. Its final report accounts for 3,269,358 completed
+records and the following five incomplete cases, each attempted again in
+the final single-case recovery round:
+
+| Case (package prefix omitted) | Final isolated recovery evidence |
+|---|---|
+| `graphicsfuzz.cov-discard-condition-loop-same-condition-again` | `recovery-3-00000.log`: `cast<VectorType>` assertion |
+| `graphicsfuzz.cov-fragcoord-clamp-array-access` | `recovery-3-00020.log`: mismatched binary operand types (`xor`) |
+| `graphicsfuzz.stable-colorgrid-modulo-vec3-values-from-matrix` | `recovery-3-00040.log`: mismatched binary operand types (`xor`) |
+| Experimental `postmortem.use_after_free.ssbo_to_ssbo_single_invocation` | `recovery-3-00047.log`: stops after starting the case, no completed record |
+| Experimental `postmortem.use_after_free.ubo_to_ssbo_single_invocation` | `recovery-3-00048.log`: stops after starting the case, no completed record |
+
+The last two logs do not establish a crash mechanism or a timeout; retain
+Unrun until individually diagnosed. Roadmap `ENV7` keeps these five cases
+and the 16 experimental InternalErrors open. Do not combine the compiler
+refresh below with this earlier, source-pinned full-audit snapshot.
+
+## Exit-check capture repair (2026-11-03)
+
+Completed `ENV6(c)(2)(d)` and the remaining capture gap in `(l)`.
+Implementation: `055056dde13f`; retained uniform nested regression:
+`1531ab22bc60`.
+Nonconstant check captures are now frozen before all exit-merge paths,
+including loops without an original latch-to-exit edge. Constants remain
+unshadowed. Natural header captures are preserved even when their raw
+value equals the check capture.
+
+The nested regressions had two distinct causes: shadowing a constant exit
+tag introduced poison and made `complex-nested-loops-and-call`'s
+`loop.exit.guard1` spuriously divergent; genuinely varying captures
+invalidated the old uniformity verdicts on an existing exit phi and its
+users. After closing the cycle, an independent fresh dominator tree,
+cycle analysis, and uniformity analysis identify only genuinely divergent
+capture users for invalidation. This avoids both stale verdicts and
+overconservative rejection of uniform nested trip-count checks.
+Diamond flattening reads the current condition's verdict, not the original
+block-keyed terminator cache. Cycle-boundary acceptance is unchanged.
+
+| Validation | Before | After |
+|---|---:|---:|
+| Complete canonical GraphicsFuzz family (757 requested) | 666 Pass / 88 Fail / 3 Unrun | 667 Pass / 87 Fail / 3 Unrun |
+| Complete GLSL loops/demote and SPIR-V 1.4 loop-control families (659 requested) | 642 Pass / 17 Fail | 642 Pass / 17 Fail |
+| `spv-stable-pillars-O-op-select-to-op-phi` | Fail | Pass |
+| `complex-nested-loops-and-call` | Pass | Pass |
+| `cov-two-nested-loops-switch-case-matrix-array-increment` | Pass | Pass |
+| `cov-uniform-vector-function-argument-mod-increment-integers` | Pass | Pass |
+| `check-feme` (cached, assertions, no PCH) | 3,878 Pass / 4 Unsupported | 3,881 Pass / 4 Unsupported |
+
+Every final Fail was reverified serially; the exact baseline/final failure
+sets show **one newly passing case and zero regressions**. The same three
+GraphicsFuzz cases remain Unrun. Intermediate diagnostic builds had
+regressions and are not the final measurement.
+The additional 659-case compatibility comparison has zero Unrun and the
+same 17 serially verified failures as the source-pinned full-audit baseline.
+Artifacts: `VK-GL-CTS/run/env6-freeze-20261103/`, with `baseline/`,
+`precise/`, `compatibility/`, verified failure lists, captured modules, and
+build/test logs.
+New unit coverage verifies sticky recurrence and both equal/distinct raw
+captures; captured nested regressions run through linearization, SIMD
+widening, and the LLVM verifier. Both inventory generators reproduce their
+tables exactly; no feature or extension advertisement changed.
 
 ## Previous container baseline (2026-10-20)
 

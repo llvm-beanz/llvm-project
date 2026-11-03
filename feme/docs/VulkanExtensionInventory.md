@@ -21,6 +21,10 @@ ICD advertisements. The ICD itself
 is compiled against the container's Vulkan headers 1.4.341. Counts describe
 advertisements, not passing CTS coverage.
 
+Rechecked after the 2026-11-03 exit-capture repair: the registry generator
+reproduces this table exactly. No instance or device extension
+advertisement changed; see `VulkanCTSReport.md` for the compiler results.
+
 | Status | Count |
 |---|---:|
 | Advertised | 50 |

@@ -15,6 +15,11 @@ all 97 advertised names, with no additional true feature bits. The ICD itself
 is compiled against the container's Vulkan headers 1.4.341. Counts below
 describe advertisements, not a conformance claim or passing CTS coverage.
 
+Rechecked after the 2026-11-03 exit-capture repair: the registry generator
+reproduces this table exactly. This compiler-correctness change adds no
+feature advertisement; the new CTS comparison is recorded separately in
+`VulkanCTSReport.md`.
+
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---:|---:|---:|
 | 1.0 | 34 of 55 | n/a | n/a |

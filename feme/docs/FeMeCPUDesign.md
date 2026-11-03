@@ -1727,6 +1727,27 @@ before any widening happens. Working on scalar IR here (masks are `i1`, not
   and resource bounds checks cannot touch memory on behalf of control flow
   the source program did not execute.
 
+### Exit captures and nested-cycle uniformity
+
+Every nonconstant value captured at a divergent exit check uses a sticky
+loop-carried shadow, before merging with either a header exit capture or a
+natural latch exit value. This also applies when the final latch-to-exit
+edge is newly introduced. Constants do not need shadows: poison-initialized
+shadows of constant exit tags can make an enclosing dispatch spuriously
+divergent. Equal raw header/check captures still need the natural header
+value on lanes that never take the check exit.
+
+The cycle traversal retains its original cycle information and uniformity
+snapshot. After new captures and the current cycle's mask backedges are
+complete, a separate dominator tree and freshly computed cycle information
+support a temporary uniformity analysis. Only captured values and their
+users that this fresh analysis proves divergent have their old uniform
+verdicts invalidated. The original, partially mutated cycle information
+must never be used for this reanalysis. Diamond flattening queries the
+current condition's value verdict rather than a stale block-keyed
+terminator verdict. This preserves uniform nested trip-count checks while
+allowing a newly divergent captured exit tag to be lowered by its parent.
+
 ### Mask representation between phases
 
 Masks are carried in the IR, in a family of FeMe-internal intrinsics that
