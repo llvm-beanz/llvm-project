@@ -7744,6 +7744,28 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // comment for the full root-cause writeup).
     if (!flattenTaintedBranchesInRegion(*PreRegion, Masks, C))
       return false;
+    // Roadmap ENV7(d): `flattenTaintedBranchesInRegion` can flatten a
+    // `PreRegion`-resident diamond whose own reconvergence block is
+    // `CheckBlock` itself (`PreRegion` only ever excludes `CheckBlock`
+    // from being flattened *as a candidate*, not from being a diamond's
+    // merge target) -- `DiamondFlattener` then replaces every phi
+    // `CheckBlock` has, `CheckExit->Cond`'s own defining phi included,
+    // with a freshly built `select` via RAUW, then erases the original.
+    // `CheckExit->Cond` is a raw `Value *` snapshot taken before this
+    // call, not a `WeakTrackingVH`, so it is left dangling: every
+    // instruction/type query on it past this point reads freed memory,
+    // most visibly surfacing many instructions later as a `xor`/`select`
+    // built from a stale, reused-memory bit width (confirmed via a real,
+    // reproduced `cast<VectorType>` assertion and two mismatched-
+    // binary-operand-type verifier failures on
+    // `dEQP-VK.graphicsfuzz.{cov-discard-condition-loop-same-condition-
+    // again,cov-fragcoord-clamp-array-access}` and
+    // `stable-colorgrid-modulo-vec3-values-from-matrix`). `CheckExit->Br`
+    // is `CheckBlock`'s own terminator and is never itself replaced by
+    // this flatten, so any RAUW of its condition operand is reflected by
+    // re-reading it directly; refresh `CheckExit->Cond` from there rather
+    // than trusting the pre-flatten snapshot.
+    CheckExit->Cond = CheckExit->Br->getCondition();
 
     // Roadmap L442: `CheckBlock` is not purely "before" its own check --
     // any resource/image call or memory access physically sharing this
