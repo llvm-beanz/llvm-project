@@ -162,6 +162,83 @@ above without a dedicated re-measurement pass; this section only confirms
 the compiler-level crash diagnosis and its `deqp-vk` effect on these three
 specific cases in isolation.
 
+## ENV7(f): `stable-colorgrid-modulo-vec3-values-from-matrix` image-correctness fix
+
+Root-caused and fixed the residual `Fail` left over from `ENV7(d)` above.
+This was **not** a recurrence of the old `ENV6(c)(2)(h)`-family message
+and not a numerics/precision bug in the modulo/matrix math -- it is a
+masking-order bug in `LoopLinearizer`:
+
+1. A loop-body `if` whose condition is a plain `load` (not yet converted
+   to a masked load) looks uniform *before* masking is applied, so
+   `collectUniformPassThroughRegion` folds the branch and both its arms
+   into `PreRegion`.
+2. The blanket `applyStageMasks(*BB, Masks)` loop that runs over
+   `PreRegion` then bakes the loop's own coarse `%active.live`/
+   `%active.sideeffect` mask into the arm's masked loads/stores/resource
+   calls.
+3. `flattenTaintedBranchesInRegion` separately (and correctly) detects
+   that the branch *is* mask-dependent once the load becomes masked, and
+   calls `DiamondFlattener::flattenKnownDivergentBranch`, which computes
+   the correct, narrower per-arm `%live.t`/`%sideeffect.t` masks.
+4. But `narrowCallMask` deliberately refuses to re-narrow a mask that is
+   already non-constant (it only overwrites constant placeholders), so
+   the arm's ops kept running under the wrong, too-coarse loop mask --
+   side effects fired for every active lane instead of only the ones
+   that actually take that arm.
+
+Fix: two new static helpers in `Linearize.cpp` right after
+`narrowCallMask`: `renarrowAlreadyMaskedOp` re-narrows a masked.load (mask
+operand 2), masked.store (operand 3), or resource/image call (last
+operand) by exact `Value *` identity -- this is sound because the stale
+mask `Value*` is exactly the one the blanket pass just used moments
+earlier, so identity comparison can't accidentally renarrow an unrelated
+op. `renarrowAlreadyMaskedOpsInBlocks` applies it over a block set.
+`flattenKnownDivergentBranch` now captures `TRegionBlocks`/`FRegionBlocks`
+separately from `LastRegionVisited` (previously shared/unsplit) and calls
+the new helpers on each arm's blocks with its own `TMasks`/`FMasks` before
+flattening.
+
+New regression lit test:
+`Transforms/CPU/loop-body-diamond-with-nested-break-arm-mask.ll`
+(encodes a loop containing `if (c[i] >= 1.0) { c[i] *= c[i];
+if (fragcoord.y < 0) break; }`; confirmed fail-before/pass-after by
+rebuilding the pre-fix `Linearize.cpp` from its parent commit).
+`check-feme`: 3883/3887 Passed, 4 unsupported, 0 failures.
+
+Known, out-of-scope limitation (tracked as roadmap `ENV7(g)`, no known
+failing case yet): `renarrowAlreadyMaskedOp` does not cover
+`createMaskedLoadRecursive`-style struct/array recursive masked loads, or
+masked atomic/cmpxchg/task-payload ops.
+
+### Real `deqp-vk` verification
+
+Rebuilt `libfeme_vulkan.so` (`ninja -C build feme_vulkan`);
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device`.
+
+Single-case re-run: `graphicsfuzz.stable-colorgrid-modulo-vec3-values-from
+-matrix` now **Passes** (previously **Fail**, `Histogram EMD value of
+0.044064 is greater than tolerance of 0.005000`).
+
+Full `vk-default/graphicsfuzz.txt` mustpass corpus (757 cases) re-run
+before/after the fix, using `feme/utils/run_vulkan_cts.py` (plain
+`deqp-vk --deqp-case='dEQP-VK.graphicsfuzz.*'` is unreliable for this
+group -- see `.instructions.md`):
+
+| Run | Pass | Fail | Unrun |
+|---|---|---|---|
+| Baseline (fix reverted) | 669 | 88 | 0 |
+| Fixed | 669 | 88 | 0 |
+
+Diffing the two 88-case Fail sets: exactly one case flips, `stable-
+colorgrid-modulo-vec3-values-from-matrix` (`Fail -> Pass`), and no case
+newly fails except one that differed only under the runner's batched/
+contended execution: `cov-function-infinite-loop-always-return` showed
+`Fail` once in the fixed batch run but passed in all of 3/3 isolated
+`--deqp-case` re-runs immediately after -- confirmed test-infra
+flakiness (contention-sensitive timing in this environment), not a
+regression from the fix. Net result: **zero regressions, one fix**.
+
 ## Exit-check capture repair (2026-11-03)
 
 Completed `ENV6(c)(2)(d)` and the remaining capture gap in `(l)`.
