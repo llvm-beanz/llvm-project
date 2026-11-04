@@ -58,6 +58,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CycleAnalysis.h"
@@ -77,6 +78,7 @@
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ValueHandle.h"
+#include "llvm/IR/ValueMap.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -88,6 +90,55 @@ using namespace llvm;
 using namespace feme::cpu;
 
 namespace {
+
+/// A `UniformityInfo` that is safe to keep querying while this pass erases
+/// and creates IR. `UniformityInfo` keys its verdicts on raw `Value*` and
+/// `BasicBlock*` addresses, so once the pass deletes an analyzed value, an
+/// unrelated new value or block allocated at the same address inherits the
+/// deleted one's verdict (e.g. a new, divergent `select` looking uniform).
+/// Which addresses get reused depends on the allocator, so the result
+/// varied between platforms (ENV7(i)). `Analyzed` drops an entry when its
+/// value is deleted, so only IR that really existed when the analysis ran
+/// is ever answered from it.
+class StableUniformityInfo {
+public:
+  StableUniformityInfo(Function &F, DominatorTree &DT, CycleInfo &CI)
+      : UI(computeWaveUniformity(F, DT, CI)) {
+    for (Argument &A : F.args())
+      Analyzed[&A] = true;
+    for (BasicBlock &BB : F) {
+      Analyzed[&BB] = true;
+      for (Instruction &I : BB)
+        Analyzed[&I] = true;
+    }
+  }
+
+  /// Instructions and arguments this pass created are reported divergent,
+  /// the same conservative verdict `UniformityInfo` gives any value absent
+  /// from its analysis.
+  bool isDivergentAtDef(const Value *V) const {
+    if ((isa<Instruction>(V) || isa<Argument>(V)) && !Analyzed.count(V))
+      return true;
+    return UI.isDivergentAtDef(V);
+  }
+
+  /// A block this pass created has no analyzed terminator, so it is
+  /// reported uniform rather than inheriting a deleted block's verdict.
+  bool isDivergentTerminator(const Instruction *I) const {
+    return Analyzed.count(I->getParent()) && UI.isDivergentTerminator(I);
+  }
+
+  void forgetValue(const Value *V) { UI.forgetValue(V); }
+
+private:
+  UniformityInfo UI;
+  /// `FollowRAUW=false`: a replacement value must not inherit the replaced
+  /// value's "analyzed" status, only deletion removes an entry.
+  struct AnalyzedConfig : ValueMapConfig<const Value *> {
+    enum { FollowRAUW = false };
+  };
+  ValueMap<const Value *, bool, AnalyzedConfig> Analyzed;
+};
 
 /// Forward declaration -- real definition (and its own full rationale
 /// comment) lives alongside `mergeTrivialRelayBlocksInCycle`'s own
@@ -2033,7 +2084,7 @@ public:
   /// simdize` then rejects the untouched divergent branch outright).
   DiamondFlattener(
       Function &F, DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
-      UniformityInfo &UI, SmallPtrSetImpl<BasicBlock *> &MergeVisited,
+      StableUniformityInfo &UI, SmallPtrSetImpl<BasicBlock *> &MergeVisited,
       SmallPtrSetImpl<BasicBlock *> &ResolvedBlocks,
       GetAlreadyLinearizedCycleExitFn GetAlreadyLinearizedCycleExit = nullptr,
       NarrowChildEntryMasksFn NarrowChildEntryMasks = nullptr,
@@ -2294,7 +2345,7 @@ private:
   DominatorTree &DT;
   PostDominatorTree &PDT;
   CycleInfo &CI;
-  UniformityInfo &UI;
+  StableUniformityInfo &UI;
 
   /// Roadmap K6z: see the constructor's own parameter comment. Null for
   /// every `DiamondFlattener` except the two `LoopLinearizer::
@@ -2689,7 +2740,12 @@ private:
   /// far -- each contributes its cycle's exit block(s) as further roots,
   /// since a cycle's own body is `LoopLinearizer`'s problem, but the code
   /// after it is squarely this pass's.
-  SmallPtrSet<BasicBlock *, 8> CycleBoundaryBlocks;
+  ///
+  /// A `SmallSetVector`, not a `SmallPtrSet`: `run` turns each entry into
+  /// a root in this order, and `MergeVisited`/`CycleBoundaryMasks` give
+  /// the first walk to claim a block authority, so address-dependent
+  /// iteration order made the result depend on the allocator (ENV7(i)).
+  SmallSetVector<BasicBlock *, 8> CycleBoundaryBlocks;
 
   /// Roadmap L375 (6th investigation), broadened by L383(a) (7th
   /// investigation): every ordinary (non-cycle-boundary) block `validate`
@@ -3847,7 +3903,7 @@ class LoopLinearizer {
 public:
   LoopLinearizer(
       Function &F, DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
-      UniformityInfo &UI,
+      StableUniformityInfo &UI,
       const DenseMap<BasicBlock *, WeakMaskPair> &DiamondFlattenedEntryMasks,
       SmallPtrSetImpl<BasicBlock *> &MergeVisited,
       SmallPtrSetImpl<BasicBlock *> &ResolvedBlocks)
@@ -3914,7 +3970,7 @@ private:
   /// That targeted check uses independent, freshly computed cycle
   /// information after the current cycle's masks and backedge are complete,
   /// never the partially mutated `CI` retained here.
-  UniformityInfo &UI;
+  StableUniformityInfo &UI;
 
   /// Roadmap L196: values this pass itself has synthesized and separately
   /// proven provably uniform "by construction" -- populated exclusively
@@ -5168,7 +5224,7 @@ bool isSyntheticRelayBlockName(StringRef Name) {
 static bool peelWouldExposeSiblingDiamondToSharedMerge(
     BasicBlock *BB, BasicBlock *Header, BasicBlock *Latch, CycleInfo &CI,
     CycleRef C, ArrayRef<std::pair<BasicBlock *, BasicBlock *>> PredTargets,
-    DominatorTree &DT, PostDominatorTree &PDT, UniformityInfo &UI) {
+    DominatorTree &DT, PostDominatorTree &PDT, StableUniformityInfo &UI) {
   if (PredTargets.empty())
     return false; // Nothing would actually be retargeted; cannot collide.
 
@@ -5261,7 +5317,7 @@ static bool peelWouldDestroyAncestorReconvergencePoint(
     BasicBlock *Latch,
     ArrayRef<std::pair<BasicBlock *, BasicBlock *>> PredTargets,
     DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
-    UniformityInfo &UI) {
+    StableUniformityInfo &UI) {
   BasicBlock *Origin = SoleSurvivor;
   while (BasicBlock *Unique = Origin->getUniquePredecessor()) {
     if (isa<CondBrInst>(Origin->getTerminator()))
@@ -5305,7 +5361,8 @@ static bool peelWouldDestroyAncestorReconvergencePoint(
 bool peelConstantFlowPredecessors(
     BasicBlock *BB, SmallPtrSetImpl<BasicBlock *> &PeeledFrom,
     DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
-    UniformityInfo &UI, SmallPtrSetImpl<BasicBlock *> *RelayTargets = nullptr,
+    StableUniformityInfo &UI,
+    SmallPtrSetImpl<BasicBlock *> *RelayTargets = nullptr,
     BasicBlock *CycleHeader = nullptr, BasicBlock *CycleLatch = nullptr) {
   auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
   if (!Br)
@@ -5610,7 +5667,7 @@ bool peelConstantFlowPredecessors(
 bool peelConstantFlowPredecessorsInCycle(
     CycleInfo &CI, CycleRef C, BasicBlock *Header, BasicBlock *Latch,
     SmallPtrSetImpl<BasicBlock *> &PeeledFrom, DominatorTree &DT,
-    PostDominatorTree &PDT, UniformityInfo &UI,
+    PostDominatorTree &PDT, StableUniformityInfo &UI,
     SmallPtrSetImpl<BasicBlock *> *RelayTargets = nullptr) {
   bool Changed = false;
   bool PeeledThisPass = true;
@@ -9469,7 +9526,7 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     DominatorTree DT(F);
     CycleInfo CI;
     CI.compute(F);
-    UniformityInfo UI = computeWaveUniformity(F, DT, CI);
+    StableUniformityInfo UI(F, DT, CI);
 
     DenseMap<BasicBlock *, WeakMaskPair> DiamondFlattenedEntryMasks;
     // Roadmap L375 (6th investigation): see `DiamondFlattener::MergeVisited`
@@ -9514,7 +9571,7 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     PostDominatorTree PDT2(F);
     CycleInfo CI2;
     CI2.compute(F);
-    UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
+    StableUniformityInfo UI2(F, DT2, CI2);
     bool CycleChanged =
         LoopLinearizer(F, DT2, PDT2, CI2, UI2, DiamondFlattenedEntryMasks,
                        MergeVisited, ResolvedBlocks)
@@ -9579,7 +9636,7 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
       PostDominatorTree PDT3(F);
       CycleInfo CI3;
       CI3.compute(F);
-      UniformityInfo UI3 = computeWaveUniformity(F, DT3, CI3);
+      StableUniformityInfo UI3(F, DT3, CI3);
       DiamondFlattener DF2(F, DT3, PDT3, CI3, UI3, MergeVisited,
                            ResolvedBlocks);
       bool FlattenedAny = true;
