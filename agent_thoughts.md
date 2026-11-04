@@ -131691,3 +131691,34 @@ this session.
    change (hours; run async).
 3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
 4. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
+
+# 2026-11-04 (later): `ENV7(h)` closed; full CTS re-measure started, not finished
+
+Next: run the full CTS re-measure on a machine/time slot with ~9 hours free.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`.
+
+## What happened
+
+1. Owner said the `shader_timeout` GLSL is broken and results are ignored.
+   Closed `ENV7(h)` in the Roadmap (commit `38784ecbf06f`). No CTS patch.
+2. Built a case list without `postmortem.shader_timeout` (3,269,347 cases)
+   and started the full audit with the same flags as the 2026-11-03 run.
+3. After ~15 minutes only 192 qpa files existed. The last run took 8.4
+   hours, so I stopped it and deleted the partial output rather than
+   leave a half-written report. No FeMe code changed this session.
+
+## State restated
+
+- `ENV7(e)`, `(f)`, `(h)`: done. `ENV7(g)`: dormant.
+- Full re-measure after the `ResourceBindings` memory change: not done.
+  Focused groups passed last session.
+
+## Suggested next steps (ranked)
+
+1. Full re-measure (~9 hours, async). Case list: filter `shader_timeout`
+   from `all-packages-cases.txt`. Use the command in `VulkanCTSReport.md`.
+2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
+3. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
