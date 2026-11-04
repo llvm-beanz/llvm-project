@@ -162,6 +162,26 @@ above without a dedicated re-measurement pass; this section only confirms
 the compiler-level crash diagnosis and its `deqp-vk` effect on these three
 specific cases in isolation.
 
+## ENV7(e): experimental postmortem Unrun and InternalError diagnosis
+
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device`.
+
+| Cases | Result |
+|---|---|
+| `postmortem.use_after_free.{ssbo,ubo}_to_ssbo_single_invocation` (2 Unrun) | FeMe bug, **fixed**: both now **Pass** ("Test succeeded without device loss") |
+| `postmortem.shader_timeout.compute_*` (16 InternalError) | CTS source bug, not FeMe: `Compiling GLSL to SPIR-V failed` -- the shader's `layout(local_size_x = 1, ...)` lacks the trailing `in;`, so glslang reports `can't read from gl_WorkGroupSize before a fixed workgroup size has been declared`. Reproduced on `compute_1x1`; the failure precedes any Vulkan call. Roadmap `ENV7(h)`. |
+
+Root cause of the Unrun pair: `deqp-vk` died with SIGSEGV (JIT frame, worker
+thread). The test records a dispatch, calls `vkFreeMemory` on both buffers'
+memory, then submits. `L421` retained `DeviceMemory` only from submit, so
+the freed storage was already unmapped. `ResourceBindings` now holds a
+reference per bound range, so a free with live bound resources defers until
+the resources are destroyed or rebound.
+
+Regression sweep after the fix (all 0 Fail): `api.object_management.single*`
+94/94, `api.buffer.*` 1030 Pass + 2046 NotSupported, `memory.allocation.
+basic.*` 102/102, `api.copy_and_blit.core.buffer_to_buffer*` 80/80.
+
 ## ENV7(f): `stable-colorgrid-modulo-vec3-values-from-matrix` image-correctness fix
 
 Root-caused and fixed the residual `Fail` left over from `ENV7(d)` above.
