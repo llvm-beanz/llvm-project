@@ -131500,3 +131500,136 @@ single bug**, not three. Fixed in one line, in one commit:
 4. **`ENV5(c)(7)(b)`** (hull lockstep barrier) / offload-test-suite
    upstreaming: lowest priority, unchanged for many sessions, push
    access still not granted.
+
+# 2026-11-03: `ENV7(f)` fixed — masking-order bug in `LoopLinearizer`, full corpus verified zero regressions
+
+Next: read `ENV7(e)` (16 InternalErrors + 2 use_after_free Unrun), it's
+the top open item below.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`.
+Confirmed, as always, before anything else.
+
+## What this session did
+
+1. Picked up `ENV7(f)` from last session's #1 next step: the residual
+   image `Fail` on `stable-colorgrid-modulo-vec3-values-from-matrix`
+   left over after `ENV7(d)`'s crash fix.
+2. An `EQ_BUFFER` amber patch confirmed the *variant* shader renders
+   wrong and the reference is right — real compiler bug, not a flaky
+   tolerance/reference issue.
+3. Bisected by hand: the nested `if (fragcoord.y < 0) break;` inside
+   `if (c[i] >= 1.0) { c[i] *= c[i]; ... }` triggers it.
+4. `llvm-reduce` (with a tightened interestingness script) minimized a
+   standalone repro to `/tmp/f/red.ll` (not an amber/deqp-vk case).
+5. Temporary `errs()` tracing in `Linearize.cpp` found the real root
+   cause — it is **not** a recurrence of the old `ENV6(c)(2)(h)` shape,
+   and not a numerics bug in the modulo/matrix math:
+   - Before masking, `br (fcmp (load ...))` looks uniform because the
+     load is still a plain `load`. `collectUniformPassThroughRegion`
+     folds the branch and both its arms into `PreRegion`.
+   - The blanket `applyStageMasks(*BB, Masks)` pass over `PreRegion`
+     then bakes the loop's coarse mask into the arm's masked
+     load/store/resource calls.
+   - `flattenTaintedBranchesInRegion` separately (and correctly) detects
+     the branch as mask-dependent once the load becomes masked, and
+     calls `DiamondFlattener::flattenKnownDivergentBranch`, which
+     computes the correct, narrower per-arm masks.
+   - But `narrowCallMask` only overwrites a *constant* mask — it refuses
+     to fix a mask that's already a non-constant `Value*`. So the arm's
+     side effects kept running under the stale, too-coarse mask for
+     every active lane, not just the ones taking that arm.
+6. Fix: two new static helpers in `Linearize.cpp`, right after
+   `narrowCallMask`:
+   - `renarrowAlreadyMaskedOp` re-narrows a masked.load/masked.store/
+     resource-or-image call by exact `Value*` mask identity — sound
+     because the stale mask is exactly the one the blanket pass just
+     set.
+   - `renarrowAlreadyMaskedOpsInBlocks` applies it over a block set.
+   `flattenKnownDivergentBranch` now captures `TRegionBlocks`/
+   `FRegionBlocks` separately (previously shared/unsplit) and calls the
+   new helpers per-arm before flattening.
+7. Known, out-of-scope gap left for later: the helper doesn't cover
+   `createMaskedLoadRecursive`-style struct/array masked loads, or
+   masked atomic/cmpxchg/task-payload ops. No known failing case yet —
+   filed as `ENV7(g)` on the roadmap rather than guessed at blind.
+
+## Verified
+
+- New regression lit test:
+  `feme/test/Transforms/CPU/loop-body-diamond-with-nested-break-arm-
+  mask.ll`. Confirmed fail-before (pre-fix `Linearize.cpp` checked out
+  from the parent commit) / pass-after.
+- `check-feme`: **3883/3887 Passed, 4 Unsupported, 0 failures**.
+- Real `deqp-vk` re-run against a freshly rebuilt `libfeme_vulkan.so`
+  (`ninja -C build feme_vulkan`): the single case now **Passes**
+  (previously `Fail`, EMD 0.044064 > tolerance 0.005000).
+- Full `vk-default/graphicsfuzz.txt` mustpass corpus (757 cases),
+  baseline (fix reverted) vs. fixed, both via `feme/utils/
+  run_vulkan_cts.py` (plain `deqp-vk --deqp-case='...*'` is unreliable
+  for this group — runs only ~half the cases and one case can hang
+  forever; codified in `.instructions.md`):
+
+  | Run | Pass | Fail | Unrun |
+  |---|---|---|---|
+  | Baseline | 669 | 88 | 0 |
+  | Fixed | 669 | 88 | 0 |
+
+  Diffed the two 88-name Fail sets: exactly one flip,
+  `stable-colorgrid-modulo-vec3-values-from-matrix` (`Fail → Pass`), and
+  one more name differed (`cov-function-infinite-loop-always-return`,
+  `Pass → Fail` in the batched run) — re-ran it alone 3/3 times and it
+  passed every time, so that's runner-contention flakiness, not a
+  regression. **Net: zero regressions, one real fix.**
+- `Vulkan14FeatureInventory.md` / `VulkanExtensionInventory.md`:
+  unchanged (internal compiler-correctness fix, no feature/extension
+  surface change).
+
+## Commits (4, each independently buildable/testable)
+
+1. `38c090630a65` — the fix (`renarrowAlreadyMaskedOp*` helpers +
+   `flattenKnownDivergentBranch` per-arm renarrowing call sites).
+2. `8b9171525150` — the regression lit test.
+3. `6d5fdabb1926` — Roadmap (`ENV7(f)` struck through, new `ENV7(g)`
+   row) + VulkanCTSReport + `.instructions.md` updates.
+4. (this commit) — agent thoughts.
+
+## State restated
+
+- `ENV7(f)`: **done** — struck through in Roadmap.
+- `ENV7(g)` (new): the renarrowing helper's known struct/array/atomic/
+  task-payload gap. No known failing case — audit-before-fix item, not
+  urgent.
+- `ENV7(e)` (experimental postmortem Unrun/InternalError outcomes):
+  still untouched, several sessions running now. This is the oldest
+  unaddressed item in the rotation.
+- `ENV6(c)(3)` (83 cases) / `ENV6(d)` (132 cases): untouched, as
+  instructed — own multi-session efforts.
+- `ENV5(c)(7)(b)` (hull lockstep barrier) / offload-test-suite
+  upstreaming: untouched, push access still not granted.
+- No issue found outside `feme/` this session — no commit touches
+  anything outside `feme/`.
+- `.instructions.md`: added the CTS runner gotchas (batch-timeout
+  requirement, `--baseline-qpa` single-value limit, flaky-under-
+  contention cases, async-mode requirement for long runs, working
+  directory, rebuild target name) and the `PreRegion` masking-order trap
+  general lesson, so the next session doesn't rediscover either by hand.
+
+## Suggested next steps (ranked)
+
+1. **`ENV7(e)`**: diagnose the two `use_after_free` Unrun cases and 16
+   InternalErrors, separately from canonical conformance. Oldest
+   untouched item — several sessions now. Start with the retained
+   recovery logs from the 2026-11-03 full audit referenced in
+   `VulkanCTSReport.md`.
+2. **`ENV7(g)`** (new, low urgency): audit whether any live GraphicsFuzz/
+   CTS case actually exercises `createMaskedLoadRecursive`/masked-atomic/
+   task-payload inside a flattened diamond arm before investing in
+   extending `renarrowAlreadyMaskedOp`. If no live case, this can stay
+   dormant indefinitely.
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
+   multi-session architecture efforts, unchanged.
+4. **`ENV5(c)(7)(b)`** (hull lockstep barrier) / offload-test-suite
+   upstreaming: lowest priority, unchanged for many sessions, push
+   access still not granted.
