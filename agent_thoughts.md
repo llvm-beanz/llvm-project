@@ -131633,3 +131633,61 @@ Confirmed, as always, before anything else.
 4. **`ENV5(c)(7)(b)`** (hull lockstep barrier) / offload-test-suite
    upstreaming: lowest priority, unchanged for many sessions, push
    access still not granted.
+
+# 2026-11-04: `ENV7(e)` diagnosed — 2 Unrun were a real FeMe bug (fixed), 16 InternalErrors are a CTS bug
+
+Next: decide whether to patch the CTS `shader_timeout` shader locally (`ENV7(h)`).
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`.
+
+## What happened
+
+1. Ran both `use_after_free` cases alone: `deqp-vk` exits 139 (SIGSEGV).
+2. `gdb` showed a JIT frame on a worker thread. Read the CTS test: it
+   records a dispatch, calls `vkFreeMemory` on both buffers, *then*
+   submits.
+3. Cause: `Buffer`/`Image` keep a raw `DeviceMemory *`. `L421` only
+   retains memory from submit onward, so the storage was already gone.
+4. Fix: `ResourceBindings` holds a `retainForExecution` ref per bound
+   range; `vkFreeMemory` now defers until the last bound resource is
+   destroyed or rebound. New `releaseDeviceMemoryReference` in
+   `Memory.cpp`.
+5. Ran one `shader_timeout` case alone: InternalError from glslang. The
+   CTS shader has `layout(local_size_x=1,...)` with no `in;`. Not FeMe.
+   Filed as `ENV7(h)`; CTS checkout is a separate repo, so no commit here.
+
+## Verified
+
+- Both UAF cases now Pass.
+- `check-feme`: 3885/3889 passed, 4 unsupported, 0 failures.
+- CTS sweep, 0 Fail: `object_management.single*` 94/94, `api.buffer.*`
+  1030 Pass/2046 NotSupported, `memory.allocation.basic.*` 102/102,
+  `copy_and_blit buffer_to_buffer*` 80/80.
+- I did not re-run the full CTS; the change touches only free timing.
+
+## Commits
+
+1. `4c4237cab87e` fix. 2. `9cb16c08ec46` unit tests. 3. `ee5ae5bb3477`
+docs. 4. this file.
+
+## Slip to fix
+
+My last session's Roadmap edit duplicated the `ENV7(e)` row. Removed it
+this session.
+
+## State restated
+
+- `ENV7(e)`: done (struck). `ENV7(f)`: done. `ENV7(h)`: new, external.
+- `ENV7(g)`: dormant. `ENV6(c)(3)`/`ENV6(d)`: untouched.
+
+## Suggested next steps (ranked)
+
+1. **`ENV7(h)`** (~1 hour): patch the CTS shader locally (add `in;`),
+   rebuild `deqp-vk`, see whether the 16 timeout cases Pass, hang, or
+   lose the device. Report upstream.
+2. Full CTS re-measure to confirm no regressions from the memory-lifetime
+   change (hours; run async).
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
+4. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
