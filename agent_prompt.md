@@ -69,14 +69,16 @@ mid-investigation to avoid losing documentation.
 You are building a Vulkan CPU reference rasterizer. Can you continue the vulkan
 ICD development. The last session suggested the next steps:
 
-1. **`ENV7(f)`** (new, this session): build a minimal standalone
-   reproducer for `stable-colorgrid-modulo-vec3-values-from-matrix`'s
-   residual image Fail, isolate whether it's a live `ENV6(c)(2)(h)`-shape
-   recurrence or something new. Likely 1-3 hours given a repro already
-   exists (`env7d-20261103/stable-colorgrid-...-module-3.ll`).
-2. **`ENV7(e)`**: diagnose the two `use_after_free` Unrun cases and 16
-   InternalErrors, separately from canonical conformance. Untouched for
-   several sessions now.
+1. **`ENV7(e)`**: diagnose the two `use_after_free` Unrun cases and 16
+   InternalErrors, separately from canonical conformance. Oldest
+   untouched item — several sessions now. Start with the retained
+   recovery logs from the 2026-11-03 full audit referenced in
+   `VulkanCTSReport.md`.
+2. **`ENV7(g)`** (new, low urgency): audit whether any live GraphicsFuzz/
+   CTS case actually exercises `createMaskedLoadRecursive`/masked-atomic/
+   task-payload inside a flattened diamond arm before investing in
+   extending `renarrowAlreadyMaskedOp`. If no live case, this can stay
+   dormant indefinitely.
 3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
    multi-session architecture efforts, unchanged.
 4. **`ENV5(c)(7)(b)`** (hull lockstep barrier) / offload-test-suite
