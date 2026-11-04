@@ -28,7 +28,7 @@ int64_t toSubpixelCoord(float Value, unsigned Bits) {
 }
 
 int64_t toSubpixelCoord(int32_t Value, unsigned Bits) {
-  return (int64_t)Value << Bits;
+  return (int64_t)Value * (1ll << Bits);
 }
 
 namespace {

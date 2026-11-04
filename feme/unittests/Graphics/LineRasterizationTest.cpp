@@ -30,6 +30,12 @@ SubpixelPoint pixelCenterPoint(int32_t X, int32_t Y) {
 /// A horizontal Bresenham line visits every pixel center from its start up
 /// to, but excluding, its own endpoint (the spec's half-open diamond-exit
 /// rule -- see roadmap L324) and nothing off that row.
+TEST(LineRasterizationTest, IntegerSubpixelConversionHandlesNegatives) {
+  EXPECT_EQ(toSubpixelCoord(-1, Bits), -(1ll << Bits));
+  EXPECT_EQ(toSubpixelCoord(-2, Bits), -(2ll << Bits));
+  EXPECT_EQ(toSubpixelCoord(3, Bits), 3ll << Bits);
+}
+
 TEST(LineRasterizationTest, HorizontalLineExcludesItsOwnEndpoint) {
   const SubpixelLineSegment Line{pixelCenterPoint(0, 2),
                                  pixelCenterPoint(3, 2)};
