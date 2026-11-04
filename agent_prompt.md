@@ -69,18 +69,14 @@ mid-investigation to avoid losing documentation.
 You are building a Vulkan CPU reference rasterizer. Can you continue the vulkan
 ICD development. The last session suggested the next steps:
 
-1. **`ENV7(e)`**: diagnose the two `use_after_free` Unrun cases and 16
-   InternalErrors, separately from canonical conformance. Oldest
-   untouched item — several sessions now. Start with the retained
-   recovery logs from the 2026-11-03 full audit referenced in
-   `VulkanCTSReport.md`.
-2. **`ENV7(g)`** (new, low urgency): audit whether any live GraphicsFuzz/
-   CTS case actually exercises `createMaskedLoadRecursive`/masked-atomic/
-   task-payload inside a flattened diamond arm before investing in
-   extending `renarrowAlreadyMaskedOp`. If no live case, this can stay
-   dormant indefinitely.
-3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own
-   multi-session architecture efforts, unchanged.
-4. **`ENV5(c)(7)(b)`** (hull lockstep barrier) / offload-test-suite
-   upstreaming: lowest priority, unchanged for many sessions, push
-   access still not granted.
+1. **`ENV7(h)`** (~1 hour): patch the CTS shader locally (add `in;`),
+   rebuild `deqp-vk`, see whether the 16 timeout cases Pass, hang, or
+   lose the device. Report upstream.
+2. Full CTS re-measure to confirm no regressions from the memory-lifetime
+   change (hours; run async).
+3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
+4. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
+
+The timeout tests in ENV7(h) seem to have broken GLSL in them. Please ignore
+those tests. It seems that they are expected to fail anyways and so the results
+of them are ignored.
