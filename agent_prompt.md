@@ -66,17 +66,126 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-You are building a Vulkan CPU reference rasterizer. Can you continue the vulkan
-ICD development. The last session suggested the next steps:
+I'm seeing some local test failures under macOS, can you diagnose and fix?
 
-1. **`ENV7(h)`** (~1 hour): patch the CTS shader locally (add `in;`),
-   rebuild `deqp-vk`, see whether the 16 timeout cases Pass, hang, or
-   lose the device. Report upstream.
-2. Full CTS re-measure to confirm no regressions from the memory-lifetime
-   change (hours; run async).
-3. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
-4. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
+The output is:
 
-The timeout tests in ENV7(h) seem to have broken GLSL in them. Please ignore
-those tests. It seems that they are expected to fail anyways and so the results
-of them are ignored.
+[80/81] Running the feme regression tests
+llvm-lit: /Users/cbieneman/dev/llvm-project/llvm/utils/lit/lit/util.py:372: note: using SDKROOT: '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk'
+FAIL: FEME :: Tools/feme-run/differential-harness.test (13 of 1307)
+******************** TEST 'FEME :: Tools/feme-run/differential-harness.test' FAILED ********************
+Exit Code: 1
+
+Command Output (stdout):
+--
+# RUN: at line 61
+echo 'resource-heap:' > /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml
+# executed command: echo resource-heap:
+# RUN: at line 62
+echo '  - index: 0' >> /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml
+# executed command: echo '  - index: 0'
+# RUN: at line 63
+echo '    size: 32' >> /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml
+# executed command: echo '    size: 32'
+# RUN: at line 64
+mkdir -p /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.unstructured.dir
+# executed command: mkdir -p /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.unstructured.dir
+# RUN: at line 66
+'/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9' /Users/cbieneman/dev/llvm-project/feme/test/../utils/feme-run-differential.py --feme-cfg-gen=/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-cfg-gen --feme-run=/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run      --work-dir=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml      --seeds=325,653,1559,2377,2454 --wave-sizes=4,8,16,32      --groups=1,1,1 --max-depth=2 --max-constructs=8
+# executed command: /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9 /Users/cbieneman/dev/llvm-project/feme/test/../utils/feme-run-differential.py --feme-cfg-gen=/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-cfg-gen --feme-run=/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --work-dir=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --seeds=325,653,1559,2377,2454 --wave-sizes=4,8,16,32 --groups=1,1,1 --max-depth=2 --max-constructs=8
+# .---command stderr------------
+# | feme-run-differential: 16 failure(s):
+# | seed 325, wave-size 4: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=4 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed325.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 325, wave-size 8: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=8 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed325.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 325, wave-size 16: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=16 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed325.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 325, wave-size 32: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=32 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed325.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 653, wave-size 4: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=4 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed653.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 653, wave-size 8: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=8 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed653.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 653, wave-size 16: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=16 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed653.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 653, wave-size 32: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=32 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed653.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 1559, wave-size 4: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=4 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed1559.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 1559, wave-size 8: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=8 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed1559.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 1559, wave-size 16: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=16 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed1559.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 1559, wave-size 32: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=32 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed1559.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 2454, wave-size 4: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=4 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed2454.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 2454, wave-size 8: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=8 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed2454.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 2454, wave-size 16: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml --wave-size=16 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.divergent-loop.dir/seed2454.ll' failed (exit 1):
+# | error: feme-cpu-simdize: function 'main' has a divergent branch; the divergence transform (feme::cpu::LinearizePass) did not remove it, or produced a shape this pass cannot widen
+# | feme-run: feme-cpu pipeline: a diagnostic was reported while widening 'main' (see stderr)
+# |
+# | seed 2454, wave-size 32: '/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-run --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/
+# | ...
+# `---data was truncated (10240/10774) (change limit with -D output_limit=N)
+# error: command failed with exit status: 1
+
+--
+
+********************
+FAIL: FEME :: Transforms/CPU/Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll (14 of 1307)
+******************** TEST 'FEME :: Transforms/CPU/Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll' FAILED ********************
+Exit Code: 2
+
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize,verify -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize,verify -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll
+# .---command stderr------------
+# | error: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'Flow234'; only a uniform pass-through region to/from the exit check is supported yet (roadmap milestone 6 deviation)
+# | error: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'Flow234.Flow236_crit_edge'; only a uniform pass-through region to/from the exit check is supported yet (roadmap milestone 6 deviation)
+# | error: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'Flow234.Flow236_crit_edge'; only a uniform pass-through region to/from the exit check is supported yet (roadmap milestone 6 deviation)
+# | error: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'Flow234.Flow236_crit_edge'; only a uniform pass-through region to/from the exit check is supported yet (roadmap milestone 6 deviation)
+# `-----------------------------
+# error: command failed with exit status: 1
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll
+# .---command stderr------------
+# | FileCheck error: '<stdin>' is empty.
+# | FileCheck command line:  /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/env6c2p-linearize-cycle-stale-pdt-uaf.ll
+# `-----------------------------
+# error: command failed with exit status: 2
+
+--
+
+********************
