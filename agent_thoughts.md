@@ -131761,3 +131761,30 @@ fails two tests: `differential-harness.test` (divergent-loop seeds) and
 3. Try a libc++ build on Linux.
 4. Replace pointer-set iteration in `Linearize.cpp` with ordered
    containers (`SmallSetVector`) if (2) is confirmed.
+
+# 2026-11-05 (macOS ASan/UBSan failures): root-caused and fixed
+
+## Next action
+Re-run `check-feme` on the Mac with the new commits.
+
+## What happened
+1. Three failure groups in `failureoutput.txt`. Group C (UBSan) was easy:
+   `toSubpixelCoord(int32_t)` shifted a negative left. Now a multiply.
+2. Groups A/B were not memory errors. They depend on malloc layout.
+3. I built an `LD_PRELOAD` shim that pads allocations randomly. 45/300
+   seeds failed on Linux with the exact macOS errors.
+4. Traced it: with identical IR, `UniformityInfo` said "divergent" in one
+   seed and "uniform" in another for a value this pass created.
+5. Cause: my `ValueMap` of "analyzed" values followed RAUW, so a new value
+   could inherit stale status. `FollowRAUW=false` -> 0/300 failures.
+6. Also made `CycleBoundaryBlocks` a `SmallSetVector` (defensive).
+
+## State restated
+- 3 commits made, `check-feme` 3885/3889 (4 unsupported).
+- Not run: full Vulkan CTS (no graphics/ICD behavior changed except the
+  shift fix on the line path). Report/inventories unchanged.
+
+## Next steps (ranked)
+1. Confirm on the Mac (ASan+UBSan) that all three groups pass.
+2. Add the shim fuzz loop to CI-like tooling if it is cheap.
+3. `ENV6(c)(3)`, `ENV6(d)`, `ENV7(g)` backlog.
