@@ -117,6 +117,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
   return VK_SUCCESS;
 }
 
+void releaseDeviceMemoryReference(DeviceMemory *Memory) {
+  const VkAllocationCallbacks *Callbacks = nullptr;
+  if (!Memory->releaseAndTakeDeferredDestroy(Callbacks))
+    return;
+  freeShareableDeviceMemory(Memory->data(), static_cast<size_t>(Memory->size()),
+                            Memory->shareableFd());
+  Allocator(Callbacks).destroy(Memory);
+}
+
 VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
     VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks *pAllocator) {
   if (!memory)

@@ -78,6 +78,11 @@ private:
   intptr_t ShareableFd;
 };
 
+/// Drops one `retainForExecution` reference on \p Memory and, if that was
+/// the last one after `vkFreeMemory` already requested destruction, frees
+/// its backing storage and the object itself.
+void releaseDeviceMemoryReference(DeviceMemory *Memory);
+
 /// Allocates \p Size bytes aligned to \p Alignment, the same host
 /// allocation `vkAllocateMemory` itself performs for a `VkDeviceMemory`'s
 /// backing store (distinct from an ICD object's own

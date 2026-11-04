@@ -60,6 +60,17 @@ struct MemoryRangeBinding {
 /// range.
 class ResourceBindings {
 public:
+  ResourceBindings() = default;
+  ResourceBindings(const ResourceBindings &) = delete;
+  ResourceBindings &operator=(const ResourceBindings &) = delete;
+
+  /// Every bound range holds one `retainForExecution` reference on its
+  /// `DeviceMemory`, so an application `vkFreeMemory` while the resource
+  /// still exists (legal, and the resource may still be recorded and
+  /// submitted) defers the backing-storage free until the resource itself
+  /// is destroyed instead of leaving a dangling data pointer.
+  ~ResourceBindings() { releaseAll(); }
+
   /// Binds `[0, Size)` of the resource to `[MemoryOffset, MemoryOffset +
   /// Size)` of `Memory`, replacing any existing binding. This is the
   /// ordinary (non-sparse) `vkBind{Buffer,Image}Memory` binding shape:
@@ -70,7 +81,8 @@ public:
   /// `bind()` contract this replaces.
   void bindWhole(DeviceMemory *Memory, VkDeviceSize MemoryOffset,
                  VkDeviceSize Size) {
-    Ranges.clear();
+    releaseAll();
+    retain(Memory);
     Ranges.push_back({0, Memory, MemoryOffset, Size});
   }
 
@@ -96,6 +108,7 @@ public:
   /// re-check `bindWhole`'s single-call contract.
   void bindRange(VkDeviceSize ResourceOffset, DeviceMemory *Memory,
                  VkDeviceSize MemoryOffset, VkDeviceSize Size) {
+    retain(Memory);
     Ranges.push_back({ResourceOffset, Memory, MemoryOffset, Size});
   }
 
@@ -151,6 +164,18 @@ public:
   }
 
 private:
+  static void retain(DeviceMemory *Memory) {
+    if (Memory)
+      Memory->retainForExecution();
+  }
+
+  void releaseAll() {
+    for (const MemoryRangeBinding &R : Ranges)
+      if (R.Memory)
+        releaseDeviceMemoryReference(R.Memory);
+    Ranges.clear();
+  }
+
   /// `SmallVector<..., 1>`: every instance today holds exactly 0 or 1
   /// ranges, so the common case needs no heap allocation at all; a real
   /// sparse resource (post-H46) may grow this past 1.
