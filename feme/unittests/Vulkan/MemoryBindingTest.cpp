@@ -14,6 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Icd.h"
 #include "MemoryBinding.h"
 
 #include "gtest/gtest.h"
@@ -221,6 +222,41 @@ TEST(ResourceBindingsTest, DataForRangeSkipsAnExplicitlyUnboundRange) {
                      /*MemoryOffset=*/0, /*Size=*/64);
 
   EXPECT_EQ(Bindings.dataForRange(0, 32), nullptr);
+}
+
+// `vkFreeMemory` with a live bound resource must defer: `requestDestroy`
+// refuses while a binding references the memory, and dropping the last
+// binding performs the deferred free (ASan flags a leak or double free if
+// the hand-off is wrong).
+TEST(ResourceBindingsTest, BindingDefersMemoryFreeUntilReleased) {
+  Allocator Alloc(nullptr);
+  void *Data = allocateDeviceMemory(64, 64);
+  ASSERT_NE(Data, nullptr);
+  DeviceMemory *Memory =
+      Alloc.create<DeviceMemory>(VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, Data, 64);
+  ASSERT_NE(Memory, nullptr);
+
+  ResourceBindings Bindings;
+  Bindings.bindWhole(Memory, 0, 64);
+  EXPECT_FALSE(Memory->requestDestroy(nullptr));
+  EXPECT_EQ(Bindings.data(), Data);
+}
+
+TEST(ResourceBindingsTest, RebindingReleasesThePreviousMemoryReference) {
+  Allocator Alloc(nullptr);
+  void *Data = allocateDeviceMemory(64, 64);
+  ASSERT_NE(Data, nullptr);
+  DeviceMemory *First =
+      Alloc.create<DeviceMemory>(VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, Data, 64);
+  ASSERT_NE(First, nullptr);
+  uint8_t Backing[64];
+  DeviceMemory Second(Backing, sizeof(Backing));
+
+  ResourceBindings Bindings;
+  Bindings.bindWhole(First, 0, 64);
+  EXPECT_FALSE(First->requestDestroy(nullptr));
+  Bindings.bindWhole(&Second, 0, 64); // Frees `First`.
+  EXPECT_EQ(Bindings.data(), static_cast<void *>(Backing));
 }
 
 } // namespace
