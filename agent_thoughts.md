@@ -131722,3 +131722,42 @@ Next: run the full CTS re-measure on a machine/time slot with ~9 hours free.
    from `all-packages-cases.txt`. Use the command in `VulkanCTSReport.md`.
 2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
 3. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
+
+# 2026-11-04 (macOS failures): not reproduced on Linux
+
+**Next action:** user runs `git rev-parse HEAD` on the Mac and sends the
+failing `seed325.ll` from the lit `Output` dir.
+
+## State restated
+
+Device check passed (`FeMe CPU Vulkan Device`). User's macOS Release build
+fails two tests: `differential-harness.test` (divergent-loop seeds) and
+`env6c2p-linearize-cycle-stale-pdt-uaf.ll`. Both report linearizer
+"internal branch in 'FlowNNN'" diagnostics. Both pass on Linux.
+
+## What I tried (all passed, no repro)
+
+1. Release + assertions, clang 21, libstdc++ (main build).
+2. 40 runs with varied `MALLOC_PERTURB_`, arena, tcache tunables.
+3. Release, no assertions, `LLVM_ENABLE_REVERSE_ITERATION=ON`
+   (`/home/dev/dev/build-rev`).
+4. Valgrind on `feme-opt` (clean) and `feme-run` (only the known LLVM
+   bitcode-writer noise).
+5. Source grep: no `std::sort`/unordered containers on the linearize path.
+   `feme-cfg-gen` uses its own distribution code, so seeds should match.
+
+## Suspects, ranked
+
+1. User's tree/build-dir is stale or missing the `ENV7(d)`/`ENV7(f)` fixes.
+2. Order dependence on `SmallPtrSet` iteration (`CycleBoundaryBlocks`,
+   `renarrowAlreadyMaskedOpsInBlocks`) that macOS addresses expose.
+3. Apple clang / libc++ optimizer-exposed UB.
+
+## Next steps
+
+1. Get macOS `git rev-parse HEAD`; rebuild `build-rel` clean.
+2. Build with `-DLLVM_USE_SANITIZER=Address;Undefined` on the Mac and run
+   env6c2p.
+3. Try a libc++ build on Linux.
+4. Replace pointer-set iteration in `Linearize.cpp` with ordered
+   containers (`SmallSetVector`) if (2) is confirmed.
