@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/VertexWrapper.h"
 
+#include "BarrierCalls.h"
 #include "StageArgsLayout.h"
 #include "StageMaskCalls.h"
 #include "feme/Core/ShaderStage.h"
@@ -342,7 +343,31 @@ void lowerVertexOutputStore(CallInst &CI, const SignatureElement &Elt,
   }
 }
 
+/// Lowers every raised barrier intrinsic to a plain `fence`, exactly as
+/// `FragmentWrapper.cpp`'s `lowerFragmentBarriers` does and for the same
+/// reasons: `SIMDizePass` already fuses a wave's invocations into one
+/// vectorized body, so any `Subgroup`-scope convergence requirement is met
+/// by construction and only the memory-ordering half needs code. `Group`
+/// scope stays on one host thread; `Device`/`All` need `System`.
+void lowerVertexBarriers(Function &F) {
+  for (Instruction &I : make_early_inc_range(instructions(F))) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+    if (!Matched)
+      continue;
+    IRBuilder<> Builder(CI);
+    Builder.CreateFence(AtomicOrdering::AcquireRelease,
+                        Matched->MemoryScope == BarrierMemoryScope::Group
+                            ? SyncScope::SingleThread
+                            : SyncScope::System);
+    CI->eraseFromParent();
+  }
+}
+
 bool lowerVertexStageOps(Function &F) {
+  lowerVertexBarriers(F);
   std::optional<EntrySignature> Sig = feme::dxil::getEntrySignature(F);
   bool UsesStageOps = false;
   for (Instruction &I : instructions(F))
