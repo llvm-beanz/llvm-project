@@ -9,6 +9,7 @@ add_feme_unittest(FeMeImageTests
   BCDecodeTest.cpp
   BlockGeometryTest.cpp
   SubresourceLayoutTest.cpp
+  ViewMaterializationTest.cpp
   )
 target_link_libraries(FeMeImageTests
   PRIVATE
