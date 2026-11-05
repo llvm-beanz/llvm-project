@@ -131981,3 +131981,21 @@ Committed. Fail total ~169. Roadmap `ENV6(d)(5a)` done, `(5b)` open.
 2. `ENV6(c)(3)` scoping (83 + loops.special 12).
 3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)` (barrier), offload upstreaming (blocked).
+
+# Session: image.store a2b10g10r10_sint validation
+
+## Next action
+Scope `ENV6(c)(3)` (83 + loops.special 12) in the roadmap.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Read the CTS generator: shader does `clamp(a,-2,1)-32`, reference does `clamp(a-32,-2,1)`.
+3. Truncate and saturate both mismatch, so the CTS itself is inconsistent. Waived ENV6(d)(3), no code change.
+
+## State
+Docs-only. 14 cases are a documented CTS quirk.
+
+## Next steps (ranked)
+1. `ENV6(c)(3)` scoping.
+2. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+3. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
