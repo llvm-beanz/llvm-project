@@ -131893,3 +131893,27 @@ architecture effort) next session.
    still just scoped.
 5. offload-test-suite upstreaming (3 patches) -- blocked on push
    access, no change possible this session.
+
+# 2026-11-05 (ENV6(d)(2): memory_model 16 "hangs" were crashes)
+
+## Next action
+Pick one of: `glsl.arrays` mat3 (12), `image.store` a2b10g10r10 (14), `tessellation.invariance` (24).
+
+## What happened
+1. Device check OK (`FeMe CPU Vulkan Device`).
+2. Ran one "hanging" case alone under gdb. It segfaulted in 1 second. Not a hang.
+3. `comp` x8: my own earlier MLIR change crashed on a nested `OpSpecConstantOp` (no function block). Fixed by `referenceof` of the inner module op. 2 tests added (dialect, spvasm) + 1 FeMe lit.
+4. `vert` x8: `VertexWrapper` never lowered `llvm.spv.*.memory.barrier`; JIT aborted. Now lowered to fences like fragment. New lit test.
+5. memory_model: 52/52 Pass. `check-feme` 3888/3892, 0 failed.
+6. Added a gdb-first gotcha to `.instructions.md`.
+
+## State restated
+- 5 commits (MLIR, FeMe tests, VertexWrapper, docs, + this note). Fail total now 203.
+- Not re-run: the other 203 failing cases (changes are narrow: spec-const deserializer + vertex barriers).
+
+## Next steps (ranked)
+1. `image.store.without_format` a2b10g10r10_sint_pack32 (14): they time out; look under gdb first.
+2. `glsl.arrays` mat3 constructor/implicit size (12): silent wrong value.
+3. `tessellation.invariance` (24).
+4. `ENV6(c)(3)` scoping (83 cases), multi-session.
+5. `ENV5(c)(7)(b)`; offload upstreaming (blocked on push access).
