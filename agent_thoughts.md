@@ -132015,3 +132015,25 @@ Reduce `glsl.loops.special.do_while_dynamic_iterations.conditional_continue_frag
 2. `ENV6(c)(5)` representatives.
 3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: ENV6(c)(4) header diamond
+
+## Next action
+Reduce `for_dynamic_iterations.dowhile_trap_fragment` (hangs) to a `feme-opt --feme-cpu-linearize` repro (`ENV6(c)(4a)`).
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Got the pre-linearize IR with `FEME_DUMP_IR_PRELINEARIZE=1`; the header held a divergent `continue` diamond, read as a second exit check.
+3. `LoopLinearizer::linearizeCycle` now splits the header body into its own block when all exits are real compares and both header successors stay in the cycle.
+4. First try was too broad: 4 lit tests broke (header exits via a flow phi). Added the "exit condition is not a phi" guard.
+5. New lit test `loop-header-divergent-continue-diamond.ll`. `check-feme` 3890 passed.
+6. Batch runner on all 324 `loops.special`: only 4 `dowhile_trap` fail. 8 fixed. Docs and `.instructions.md` updated.
+
+## State
+Committed. Fail total ~161.
+
+## Next steps (ranked)
+1. `ENV6(c)(4a)` the 4 remaining `dowhile_trap` hangs.
+2. `ENV6(c)(5)` representatives.
+3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
