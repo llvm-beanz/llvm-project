@@ -5,6 +5,7 @@ add_feme_library(FeMeImage
   BCPartitionTables.cpp
   BlockGeometry.cpp
   SubresourceLayout.cpp
+  ViewMaterialization.cpp
 
   LINK_COMPONENTS
   Support
