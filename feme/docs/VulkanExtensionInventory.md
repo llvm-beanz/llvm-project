@@ -41,6 +41,12 @@ extraction (pure code motion, see `VulkanCTSReport.md`): the generator
 reproduces this table exactly against the same CTS registry. No extension
 advertisement changed.
 
+Rechecked after the 2026-11-05 WARP roadmap `WS1(a)` BC decoder
+extraction (pure code motion, see `VulkanCTSReport.md`): not regenerated
+this entry -- moving `BCDecode`/`BC6HDecode`/`BC7Decode`/
+`BCPartitionTables` into `FeMeImage` behind unchanged forwarder signatures
+changes no extension advertisement, so this table is unaffected.
+
 | Status | Count |
 |---|---:|
 | Advertised | 50 |

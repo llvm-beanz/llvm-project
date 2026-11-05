@@ -1,5 +1,70 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS1(a): BC1-5/BC6H/BC7 block decoder extraction (2026-11-05)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device`. This session implements WARP roadmap `WS1(a)` (the first of a new
+`WS1(a)`/`WS1(b)`/`WS1(c)` breakdown of `WS1`, filed this session per the
+one-lowercase-letter nesting rule): every BC-family block decoder
+(`BCDecode.*` BC1-5, `BC6HDecode.*`, `BC7Decode.*`, and their shared
+`BCPartitionTables.*`) never depended on `VkFormat` or any other Vulkan
+type, so they move verbatim into the portable `FeMeImage` library
+(`feme/lib/Image/{BCDecode,BC6HDecode,BC7Decode,BCPartitionTables}.cpp`,
+headers under `feme/include/feme/Image/`) as `feme::image::decodeBC*`/
+`feme::image::bcpartitions::*`. `feme/lib/Vulkan/{BCDecode,BC6HDecode,
+BC7Decode}.{h,cpp}` keep their existing signatures as thin forwarders (so
+`BCSamplingBridge.cpp`'s sampling path is unaffected); the now-unused
+Vulkan-side `BCPartitionTables.{h,cpp}` (only ever an internal
+implementation detail of the two BPTC decoders) are removed outright
+rather than forwarded. ASTC/ETC2 decode is deliberately left where it is
+(not a D3D requirement; `WS1`'s own roadmap text migrates them only if
+they end up sharing the extracted path, which they do not yet). Pure code
+motion -- no advertised capability or Vulkan behavior changed.
+
+`check-feme` rebuilt its prerequisites and passed: **3,912 Passed, 15
+Skipped, 10 Unsupported, zero failures** (3,937 discovered tests),
+including 22 new `FeMeImageTests` cases (10 BC1-5, 6 BC7, 6 BC6H,
+mirroring the existing Vulkan-side `BC*DecodeTest.cpp` cases now
+exercising the real implementation directly in its new home). Cached
+(`sccache`), assertions enabled, no PCH.
+
+The local CTS checkout at `12af7ce2dbfd6a95a72cb77dd4f3e9bdaf51d11f`
+(unchanged) ran every `vk-default` mustpass
+`dEQP-VK.texture.compressed.bc*` case (192 cases, covering every advertised
+BC1/BC1A/BC2/BC3/BC4/BC5/BC6H/BC7 sub-format in both POT/NPOT, mip, and
+compute-queue variants) -- directly exercising every decoder moved this
+session (BC6H/BC7 solely through the sampling path, since neither is wired
+into any other operation yet). Total: **192 Completed, 96 Pass, 96
+NotSupported (sparse-residency variants, expected, unrelated to this
+change), zero Fail, zero Unrun.** Artifacts are under
+`C:\dev\VK-GL-CTS\run\feme-20261105-ws1a-bcdecode`: `cases.txt`,
+`results\report.txt`. From the LLVM checkout:
+
+```powershell
+$env:FEME_VULKAN_SAFETY_NET_TIMEOUT_MS = '30000'
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261105-ws1a-bcdecode\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261105-ws1a-bcdecode\results `
+  --workers 1 --batch-size 40 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The 192-case list came directly from the local `vk-default` mustpass
+(`external\vulkancts\mustpass\main\vk-default\texture.txt`, filtered to
+`compressed.bc*`) -- unlike `WS0(b)`'s `subresource_layout`/
+`host_image_copy` modules, this one is already in mustpass.
+
+The ICD at commit `8508021b6867` (this session's HEAD so far) has
+SHA-256 `bfa15e08a6893c77e63012952fcd969e878eda2a4363591732c15382d5a44ad6`
+(`libfeme_vulkan.dll`); `llvm-project` was at that same commit when this
+run completed. No full CTS sweep, Direct3D execution, display
+interoperability, or HLK qualification was run this session; both Vulkan
+inventories were not regenerated this entry (no format/extension
+advertisement changed by this pure code-motion commit -- see WS0(a)'s
+recheck below, still valid).
+
 ## Windows WARP roadmap WS0(b): subresource-layout extraction (2026-11-05)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
