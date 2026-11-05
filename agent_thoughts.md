@@ -132037,3 +132037,24 @@ Committed. Fail total ~161.
 2. `ENV6(c)(5)` representatives.
 3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: ENV6(c)(4a) dowhile_trap hangs
+
+## Next action
+Triage `ENV6(c)(5)` representatives (37 linearize cases), one alone each.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Ran `dowhile_trap_vertex` alone: hangs. Dumped IR with `FEME_DUMP_IR_PRELINEARIZE`, linearized it alone: no error, but the inner loop entry mask was a literal `true`.
+3. Cause: the outer walk reaches the inner loop at its latch; `rethreadNestedEntryMasks` is keyed by header, so no narrowing.
+4. Fix: redirect a linearized child's latch to its header. New lit test `loop-nested-multiblock-child-entry-mask.ll`. `check-feme` 3891 passed.
+5. `loops.special` 324/324 Pass. Regression run (770 cases): 146 fail, none new.
+
+## State
+Committed. Failing total at most 146 (stale list had 255).
+
+## Next steps (ranked)
+1. Re-measure the full CTS to refresh the failing list.
+2. `ENV6(c)(5)` representatives.
+3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
