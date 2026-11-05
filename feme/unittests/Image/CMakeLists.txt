@@ -8,6 +8,7 @@ add_feme_unittest(FeMeImageTests
   BC7DecodeTest.cpp
   BCDecodeTest.cpp
   BlockGeometryTest.cpp
+  CopyWalkTest.cpp
   SubresourceLayoutTest.cpp
   ViewMaterializationTest.cpp
   )
