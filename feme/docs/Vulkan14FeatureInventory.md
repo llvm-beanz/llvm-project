@@ -50,6 +50,12 @@ extent/border-mask extraction (pure code motion, see
 forwarder signatures changes no feature advertisement, so this table is
 unaffected.
 
+Rechecked after the 2026-11-05 WARP roadmap `WS1(c)` image-copy
+region-walk extraction (pure code motion, see `VulkanCTSReport.md`): not
+regenerated this entry -- moving `runCopyImage`'s stride-walking geometry
+into `FeMeImage` behind an unchanged function body changes no feature
+advertisement, so this table is unaffected.
+
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---:|---:|---:|
 | 1.0 | 34 of 55 | n/a | n/a |

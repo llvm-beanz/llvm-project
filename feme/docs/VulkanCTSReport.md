@@ -1,5 +1,88 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS1(c): image-copy region-walk extraction (2026-11-05)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` (confirmed at session start and again immediately before this CTS
+run). This session implements WARP roadmap `WS1(c)`: `feme::vulkan::
+ImageOps.cpp`'s `runCopyImage` -- not `CommandBuffer.cpp`, which is where
+the roadmap's original `WS1(c)` text said this logic lived; that was
+inaccurate and is corrected in this session's roadmap update -- computes
+its row/depth/array-layer-vs-3D-depth-slice stride-walking geometry (block
+/texel unit conversion for each side's own compressed-block shape,
+row-byte sizing with the per-texel sample count folded in, and the rule
+that decides whether a region's slices step through array layers or a
+3D image's depth offset) entirely from plain scalar values, before ever
+touching a live `Image`'s texel/block storage. That geometry moves into
+`feme::image::computeImageCopyRegionWalk`/`computeImageCopySliceLocation`
+(`feme/include/feme/Image/CopyWalk.h`, `feme/lib/Image/CopyWalk.cpp`); the
+actual `memcpy` through `Image::texelPointer`/`blockPointer` stays in
+`ImageOps.cpp`; `runCopyImage`'s own copy becomes a pair of calls to the
+new functions. `runBlitImage`/`runResolveImage` were evaluated for the
+same kind of extraction and found to have nothing comparable left to
+move: `runBlitImage`'s per-texel loop is inseparable from its BC/ETC2/ASTC
+decode-then-resample pipeline (bounds and sub-pixel sample positions
+depend on the filter and the decoded-format byte layout, not just
+block/sample-count geometry), and `runResolveImage`'s loop is already a
+direct, un-block-shaped nested walk with no unit-conversion or
+3D-vs-array-layer branch to factor out -- only a copy can pair a 3D image
+with a differently-shaped 2D array image or mix block-compressed/
+uncompressed block shapes on its two sides. Pure code motion -- no
+advertised capability or Vulkan behavior changed.
+
+`check-feme` rebuilt its prerequisites and passed: **3,935 Passed, 15
+Skipped, 10 Unsupported, zero failures** (3,960 discovered tests),
+including 9 new `FeMeImageTests` cases (uncompressed/multisample row-byte
+sizing, compressed-source block-unit conversion into a differently-shaped
+uncompressed destination, non-divisible-extent ceiling rounding, and every
+2D-array/3D-image slice-stepping combination) -- `FeMeImageTests.exe` run
+directly also showed **71/71 passed** (62 prior + 9 new). Cached
+(`sccache`), assertions enabled, no PCH.
+
+The local CTS checkout at `12af7ce2dbfd6a95a72cb77dd4f3e9bdaf51d11f`
+(unchanged) ran a bounded 126-case selection built from the local
+`vk-default` mustpass, chosen to exercise every piece of logic this
+session moved: `dEQP-VK.api.copy_and_blit.core.image_to_image.3d_images.*`
+(6 cases, directly exercises the 3D-depth-slice-vs-array-layer stepping
+rule in both directions), `.array.*` (9 cases, exercises array-to-array
+layer stepping including a partial/remaining-layers case), `.simple_tests.*`
+(23 cases, general single-region copy coverage), and
+`.all_formats.color.2d_to_2d.bc1_rgb_unorm_block.*` (88 cases, exercises
+the compressed-source block-unit-conversion path against both a
+differently-shaped uncompressed destination and a same-shaped compressed
+destination, across every layout-pair/queue-family combination mustpass
+covers for this one format). Total: **126 Completed, 118 Pass, 8
+NotSupported (layout/queue combinations this ICD does not advertise,
+pre-existing and unrelated to this change), zero Fail, zero Unrun.**
+Artifacts are under `C:\dev\VK-GL-CTS\run\feme-20261105-ws1c-copywalk`:
+`cases.txt`, `results\report.txt`. From the LLVM checkout:
+
+```powershell
+$env:FEME_VULKAN_SAFETY_NET_TIMEOUT_MS = '30000'
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261105-ws1c-copywalk\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261105-ws1c-copywalk\results `
+  --workers 1 --batch-size 60 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The 126-case list was assembled by filtering the local `vk-default`
+mustpass `api.txt` to the four groups above, restricted to the `core`
+copy_and_blit variant (not `copy_commands2`, to avoid doubling coverage of
+the same geometry through the `VkCopyImageInfo2`-style entry points, which
+share the same `runCopyImage` implementation).
+
+The ICD at commit `82063faeb37f` (this session's HEAD) has SHA-256
+`ff38849476ed199dd375ed8ac0243ded5b269c6c10b7fa1980c6915bc4c384c7`
+(`libfeme_vulkan.dll`); `llvm-project` was at that same commit when this
+run completed. No full CTS sweep, Direct3D execution, display
+interoperability, or HLK qualification was run this session; both Vulkan
+inventories were not regenerated this entry (no format/extension
+advertisement changed by this pure code-motion commit -- see WS0(a)'s
+recheck below, still valid).
+
 ## Windows WARP roadmap WS1(b): image-view extent/border-mask extraction (2026-11-05)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
