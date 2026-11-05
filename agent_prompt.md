@@ -66,6 +66,7 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-The Vulkan CTS run has been going for a long time with a single process left
-running for 19 hours (PID 86173). Can you inspect the status and see what is
-hanging and decide what the best step to finish the sweep is?
+Please continue working on the FeMe Vulkan ICD. Suggested next steps:
+
+1. Cluster the 255 failures; biggest: memory_model (52), tessellation (24).
+2. `ENV7(g)` audit, offload upstreaming.
