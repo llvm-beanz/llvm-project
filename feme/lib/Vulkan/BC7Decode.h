@@ -6,6 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
+// Roadmap WS1(a): the real implementation now lives in
+// feme/include/feme/Image/BC7Decode.h / feme/lib/Image/BC7Decode.cpp
+// (feme::image::decodeBC7Block), since it never depended on VkFormat or
+// any other Vulkan type. This header now only forwards to it, unchanged,
+// so BCSamplingBridge.cpp and BC7DecodeTest.cpp keep working as-is.
+//
 // Roadmap H8l (split from H8k's own BC6H/BC7 scoping pass): a real decoder
 // for `VK_FORMAT_BC7_{UNORM,SRGB}_BLOCK` ("BPTC", `VK_FORMAT_BC7_*`, 2 of
 // the remaining 4 `VK_FORMAT_BC*` formats after H8i's own BC1-5 slice).

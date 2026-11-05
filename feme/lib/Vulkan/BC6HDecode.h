@@ -6,6 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
+// Roadmap WS1(a): the real implementation now lives in
+// feme/include/feme/Image/BC6HDecode.h / feme/lib/Image/BC6HDecode.cpp
+// (feme::image::decodeBC6HBlock), since it never depended on VkFormat or
+// any other Vulkan type. This header now only forwards to it, unchanged,
+// so BCSamplingBridge.cpp and BC6HDecodeTest.cpp keep working as-is.
+//
 // Roadmap H8m (split from H8k's own BC6H/BC7 scoping pass, attempted after
 // H8l/BC7): a real decoder for `VK_FORMAT_BC6H_{U,S}FLOAT_BLOCK` ("BPTC
 // HDR", the last 2 of the 16 `VK_FORMAT_BC*` formats after H8i's BC1-5 and

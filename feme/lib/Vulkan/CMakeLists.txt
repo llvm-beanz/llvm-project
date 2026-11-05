@@ -98,7 +98,6 @@ add_feme_library(FeMeVulkanCore STATIC
   BC6HDecode.cpp
   BC7Decode.cpp
   BCDecode.cpp
-  BCPartitionTables.cpp
   BCSamplingBridge.cpp
   Buffer.cpp
   CommandBuffer.cpp
