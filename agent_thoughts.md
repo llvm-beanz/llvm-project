@@ -134332,3 +134332,168 @@ Picked up the prior session's ranked suggestion #1 (`WS1(c)`).
 6. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-06: WS1(d) attachment-view layer-count extraction (this session)
+
+**Next action:** `WS2` (task execution/retained work storage out of
+`Sync.*`) -- `WS1`'s original three-row breakdown (`WS1(a)`-`WS1(d)`) is
+now fully done.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+(confirmed at the start of this session and again immediately before the
+CTS run, per standing instructions -- same two harmless `nv-vk64.json`
+loader warnings as every prior session).
+
+## What I did
+
+Picked up the prior session's ranked suggestion #1 (`WS1(d)`), the last
+piece of `WS1`'s original breakdown.
+
+1. Re-read `ImageView::resolvedLayerCount()`/`feme::vulkan::
+   effectiveViewLayerCount` (`feme/lib/Vulkan/Image.h`/`Image.cpp`) end to
+   end rather than trusting the prior session's summary verbatim.
+   Confirmed `RenderPass.cpp`'s `resolveAttachmentView`/
+   `isCompatibleAttachmentView` are still the only two callers, and that
+   `effectiveViewLayerCount` is a pure function of four scalars (whether
+   the image is a 3D image, whether the view is a 3D view, the image's
+   depth, the image's array-layer count) with no live `Image`/`ImageView`
+   dependency beyond reading those four values.
+2. Added `feme::image::effectiveViewLayerCount`/
+   `resolveAttachmentViewLayerCount` to `ViewMaterialization.h`/`.cpp`
+   (not a new file -- this is squarely "image-view materialization," the
+   same family `WS1(b)`'s `resolveImageViewExtent` already lives in).
+   `resolveAttachmentViewLayerCount` deliberately reproduces `ImageView::
+   resolvedLayerCount()`'s exact (unclamped) sentinel-resolution
+   behavior, not `resolveImageViewExtent`'s clamped version -- see the
+   decision record below.
+3. Converted both Vulkan-side functions into one-line forwarders:
+   `effectiveViewLayerCount` in `Image.cpp`, `ImageView::
+   resolvedLayerCount()` inline in `Image.h`. `RenderPass.cpp` needed no
+   changes at all -- it already only ever calls `View->
+   resolvedLayerCount()`, never the Vulkan-side `effectiveViewLayerCount`
+   directly.
+4. Three commits, same established pattern: (1) add the two portable
+   functions to `FeMeImage`, build-verify; (2) convert `Image.h`/`.cpp`'s
+   two functions into forwarders, build `FeMeImage` -> `FeMeVulkanCore` ->
+   `feme_vulkan` in sequence; (3) add 7 new test cases to
+   `ViewMaterializationTest.cpp` (not a new file, matching where the
+   functions themselves live), build-and-run.
+5. Struck `WS1(d)` on `WARPRoadmap.md` with exit evidence, recording the
+   design decision inline (see below) so the row stands on its own.
+   Also updated the roadmap's opening summary line, which still said
+   only "`WS0`... is done; `WS1` can continue" -- now that `WS1(a)`-
+   `WS1(d)` are all struck, updated it to say both `WS0` and `WS1` are
+   done.
+
+## Verification
+
+- `check-feme`: 3,942 Passed / 15 Skipped / 10 Unsupported, zero
+  failures (3,967 discovered) -- exactly 7 more than the prior session's
+  3,960, matching the 7 new `ViewMaterializationTest` cases, zero
+  regressions. Confirmed via the `cmake --build . --target check-feme`
+  process's own zero exit code (the lit summary's captured output
+  again stopped right after the "Passed" line, the same truncation seen
+  in every recent session -- the zero-exit-code method remains the
+  established fallback).
+- `FeMeImageTests.exe` direct run: 78/78 Pass (71 prior + 7 new).
+- Bounded CTS: assembled a 36-case selection from the local `vk-default`
+  mustpass's `renderpasses.txt`, filtered to the only two group names
+  that directly reference either the `VK_REMAINING_ARRAY_LAYERS`
+  sentinel or a 3D-image attachment: `remaining_array_layers.*` (26
+  cases across `renderpass1`/`renderpass2`, including the
+  `view_transition.3d_texture_view_transition` case -- an exact hit on
+  the 2D-view-of-3D-image special case this session extracted) and
+  `suballocation.multisample_resolve.resolve_into_3d_image.*` (10 cases,
+  resolving a multisample image into a 3D-image attachment, another path
+  through the same layer-count resolution). Result: 36 Completed, 34
+  Pass, 2 NotSupported (an unsupported sample-count/format combination,
+  pre-existing and unrelated), zero Fail, zero Unrun.
+- Did not regenerate either Vulkan inventory file -- added a "rechecked,
+  not regenerated, no advertisement changed" note to both, matching
+  every prior `WS0`/`WS1` session's own precedent.
+- Built the case-list file directly under an absolute
+  `C:\dev\VK-GL-CTS\run\feme-2026-11-06-ws1d\cases.txt` path from the
+  start, maintaining the discipline established after the WS1(a)/WS1(b)
+  relative-path mistakes.
+
+## Decision record
+
+1. **The central open question the `WS1(d)` roadmap row posed** --
+   should attachment-view and sampled/storage-view layer-count
+   resolution converge on one shared function, or stay distinct? --
+   resolved as **stay deliberately distinct**. `ImageView::
+   resolvedLayerCount()` does not clamp an explicit (non-sentinel)
+   `layerCount` against the image's remaining layers; `WS1(b)`'s
+   `resolveImageViewExtent` does (`std::min(ResolvedLayerCount,
+   ImageArrayLayers - BaseArrayLayer)`). Converging them would silently
+   change `RenderPass.cpp`'s attachment-view validation (an
+   out-of-range explicit `layerCount` would start being clamped instead
+   of passed through unchanged, which `resolveAttachmentView`'s own
+   zero-check and `AttachmentView::ArrayLayers` assignment both
+   currently assume is already correct). This extraction is pure code
+   motion, not a behavior fix, so preserving the discrepancy verbatim
+   (and documenting *why* it exists, in both the header comment and the
+   new unit test's own name) was the right choice -- a future session
+   that wants to actually converge the two paths now has an explicit,
+   tested behavioral difference to reason about and decide whether to
+   change, not an undocumented inconsistency to rediscover from scratch.
+2. Kept both new functions in `ViewMaterialization.h`/`.cpp` rather than
+   a new file under `feme/include/feme/Image/` -- they are the same kind
+   of "image-view materialization" work `WS1(b)` already named that file
+   for, and `resolveAttachmentViewLayerCount` directly calls
+   `effectiveViewLayerCount`, so keeping them adjacent to
+   `resolveImageViewExtent` (which the roadmap row explicitly said this
+   work should "build on") made the file's own role as "all portable
+   view-materialization math lives here" stay coherent, rather than
+   fragmenting closely related logic across files prematurely.
+3. Did not touch `RenderPass.cpp` itself in the forwarder-conversion
+   commit -- it was already calling `View->resolvedLayerCount()`
+   exclusively (never `effectiveViewLayerCount` directly), so the
+   forwarder conversion was entirely contained to `Image.h`/`Image.cpp`.
+   This is a smaller blast radius than `WS1(b)`/`WS1(c)` needed, and is
+   itself evidence the roadmap's own characterization of this as
+   "smaller and more self-contained than `WS1(c)`" (from the prior
+   session's ranked list) was accurate.
+
+## State restated
+
+- `WS0` (`WS0(a)`/`WS0(b)`), `WS1(a)`, `WS1(b)`, `WS1(c)`, `WS1(d)`: all
+  done. `WS1`'s entire three-row original breakdown (which grew to four
+  rows once `WS1(b)`'s session carved out `WS1(d)`) is now fully struck.
+- `WS2`/`WS3`, `W0`-`W7`: unchanged, all still pending.
+- `FeMeImage` library still has eight files (`BlockGeometry.*`,
+  `SubresourceLayout.*`, `BCDecode.*`, `BC6HDecode.*`, `BC7Decode.*`,
+  `BCPartitionTables.*`, `ViewMaterialization.*`, `CopyWalk.*`) -- this
+  session added functions to an existing file, not a new one -- and 78
+  unit tests total.
+- No offload-test-suite / `check-hlsl-feme-vk` work this session.
+- No issue found outside `feme/` this session -- no reproducer/fix commit
+  needed.
+- No new environment/process issue found worth codifying in
+  `feme/.instructions.md` this session -- re-skimmed its last ~8 headings
+  at session start, nothing new since the last session, and no new
+  mistake was made this session requiring a fresh entry.
+
+## Suggested next steps (ranked)
+
+1. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+   incrementally. With `WS1`'s entire breakdown now done, this is the
+   natural next shared-core extraction target per the roadmap's own
+   `WS0 -> WS1 -> ...` sequencing, and is independent of the image-
+   focused `WS0`/`WS1` work this and the last several sessions did.
+2. **`WS3`**: establish shared-core regression gates -- still worth the
+   brief review flagged in the last two sessions (whether its gates
+   would have caught anything `WS0`/`WS1`'s manual check-feme/CTS
+   verification did not) now that `WS1` is fully done and there is a
+   complete, closed body of extraction work to evaluate the question
+   against, rather than an open-ended one.
+3. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
+   an explicit FeMe adapter-selection assertion -- a research/
+   documentation task, no Windows adapter install needed yet.
+4. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+5. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
