@@ -70,15 +70,26 @@ Please begin work on the WARP roadmap.
 
 ## Suggested next steps (ranked)
 
-1. **`WS0(b)`**: extract `Image.*`'s checked mip/plane/sample subresource
-   layout math into `FeMeImage`, building on this session's block-geometry
-   functions. Same bounded-commit/test/CTS pattern as this session.
-2. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus
-   (public/white-box/legacy-shader/display-dependent) and add an explicit
-   FeMe adapter-selection assertion to a future runner -- a research/
-   documentation task, no Windows adapter install needed yet.
-3. **`W0(a)`/`W0(b)`** (Direct3D sense, not this session's `WS0(b)`): still
-   blocked on a suitable Windows host/VM outside this process-isolated
-   container, per the prior session's note.
-4. Backlog carried from prior sessions, still untouched:
-   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
+1. **`WS1`**: move BC decoders/bridges first, then normalized image-view
+   materialization and reusable copy/resolve kernels out of
+   `CommandBuffer.cpp`/`ImageOps.cpp` into `FeMeImage`, building on both
+   `WS0(a)`'s block-geometry and `WS0(b)`'s subresource-layout functions.
+   Materially larger than `WS0` -- likely needs its own lettered
+   breakdown (`WS1(a)`, `WS1(b)`, ...) the way `WS0` just got, started at
+   the top of a future session rather than retrofitted mid-session.
+2. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+   incrementally -- independent of `WS1`, could run in parallel in a
+   separate session.
+3. **`WS3`**: establish shared-core regression gates (nominally meant to
+   precede `WS0` per the roadmap's own text, but `WS0` is now done without
+   them -- worth a brief look at whether `WS3`'s gates would have caught
+   anything `WS0(a)`/`WS0(b)`'s manual check-feme/CTS verification did
+   not, before treating it as moot).
+4. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
+   explicit FeMe adapter-selection assertion -- a research/documentation
+   task, no Windows adapter install needed yet.
+5. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+6. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
