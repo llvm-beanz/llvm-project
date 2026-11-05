@@ -131999,3 +131999,19 @@ Docs-only. 14 cases are a documented CTS quirk.
 1. `ENV6(c)(3)` scoping.
 2. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
 3. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: ENV6(c)(3) scoping
+
+## Next action
+Reduce `glsl.loops.special.do_while_dynamic_iterations.conditional_continue_fragment` to an `.ll` repro (`ENV6(c)(4)`).
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Re-ran one loops.special case: still "more than one divergent exit check".
+3. Split `ENV6(c)(3)` into `(4)`-`(7)` siblings in the roadmap, smallest first. Docs only.
+
+## Next steps (ranked)
+1. `ENV6(c)(4)` (14 cases, ~1 session).
+2. `ENV6(c)(5)` representatives.
+3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
