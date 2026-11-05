@@ -4,6 +4,7 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_feme_unittest(FeMeImageTests
+  BCDecodeTest.cpp
   BlockGeometryTest.cpp
   SubresourceLayoutTest.cpp
   )
