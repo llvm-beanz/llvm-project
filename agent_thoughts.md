@@ -131812,3 +131812,19 @@ Wait for the sweep (~9h), then reconcile into `VulkanCTSReport.md`.
 2. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): triage from the
    fresh failure list.
 3. `ENV7(g)` audit, then `ENV5(c)(7)(b)`/offload upstreaming.
+
+# 2026-11-05 (hung PID 86173 triage)
+
+## Next action
+Triage the 255 failures (`ENV6(c)(3)`/`ENV6(d)` clusters).
+
+## What happened
+1. Device check OK.
+2. PID 86173 was NOT our sweep: parent 1, `/tmp/gf-baseline-run`, files gone,
+   spinning at 100% CPU for 19h. Orphan from an older session. Killed.
+3. Our sweep had already finished at 14:02: 0 Unrun, 255 Fail.
+4. Recorded results in `VulkanCTSReport.md`.
+
+## Next steps
+1. Cluster the 255 failures; biggest: memory_model (52), tessellation (24).
+2. `ENV7(g)` audit, offload upstreaming.

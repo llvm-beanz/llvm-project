@@ -70,6 +70,20 @@ Their isolated frontend, backend, SPIR-V validation and original offload
 regressions pass. The Clang interpolation reproducer now returns
 `[3,12,2,3]`, not `[3,3,3,3]`.
 
+### 2026-11-05 re-measure (post `ENV7(i)`)
+
+Same command as below, case list = `all-packages-cases.txt` minus
+`shader_timeout` (3,269,347 cases), artifacts in
+`/home/dev/dev/VK-GL-CTS/run/feme-20261105-full/`. Finished 2026-11-05
+14:02 UTC: **0 Unrun**; Pass 727,856, NotSupported 2,541,190,
+QualityWarning 46, **Fail 255**. Largest failure clusters:
+`memory_model.{write_after_read,message_passing}.core11` (52),
+`tessellation.invariance.outer_edge_symmetry` (24),
+`image.store.without_format` (14), `glsl.loops.special` (12).
+A stray `deqp-vk` (PID 86173, 19 h, 100% CPU) from an unrelated
+`/tmp/gf-baseline-run` run (parent PID 1, case list already deleted) was
+not part of this sweep and was killed.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
