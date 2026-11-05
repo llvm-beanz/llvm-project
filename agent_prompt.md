@@ -66,7 +66,9 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-I'm seeing some local test failures under macOS, can you diagnose and fix them?
+Please continue work on the FeMe Vulkan ICD. Potential next steps:
 
-When built with ubsan and asan I see the output in the failureoutput.txt file at
-the root of the repo.
+1. Full re-measure (~9 hours, async). Case list: filter `shader_timeout`
+   from `all-packages-cases.txt`. Use the command in `VulkanCTSReport.md`.
+2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
+3. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
