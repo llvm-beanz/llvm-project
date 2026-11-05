@@ -68,6 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `ENV6(c)(3)` scoping.
-2. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
-3. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+1. `ENV6(c)(4)` (14 cases, ~1 session).
+2. `ENV6(c)(5)` representatives.
+3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
