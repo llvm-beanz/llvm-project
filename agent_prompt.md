@@ -68,5 +68,19 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. Cluster the 255 failures; biggest: memory_model (52), tessellation (24).
-2. `ENV7(g)` audit, offload upstreaming.
+1. `ENV6(d)(2)`: isolate the 16 `memory_model`
+   `device.payload_local.*.guard_local.*.{comp,vert}` hangs on their
+   own (alone, no batch) to get a real stack/log instead of a bare
+   timeout -- about 30-60 min to get a first signal.
+2. `ENV6(c)(3)`: scope as its own multi-session milestone before
+   starting (83 cases, `feme-cpu-linearize`/`simdize`/`wrap-entry`
+   architecture gap, not a quick fix) -- a few hours just to plan.
+3. `ENV6(d)` remainder: `glsl.arrays` mat3 constructor (12 cases,
+   silent wrong-value), `image.store.without_format`
+   `a2b10g10r10_sint_pack32` (14 cases, no compile error),
+   `tessellation.invariance` (26 cases, no compile error) -- each
+   likely a half-day reproduce-and-fix once picked up.
+4. `ENV5(c)(7)(b)` hull lockstep barriers (3 cases) -- lowest priority,
+   still just scoped.
+5. offload-test-suite upstreaming (3 patches) -- blocked on push
+   access, no change possible this session.
