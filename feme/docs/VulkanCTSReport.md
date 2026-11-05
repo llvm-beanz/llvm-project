@@ -194,6 +194,19 @@ and, if run in one serial `deqp-vk` process, cascade `VK_TIMEOUT` into the
 rest of the group -- use the batch runner). `check-feme` 3890/3894, 4
 unsupported. Fail total is now 169 - 8 = 161. No inventory change.
 
+### L538: `glsl.loops.special` 324/324 `Pass` -- child loop entry narrowed via its latch (`ENV6(c)(4a)`)
+
+The 4 `for_{dynamic,uniform}_iterations.dowhile_trap_*` hangs: an outer
+loop's body walk reaches a multi-block inner do-while at its latch, so
+`rethreadNestedEntryMasks` (keyed by header) never narrowed the inner entry
+mask; lanes the outer loop had already deactivated spun the inner
+`feme.cpu.mask.any` forever. It now redirects a linearized child's latch to
+its header. Regression run over the 255 stale failures plus the
+`glsl.loops`/`glsl.switch`/`glsl.demote` groups (770 cases): 624 Pass, 146
+Fail, none outside the stale failure list. Failing total is now at most 146
+(109 of the stale 255 now pass). `check-feme` 3891/3895, 4 unsupported. No
+inventory change.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
