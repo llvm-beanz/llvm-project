@@ -31,6 +31,11 @@ at checkout `12af7ce2dbfd`. No implementation or extension advertisement changed
 The eight-case CTS smoke is recorded separately in `VulkanCTSReport.md`;
 it is not a new full extension-query or conformance audit.
 
+Rechecked after the 2026-11-05 WARP roadmap `WS0(a)` block-geometry
+extraction (pure code motion, see `VulkanCTSReport.md`): the generator
+reproduces this table exactly against the same CTS registry. No extension
+advertisement changed.
+
 | Status | Count |
 |---|---:|
 | Advertised | 50 |
