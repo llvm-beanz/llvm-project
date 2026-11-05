@@ -1,8 +1,8 @@
 # FeMe WARP-like software adapter roadmap
 
 **Next implementation step: W0(a), prove the Windows integration boundary.**
-In parallel, WS0 can inventory and test the shared image boundary without
-committing to a Windows deployment model.
+In parallel, `WS0(a)` is done; `WS0(b)` can continue the shared image
+boundary extraction without committing to a Windows deployment model.
 
 This is the implementation checklist for [FeMeWARPDesign.md](FeMeWARPDesign.md),
 not a claim that FeMe is a Direct3D adapter today. The product remains a
@@ -98,7 +98,8 @@ for the other's semantics.
 
 | ID | Bounded change | Exit evidence |
 |---|---|---|
-| WS0 | Separate API-neutral format/block geometry and checked mip/plane/sample layout calculations from `Format.*`/`Image.*`. Leave Vulkan creation, allocation binding, layout state, and feature tables in place. | Portable layout/overflow/odd-extent/compressed/depth-plane tests; Vulkan callers migrated with unchanged footprints and advertisements. |
+| ~~WS0(a)~~ | Extract `formatElementSize`/`blockWidth`/`blockHeight`/`bytesPerBlock`/`isASTCSRGBFormat` out of `feme::vulkan::Format.cpp` into a new API-neutral `FeMeImage` library (`feme/lib/Image`, `feme/include/feme/Image/BlockGeometry.h`); none of them ever depended on `VkFormat`. `Format.{h,cpp}` keep their existing signatures as thin forwarders, so every Vulkan caller and advertised format capability is unchanged. | `FeMeImageTests` (11 cases: ordinary/ASTC-LDR/ASTC-HDR/BC/ETC2-EAC element sizes, block shapes and sRGB); `check-feme` 3,875 Passed/15 Skipped/10 Unsupported, zero failures; bounded 233-case `dEQP-VK.api.smoke.*`/`api.info.format_properties.*` CTS run, 233 Pass/zero Fail; both Vulkan inventories regenerate unchanged. See `VulkanCTSReport.md`. |
+| WS0(b) | Separate the checked mip/plane/sample subresource-layout calculations (offsets, strides, overflow/odd-extent/depth-plane handling) from `Image.*` into the same `FeMeImage` library, building on `WS0(a)`'s block-geometry functions. Leave Vulkan creation, allocation binding, layout state, and feature tables in place. | Portable layout/overflow/odd-extent/compressed/depth-plane tests; Vulkan callers migrated with unchanged footprints and advertisements. |
 | WS1 | Move BC decoders/bridges first, then normalized image-view materialization and reusable copy/resolve kernels out of `CommandBuffer.cpp`/`ImageOps.cpp`. Migrate ASTC/ETC only where they share the extracted path; they are not D3D requirements. | Existing decode/sampling/copy tests still pass; view rebasing, swizzle, sRGB, row/depth/sample strides and decoded-storage lifetime have direct tests. Vulkan and D3D consume the same helpers. |
 | WS2 | Extract task execution and retained work storage from `Sync.*`, command execution, and existing CPU/draw worker paths incrementally. Preserve Vulkan queue/semaphore behavior; do not export its `QueueExecutor` object model wholesale. | Submission replay, independent queues, wait-before-signal, error wakeup, destruction and single/multi-worker tests. A lower-valued D3D fence signal is tested separately from Vulkan's monotonic timeline rules. |
 | WS3 | Establish shared-core regression gates before WS0, and apply them to every following commit. Move portable tests with their helpers, retaining loader-level tests in Vulkan. | `check-feme`, affected CTS groups, byte/image comparisons and unchanged capability manifests; compare named failures, not only pass totals. |
