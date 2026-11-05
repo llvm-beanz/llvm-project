@@ -1,5 +1,6 @@
 ---
-model: claude-sonnet-5.5
+model: claude-sonnet-5
+resume: 86dca4d4-0d8b-4652-b37b-c8ab60c0ce73
 ---
 # Initial Guidelines
 
@@ -66,3 +67,18 @@ mid-investigation to avoid losing documentation.
 # Request
 
 Please begin work on the WARP roadmap.
+
+## Suggested next steps (ranked)
+
+1. **`WS0(b)`**: extract `Image.*`'s checked mip/plane/sample subresource
+   layout math into `FeMeImage`, building on this session's block-geometry
+   functions. Same bounded-commit/test/CTS pattern as this session.
+2. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus
+   (public/white-box/legacy-shader/display-dependent) and add an explicit
+   FeMe adapter-selection assertion to a future runner -- a research/
+   documentation task, no Windows adapter install needed yet.
+3. **`W0(a)`/`W0(b)`** (Direct3D sense, not this session's `WS0(b)`): still
+   blocked on a suitable Windows host/VM outside this process-isolated
+   container, per the prior session's note.
+4. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
