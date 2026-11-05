@@ -4,6 +4,7 @@ add_feme_library(FeMeImage
   BCDecode.cpp
   BCPartitionTables.cpp
   BlockGeometry.cpp
+  CopyWalk.cpp
   SubresourceLayout.cpp
   ViewMaterialization.cpp
 
