@@ -2283,11 +2283,28 @@ LogicalResult spirv::SpecConstantCompositeOp::verify() {
       } else if (auto specConstCompositeOp =
                      dyn_cast<spirv::SpecConstantCompositeOp>(constituentOp)) {
         constituentType = specConstCompositeOp.getType();
+      } else if (auto moduleSpecConstOperationOp =
+                     dyn_cast<spirv::ModuleSpecConstantOperationOp>(
+                         constituentOp)) {
+        // Per the SPIR-V spec, an `OpSpecConstantOp` result (a
+        // specialization constant computed from other constants) may also
+        // serve as a composite constituent; `spirv.ModuleSpecConstantOperation`
+        // is that named, module-scope form (see its own description). Like
+        // `spirv.SpecConstant`/`spirv.SpecConstantComposite`, it produces no
+        // SSA result, so its type is read off its wrapped instruction's
+        // yielded operand instead.
+        constituentType =
+            cast<spirv::YieldOp>(moduleSpecConstOperationOp.getBody()
+                                     .front()
+                                     .back())
+                .getOperand()
+                .getType();
       } else {
         return emitError("unsupported constituent ")
                << constituent.getAttr()
-               << ": must reference a spirv.SpecConstant or "
-                  "spirv.SpecConstantComposite";
+               << ": must reference a spirv.SpecConstant, "
+                  "spirv.SpecConstantComposite, or "
+                  "spirv.ModuleSpecConstantOperation";
       }
     } else {
       // A constituent that is not a symbol reference is an inline attribute
@@ -2413,6 +2430,74 @@ void spirv::SpecConstantOperationOp::print(OpAsmPrinter &printer) {
 }
 
 LogicalResult spirv::SpecConstantOperationOp::verifyRegions() {
+  Block &block = getRegion().getBlocks().front();
+
+  if (block.getOperations().size() != 2)
+    return emitOpError("expected exactly 2 nested ops");
+
+  Operation &enclosedOp = block.getOperations().front();
+
+  if (!enclosedOp.hasTrait<OpTrait::spirv::UsableInSpecConstantOp>())
+    return emitOpError("invalid enclosed op");
+
+  for (auto operand : enclosedOp.getOperands())
+    if (!isa_and_present<spirv::ConstantOp, spirv::ReferenceOfOp,
+                         spirv::SpecConstantOperationOp>(
+            operand.getDefiningOp()))
+      return emitOpError(
+          "invalid operand, must be defined by a constant operation");
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.ModuleSpecConstantOperation
+//===----------------------------------------------------------------------===//
+
+ParseResult
+spirv::ModuleSpecConstantOperationOp::parse(OpAsmParser &parser,
+                                            OperationState &result) {
+  Region *body = result.addRegion();
+
+  StringAttr symName;
+  if (parser.parseSymbolName(symName, getSymNameAttrName(result.name).str(),
+                             result.attributes))
+    return failure();
+
+  if (parser.parseKeyword("wraps"))
+    return failure();
+
+  body->push_back(new Block);
+  Block &block = body->back();
+  Operation *wrappedOp = parser.parseGenericOperation(&block, block.begin());
+
+  if (!wrappedOp)
+    return failure();
+
+  OpBuilder builder(parser.getContext());
+  builder.setInsertionPointToEnd(&block);
+  spirv::YieldOp::create(builder, wrappedOp->getLoc(), wrappedOp->getResult(0));
+  result.location = wrappedOp->getLoc();
+
+  // Unlike `spirv.SpecConstantOperation` (whose SSA result is its whole
+  // point, consumed directly at its single point of use), this op is
+  // referenced by symbol and -- per `SymbolOpInterface`'s "symbols must not
+  // have results" invariant -- has no result type to add here.
+
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  return success();
+}
+
+void spirv::ModuleSpecConstantOperationOp::print(OpAsmPrinter &printer) {
+  printer << ' ';
+  printer.printSymbolName(getSymName());
+  printer << " wraps ";
+  printer.printGenericOp(&getBody().front().front());
+}
+
+LogicalResult spirv::ModuleSpecConstantOperationOp::verifyRegions() {
   Block &block = getRegion().getBlocks().front();
 
   if (block.getOperations().size() != 2)

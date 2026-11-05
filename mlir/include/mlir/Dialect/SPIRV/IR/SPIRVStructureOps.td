@@ -804,6 +804,9 @@ def SPIRV_SpecConstantCompositeOp : SPIRV_Op<"SpecConstantComposite", [
 
     A constituent of a spec constant composite can be:
     - A symbol reference to another spec constant (scalar or composite).
+    - A symbol reference to a named `spirv.ModuleSpecConstantOperation`,
+      a specialization constant computed from other constants (e.g. the
+      product of two `gl_WorkGroupSize` components).
     - An inline typed attribute holding the value of a regular
       (non-specialization) constant, e.g. one of a composite spec constant's
       constituents that is itself not individually specializable (a `mat2`
@@ -984,19 +987,93 @@ def SPIRV_SpecConstantOperationOp : SPIRV_Op<"SpecConstantOperation", [
 
 // -----
 
-def SPIRV_YieldOp : SPIRV_Op<"mlir.yield", [
-    HasParent<"SpecConstantOperationOp">, Pure, Terminator]> {
+def SPIRV_ModuleSpecConstantOperationOp : SPIRV_Op<"ModuleSpecConstantOperation", [
+       InModuleScope, SymbolName, SymbolVisibility, Symbol,
+       SingleBlockImplicitTerminator<"YieldOp">]> {
   let summary = [{
-    Yields the result computed in `spirv.SpecConstantOperation`'s
-    region back to the parent op.
+    Declare a new, named specialization constant that results from doing an
+    operation, addressable by symbol from elsewhere in the module.
   }];
 
   let description = [{
-    This op is a special terminator whose only purpose is to terminate
-    an `spirv.SpecConstantOperation`'s enclosed region. It accepts a
-    single operand produced by the preceeding (and only other) instruction
-    in its parent block (see SPIRV_SpecConstantOperation for further
-    details). This op has no corresponding SPIR-V instruction.
+    This op is the named, module-scope counterpart of
+    `spirv.SpecConstantOperation`: it declares a SPIR-V specialization
+    constant that results from doing an operation on other constants
+    (specialization or otherwise), covering the same `OpSpecConstantOp`
+    SPIR-V instruction.
+
+    `spirv.SpecConstantOperation` itself is only ever materialized inline,
+    once per point of use, directly inside the function body that
+    references it, and so is only ever consumed as an SSA value -- it has
+    no persistent identity of its own. However, SPIR-V also permits an
+    `OpSpecConstantOp` result to be used as another specialization
+    constant's composite constituent (`OpSpecConstantComposite`), a context
+    that -- like `spirv.SpecConstant`/`spirv.SpecConstantComposite`
+    themselves -- requires a persistent, named instance living directly in
+    the module rather than inside any function. This op fills that role:
+    it is referenced by symbol (e.g. via `spirv.mlir.referenceof`, same as
+    `spirv.SpecConstant`/`spirv.SpecConstantComposite`) rather than by SSA
+    value, and so -- per `SymbolOpInterface`'s "symbols must not have
+    results" invariant -- produces no result of its own.
+
+    In the `spv` dialect, this op is modelled as follows:
+
+    ```
+    spv-module-spec-constant-operation-op ::=
+        `spirv.ModuleSpecConstantOperation` symbol-ref-id `wraps`
+         generic-spirv-op `:` function-type
+    ```
+
+    In particular, an `spirv.ModuleSpecConstantOperation` contains exactly
+    one region. In turn, that region contains exactly 2 instructions:
+    - One of the SPIR-V instructions valid within an `OpSpecConstantOp`
+      (see `spirv.SpecConstantOperation` for the full list).
+    - An `spirv.mlir.yield` instruction as the terminator.
+
+    #### Example:
+    ```mlir
+    spirv.SpecConstant @sc1 = 1 : i32
+    spirv.SpecConstant @sc2 = 2 : i32
+
+    spirv.ModuleSpecConstantOperation @sco wraps "spirv.IAdd"(%0, %1) : (i32, i32) -> i32
+    spirv.SpecConstantComposite @scc (@sco, @sco) : !spirv.array<2 x i32>
+    ```
+  }];
+
+  let arguments = (ins
+    StrAttr:$sym_name,
+    OptionalAttr<StrAttr>:$sym_visibility
+  );
+
+  let results = (outs);
+
+  let regions = (region SizedRegion<1>:$body);
+
+  let hasOpcode = 0;
+
+  let autogenSerialization = 0;
+
+  let hasVerifier = 0;
+  let hasRegionVerifier = 1;
+}
+
+// -----
+
+def SPIRV_YieldOp : SPIRV_Op<"mlir.yield", [
+    ParentOneOf<["SpecConstantOperationOp", "ModuleSpecConstantOperationOp"]>,
+    Pure, Terminator]> {
+  let summary = [{
+    Yields the result computed in `spirv.SpecConstantOperation`'s or
+    `spirv.ModuleSpecConstantOperation`'s region back to the parent op.
+  }];
+
+  let description = [{
+    This op is a special terminator whose only purpose is to terminate a
+    `spirv.SpecConstantOperation`'s or `spirv.ModuleSpecConstantOperation`'s
+    enclosed region. It accepts a single operand produced by the preceeding
+    (and only other) instruction in its parent block (see
+    SPIRV_SpecConstantOperation for further details). This op has no
+    corresponding SPIR-V instruction.
 
     #### Example:
 

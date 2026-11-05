@@ -1303,7 +1303,7 @@ spirv.module Logical GLSL450 {
 // Unsupported constituent (not a SpecConstant or SpecConstantComposite)
 spirv.module Logical GLSL450 {
   spirv.GlobalVariable @gv : !spirv.ptr<f32, Private>
-  // expected-error @+1 {{unsupported constituent "gv": must reference a spirv.SpecConstant or spirv.SpecConstantComposite}}
+  // expected-error @+1 {{unsupported constituent "gv": must reference a spirv.SpecConstant, spirv.SpecConstantComposite, or spirv.ModuleSpecConstantOperation}}
   spirv.SpecConstantComposite @scc (@gv) : !spirv.array<1 x f32>
 }
 
@@ -1408,7 +1408,7 @@ spirv.module Logical GLSL450 {
 spirv.module Logical GLSL450 {
   spirv.func @foo() -> i32 "None" {
     %0 = spirv.Constant 1: i32
-    // expected-error @+1 {{op expects parent op 'spirv.SpecConstantOperation'}}
+    // expected-error @+1 {{op expects parent op to be one of 'spirv.SpecConstantOperation, spirv.ModuleSpecConstantOperation'}}
     spirv.mlir.yield %0 : i32
   }
 }
@@ -1449,3 +1449,79 @@ spirv.module Logical GLSL450 {
     spirv.Return
   }
 }
+
+//===----------------------------------------------------------------------===//
+// spirv.ModuleSpecConstantOperation
+//===----------------------------------------------------------------------===//
+
+// -----
+
+// A named, module-scope spec-constant-operation referenced as a
+// SpecConstantComposite constituent (the shape SPIR-V uses for, e.g., a
+// `WorkgroupSize` built from `gl_WorkGroupSize.x * gl_WorkGroupSize.y`).
+spirv.module Logical GLSL450 {
+  spirv.SpecConstant @sc0 = 8 : i32
+  spirv.SpecConstant @sc1 = 4 : i32
+
+  // CHECK: [[SC0:%.*]] = spirv.mlir.referenceof @sc0
+  %0 = spirv.mlir.referenceof @sc0 : i32
+  // CHECK: [[SC1:%.*]] = spirv.mlir.referenceof @sc1
+  %1 = spirv.mlir.referenceof @sc1 : i32
+
+  // CHECK: spirv.ModuleSpecConstantOperation @sco wraps "spirv.IMul"([[SC0]], [[SC1]]) : (i32, i32) -> i32
+  spirv.ModuleSpecConstantOperation @sco wraps "spirv.IMul"(%0, %1) : (i32, i32) -> i32
+
+  // CHECK: spirv.SpecConstantComposite @scc (@sco, @sco) : !spirv.array<2 x i32>
+  spirv.SpecConstantComposite @scc (@sco, @sco) : !spirv.array<2 x i32>
+}
+
+// -----
+
+// A `spirv.ModuleSpecConstantOperation` must appear directly in a
+// module-like op (it is referenced by symbol, same as
+// spirv.SpecConstant/SpecConstantComposite, and has no SSA result).
+spirv.module Logical GLSL450 {
+  spirv.func @foo() -> () "None" {
+    %0 = spirv.Constant 1 : i32
+    // expected-error @+1 {{op must appear in a module-like op's block}}
+    spirv.ModuleSpecConstantOperation @sco wraps "spirv.IAdd"(%0, %0) : (i32, i32) -> i32
+    spirv.Return
+  }
+}
+
+// -----
+
+// Mismatched constituent type.
+spirv.module Logical GLSL450 {
+  spirv.SpecConstant @sc0 = 8 : i32
+  %0 = spirv.mlir.referenceof @sc0 : i32
+
+  spirv.ModuleSpecConstantOperation @sco wraps "spirv.IAdd"(%0, %0) : (i32, i32) -> i32
+
+  // expected-error @+1 {{has incorrect types of operands: expected 'f32', but provided 'i32'}}
+  spirv.SpecConstantComposite @scc (@sco) : !spirv.array<1 x f32>
+}
+
+// -----
+
+// Composite constituent referencing an unsupported symbol kind is still
+// rejected, and the diagnostic now also mentions the new constituent kind.
+spirv.module Logical GLSL450 {
+  spirv.GlobalVariable @gv : !spirv.ptr<f32, Private>
+  // expected-error @+1 {{unsupported constituent "gv": must reference a spirv.SpecConstant, spirv.SpecConstantComposite, or spirv.ModuleSpecConstantOperation}}
+  spirv.SpecConstantComposite @scc (@gv) : !spirv.array<1 x f32>
+}
+
+// -----
+
+// Invalid enclosed op.
+spirv.module Logical GLSL450 {
+  spirv.func @foo() -> () "None" {
+    %0 = spirv.Variable : !spirv.ptr<i32, Function>
+    spirv.Return
+  }
+
+  // expected-error @+1 {{invalid enclosed op}}
+  spirv.ModuleSpecConstantOperation @sco wraps "spirv.Undef"() : () -> i32
+}
+
