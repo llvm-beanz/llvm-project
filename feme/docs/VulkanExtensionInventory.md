@@ -61,6 +61,13 @@ regenerated this entry -- moving `runCopyImage`'s stride-walking geometry
 into `FeMeImage` behind an unchanged function body changes no extension
 advertisement, so this table is unaffected.
 
+Rechecked after the 2026-11-06 WARP roadmap `WS1(d)` attachment-view
+layer-count extraction (pure code motion, see `VulkanCTSReport.md`): not
+regenerated this entry -- moving `effectiveViewLayerCount`/`ImageView::
+resolvedLayerCount()` into `FeMeImage` behind unchanged forwarder
+signatures changes no extension advertisement, so this table is
+unaffected.
+
 | Status | Count |
 |---|---:|
 | Advertised | 50 |

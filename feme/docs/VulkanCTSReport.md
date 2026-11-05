@@ -1,5 +1,87 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS1(d): attachment-view layer-count extraction (2026-11-06)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` (confirmed at session start and again immediately before this CTS
+run). This session implements WARP roadmap `WS1(d)`: `feme::vulkan::
+effectiveViewLayerCount`/`ImageView::resolvedLayerCount()`
+(`feme/lib/Vulkan/Image.h`/`Image.cpp`) -- the attachment-view-only
+resolution that repurposes a 2D/2D-array view's `baseArrayLayer`/
+`layerCount` subresource-range fields to address a `Texture3D` image's
+depth slices instead of real array layers, used only by `RenderPass.cpp`'s
+`resolveAttachmentView`/`isCompatibleAttachmentView` -- moves into
+`feme::image::effectiveViewLayerCount`/`resolveAttachmentViewLayerCount`
+(`feme/include/feme/Image/ViewMaterialization.h`,
+`feme/lib/Image/ViewMaterialization.cpp`), alongside `WS1(b)`'s
+`resolveImageViewExtent`. The two Vulkan-side functions become thin
+forwarders with identical signatures and behavior; `RenderPass.cpp` itself
+is unchanged (it still calls `View->resolvedLayerCount()`).
+
+Design decision this session had to make (the roadmap's `WS1(d)` row left
+it open): attachment-view and sampled/storage-view layer-count resolution
+stay **deliberately distinct**, not merged into one shared function.
+`ImageView::resolvedLayerCount()` does not clamp an explicit (non-
+sentinel) `layerCount` against the image's remaining layers the way
+`resolveImageViewExtent` does for the sampling/storage path --
+`resolveAttachmentViewLayerCount`'s own header comment documents this
+difference explicitly and preserves it verbatim, since this extraction is
+pure code motion, not a behavior fix. Converging the two paths would
+silently change attachment-view validation (an explicit overrun
+`layerCount` would start being clamped instead of passed through) and is
+left to a future, deliberate change if ever wanted -- not decided here.
+
+`check-feme` rebuilt its prerequisites and passed: **3,942 Passed, 15
+Skipped, 10 Unsupported, zero failures** (3,967 discovered tests),
+including 7 new `FeMeImageTests` cases (non-3D-image pass-through,
+3D-image-with-3D-view pass-through, 3D-image-with-non-3D-view depth
+substitution, explicit-count pass-through, `VK_REMAINING_ARRAY_LAYERS`
+resolution against array layers and against depth for the 2D-view-of-3D-
+image case, and the deliberate non-clamping of an explicit count) --
+`FeMeImageTests.exe` run directly also showed **78/78 passed** (71 prior +
+7 new). Cached (`sccache`), assertions enabled, no PCH.
+
+The local CTS checkout at `12af7ce2dbfd6a95a72cb77dd4f3e9bdaf51d11f`
+(unchanged) ran a bounded 36-case selection built from the local
+`vk-default` mustpass, chosen to exercise every piece of logic this
+session moved: `dEQP-VK.renderpasses.renderpass{1,2}.remaining_array_
+layers.*` (26 cases, directly exercises `VK_REMAINING_ARRAY_LAYERS`
+sentinel resolution for attachment views, including the `3d_texture_view_
+transition` case which is exactly the 2D-view-of-3D-image special case
+this session extracted) and `.suballocation.multisample_resolve.resolve_
+into_3d_image.*` (10 cases, exercises resolving a multisample image into
+a 3D-image attachment, another path through the same layer-count
+resolution). Total: **36 Completed, 34 Pass, 2 NotSupported (an
+unsupported sample-count/format combination, pre-existing and unrelated
+to this change), zero Fail, zero Unrun.** Artifacts are under
+`C:\dev\VK-GL-CTS\run\feme-2026-11-06-ws1d`: `cases.txt`,
+`results\report.txt`. From the LLVM checkout:
+
+```powershell
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-2026-11-06-ws1d\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-2026-11-06-ws1d\results `
+  --workers 1 --batch-size 60 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The 36-case list was assembled by filtering the local `vk-default`
+mustpass `renderpasses.txt` to the two groups above (`remaining_array_
+layers` and `resolve_into_3d_image`), the only groups in that file whose
+names directly reference either the `VK_REMAINING_ARRAY_LAYERS` sentinel
+or a 3D-image render target/attachment.
+
+The ICD at commit `17d5c67f344f` (this session's HEAD) has SHA-256
+`c67180c51f2d38c1ca95d8d468eb4ff8e39a605eb14c164e2a3ecbd9ef9963bf`
+(`libfeme_vulkan.dll`); `llvm-project` was at that same commit when this
+run completed. No full CTS sweep, Direct3D execution, display
+interoperability, or HLK qualification was run this session; both Vulkan
+inventories were not regenerated this entry (no format/extension
+advertisement changed by this pure code-motion commit -- see WS0(a)'s
+recheck below, still valid).
+
 ## Windows WARP roadmap WS1(c): image-copy region-walk extraction (2026-11-05)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
