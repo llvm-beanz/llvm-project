@@ -1,0 +1,36 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.0 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: A module-scope `OpSpecConstantOp` whose operand is itself an
+; COM: `OpSpecConstantOp` must reference the inner one by symbol rather than
+; COM: trying to inline it (there is no enclosing function block).
+
+; CHECK: spirv.ModuleSpecConstantOperation @inner wraps "spirv.IMul"
+; CHECK: [[REF:%.*]] = spirv.mlir.referenceof @inner : si32
+; CHECK: spirv.ModuleSpecConstantOperation @outer wraps "spirv.ISub"({{.*}}, [[REF]]) : (si32, si32) -> si32
+; CHECK: spirv.SpecConstantComposite @wg_size (@outer, @outer, @sc1) : vector<3xsi32>
+
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpName %sc0 "sc0"
+               OpName %sc1 "sc1"
+               OpName %inner "inner"
+               OpName %outer "outer"
+               OpName %wg_size "wg_size"
+               OpDecorate %sc0 SpecId 0
+               OpDecorate %sc1 SpecId 1
+               OpDecorate %wg_size BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+        %sc0 = OpSpecConstant %int 8
+        %sc1 = OpSpecConstant %int 1
+      %v3int = OpTypeVector %int 3
+      %inner = OpSpecConstantOp %int IMul %sc0 %sc1
+      %outer = OpSpecConstantOp %int ISub %sc0 %inner
+    %wg_size = OpSpecConstantComposite %v3int %outer %outer %sc1
+       %main = OpFunction %void None %3
+          %6 = OpLabel
+               OpReturn
+               OpFunctionEnd

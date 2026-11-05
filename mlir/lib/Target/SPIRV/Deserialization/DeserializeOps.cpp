@@ -87,6 +87,20 @@ Value spirv::Deserializer::getValue(uint32_t id) {
     return referenceOfOp.getReference();
   }
   if (auto specConstOperationInfo = getSpecConstantOperation(id)) {
+    // Outside a function (e.g. an operand of a module-scope
+    // spirv.ModuleSpecConstantOperation) there is no block to host the
+    // inline form, so reference a named module-scope instance instead.
+    if (!curBlock) {
+      spirv::ModuleSpecConstantOperationOp moduleOp =
+          getOrCreateModuleSpecConstantOperation(id);
+      if (!moduleOp)
+        return Value();
+      return spirv::ReferenceOfOp::create(
+                 opBuilder, unknownLoc,
+                 getType(specConstOperationInfo->resultTypeID),
+                 SymbolRefAttr::get(moduleOp.getOperation()))
+          .getReference();
+    }
     return materializeSpecConstantOperation(
         id, specConstOperationInfo->enclodesOpcode,
         specConstOperationInfo->resultTypeID,

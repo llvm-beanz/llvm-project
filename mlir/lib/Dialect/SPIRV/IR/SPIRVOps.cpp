@@ -2060,9 +2060,19 @@ LogicalResult spirv::ReferenceOfOp::verify() {
   if (specConstCompositeOp)
     constType = specConstCompositeOp.getType();
 
-  if (!specConstOp && !specConstCompositeOp)
-    return emitOpError(
-        "expected spirv.SpecConstant or spirv.SpecConstantComposite symbol");
+  auto moduleSpecConstOperationOp =
+      dyn_cast_or_null<spirv::ModuleSpecConstantOperationOp>(specConstSym);
+  if (moduleSpecConstOperationOp)
+    constType = moduleSpecConstOperationOp.getBody()
+                    .front()
+                    .getTerminator()
+                    ->getOperand(0)
+                    .getType();
+
+  if (!specConstOp && !specConstCompositeOp && !moduleSpecConstOperationOp)
+    return emitOpError("expected spirv.SpecConstant, "
+                       "spirv.SpecConstantComposite or "
+                       "spirv.ModuleSpecConstantOperation symbol");
 
   if (getReference().getType() != constType)
     return emitOpError("result type mismatch with the referenced "

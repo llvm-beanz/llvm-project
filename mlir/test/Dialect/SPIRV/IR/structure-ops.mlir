@@ -1076,7 +1076,7 @@ func.func @reference_of_composite() {
 
 spirv.module Logical GLSL450 {
   spirv.func @foo() -> () "None" {
-    // expected-error @+1 {{expected spirv.SpecConstant or spirv.SpecConstantComposite symbol}}
+    // expected-error @+1 {{expected spirv.SpecConstant, spirv.SpecConstantComposite or spirv.ModuleSpecConstantOperation symbol}}
     %0 = spirv.mlir.referenceof @sc : i32
     spirv.Return
   }
@@ -1473,6 +1473,19 @@ spirv.module Logical GLSL450 {
 
   // CHECK: spirv.SpecConstantComposite @scc (@sco, @sco) : !spirv.array<2 x i32>
   spirv.SpecConstantComposite @scc (@sco, @sco) : !spirv.array<2 x i32>
+}
+
+// -----
+
+// A module-scope operation may itself be an operand of another one,
+// via `spirv.mlir.referenceof`.
+spirv.module Logical GLSL450 {
+  spirv.SpecConstant @sc0 = 8 : i32
+  %0 = spirv.mlir.referenceof @sc0 : i32
+  spirv.ModuleSpecConstantOperation @inner wraps "spirv.IMul"(%0, %0) : (i32, i32) -> i32
+  // CHECK: spirv.mlir.referenceof @inner : i32
+  %1 = spirv.mlir.referenceof @inner : i32
+  spirv.ModuleSpecConstantOperation @outer wraps "spirv.IAdd"(%0, %1) : (i32, i32) -> i32
 }
 
 // -----
