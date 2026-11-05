@@ -1641,20 +1641,22 @@ being about versions two releases old.
 
 ### 1.10 Direct3D software adapter
 
-Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md). Nothing exists.
+Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md), with the source-based
+implementation checklist in [WARPRoadmap.md](WARPRoadmap.md). No Direct3D
+frontend exists; the shared CPU/image/raster/tessellation/mesh machinery does.
 
 | Gap | Owner section | Priority |
 |---|---|---|
 | The integration boundary is undecided: whether a software/render-only adapter can be installed and enumerated through DXGI at all, versus an application-local compatibility runtime. Choosing wrong invalidates most object-layer work, so W0 is explicitly a throwaway-capable prototype and gates every Windows-facing line of code | "Replacement and Deployment Model", W0 | P0 |
-| No Windows SDK/WDK/DDI version selection, signing, INF, CI or debugging story — and no Windows CI in this tree at all | W0 | P0 |
+| No selected adapter SDK/WDK/DDI, signing, INF or Windows adapter CI contract. The Windows development container provides local Direct3D sources/tests, not an installed FeMe adapter or HLK lab | W0 | P0 |
 | Same in-process LLVM coexistence requirement as §1.9 (the adapter loads into processes that may already host DXC), plus an exported symbol set checked against the selected DDI contract | "Project and Binary Boundaries" | P0 |
 | Serialized root signatures of both versions, descriptor heaps and tables | W2 | P1 |
 | Device/queue/allocator/list/fence/heap/buffer/pipeline objects, device-removal propagation, indirect dispatch, copies, barriers, queries | W1–W2 | P1 |
-| Textures, sampling, copy footprints, views, format matrix | W3 | P1 (blocked on G2) |
-| Raster, output merge, tessellation/geometry, pipeline libraries, persistent cache, HLK | W4–W5 | P2 (blocked on G3–G5) |
+| Extract shared image/layout/decoder/preparation helpers from Vulkan, then map D3D textures, footprints, views and format support | WS0–WS1, W2 | P1 |
+| Map raster, output merge, tessellation/geometry and pipeline caches onto the existing shared executor | W3 | P2 |
 | DXGI presentation, shared resources/fences, D3D11-on-12 evaluation | W6 | P2 |
-| DXR (state objects, ray-tracing pipelines, shader tables, inline ray tracing at `D3D12_RAYTRACING_TIER_1_1`) and mesh/amplification shading, both now inside the declared scope rather than "evaluate later" | W6 | P2 (blocked on G6–G8, and on §1.9.8 proving the shared engine against the Vulkan CTS first) |
-| No conformance measurement of any kind is possible in this tree: the HLK is Windows-only and there is no Windows CI, so the shared graphics/ray-tracing core's conformance evidence comes from the Vulkan side until W0 solves that | W7 | P1 |
+| Mesh/amplification and advanced FL 12_2 resources; DXR state objects, shader tables and Tier 1.1 inline/ray-pipeline execution over the shared ray engine | W4–W5 | P2 (G6–G8 reuse/completion) |
+| Adapter-specific runtime conformance and HLK evidence remain absent; local source availability is not qualification | W7 | P1 |
 
 Its portable half (command execution, resource layout, software graphics) is
 required to stay unit-testable on non-Windows hosts, which is what makes W1–W5
@@ -1668,19 +1670,19 @@ Direct3D counterpart of §1.9.9's definition: feature level 12_2 in full
 (DXR 1.1, mesh shaders, sampler feedback, variable-rate shading, binding
 tier 3), measured by the HLK Direct3D 12 suites and this project's own
 portable execution tests, with the same "advertise only what passes" rule.
-Two scheduling facts follow, and both are the reason this stays a §1.10
-note rather than its own E/F/H/J-style series:
+Two scheduling facts follow:
 
 - **The work is mostly already scheduled, under other names.** Everything
   the Direct3D target needs from the shared core is a G-row (G2–G8) or,
   transitively, a §1.9.7/§1.9.8 row that drives one. Adding a parallel
   Direct3D row per capability would double-track the same engine work; what
-  is genuinely Direct3D-specific stays in W0–W7.
-- **It is deliberately behind Vulkan, not beside it.** The Vulkan CTS runs
-  on this project's hosts today and the HLK does not, so the shared core
-  reaches conformance quality through §1.9 first. "Eventually equivalent"
-  is a scope statement, not a schedule one — and W7 is the milestone that
-  makes it checkable rather than aspirational.
+  is genuinely Direct3D-specific stays in W0–W7. WARPRoadmap's WS0–WS3
+  describe extraction and regression gates, not duplicate feature engines.
+- **Vulkan stays the regression consumer during D3D bring-up.** Local Windows
+  sources permit W0 and portable refactoring to proceed alongside §1.9.
+  Full Vulkan conformance is not a prerequisite to starting that work,
+  nor does Vulkan evidence replace Direct3D runtime tests or HLK. W7 makes
+  the independently measured Direct3D scope checkable.
 
 The one thing this section *does* add is an obligation on §1.9.7/§1.9.8
 rows: a fix landed in `feme::graphics`/`feme::raytracing` for a Vulkan CTS
@@ -2778,12 +2780,18 @@ and with §3.2 once their prerequisites land.
 | # | Milestone | Depends on |
 |---|---|---|
 | W0 | Integration feasibility prototype: SDK/WDK/DDI/OS version selection, proof that a software adapter can be installed and enumerated through DXGI or selection of the application-local compatibility-runtime boundary instead, and the signing/INF/CI/debugging story. Throwaway-capable, and gates every other W step | — |
-| W1 | Headless compute device: objects, DXIL import through the existing path, a resource-free dispatch, multi-wave barrier correctness, device-removal propagation | W0, R21, R22 |
-| W2 | Root signatures of both versions, descriptor heaps and tables, root constants and CBVs, raw/structured/typed buffers with UAV writes and atomics, dispatch/copy/barrier/query, WARP differential | W1, R25, R23 |
-| W3 | Textures and sampling: image/sampler descriptor ABI, committed and placed layouts, copy footprints, views, the initial format matrix, UAV texture access | W2, R30 |
-| W4 | Basic graphics: input assembly through pixel shading with derivatives, interpolation modes, helper lanes, one render target, depth, minimal blend | W3, R32 |
-| W5 | Graphics completeness: depth/stencil, blending, MSAA, formats, MRT, queries, predication, stream output, indirect draw, tessellation and geometry, pipeline libraries and a validated cache, Windows conformance and HLK | W4, R33, R34 |
-| W6 | Interoperability: DXGI presentation or cross-adapter prototype, shared resources and fences, D3D11-on-12 evaluation, mesh-shader and ray-tracing evaluation | W5, R35–R37 |
+| W1 | Full-architecture objects and headless compute through existing stage APIs; device removal and truthful development capability inventory | W0, WS2; reuse R21, R22 |
+| W2 | Root signatures, descriptor heaps, general CBVs, buffers/images/samplers, committed/placed/reserved resources, copy footprints, residency, legacy synchronization, indirect commands and queries | W1, WS0–WS1; reuse R23, R25, R30 |
+| W3 | Conventional graphics over FeMeGraphics: raster/output merge, MSAA, stream output, tessellation/geometry, indirect draw, libraries/caches and cross-API differential tests | W2; reuse/complete R32–R34 |
+| W4 | FL 12_2 mesh/amplification and advanced raster/resource/binding requirements; generated normative capability gap report | W3; reuse/complete G6 |
+| W5 | Shared BVH/ray continuations, DXR 1.1 state objects/tables/queries, and FL 12_2 closure | W4; shared G7–G8 / R36–R37 |
+| W6 | Independent enhanced-barrier, presentation/interoperability, and later shader-model/Work Graphs/compatibility tracks | W2 for barriers; W0+W3 for presentation; W5 for later profiles |
+| W7 | Exact-profile runtime conformance, applicable HLK and project evidence; qualification/signing recorded separately | W0–W5, W6 presentation and any selected optional profiles |
+
+WS0–WS3 and the single-letter W-step breakdowns are defined in
+[WARPRoadmap.md](WARPRoadmap.md). These rows now match FeMeWARPDesign's
+W0–W7 meanings; the older texture/basic-graphics split was inconsistent with
+that design and omitted W7.
 
 The Vulkan conformance steps C1–C10 (§1.9.1) are not a milestone row in
 this table. They cut across V4–V7 rather than following them, they are

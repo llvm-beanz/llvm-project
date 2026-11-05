@@ -43,40 +43,38 @@ portions of that work are factored into
 [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md); this document owns their
 Direct3D mapping and Windows deployment.
 
-FeMe's DXIL path is further along than its SPIR-V path, but the CPU target is
-not ready to back a Direct3D device today. The prerequisites below gate the
-milestones at the end of this document, and all but the last are shared with
-the Vulkan design rather than specific to Direct3D:
+### Implementation baseline (2026-11-05)
 
-- ~~`feme::cpu::JITEngine` has no unit of work smaller than a whole dispatch.
-  It runs every group sequentially on the calling thread and accepts but
-  ignores `JITOptions::NumThreads`, so a command-queue executor needs the
-  per-workgroup API the Vulkan design proposes.~~ (closed by roadmap R21:
-  `feme::cpu::CompiledStage::invokeGroup` is that per-workgroup API, shared
-  unchanged with the Vulkan design under FeMeGraphicsDesign.md's
-  `CompiledStage` name, and `JITOptions::NumThreads` now runs a real worker
-  pool; see FeMeVulkanDesign.md's "CPU Runtime API Changes" Status note)
-- Root-constant lowering exists only in the narrow shape roadmap step R12
-  landed: `feme::cpu::RootConstantLoweringPass` handles the default
-  `(b0, space0)` binding, a non-array `dx.CBuffer`, and a constant row index,
-  and `ResourceInfo::RootConstantSize` is populated from it. Any other
-  register binding, an array, or a dynamic row index is still unsupported, and
-  `feme::cpu::BoundResourceNormalizationPass` deliberately does not normalize
-  constant buffers. Root constants and CBVs remain a multi-pass CPU-target
-  change, not a frontend mapping.
-- Groupshared lowering accepts only *uniform* indices, which excludes the
-  `SV_GroupIndex`-indexed `groupshared` arrays that ordinary compute shaders
-  use.
-- `feme::cpu::ArtifactInfo`'s wave size, thread-group dimensions, and
-  groupshared size/alignment fields exist in artifact ABI version 2 but are
-  always written as zero.
-- The CPU target is compute-only. `FemeDispatchArgs` describes a dispatch, not
-  a shader stage with per-invocation inputs and outputs, and no `FemeDescriptor`
-  field describes an image or a sampler. Every graphics stage below therefore
-  needs new ABI, not only new runtime code.
+The local Direct3D source evaluation and the executable sequencing plan are
+recorded in [WARPRoadmap.md](WARPRoadmap.md). That roadmap refines W0-W7
+below; it does not mark any Direct3D implementation milestone complete.
+The original compute-only baseline is no longer current:
 
-The FeMe-side prerequisites above, and this document's milestones, are
-scheduled against the rest of FeMe in [Roadmap.md](Roadmap.md) (§1.10 and
+- `feme::cpu::CompiledStage` supports compute, vertex, fragment, hull,
+  patch-constant, domain, geometry, mesh, and task invocation. Reuse its
+  prepared resource and stage ABIs rather than inventing a Direct3D variant.
+- `StageArtifactInfo` uses artifact ABI version 7 and populated wave,
+  workgroup, and groupshared reflection. Divergent groupshared indexing has
+  lowering and regression coverage; remaining barrier and masking limitations
+  must be assessed against individual shaders, not treated as blanket gaps.
+- Image and sampler descriptors, CPU sampling helpers, and a substantial
+  `FeMeGraphics` raster/tessellation/mesh executor already serve the Vulkan
+  ICD. Some reusable image layout, decoding, descriptor preparation, and
+  scheduling machinery still lives in `lib/Vulkan`; extracting that machinery
+  is a prerequisite to sharing it with Direct3D.
+- Root-constant lowering accepts one binding at any register/space, bounded
+  arrays, and dynamic row indices for the supported 32-bit row loads.
+  Multiple CBVs and a root-signature-driven distinction between root constants
+  and CBVs still need compiler work. `BoundResourceNormalizationPass`
+  currently normalizes typed/raw buffers, not general constant buffers.
+- FeMe has a DXBC importer and translation path, but its existence does not
+  establish compatibility with the legacy shader corpus. W0 must audit the
+  shader input requirements of the promised Direct3D profile.
+
+There is still no FeMe Direct3D frontend or installed software adapter.
+The shared ray-tracing library remains planned. Existing Vulkan functionality
+is evidence for reuse, not proof of Direct3D feature-level compliance.
+The broader scheduling index remains [Roadmap.md](Roadmap.md) (§1.10 and
 §3.3).
 
 ## Summary
@@ -126,7 +124,8 @@ flowchart LR
 
 The Direct3D layer owns API semantics: object lifetime, root signatures,
 descriptor heaps, resource states, command ordering, residency, tiled-resource
-behavior, and graphics fixed function. FeMe continues to own shader semantics
+behavior, and translation of graphics fixed-function state. The shared
+graphics executor implements the normalized fixed function. FeMe owns shader semantics
 and CPU code generation. FeMe must not acquire knowledge of `ID3D12Resource`,
 DXGI adapters, command allocators, or Windows presentation objects.
 
@@ -237,9 +236,10 @@ rather than a single "be conformant" bullet:
    `feme::graphics`/`feme::raytracing` is a Direct3D gap too, and vice
    versa; the roadmap tracks it once.
 2. **Shared-core sequencing may be Vulkan-first, deliberately.** The Vulkan
-   CTS is runnable on this project's Linux hosts today, and the HLK is not
-   (there is no Windows CI in this tree at all — see
-   [Roadmap.md](Roadmap.md) §1.10). Driving the shared core to conformance
+   CTS is runnable on the project's Linux and Windows development hosts.
+   The Windows container also provides local Direct3D sources and tests,
+   but that does not supply an installed FeMe adapter or an HLK lab.
+   Driving the shared core to conformance
    through the CTS first is what makes the Direct3D target reachable at
    all. This affects implementation order, not the Direct3D product baseline.
 3. **The honesty rules are identical.** No feature level, capability bit,
@@ -253,9 +253,11 @@ rather than a single "be conformant" bullet:
 - Replacing Microsoft's signed WARP binaries or claiming that
   `D3D_DRIVER_TYPE_WARP` selects FeMe.
 - Binary compatibility with undocumented WARP internals.
-- Direct3D 11, Direct3D 10, or DXBC execution in the first implementation.
-  D3D11-on-12 is the preferred eventual route for older APIs; native D3D11 DDI
-  support is a separate design if that route proves insufficient.
+- Native Direct3D 11/10 frontends and legacy DXBC execution in the first
+  checkpoint. W0 must establish whether DXBC support is required for the
+  completed profile and schedule any required importer/execution work before
+  claiming compliance. D3D11-on-12 does not by itself supply missing shader
+  execution support; native D3D11 DDI support is a separate design.
 - Hardware acceleration or forwarding work to another GPU.
 - Video decode/encode/processing and DirectML-specific acceleration. These are
   separate API and scheduling designs; compute shaders used by DirectML remain
@@ -363,7 +365,7 @@ A tentative source layout is:
 ```text
 feme/
   include/feme/Direct3D/       Shared compiler/runtime interfaces, if any
-  lib/Direct3D/                D3D12 objects, commands, and software pipeline
+  lib/Direct3D/                D3D12 objects, commands, and state translation
   lib/Direct3D/Windows/        DDI, DXGI, adapter, and OS integration
   test/Direct3D/               Lit tests with small D3D12 clients
   unittests/Direct3D/          Object, state, descriptor, and raster tests
@@ -374,6 +376,18 @@ Windows SDK and WDK plus FeMe, LLVM, MLIR, and platform threading/dynamic-librar
 support. OS-facing code stays in `lib/Direct3D/Windows`; command execution,
 resource layout, and software graphics code should remain portable enough to
 unit test on non-Windows hosts.
+
+Shared extraction follows WARPRoadmap's WS0-WS3 gates: a small `FeMeImage`
+library owns API-neutral format/layout, decoded-view preparation, and image
+copy/resolve mechanics migrated from Vulkan; `FeMeExecution` owns reusable
+task dispatch and execution-retained storage. They are introduced with real
+migrated callers, not empty interface scaffolding. Image helpers depend only
+on low-level core/support and existing runtime ABI definitions, avoiding a
+cycle through `FeMeGraphics` or `FeMeTargetCPU`. Both API frontends consume
+these helpers without depending on each other's runtime library. API command
+streams, fence/semaphore rules, resource states, and Windows ownership remain
+in the frontends; sampling/code generation and fixed function retain their
+existing CPU-runtime and `FeMeGraphics` owners.
 
 The adapter is loaded into application processes which may already contain
 other LLVM users, including DXC. It must statically link its private LLVM,
@@ -438,8 +452,9 @@ profile containing:
 
 The installed adapter and compatibility-runtime frontend consume the same
 profile. A profile is generated only from named tests and cannot contain
-hand-maintained optimistic overrides. The development profile may initially
-report a lower feature level while subsystems are brought up, but release
+hand-maintained optimistic overrides. An incomplete development harness does
+not report a lower feature level merely because compute works: every reported
+level must satisfy all of its requirements, including graphics. Release
 completion requires the full feature level 12_2 profile defined above.
 
 Specific reporting rules include:
@@ -449,16 +464,19 @@ Specific reporting rules include:
   execution semantics are implemented. Queries from runtimes newer than the
   adapter must return the specified `E_INVALIDARG`/retry behavior rather than
   guessing.
-- An application that supplies DXBC fails pipeline-state creation with a clear
-  result rather than being silently mishandled. D3D11-on-12 is the preferred
-  compatibility path for DXBC-era APIs.
+- During DXIL-only bring-up, DXBC fails pipeline-state creation explicitly.
+  The completed profile must satisfy W0's shader compatibility audit, reusing
+  and extending FeMe's existing DXBC path where required. D3D11-on-12 cannot
+  be assumed to replace that compiler work.
 - Wave lane count is pinned device-wide, and the reported
   `WaveLaneCountMin`/`WaveLaneCountMax` must match FeMe's compile-time wave
   size policy. A shader model that lets a shader request a wave size is
   advertised only once that request is honored or rejected explicitly.
-- Root Signature 1.1 and Resource Binding Tier 3 are release requirements.
-  Unbounded ranges, directly indexed heaps, and non-uniform per-lane
-  descriptors are therefore core ABI requirements, not optional follow-up.
+- Root Signature 1.1 and Resource Binding Tier 3 are release requirements,
+  including their unbounded-range and non-uniform binding requirements.
+  Directly indexed resource/sampler heaps are a separate Shader Model 6.6
+  capability, not implied by the feature level 12_2 / Shader Model 6.5 baseline.
+  The shared ABI must accommodate them without advertising them prematurely.
 - The format table is operation-specific. A format is not advertised for
   sampling, filtering, typed load/store, render target, blend, depth/stencil,
   multisampling, resolve, display, or atomic access until that exact operation
@@ -544,9 +562,9 @@ Direct3D visibility, range, and volatility rules.
   range, preserving register, space, count, and append/explicit offsets.
 - Static samplers become immutable pipeline metadata.
 - Shader-visible CBV/SRV/UAV and sampler heaps remain distinct.
-  `FemeDispatchArgs` already reserves a separate `SamplerHeap` pointer and
-  count, but no `FemeDescriptor` field describes a sampler, so that heap stays
-  empty until the sampler ABI lands in W2. At most one shader-visible heap of
+  Materialization reuses the existing buffer, image, and sampler descriptor
+  ABIs, preserving D3D's logical heap indices across those physical heaps.
+  At most one shader-visible heap of
   each type is bound at a time, and the heap size limits of the reported
   binding tier are part of the contract.
 - Root Signature 1.1 volatility/static flags control when descriptor contents
@@ -573,12 +591,12 @@ changed while a queue may be executing a command that reads them remain
 application error; the snapshot point does not repair that, it only stops the
 runtime from creating the problem itself.
 
-FeMe root-constant lowering covers only the default `(b0, space0)`, non-array,
-constant-row-index shape, and constant-buffer handling is otherwise
-incomplete. These are prerequisites for general D3D12 applications, not
-frontend-only translation work. The first executing shader may therefore use
-only bound raw/structured buffers and builtins; general root constants and
-CBVs are a separate milestone.
+FeMe's existing root-constant promotion is not a general root-signature
+mapping: it infers one binding from shader use rather than accepting a D3D
+root layout. W2 must supply an explicit binding map for multiple constants,
+CBVs, tables, and static samplers. General CBV handling remains compiler work,
+not only frontend translation; the first shader can use raw/structured buffers
+and builtins without waiting for that completion.
 
 ## Memory, Resources, and Residency
 
@@ -690,10 +708,11 @@ property, even though `FemeDescriptor` already reserves
 `FEME_DESCRIPTOR_ROV`. These belong to focused raster/format tests rather than
 being inferred from image comparisons alone.
 
-Texture sampling needs a dedicated image/sampler descriptor ABI and runtime
-helpers for addressing, mip selection, filtering, comparison, gather, and
-format conversion. It should not be forced into FeMe's existing buffer
-descriptor representation.
+Texture sampling reuses the existing dedicated image/sampler descriptor ABI
+and CPU runtime helpers. W2 must complete the Direct3D mapping for addressing,
+mip selection, filtering, comparison, gather, and format conversion, sharing
+the image mechanics currently embedded in the Vulkan ICD rather than copying
+them or forcing images into the buffer descriptor representation.
 
 ## Ray Tracing and Work Graphs
 
@@ -810,6 +829,10 @@ identity matching, and an option to disable loading it entirely.
 
 ## Implementation Milestones
 
+[WARPRoadmap.md](WARPRoadmap.md) is the dependency and acceptance checklist
+for these product milestones. Items below that already exist in the shared
+core require reuse and Direct3D validation, not a second implementation.
+
 ### W0: Integration feasibility prototype
 
 - Select supported Windows SDK, WDK, DDI, and minimum OS versions.
@@ -835,7 +858,7 @@ would invalidate most object-layer work.
   out of `feme::cpu::JITEngine`, shared with the Vulkan design.~~ (closed by
   roadmap R21: `feme::cpu::CompiledStage`/`PreparedDispatch`, see the
   prerequisites list above)
-- Populate `ArtifactInfo`'s wave size, group size, and groupshared fields.
+- Reuse and validate populated `StageArtifactInfo` reflection.
 - Execute a resource-free compute dispatch and verify builtin IDs.
 - Verify workgroup barrier correctness for multi-wave groups under sequential
   wave execution within a group.
@@ -847,14 +870,16 @@ would invalidate most object-layer work.
 ### W2: Complete resource, binding, and synchronization model
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
-  tables, unbounded ranges, static samplers, root descriptors, direct heap
-  indexing, and per-lane non-uniform selection.
+  tables, unbounded ranges, static samplers, root descriptors, and per-lane
+  non-uniform selection. Preserve the logical index mapping needed by W6's
+  separately negotiated direct heap indexing.
 - Complete FeMe root-constant and constant-buffer lowering.
-- Implement divergent groupshared indexing in `feme::cpu`, without which
-  ordinary `SV_GroupIndex`-indexed shaders cannot run.
+- Validate existing divergent groupshared lowering against the D3D corpus and
+  complete any required barrier/masking shapes.
 - Complete raw, structured, and typed buffer operations, UAV counters, required
   atomics, and bounds behavior.
-- Define image and sampler descriptor ABIs.
+- Reuse the image and sampler descriptor ABIs and extract common preparation
+  and storage helpers from the Vulkan frontend.
 - Implement committed, placed, and reserved resources; texture layouts; copy
   footprints; views; residency; aliasing; and shared handles.
 - Implement the complete sampling model and an operation-specific format
@@ -988,8 +1013,9 @@ shows that an installed software adapter is impractical.
 
 Using vkd3d-style translation would reuse a mature D3D12 frontend once the
 FeMe Vulkan driver is broad enough. It also adds a D3D12-to-Vulkan translation
-layer, makes Direct3D correctness depend on two runtimes, and cannot help until
-the Vulkan design grows full graphics and images. This is a useful bootstrap or
+layer and makes Direct3D correctness depend on two runtimes. The Vulkan ICD
+already has graphics and images, but its remaining capability gaps still
+constrain this route. This is a useful bootstrap or
 differential configuration, not the direct architecture proposed here.
 
 ### Add a FeMe backend to Mesa or another existing renderer
@@ -1024,8 +1050,9 @@ lets D3D11-on-12 provide an eventual compatibility route.
    compiled entry point once per group and the wave loop -- and the barrier
    splitting built on it -- stays inside that compiled entry point exactly as
    before (see FeMeVulkanDesign.md's "CPU Runtime API Changes" Status note).
-   Groupshared allocation above the entry wrapper's own stack threshold
-   remains unimplemented (roadmap milestone 9/R22).
+   Reflection and stage invocation have since advanced as recorded in the
+   implementation baseline above; W1 must validate the current allocation and
+   barrier paths rather than rely on this original compute-only sketch.
 4. What root-signature reflection survives FeMe's DXIL metadata raising, and
    what explicit binding map must pipeline creation retain before lowering?
 5. Which DXIL validation responsibilities belong to the D3D runtime, the
