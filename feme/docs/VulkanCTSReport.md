@@ -179,6 +179,21 @@ group: only the 2 documented `inner_triangle_set.*_fractional_odd_spacing`
 Fail total is now 191 - 22 = 169. `check-feme` 3889/3893, 4 unsupported.
 No inventory change.
 
+### L537: `glsl.loops.special` -- 8 of 12 `Pass`; divergent header diamond split out (`ENV6(c)(4)`)
+
+A do-while loop whose header holds a divergent `if (..) continue;` diamond
+was rejected with "more than one divergent exit check". `LoopLinearizer` now
+splits the header body into its own block when every exit is a real
+comparison (not a `StructurizeCFG` flow phi) and both header successors stay
+in the cycle, so the branch is an ordinary internal diamond. Fixed:
+`do_while_dynamic_iterations.{conditional,double}_continue_{fragment,vertex}`
+(4) and `{while_dynamic,while_uniform}_iterations.dowhile_trap_*` (4). The
+whole `glsl.loops.special` list (324) via the batch runner: only the 4
+`for_{dynamic,uniform}_iterations.dowhile_trap_*` cases still fail (they hang
+and, if run in one serial `deqp-vk` process, cascade `VK_TIMEOUT` into the
+rest of the group -- use the batch runner). `check-feme` 3890/3894, 4
+unsupported. Fail total is now 169 - 8 = 161. No inventory change.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
