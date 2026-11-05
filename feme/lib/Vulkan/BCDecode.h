@@ -8,40 +8,12 @@
 //
 // Roadmap H8i (deferred from H8c's own scoping pass): a real decoder for
 // the five S3TC/RGTC block-compressed formats collectively named "BC1"
-// through "BC5" -- `decodeBC1Block` (opaque or 1-bit-punchthrough-alpha
-// RGB, `VK_FORMAT_BC1_RGB(A)_{UNORM,SRGB}_BLOCK`, 4 formats),
-// `decodeBC2Block`/`decodeBC3Block` (RGBA with explicit or interpolated
-// alpha, `VK_FORMAT_BC{2,3}_{UNORM,SRGB}_BLOCK`, 2 formats each), and
-// `decodeBC4Block`/`decodeBC5Block` (one or two independent
-// interpolated-single-channel blocks, `VK_FORMAT_BC{4,5}_{UNORM,SNORM}
-// _BLOCK`, 2 formats each) -- covering 12 of the 16 `VK_FORMAT_BC*`
-// formats. This file implements the algorithm the Khronos S3TC/RGTC
-// bitstream specification defines
-// (`https://github.com/KhronosGroup/DataFormat/blob/master/s3tc.txt`/
-// `rgtc.txt`) -- the same specification (and, cross-checked directly
-// against its own reference decoder while writing this,
-// `VK-GL-CTS`'s own `tcuCompressedTexture.cpp`) a compliant
-// hardware/software decoder anywhere must follow to produce the one
-// correct answer for a given block; there is no FeMe-specific design
-// choice here, the same precedent `ASTCDecode.h`/`ETC2Decode.h`'s own
-// file comments already establish for this directory's other
-// block-compressed formats.
-//
-// BC6H (`VK_FORMAT_BC6H_*`, HDR half-float endpoint interpolation) and
-// BC7 (`VK_FORMAT_BC7_*`, 8 modes with a large per-mode
-// partition/rotation/index-selection space) -- the other 4 of the 16
-// `VK_FORMAT_BC*` formats -- are dramatically more complex than BC1-5
-// and are not attempted in this file at all; see `Roadmap.md`'s own H8i
-// entry for the scoping rationale and the new row filed for them.
-//
-// Nothing in this ICD calls any of these five functions yet: like
-// `ETC2Decode.h`'s own initial slice (roadmap H8c), `vkCreateImage`
-// still rejects every `VK_FORMAT_BC*` outright, `Format.cpp` has no
-// `ResourceFormat` enumerators for any of these 12 formats, and no
-// feature bit is flipped -- these functions exist as standalone,
-// directly-unit-tested (`BCDecodeTest.cpp`) building blocks for the
-// wiring a follow-on roadmap row adds, mirroring `ETC2Decode.h`'s own
-// H8c-then-H8j sequencing.
+// through "BC5". See `feme/include/feme/Image/BCDecode.h`'s own file
+// comment for the full algorithm description; as of roadmap WS1(a) that
+// header holds the actual implementation (`feme::image::decodeBC*Block`),
+// since none of it ever depended on `VkFormat` or any other Vulkan type.
+// This header now only forwards to it, unchanged, so every existing
+// caller (`BCSamplingBridge.cpp`, `BCDecodeTest.cpp`) keeps working as-is.
 //
 //===----------------------------------------------------------------------===//
 
