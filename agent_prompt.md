@@ -66,9 +66,6 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-Please continue work on the FeMe Vulkan ICD. Potential next steps:
-
-1. Full re-measure (~9 hours, async). Case list: filter `shader_timeout`
-   from `all-packages-cases.txt`. Use the command in `VulkanCTSReport.md`.
-2. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases).
-3. **`ENV7(g)`** audit, then **`ENV5(c)(7)(b)`** / offload upstreaming.
+The Vulkan CTS run has been going for a long time with a single process left
+running for 19 hours (PID 86173). Can you inspect the status and see what is
+hanging and decide what the best step to finish the sweep is?
