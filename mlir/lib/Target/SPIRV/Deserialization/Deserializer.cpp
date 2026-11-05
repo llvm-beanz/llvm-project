@@ -2401,6 +2401,25 @@ spirv::Deserializer::processSpecConstantComposite(ArrayRef<uint32_t> operands) {
       continue;
     }
 
+    // Per the SPIR-V spec, a constituent may also be the <id> of an
+    // OpSpecConstantOp -- e.g. a `WorkgroupSize` composite built from
+    // `gl_WorkGroupSize.x/y/z` specialization constants combined with
+    // `OpIMul`/`OpISub`. Such an <id> was only recorded (not yet
+    // materialized as an op) by `processSpecConstantOperation`, since the
+    // common case materializes it lazily, inline, at its single point of
+    // use inside a function body (see `materializeSpecConstantOperation`).
+    // That inline form has no persistent identity to reference by symbol,
+    // so build (and memoize) a separate, named, module-scope
+    // `spirv.ModuleSpecConstantOperation` instance here instead.
+    if (getSpecConstantOperation(operands[i])) {
+      spirv::ModuleSpecConstantOperationOp moduleSpecConstOperationOp =
+          getOrCreateModuleSpecConstantOperation(operands[i]);
+      if (!moduleSpecConstOperationOp)
+        return failure();
+      elements.push_back(SymbolRefAttr::get(moduleSpecConstOperationOp));
+      continue;
+    }
+
     if (std::optional<std::pair<Attribute, Type>> constituent =
             getConstant(operands[i])) {
       elements.push_back(constituent->first);
@@ -2549,6 +2568,71 @@ Value spirv::Deserializer::materializeSpecConstantOperation(
 
   spirv::YieldOp::create(opBuilder, loc, block.front().getResult(0));
   return specConstOperationOp.getResult();
+}
+
+spirv::ModuleSpecConstantOperationOp
+spirv::Deserializer::getOrCreateModuleSpecConstantOperation(
+    uint32_t resultID) {
+  if (spirv::ModuleSpecConstantOperationOp cached =
+          specConstOperationGlobalMap.lookup(resultID))
+    return cached;
+
+  std::optional<SpecConstOperationMaterializationInfo> info =
+      getSpecConstantOperation(resultID);
+  assert(info && "expected a previously recorded OpSpecConstantOp <id>");
+
+  assert(getType(info->resultTypeID) &&
+        "undefined result type for module-scope "
+        "spirv.ModuleSpecConstantOperation");
+
+  // This instance must be addressable by symbol from module scope (unlike
+  // the inline, function-scope form built by
+  // `materializeSpecConstantOperation`), so its body is assembled the same
+  // way: deserialize the enclosed op (and any `spirv.mlir.referenceof` or
+  // `spirv.Constant` its operands need) at the *current* insertion point
+  // first -- here, module scope -- so those operand-materializing ops land
+  // outside the new op's region, then split just the enclosed op off into
+  // its own block to become that region's body.
+  DenseMap<uint32_t, Value> newValueMap;
+  llvm::SaveAndRestore valueMapGuard(valueMap, newValueMap);
+  constexpr uint32_t fakeID = static_cast<uint32_t>(-3);
+
+  SmallVector<uint32_t, 4> enclosedOpResultTypeAndOperands;
+  enclosedOpResultTypeAndOperands.push_back(info->resultTypeID);
+  enclosedOpResultTypeAndOperands.push_back(fakeID);
+  enclosedOpResultTypeAndOperands.append(info->enclosedOpOperands.begin(),
+                                         info->enclosedOpOperands.end());
+
+  Block *moduleBlock = opBuilder.getInsertionBlock();
+
+  if (failed(processInstruction(info->enclodesOpcode,
+                                enclosedOpResultTypeAndOperands)))
+    return spirv::ModuleSpecConstantOperationOp();
+
+  // Since the enclosed op is emitted in the current (module) block, split it
+  // into a separate new block, mirroring
+  // `materializeSpecConstantOperation`'s use of `curBlock->splitBlock`.
+  Block *enclosedBlock = moduleBlock->splitBlock(&moduleBlock->back());
+
+  auto loc = createFileLineColLoc(opBuilder);
+  auto symName = opBuilder.getStringAttr(getSpecConstantSymbol(resultID));
+  auto specConstOperationOp = spirv::ModuleSpecConstantOperationOp::create(
+      opBuilder, loc, symName, /*sym_visibility=*/nullptr);
+  specConstOperationGlobalMap[resultID] = specConstOperationOp;
+
+  Region &body = specConstOperationOp.getBody();
+  // Move the new block into the op's body.
+  body.getBlocks().splice(body.end(), moduleBlock->getParent()->getBlocks(),
+                          Region::iterator(enclosedBlock));
+  Block &block = body.back();
+
+  // RAII guard to reset the insertion point to the module's region after
+  // deserializing the body of the ModuleSpecConstantOperation.
+  OpBuilder::InsertionGuard moduleInsertionGuard(opBuilder);
+  opBuilder.setInsertionPointToEnd(&block);
+
+  spirv::YieldOp::create(opBuilder, loc, block.front().getResult(0));
+  return specConstOperationOp;
 }
 
 LogicalResult

@@ -1735,6 +1735,16 @@ LogicalResult Serializer::processOperation(Operation *opInst) {
       .Case([&](spirv::SpecConstantOperationOp op) {
         return processSpecConstantOperationOp(op);
       })
+      .Case([&](spirv::ModuleSpecConstantOperationOp op) {
+        // TODO: Implement serialization of this named, module-scope form
+        // (see its own description) -- it has no SSA result to key
+        // `valueIDMap` off of, and (being referenced by symbol, e.g. as an
+        // `OpSpecConstantComposite` constituent) needs its own `resultID`
+        // tracked by symbol name instead, analogous to `specConstIDMap`.
+        return op.emitError(
+            "unimplemented: serialization of "
+            "spirv.ModuleSpecConstantOperation");
+      })
       .Case([&](spirv::SwitchOp op) { return processSwitchOp(op); })
       .Case([&](spirv::UndefOp op) { return processUndefOp(op); })
       .Case([&](spirv::VariableOp op) { return processVariableOp(op); })

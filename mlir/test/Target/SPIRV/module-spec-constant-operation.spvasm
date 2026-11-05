@@ -1,0 +1,36 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.0 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: An `OpSpecConstantOp` used at module scope only (not inlined into a
+; COM: function body) -- the shape produced for, e.g., a `WorkgroupSize`
+; COM: built from `gl_WorkGroupSize.x * gl_WorkGroupSize.y` -- must
+; COM: deserialize into a named, module-scope `spirv.ModuleSpecConstantOperation`
+; COM: so it can be referenced by symbol from `spirv.SpecConstantComposite`.
+
+; CHECK: spirv.SpecConstant @sc0 spec_id(0) = 8 : si32
+; CHECK: spirv.SpecConstant @sc1 spec_id(1) = 1 : si32
+; CHECK: spirv.ModuleSpecConstantOperation @sco wraps "spirv.ISub"({{.*}}, {{.*}}) : (si32, si32) -> si32
+; CHECK: spirv.SpecConstantComposite @wg_size (@sco, @sco, @sc1) : vector<3xsi32>
+
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpName %sc0 "sc0"
+               OpName %sc1 "sc1"
+               OpName %sco "sco"
+               OpName %wg_size "wg_size"
+               OpDecorate %sc0 SpecId 0
+               OpDecorate %sc1 SpecId 1
+               OpDecorate %wg_size BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+        %sc0 = OpSpecConstant %int 8
+        %sc1 = OpSpecConstant %int 1
+      %v3int = OpTypeVector %int 3
+        %sco = OpSpecConstantOp %int ISub %sc0 %sc1
+    %wg_size = OpSpecConstantComposite %v3int %sco %sco %sc1
+       %main = OpFunction %void None %3
+          %6 = OpLabel
+               OpReturn
+               OpFunctionEnd

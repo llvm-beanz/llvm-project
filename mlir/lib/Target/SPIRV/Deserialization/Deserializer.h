@@ -451,6 +451,18 @@ private:
                                          uint32_t resultTypeID,
                                          ArrayRef<uint32_t> enclosedOpOperands);
 
+  /// Returns the named, module-scope `spirv.ModuleSpecConstantOperation`
+  /// for the given OpSpecConstantOp result <id>, creating and caching it
+  /// the first time this <id> is requested. Unlike
+  /// `materializeSpecConstantOperation` (which emits an unnamed
+  /// `spirv.SpecConstantOperation` inline at a single function-scope point
+  /// of use), this form is addressable by symbol reference so it can also
+  /// serve as an `OpSpecConstantComposite` constituent, e.g. the
+  /// `WorkgroupSize` composite built from `gl_WorkGroupSize.x/y/z`
+  /// specialization constants combined with `OpIMul`/`OpISub`.
+  spirv::ModuleSpecConstantOperationOp
+  getOrCreateModuleSpecConstantOperation(uint32_t resultID);
+
   /// Processes a SPIR-V OpConstantNull instruction with the given `operands`.
   LogicalResult processConstantNull(ArrayRef<uint32_t> operands);
 
@@ -760,6 +772,12 @@ private:
   /// mapping.
   DenseMap<uint32_t, SpecConstOperationMaterializationInfo>
       specConstOperationMap;
+
+  /// Result <id> to the named, module-scope
+  /// `spirv.ModuleSpecConstantOperation` already materialized for it by
+  /// `getOrCreateModuleSpecConstantOperation`.
+  DenseMap<uint32_t, spirv::ModuleSpecConstantOperationOp>
+      specConstOperationGlobalMap;
 
   // Result <id> to GraphConstantARM ID attribute and result type.
   DenseMap<uint32_t, spirv::GraphConstantARMOpMaterializationInfo>
