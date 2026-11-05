@@ -131917,3 +131917,24 @@ Pick one of: `glsl.arrays` mat3 (12), `image.store` a2b10g10r10 (14), `tessellat
 3. `tessellation.invariance` (24).
 4. `ENV6(c)(3)` scoping (83 cases), multi-session.
 5. `ENV5(c)(7)(b)`; offload upstreaming (blocked on push access).
+
+# Session: image.store a2b10g10r10_sint triage
+
+## Next action
+Compare the CTS shader expression against its reference for this one format.
+
+## What I did
+1. Ran `image.store.without_format.1d.a2b10g10r10_sint_pack32` alone: no timeout, fails fast (alpha diff 3).
+2. Decoded the log images: reference alpha is 1 for x<=30 then 0,-1,-2.
+3. The shader stores `clamp(a,-2,1)-32`, always out of 2-bit range.
+4. Tried saturating pack in `FeMeRuntimeCPU.c`: same max diff. Reverted.
+
+## State
+No code changes. Roadmap row `ENV6(d)(3)` added. `glsl.arrays`, `tessellation.invariance`, `ENV6(c)(3)` not started.
+
+## Next steps (ranked)
+1. Validate the CTS expectation for ENV6(d)(3) (maybe CTS quirk).
+2. `glsl.arrays` mat3 (12): run one alone.
+3. `tessellation.invariance` (24).
+4. `ENV6(c)(3)` scoping.
+5. Offload upstreaming (blocked on push access).
