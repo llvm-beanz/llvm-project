@@ -123,7 +123,13 @@ VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
 /// `computeImageCreateInfoSubresourceLayout` below (`VK_KHR_maintenance5`'s
 /// info-only `vkGetDeviceImageSubresourceLayoutKHR`, mirroring
 /// `computeImageCreateInfoSize`'s own relationship to
-/// `vkGetDeviceImageMemoryRequirements` above).
+/// `vkGetDeviceImageMemoryRequirements` above). (WARP roadmap WS0(b))
+/// `Image.cpp`'s underlying per-mip layout math now lives in the portable
+/// `FeMeImage` library (`feme/Image/SubresourceLayout.h`'s
+/// `feme::image::SubresourceLayout`/`computeSubresourceLayout(s)`); this
+/// `VkDeviceSize`-typed struct and `computeImageCreateInfoSize`/
+/// `computeImageCreateInfoSubresourceLayout` below remain the
+/// Vulkan-facing wrappers around it.
 struct ImageSubresourceLayout {
   VkDeviceSize Offset;
   VkDeviceSize Size;

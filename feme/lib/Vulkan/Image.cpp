@@ -12,6 +12,8 @@
 #include "Objects.h"
 #include "RenderPass.h"
 
+#include "feme/Image/SubresourceLayout.h"
+
 #include "llvm/Support/ErrorHandling.h"
 
 #include <algorithm>
@@ -41,70 +43,37 @@ ImageDimension mapImageDimension(VkImageType Type, uint32_t ArrayLayers) {
 }
 
 /// Computes a packed, mip-major subresource layout table for an image of
-/// \p Dimension with the given extent/mip/array counts, \p SampleCount and
-/// \p BlockWidth/\p BlockHeight/\p BytesPerBlock (roadmap E20; `{1, 1,
-/// formatElementSize(Format)}` for a non-block-compressed format, so this
-/// generalizes the original per-texel math rather than replacing it -- see
-/// Format.h's file comment) -- see Image.h's file comment on why tiling is
-/// not distinguished. Mip level `L`'s slice count is `max(1, Depth >> L)`
-/// for a 3D image (its depth halves per mip, per Vulkan's mip-chain rules)
-/// or `ArrayLayers` for every other dimension (an array image's layer
-/// count is constant across mips). A row is `ceil(Width / BlockWidth)`
-/// blocks wide, `BytesPerBlock` bytes each; `ceil` rather than plain
-/// division because Vulkan requires only the whole *block* grid to be
-/// stored, so a mip level whose texel extent isn't itself a multiple of
-/// the block size (every level below the base one, for almost any
-/// non-power-of-two-friendly footprint) still occupies one full row/column
-/// of blocks at its edge, per `VkImageFormatProperties`' own
-/// `VK_ERROR_FORMAT_NOT_SUPPORTED`-avoiding compressed-format extent
-/// rules. Every sample of one non-block-compressed texel is stored
-/// contiguously (`SampleStride == BytesPerBlock`), so a texel's
-/// `SampleCount` samples occupy `SampleCount * BytesPerBlock` bytes and a
-/// row is `Width` texels wide of that; a block-compressed format is never
-/// multisampled in real Vulkan, so `SampleCount` is always 1 for one.
+/// \p Type/\p Depth/\p ArrayLayers -- a thin `VkImageType`-to-`bool`
+/// forwarder onto `feme::image::computeSubresourceLayouts` (WARP roadmap
+/// WS0(b); see that function's own comment for the per-mip math this
+/// implements).
 std::pair<std::vector<FemeImageSubresourceLayout>, VkDeviceSize>
 computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
                           uint32_t Depth, uint32_t MipLevels,
                           uint32_t ArrayLayers, uint32_t SampleCount,
                           uint32_t BlockWidth, uint32_t BlockHeight,
                           uint32_t BytesPerBlock) {
-  std::vector<FemeImageSubresourceLayout> Layouts(MipLevels);
-  uint64_t Offset = 0;
-  for (uint32_t Level = 0; Level != MipLevels; ++Level) {
-    uint32_t LevelWidth = std::max(1u, Width >> Level);
-    uint32_t LevelHeight = std::max(1u, Height >> Level);
-    uint32_t LevelDepth =
-        Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> Level) : 1;
-    uint32_t SliceCount = Type == VK_IMAGE_TYPE_3D ? LevelDepth : ArrayLayers;
-    uint32_t BlocksWide = (LevelWidth + BlockWidth - 1) / BlockWidth;
-    uint32_t BlocksHigh = (LevelHeight + BlockHeight - 1) / BlockHeight;
-
-    FemeImageSubresourceLayout &L = Layouts[Level];
-    L.Offset = Offset;
-    L.SampleStride = SampleCount > 1 ? BytesPerBlock : 0;
-    L.RowPitch = uint64_t(BlocksWide) * BytesPerBlock * SampleCount;
-    L.SlicePitch = L.RowPitch * BlocksHigh;
-    Offset += L.SlicePitch * SliceCount;
-  }
-  return {std::move(Layouts), Offset};
+  return feme::image::computeSubresourceLayouts(
+      Type == VK_IMAGE_TYPE_3D, Width, Height, Depth, MipLevels, ArrayLayers,
+      SampleCount, BlockWidth, BlockHeight, BytesPerBlock);
 }
 
 /// Shared by `Image::subresourceLayout` (a live image, whose per-level
 /// table is already computed) and `computeImageCreateInfoSubresourceLayout`
 /// below (an info-only `VkImageCreateInfo`, whose per-level table is
-/// computed on the fly) -- see `ImageSubresourceLayout`'s own comment in
-/// Image.h for the `Size`/`ArrayPitch`/`DepthPitch` rules this implements.
+/// computed on the fly) -- a thin `VkImageType`-to-`bool` forwarder onto
+/// `feme::image::computeSubresourceLayout`, converting its API-neutral
+/// `feme::image::SubresourceLayout` result back to the Vulkan-facing
+/// `VkDeviceSize`-typed `ImageSubresourceLayout` (`vkGetImageSubresourceLayout`'s
+/// own result shape -- see `ImageSubresourceLayout`'s own comment in
+/// Image.h for the `Size`/`ArrayPitch`/`DepthPitch` rules this implements).
 ImageSubresourceLayout
 computeSubresourceLayout(VkImageType Type, uint32_t Depth,
                          const FemeImageSubresourceLayout &L, uint32_t MipLevel,
                          uint32_t ArrayLayer) {
-  uint32_t LevelDepth =
-      Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> MipLevel) : 1;
-  VkDeviceSize Size =
-      Type == VK_IMAGE_TYPE_3D ? L.SlicePitch * LevelDepth : L.SlicePitch;
-  return {L.Offset + uint64_t(ArrayLayer) * L.SlicePitch, Size, L.RowPitch,
-          /*ArrayPitch=*/Type == VK_IMAGE_TYPE_3D ? 0 : L.SlicePitch,
-          /*DepthPitch=*/Type == VK_IMAGE_TYPE_3D ? L.SlicePitch : 0};
+  feme::image::SubresourceLayout R = feme::image::computeSubresourceLayout(
+      Type == VK_IMAGE_TYPE_3D, Depth, L, MipLevel, ArrayLayer);
+  return {R.Offset, R.Size, R.RowPitch, R.ArrayPitch, R.DepthPitch};
 }
 
 } // namespace
