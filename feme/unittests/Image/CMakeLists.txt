@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeImageTests
   BlockGeometryTest.cpp
+  SubresourceLayoutTest.cpp
   )
 target_link_libraries(FeMeImageTests
   PRIVATE
