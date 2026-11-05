@@ -131960,3 +131960,24 @@ Committed: arrays fix (+docs L535). Fail total 191. Tessellation and image.store
 3. `ENV6(c)(3)` scoping (83 + loops.special 12).
 4. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
 5. `ENV5(c)(7)(b)`; offload upstreaming (blocked on push access).
+
+# Session: tessellation outer_edge_symmetry
+
+## Next action
+Pick `ENV6(d)(3)` (image.store reference) or `ENV6(c)(3)` scoping.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. CTS shader mirrors with `1.0 - x`, compares exactly. `K/N` can't satisfy `x(N-K) == 1-x(K)` bitwise.
+3. Added `edgeFraction(K,N)` (2^-16 grid, complement exact) to the triangle/quad boundary rings.
+4. Updated one unit test's canonical values. Graphics unit tests 426/426, `check-feme` 3889 pass.
+5. Whole `tessellation.*` CTS group: only 2 known `inner_triangle_set` (L346) + `shader_input_output.barrier` fail.
+
+## State
+Committed. Fail total ~169. Roadmap `ENV6(d)(5a)` done, `(5b)` open.
+
+## Next steps (ranked)
+1. `ENV6(d)(3)` image.store (14).
+2. `ENV6(c)(3)` scoping (83 + loops.special 12).
+3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)` (barrier), offload upstreaming (blocked).
