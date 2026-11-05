@@ -41,6 +41,7 @@ uint32_t feme::image::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::E5B9G9R9_UFLOAT:
   case ResourceFormat::D32_FLOAT:
   case ResourceFormat::D24_UNORM_S8_UINT:
+  case ResourceFormat::X8_D24_UNORM:
     return 4;
   case ResourceFormat::R32G32_FLOAT:
   case ResourceFormat::R32G32_UINT:

@@ -38,6 +38,15 @@
 // `feme::vulkan::decodeASTCBlockHDR` (ASTCDecode.h) instead of
 // `decodeASTCBlock`.
 //
+// WARP roadmap WS0 ("Separate API-neutral format/block geometry ... from
+// Format.*/Image.*", feme/docs/WARPRoadmap.md): `formatElementSize`,
+// `blockWidth`, `blockHeight`, `bytesPerBlock`, and `isASTCSRGBFormat` below
+// are declared here for source compatibility with every existing caller, but
+// their implementation (Format.cpp) now just forwards to the API-neutral
+// `feme::image` functions of the same name (BlockGeometry.h, in the new
+// `FeMeImage` library) -- none of them ever actually depended on `VkFormat`
+// or any other Vulkan type.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_FORMAT_H

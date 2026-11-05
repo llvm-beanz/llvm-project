@@ -139,6 +139,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Vulkan::Headers
   FeMeCore
   FeMeGraphics
+  FeMeImage
   FeMeImportSPIRV
   FeMeTargetCPU
   FeMeTransformsCPU
