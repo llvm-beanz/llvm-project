@@ -13,6 +13,12 @@
 // `feme::vulkan::materializeImageDescriptor`'s own forwarding wrapper end
 // to end through the Vulkan object model.
 //
+// WARP roadmap WS1(d): also exercises the extracted portable
+// attachment-view layer-count resolution (`effectiveViewLayerCount`/
+// `resolveAttachmentViewLayerCount`). `feme/unittests/Vulkan/
+// RenderPassTest.cpp` (unchanged by this extraction) continues to cover
+// `ImageView::resolvedLayerCount()`'s own forwarding wrapper end to end.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Image/ViewMaterialization.h"
@@ -182,6 +188,85 @@ TEST(ViewMaterializationTest, BorderComponentMaskFourChannelFormatsAreZero) {
   EXPECT_EQ(
       compressedFormatBorderComponentMask(ResourceFormat::R8G8B8A8_UNORM),
       0u);
+}
+
+// WARP roadmap WS1(d): `effectiveViewLayerCount`/
+// `resolveAttachmentViewLayerCount`, the portable counterparts of
+// `feme::vulkan::effectiveViewLayerCount`/`ImageView::resolvedLayerCount()`.
+
+TEST(EffectiveViewLayerCountTest, NonTexture3DImageAlwaysUsesArrayLayers) {
+  // Every dimension but one (2D array, cube array, ...): the view's own
+  // type never matters, only the image's own array-layer count.
+  EXPECT_EQ(effectiveViewLayerCount(/*ImageIsTexture3D=*/false,
+                                    /*ViewIsTexture3D=*/false,
+                                    /*ImageDepth=*/1,
+                                    /*ImageArrayLayers=*/6),
+            6u);
+}
+
+TEST(EffectiveViewLayerCountTest,
+    Texture3DImageWithTexture3DViewUsesArrayLayers) {
+  // A real `Texture3D` view of a `Texture3D` image still addresses the
+  // (always exactly one) real array layer, not a depth slice.
+  EXPECT_EQ(effectiveViewLayerCount(/*ImageIsTexture3D=*/true,
+                                    /*ViewIsTexture3D=*/true,
+                                    /*ImageDepth=*/16,
+                                    /*ImageArrayLayers=*/1),
+            1u);
+}
+
+TEST(EffectiveViewLayerCountTest,
+    Texture3DImageWithNon3DViewUsesDepthAsLayerCount) {
+  // A 2D/2D-array view of a 3D image (2D-array-compatible) repurposes
+  // `baseArrayLayer`/`layerCount` to address depth slices instead.
+  EXPECT_EQ(effectiveViewLayerCount(/*ImageIsTexture3D=*/true,
+                                    /*ViewIsTexture3D=*/false,
+                                    /*ImageDepth=*/16,
+                                    /*ImageArrayLayers=*/1),
+            16u);
+}
+
+TEST(ResolveAttachmentViewLayerCountTest, ExplicitCountPassesThrough) {
+  EXPECT_EQ(resolveAttachmentViewLayerCount(
+                /*ImageIsTexture3D=*/false, /*ViewIsTexture3D=*/false,
+                /*ImageDepth=*/1, /*ImageArrayLayers=*/6,
+                /*BaseArrayLayer=*/2, /*RequestedLayerCount=*/3),
+            3u);
+}
+
+TEST(ResolveAttachmentViewLayerCountTest,
+    RemainingSentinelResolvesAgainstArrayLayers) {
+  EXPECT_EQ(resolveAttachmentViewLayerCount(
+                /*ImageIsTexture3D=*/false, /*ViewIsTexture3D=*/false,
+                /*ImageDepth=*/1, /*ImageArrayLayers=*/6,
+                /*BaseArrayLayer=*/2,
+                /*RequestedLayerCount=*/kRemainingImageViewExtent),
+            4u); // Layers 2..5 of 6.
+}
+
+TEST(ResolveAttachmentViewLayerCountTest,
+    RemainingSentinelResolvesAgainstDepthFor2DViewOf3DImage) {
+  // The WS1(d) special case: a 2D-array attachment view of a 3D image
+  // resolves `VK_REMAINING_ARRAY_LAYERS` against the image's own depth,
+  // not its (always 1) array-layer count.
+  EXPECT_EQ(resolveAttachmentViewLayerCount(
+                /*ImageIsTexture3D=*/true, /*ViewIsTexture3D=*/false,
+                /*ImageDepth=*/8, /*ImageArrayLayers=*/1,
+                /*BaseArrayLayer=*/3,
+                /*RequestedLayerCount=*/kRemainingImageViewExtent),
+            5u); // Depth slices 3..7 of 8.
+}
+
+TEST(ResolveAttachmentViewLayerCountTest,
+    ExplicitCountIsNotClampedUnlikeSamplingPath) {
+  // Deliberately preserves `ImageView::resolvedLayerCount()`'s pre-
+  // existing (unclamped) behavior for an explicit, non-sentinel count --
+  // see this function's own header comment.
+  EXPECT_EQ(resolveAttachmentViewLayerCount(
+                /*ImageIsTexture3D=*/false, /*ViewIsTexture3D=*/false,
+                /*ImageDepth=*/1, /*ImageArrayLayers=*/2,
+                /*BaseArrayLayer=*/0, /*RequestedLayerCount=*/100),
+            100u);
 }
 
 } // namespace
