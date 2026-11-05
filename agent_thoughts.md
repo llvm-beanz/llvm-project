@@ -133590,3 +133590,97 @@ not treated as artifacts available in this Windows session.
 2. W0(c)-W0(d): classify the local test corpus and prove adapter selection.
 3. In parallel, establish WS3 regression selections and start WS0's checked
    image-layout extraction with unchanged Vulkan behavior.
+
+# 2026-11-05: WS0(a) block-geometry extraction (this session)
+
+**Next action:** continue with `WS0(b)` (mip/plane/sample subresource
+layout out of `Image.*`), or `W0(c)`/`W0(d)` test-corpus classification.
+
+Note: the `i-have-adhd` skill named in the prompt is not registered in this
+Windows container (`skill` tool only lists `code-review-and-quality`,
+`customize-cloud-agent`, `github-pr-media`; no `~\.agents\skills` directory
+exists under `%USERPROFILE%` either). This entry follows the same terse,
+action-first format the file's own prior entries already converged on
+instead.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`.
+
+## What I did
+
+1. Picked the smallest concrete, boundedly-testable slice of `WS0` (the
+   WARP roadmap's own suggested next step): `Format.cpp`'s
+   `formatElementSize`/`blockWidth`/`blockHeight`/`bytesPerBlock`/
+   `isASTCSRGBFormat` never actually examined a `VkFormat` -- pure
+   functions of `ResourceFormat`. Moved them verbatim into a new
+   API-neutral `FeMeImage` library (`feme/lib/Image`,
+   `feme/include/feme/Image/BlockGeometry.h`), depending only on
+   `RuntimeABI.h` and LLVM Support, per the design's sharing contract.
+2. Left `feme::vulkan::Format.{h,cpp}` with the same five function
+   signatures, now thin forwarders, so no Vulkan caller changed at all.
+   `FeMeVulkanCore` links the new library.
+3. Added `FeMeImageTests` (11 cases) exercising the moved functions
+   directly, independent of Vulkan; `FeMeVulkanTests`' existing
+   `FormatTest.cpp` is untouched and keeps covering the forwarders.
+4. Four small commits: library, forwarding, tests, roadmap/report docs
+   (plus this one) -- mechanical extraction kept separate from the (none,
+   this time) behavior changes, per the roadmap's own rule.
+
+## Verification
+
+- `check-feme`: 3,875 Passed / 15 Skipped / 10 Unsupported, zero failures
+  (3,900 discovered; rebuilt prerequisites including the new library/tests
+  and the ICD). Cached, assertions on, no PCH (confirmed from
+  `CMakeCache.txt`, did not need to reconfigure that part).
+- `FeMeImageTests.exe` run directly: 11/11 Pass.
+- Bounded CTS: `dEQP-VK.api.smoke.*` (8) + `dEQP-VK.api.info.
+  format_properties.*` (225) from `mustpass\main\vk-default\api.txt` ->
+  233 Pass, 0 Fail, 0 Unrun. Chose this selection because it's the
+  existing smoke set plus the one CTS group that most directly exercises
+  `formatFeatureFlags`/`mapVkFormat`, both of which call the moved
+  functions.
+- Both inventory generators reproduce `Vulkan14FeatureInventory.md`/
+  `VulkanExtensionInventory.md` exactly (table-only diff, zero changes).
+
+## Decision record
+
+1. Did not also migrate `Image.*`'s mip/plane/sample layout math this
+   session -- that is materially larger (subresource offset/stride/
+   overflow math, not just a format lookup table) and deserves its own
+   bounded commit/test/CTS cycle. Split it into `WS0(b)` on the roadmap
+   instead of claiming `WS0` done.
+2. Did not touch `WS1`/`WS2`/`W0(a)`-`W0(d)` this session: `W0(a)`/`W0(b)`
+   need an actual Windows adapter-installation host/VM (out of scope for
+   this process-isolated container, already noted by the prior session),
+   and `W0(c)`/`W0(d)` need the Direct3D checkout's test corpus classified
+   first, which is a research task, not a code change.
+3. Struck `WS0(a)` on `WARPRoadmap.md` with its exit evidence; added
+   `WS0(b)` rather than leaving a single half-true `WS0` row, per the
+   per-session instruction to update the roadmap honestly when a milestone
+   is only partly done.
+
+## State restated
+
+- `WS0(a)`: done (struck, this session). `WS0(b)`: new, not started.
+- `W0`-`W7`, `WS1`-`WS3`: unchanged from the prior session's status (all
+  pending).
+- No offload-test-suite / `check-hlsl-feme-vk` work this session (not
+  touched by this change; skipped to keep the session bounded).
+- No full Vulkan CTS re-measure; the bounded 233-case run is sufficient
+  evidence for a pure code-motion change with zero behavior delta.
+
+## Suggested next steps (ranked)
+
+1. **`WS0(b)`**: extract `Image.*`'s checked mip/plane/sample subresource
+   layout math into `FeMeImage`, building on this session's block-geometry
+   functions. Same bounded-commit/test/CTS pattern as this session.
+2. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus
+   (public/white-box/legacy-shader/display-dependent) and add an explicit
+   FeMe adapter-selection assertion to a future runner -- a research/
+   documentation task, no Windows adapter install needed yet.
+3. **`W0(a)`/`W0(b)`** (Direct3D sense, not this session's `WS0(b)`): still
+   blocked on a suitable Windows host/VM outside this process-isolated
+   container, per the prior session's note.
+4. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
