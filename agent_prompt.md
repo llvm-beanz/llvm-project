@@ -68,8 +68,8 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `image.store.without_format` a2b10g10r10_sint_pack32 (14): they time out; look under gdb first.
-2. `glsl.arrays` mat3 constructor/implicit size (12): silent wrong value.
+1. Validate the CTS expectation for ENV6(d)(3) (maybe CTS quirk).
+2. `glsl.arrays` mat3 (12): run one alone.
 3. `tessellation.invariance` (24).
-4. `ENV6(c)(3)` scoping (83 cases), multi-session.
-5. `ENV5(c)(7)(b)`; offload upstreaming (blocked on push access).
+4. `ENV6(c)(3)` scoping.
+5. Offload upstreaming (blocked on push access).
