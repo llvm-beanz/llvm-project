@@ -4615,6 +4615,17 @@ private:
   /// among `OtherCondBrBlocks`). Kept anyway since it is independently a
   /// strict improvement with no known regression.
   void rethreadNestedEntryMasks(BasicBlock *BB, const MaskPair &Masks) {
+    // ENV6(c)(4a): a region walk that skips an already-linearized child
+    // cycle stops at the child's latch (the block with the loop-control
+    // branch), not its header, so a multi-block child is otherwise never
+    // narrowed. Redirect the child's latch to its header.
+    if (!HeaderActiveMasks.count(BB))
+      if (CycleRef ChildCycle = CI.getCycle(BB); ChildCycle.isValid()) {
+        BasicBlock *ChildHeader = CI.getHeader(ChildCycle);
+        if (HeaderActiveMasks.count(ChildHeader) &&
+            llvm::is_contained(successors(BB), ChildHeader))
+          BB = ChildHeader;
+      }
     auto It = HeaderActiveMasks.find(BB);
     if (It == HeaderActiveMasks.end())
       return;
