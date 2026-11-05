@@ -133684,3 +133684,148 @@ instead.
    container, per the prior session's note.
 4. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
+
+# 2026-11-05: WS0(b) subresource-layout extraction, WS0 complete (this session)
+
+**Next action:** `WS1` (BC decoders/bridges, normalized image-view
+materialization, reusable copy/resolve kernels out of
+`CommandBuffer.cpp`/`ImageOps.cpp`).
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+(confirmed at the start of this session and again before each CTS run,
+per standing instructions).
+
+## What I did
+
+Continued directly from the prior session's suggested next step
+(`WS0(b)`), finishing `WS0` entirely:
+
+1. Moved `feme::vulkan::Image.cpp`'s anonymous-namespace
+   `computeSubresourceLayouts`/`computeSubresourceLayout` (the mip-major
+   offset/stride/depth-plane math every `Image` sizes its storage with)
+   into the portable `FeMeImage` library
+   (`feme/include/feme/Image/SubresourceLayout.h`,
+   `feme/lib/Image/SubresourceLayout.cpp`), converting the only
+   Vulkan-specific parameter (`VkImageType`) to a plain `Is3D` bool and the
+   `VkDeviceSize`-typed result to a new `feme::image::SubresourceLayout`.
+   `feme::vulkan::Image.{h,cpp}` keep the same signatures as thin
+   forwarders.
+2. Re-read `WS0(b)`'s own roadmap wording ("*checked* mip/plane/sample
+   subresource-layout calculations... overflow/odd-extent/depth-plane
+   handling") and noticed `Image::isInBounds` -- the out-of-bounds check
+   `texelPointer`/`blockPointer` share (roadmap E16) -- is exactly this
+   "checked" half and is just as pure/portable as the layout math (reads
+   only plain parameters, no live `Image` memory state). Extracted it too,
+   as `feme::image::isInBoundsSubresource`, rather than leaving `WS0(b)`
+   half-addressed.
+3. Five commits, each independently buildable/testable: the layout-math
+   library addition, its Vulkan forwarder, its unit tests; then the
+   isInBounds library addition, its Vulkan forwarder, its unit tests (six,
+   not five -- I split the library+forwarder+tests pattern twice, once per
+   extracted piece, matching `WS0(a)`'s own precedent).
+4. Struck `WS0(b)` on `WARPRoadmap.md` with its exit evidence; since both
+   `WS0(a)` and `WS0(b)` are now done, updated the file's own "next
+   implementation step" line to point at `WS1` instead of `WS0(b)`.
+
+## Verification
+
+- `check-feme` after the layout-math commits: 3,885 Passed / 15 Skipped /
+  10 Unsupported, zero failures (3,910 discovered). After the
+  `isInBoundsSubresource` commits: 3,890 Passed (3,915 discovered) --
+  exactly 10 then 5 more tests than the prior session's 3,875 baseline,
+  matching the new `FeMeImageTests` cases added each time, zero
+  regressions either time.
+- `FeMeImageTests.exe` run directly both times: 21/21, then 26/26 Pass.
+- Bounded CTS, in two parts:
+  - `dEQP-VK.image.subresource_layout.*` (1D/2D/2D-array/3D x 1/2/4/
+    all-mip-level, every format): 3,537 Completed, 1,728 Pass, 1,809
+    NotSupported, zero Fail, zero Unrun -- directly exercises the moved
+    layout-table math across every dimension/mip-count combination the
+    function branches on. This CTS module isn't in the local `vk-default`
+    mustpass case lists (unlike every group the prior session used), so I
+    generated its case list straight from `deqp-vk.exe` itself
+    (`--deqp-runmode=txt-caselist --deqp-case=dEQP-VK.image.
+    subresource_layout.*`) -- worth remembering for any future module not
+    in mustpass.
+  - Added `dEQP-VK.image.host_image_copy.array.r16_unorm.linear.*` (59
+    cases, odd/non-power-of-two array extents) and `...*large_images*`
+    (42 cases) once `isInBoundsSubresource` was also extracted, since
+    those exercise `texelPointer`/the bounds check against real pixel
+    data, not just the layout table. Combined: 3,638 Completed, 1,758
+    Pass, 1,880 NotSupported, zero Fail, zero Unrun.
+  - Chose NOT to run the full `host_image_copy` group (42,479 cases) or
+    `copy_and_blit` (45,636 cases) -- both would exercise the same code
+    paths but at a cost disproportionate to a pure-code-motion change;
+    the targeted subsets plus `check-feme`'s own extensive existing image
+    copy/clear/blit lit coverage (already exercising `isInBounds` on
+    every run) are sufficient evidence.
+- Regenerated both inventories to scratch files and diffed against the
+  committed docs' pipe-table lines only (excluding a separate
+  hand-maintained summary table inside `Vulkan14FeatureInventory.md` that
+  the generator never reproduces, already true before this session) --
+  zero differences in the actual generated detail tables either time.
+
+## Decision record
+
+1. Did not stop at just the layout-math half of `WS0(b)` even though that
+   alone would have been a defensible, separately-committed slice --
+   re-reading the roadmap's own wording for the milestone made it clear
+   "checked" was pointing at a second, distinct piece of code
+   (`isInBounds`) I would otherwise have silently left out while still
+   striking the row as done. Decided finishing the milestone honestly was
+   worth a second extraction cycle in the same session rather than
+   under-delivering what the roadmap text itself promised.
+2. Did not extract `isValidImageShape` (`vkCreateImage`'s own flag/sample-
+   count/dimension validation) despite also being "checked" -- it
+   genuinely examines `VkImageCreateFlagBits`/`VkSampleCountFlagBits` and
+   Vulkan-specific extension interactions throughout, unlike
+   `isInBounds`'s plain-integer math. Keeping it Vulkan-only matches the
+   roadmap's own "Leave Vulkan creation... in place" scope line for
+   `WS0(b)`.
+3. Did not touch `WS1`-`WS3` or any `W0`-`W7` step this session, for the
+   same reasons as the prior session (Windows-adapter-install work needs a
+   host/VM this container doesn't have; `WS1` is a materially larger
+   lift -- BC decode bridging plus copy/resolve kernel extraction -- that
+   deserves its own session rather than a rushed partial start here).
+
+## State restated
+
+- `WS0` (both `WS0(a)` and `WS0(b)`): done, both struck through with exit
+  evidence on `WARPRoadmap.md`.
+- `WS1`-`WS3`, `W0`-`W7`: unchanged, all still pending.
+- `FeMeImage` library now has two files (`BlockGeometry.*`,
+  `SubresourceLayout.*`) and 26 unit tests total; `feme::vulkan::Image.cpp`
+  has three thin forwarders onto it
+  (`computeSubresourceLayouts`/`computeSubresourceLayout`/`isInBounds`)
+  alongside `Format.cpp`'s five from the prior session.
+- No offload-test-suite / `check-hlsl-feme-vk` work this session.
+- No full Vulkan CTS re-measure; the bounded combined run is sufficient
+  evidence for a pure code-motion change with zero behavior delta.
+
+## Suggested next steps (ranked)
+
+1. **`WS1`**: move BC decoders/bridges first, then normalized image-view
+   materialization and reusable copy/resolve kernels out of
+   `CommandBuffer.cpp`/`ImageOps.cpp` into `FeMeImage`, building on both
+   `WS0(a)`'s block-geometry and `WS0(b)`'s subresource-layout functions.
+   Materially larger than `WS0` -- likely needs its own lettered
+   breakdown (`WS1(a)`, `WS1(b)`, ...) the way `WS0` just got, started at
+   the top of a future session rather than retrofitted mid-session.
+2. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+   incrementally -- independent of `WS1`, could run in parallel in a
+   separate session.
+3. **`WS3`**: establish shared-core regression gates (nominally meant to
+   precede `WS0` per the roadmap's own text, but `WS0` is now done without
+   them -- worth a brief look at whether `WS3`'s gates would have caught
+   anything `WS0(a)`/`WS0(b)`'s manual check-feme/CTS verification did
+   not, before treating it as moot).
+4. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
+   explicit FeMe adapter-selection assertion -- a research/documentation
+   task, no Windows adapter install needed yet.
+5. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+6. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
