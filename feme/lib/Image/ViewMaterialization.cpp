@@ -73,3 +73,21 @@ uint32_t feme::image::compressedFormatBorderComponentMask(
     return 0u; // Already 4-channel (or ASTC/uncompressed): no override.
   }
 }
+
+uint32_t feme::image::effectiveViewLayerCount(bool ImageIsTexture3D,
+                                              bool ViewIsTexture3D,
+                                              uint32_t ImageDepth,
+                                              uint32_t ImageArrayLayers) {
+  return ImageIsTexture3D && !ViewIsTexture3D ? ImageDepth : ImageArrayLayers;
+}
+
+uint32_t feme::image::resolveAttachmentViewLayerCount(
+    bool ImageIsTexture3D, bool ViewIsTexture3D, uint32_t ImageDepth,
+    uint32_t ImageArrayLayers, uint32_t BaseArrayLayer,
+    uint32_t RequestedLayerCount) {
+  uint32_t Effective = effectiveViewLayerCount(ImageIsTexture3D, ViewIsTexture3D,
+                                               ImageDepth, ImageArrayLayers);
+  return RequestedLayerCount == kRemainingImageViewExtent
+             ? Effective - BaseArrayLayer
+             : RequestedLayerCount;
+}

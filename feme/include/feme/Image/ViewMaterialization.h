@@ -26,6 +26,16 @@
 // functions; every existing Vulkan caller and advertised behavior is
 // unaffected by this extraction.
 //
+// WARP roadmap WS1(d) ("Move ImageView::resolvedLayerCount()/
+// effectiveViewLayerCount's 2D-view-of-3D-image depth-slice-as-array-layer
+// resolution ... into FeMeImage", feme/docs/WARPRoadmap.md): adds
+// `effectiveViewLayerCount`/`resolveAttachmentViewLayerCount`, the
+// portable counterparts of `feme::vulkan::effectiveViewLayerCount`/
+// `ImageView::resolvedLayerCount()` -- the separate, attachment-view-only
+// layer-resolution path `WS1(b)` intentionally left untouched (it is not
+// used by `materializeImageDescriptor`). `RenderPass.cpp`'s own callers
+// now forward to these functions.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_IMAGE_VIEWMATERIALIZATION_H
@@ -103,6 +113,43 @@ ImageViewExtent resolveImageViewExtent(uint32_t ImageWidth,
 /// their own (4-channel) decode targets.
 uint32_t
 compressedFormatBorderComponentMask(feme::cpu::ResourceFormat Format);
+
+/// WARP roadmap WS1(d): the number of real, addressable "layers" an
+/// attachment view resolves `kRemainingImageViewExtent` against, and
+/// validates `baseArrayLayer`/`layerCount` bounds against -- the portable
+/// counterpart of `feme::vulkan::effectiveViewLayerCount`. For every
+/// dimension but one, this is simply \p ImageArrayLayers. The one
+/// exception: a non-`Texture3D`-dimensioned view (\p ViewIsTexture3D
+/// false) of a `Texture3D` image (\p ImageIsTexture3D true) repurposes the
+/// view's `baseArrayLayer`/`layerCount` subresource-range fields to
+/// address depth slices instead (real Vulkan's
+/// `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` rule) -- a 3D image always
+/// has exactly one real array layer, so \p ImageArrayLayers itself would
+/// wrongly reject or truncate every slice past the first. A
+/// `Texture3D`-dimensioned view of the same image is unaffected (its own
+/// `baseArrayLayer`/`layerCount` still address the single real array
+/// layer, not a depth slice -- Vulkan disallows a `VK_IMAGE_VIEW_TYPE_3D`
+/// view from ever being partial across depth at all).
+uint32_t effectiveViewLayerCount(bool ImageIsTexture3D, bool ViewIsTexture3D,
+                                 uint32_t ImageDepth,
+                                 uint32_t ImageArrayLayers);
+
+/// WARP roadmap WS1(d): resolves an attachment view's own
+/// \p RequestedLayerCount (possibly `kRemainingImageViewExtent`) against
+/// \p effectiveViewLayerCount's result, the portable counterpart of
+/// `ImageView::resolvedLayerCount()`. Deliberately does **not** clamp an
+/// explicit (non-sentinel) \p RequestedLayerCount against the remaining
+/// layer count the way `resolveImageViewExtent` does for the sampling/
+/// storage path above -- this preserves `ImageView::resolvedLayerCount()`'s
+/// own pre-existing behavior verbatim (pure code motion, not a behavior
+/// fix); whether the two paths *should* converge is an open question left
+/// to a future change, not decided by this extraction.
+uint32_t resolveAttachmentViewLayerCount(bool ImageIsTexture3D,
+                                         bool ViewIsTexture3D,
+                                         uint32_t ImageDepth,
+                                         uint32_t ImageArrayLayers,
+                                         uint32_t BaseArrayLayer,
+                                         uint32_t RequestedLayerCount);
 
 } // namespace feme::image
 
