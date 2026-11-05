@@ -16,6 +16,7 @@
 
 #include "feme/Graphics/ImageFixture.h"
 #include "feme/Graphics/LayeredRendering.h"
+#include "feme/Image/CopyWalk.h"
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -444,47 +445,39 @@ Error runCopyImage(Image *Src, Image *Dst,
         Region.dstSubresource.mipLevel >= Dst->mipLevels())
       return createStringError(inconvertibleErrorCode(),
                                "image copy mip level is out of range");
-    uint32_t WidthUnits = (Region.extent.width + SrcBlockW - 1) / SrcBlockW;
-    uint32_t HeightUnits = (Region.extent.height + SrcBlockH - 1) / SrcBlockH;
-    uint32_t SrcOffsetXUnits = uint32_t(Region.srcOffset.x) / SrcBlockW;
-    uint32_t SrcOffsetYUnits = uint32_t(Region.srcOffset.y) / SrcBlockH;
-    uint32_t DstOffsetXUnits = uint32_t(Region.dstOffset.x) / DstBlockW;
-    uint32_t DstOffsetYUnits = uint32_t(Region.dstOffset.y) / DstBlockH;
-    uint64_t RowBytes = uint64_t(WidthUnits) * UnitSize * SampleCount;
     uint32_t LayerCount = Src->resolvedLayerCount(
         Region.srcSubresource.baseArrayLayer, Region.srcSubresource.layerCount);
-    // A copy between a 3D image and a 2D (array) image treats the 3D
-    // image's `extent.depth` slices as the 2D image's `layerCount` layers
-    // (real Vulkan's own "Image Copies" rule): whichever side is 3D steps
-    // through `Region.*Offset.z`, and whichever side is not steps through
-    // its own `baseArrayLayer` instead -- never both, and never neither,
-    // since exactly one of `LayerCount`/`Region.extent.depth` is greater
-    // than 1 for any legal region. A same-dimensionality (2D-to-2D or
-    // 3D-to-3D) copy is the special case where both sides agree, which
-    // this same formula also computes correctly.
-    uint32_t SliceCount =
-        (SrcIs3D || DstIs3D) ? Region.extent.depth : LayerCount;
-    for (uint32_t S = 0; S != SliceCount; ++S) {
-      uint32_t SrcLayer =
-          Region.srcSubresource.baseArrayLayer + (SrcIs3D ? 0 : S);
-      uint32_t SrcZ = Region.srcOffset.z + (SrcIs3D ? S : 0);
-      uint32_t DstLayer =
-          Region.dstSubresource.baseArrayLayer + (DstIs3D ? 0 : S);
-      uint32_t DstZ = Region.dstOffset.z + (DstIs3D ? S : 0);
-      for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
+    feme::image::ImageCopyRegionWalk Walk =
+        feme::image::computeImageCopyRegionWalk(
+            SrcBlockW, SrcBlockH, DstBlockW, DstBlockH, UnitSize, SampleCount,
+            SrcIs3D, DstIs3D, Region.extent.width, Region.extent.height,
+            Region.extent.depth, uint32_t(Region.srcOffset.x),
+            uint32_t(Region.srcOffset.y), uint32_t(Region.dstOffset.x),
+            uint32_t(Region.dstOffset.y), LayerCount);
+    for (uint32_t S = 0; S != Walk.SliceCount; ++S) {
+      feme::image::ImageCopySliceLocation Slice =
+          feme::image::computeImageCopySliceLocation(
+              SrcIs3D, DstIs3D, Region.srcSubresource.baseArrayLayer,
+              uint32_t(Region.srcOffset.z), Region.dstSubresource.baseArrayLayer,
+              uint32_t(Region.dstOffset.z), S);
+      for (uint32_t Y = 0; Y != Walk.HeightUnits; ++Y) {
         void *SrcRow =
             SrcCompressed
-                ? Src->blockPointer(Region.srcSubresource.mipLevel, SrcLayer,
-                                    SrcOffsetXUnits, SrcOffsetYUnits + Y, SrcZ)
-                : Src->texelPointer(Region.srcSubresource.mipLevel, SrcLayer,
-                                    SrcOffsetXUnits, SrcOffsetYUnits + Y, SrcZ);
+                ? Src->blockPointer(Region.srcSubresource.mipLevel,
+                                    Slice.SrcLayer, Walk.SrcOffsetXUnits,
+                                    Walk.SrcOffsetYUnits + Y, Slice.SrcZ)
+                : Src->texelPointer(Region.srcSubresource.mipLevel,
+                                    Slice.SrcLayer, Walk.SrcOffsetXUnits,
+                                    Walk.SrcOffsetYUnits + Y, Slice.SrcZ);
         void *DstRow =
             DstCompressed
-                ? Dst->blockPointer(Region.dstSubresource.mipLevel, DstLayer,
-                                    DstOffsetXUnits, DstOffsetYUnits + Y, DstZ)
-                : Dst->texelPointer(Region.dstSubresource.mipLevel, DstLayer,
-                                    DstOffsetXUnits, DstOffsetYUnits + Y, DstZ);
-        std::memcpy(DstRow, SrcRow, RowBytes);
+                ? Dst->blockPointer(Region.dstSubresource.mipLevel,
+                                    Slice.DstLayer, Walk.DstOffsetXUnits,
+                                    Walk.DstOffsetYUnits + Y, Slice.DstZ)
+                : Dst->texelPointer(Region.dstSubresource.mipLevel,
+                                    Slice.DstLayer, Walk.DstOffsetXUnits,
+                                    Walk.DstOffsetYUnits + Y, Slice.DstZ);
+        std::memcpy(DstRow, SrcRow, Walk.RowBytes);
       }
     }
   }
