@@ -133543,3 +133543,50 @@ interestingness test.
    acted on, still needs an explicit owner decision.
 6. Keep re-checking the offload-test-suite patch set each session
    (clean again this session).
+# 2026-11-05: Windows WARP roadmap and source evaluation
+
+**Next action:** open `feme\docs\WARPRoadmap.md` at W0(a) and pin the
+Windows adapter/runtime contract before implementing the frontend.
+
+## Outcome
+
+Created the W0-W7 roadmap with shared-core extraction steps, dependencies,
+acceptance criteria and mappings to the local Direct3D tests. Refreshed
+`FeMeWARPDesign.md` and the main roadmap index. No compiler or driver code
+changed, and no implementation milestone was marked complete.
+
+## Decision record
+
+1. Reuse FeMe's existing stage ABIs and raster/tessellation/mesh executor.
+   Extract image/descriptor preparation and task mechanics from Vulkan instead
+   of copying them into a second driver.
+2. Keep API ownership, barriers, capability queries and Windows integration
+   in the frontends. A D3D fence can decrease; a Vulkan timeline semaphore
+   cannot provide its semantics unchanged.
+3. Keep deployment unproven. Local WARP code uses runtime/kernel services;
+   this checkout does not include a complete BasicRender miniport. Reference
+   source access is not redistribution permission or adapter qualification.
+4. Audit shader/test compatibility early: FeMe's DXBC importer is not complete
+   legacy execution, and WARP-specific test switches do not select FeMe.
+   Direct heap indexing is a separate SM 6.6 capability.
+
+## Verification and limits
+
+Device identity confirmed at session start and CTS launch. Cached,
+assertion-enabled, no-PCH `check-feme` passed: 3,864 Passed, 15 Skipped,
+10 Unsupported; prerequisite edges checked in the generated Ninja graph.
+The local Windows CTS smoke passed all eight cases with vendor `0x10000`.
+Both inventory tables regenerate unchanged. Results and binary identities
+are recorded in `VulkanCTSReport.md`; Windows process constraints are in
+`feme\.instructions.md`.
+
+No full CTS sweep, Direct3D execution, installed-adapter prototype, display
+testing or HLK run was performed. Historical Linux sweep notes above were
+not treated as artifacts available in this Windows session.
+
+## Suggested next steps
+
+1. W0(a): prove the integration boundary on a suitable Windows host/VM.
+2. W0(c)-W0(d): classify the local test corpus and prove adapter selection.
+3. In parallel, establish WS3 regression selections and start WS0's checked
+   image-layout extraction with unchanged Vulkan behavior.
