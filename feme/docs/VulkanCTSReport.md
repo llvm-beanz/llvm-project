@@ -1,5 +1,81 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS1(b): image-view extent/border-mask extraction (2026-11-05)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` (rechecked at session start and again immediately before this
+CTS run). This session implements WARP roadmap `WS1(b)`: the portable
+parts of `feme::vulkan::CommandBuffer.cpp`'s `materializeImageDescriptor`
+-- the subresource-range clamping/`VK_REMAINING_MIP_LEVELS`/
+`VK_REMAINING_ARRAY_LAYERS`-sentinel resolution and the resulting per-mip
+width/height/depth computation -- move into a new portable
+`feme::image::resolveImageViewExtent` (`feme/include/feme/Image/
+ViewMaterialization.h`, `feme/lib/Image/ViewMaterialization.cpp`), along
+with the already-Vulkan-independent `compressedFormatBorderComponentMask`
+switch (moved verbatim, zero logic change -- it only ever operated on
+`feme::cpu::ResourceFormat`). `CommandBuffer.cpp`'s
+`materializeImageDescriptor` and `compressedFormatBorderComponentMask`
+become thin forwarders. `resolveImageSwizzle` (already a one-line wrapper
+over the portable `feme::cpu::packImageSwizzle`) and the ASTC-decode
+sRGB-format ternary (already a one-line `isASTCSRGBFormat` check against
+`feme::cpu::ResourceFormat`) were evaluated and intentionally left in
+place -- no further Vulkan-coupled logic to extract. `ImageView::
+resolvedLayerCount()`/`effectiveViewLayerCount` (`RenderPass.cpp`'s
+separate 2D-view-of-3D-image attachment special case, not used by
+`materializeImageDescriptor`) was intentionally not touched; it is now
+`WS1(d)` in the roadmap. Pure code motion -- no advertised capability or
+Vulkan behavior changed.
+
+`check-feme` rebuilt its prerequisites and passed: **3,926 Passed, 15
+Skipped, 10 Unsupported, zero failures** (3,951 discovered tests),
+including 14 new `FeMeImageTests` cases (whole-image resolution, mip/
+array-layer sentinel resolution, explicit-count clamping, out-of-bounds
+base-mip/base-layer/zero-count invalidity, 3D depth-halving-per-mip,
+minification floor, and border-component-mask coverage across 1-4-channel
+BC/ETC2 format families) -- `FeMeImageTests.exe` run directly also showed
+**62/62 passed** (48 prior + 14 new). Cached (`sccache`), assertions
+enabled, no PCH.
+
+The local CTS checkout at `12af7ce2dbfd6a95a72cb77dd4f3e9bdaf51d11f`
+(unchanged) ran a bounded 1,062-case selection built from the local
+`vk-default` mustpass, chosen to exercise every piece of logic this
+session moved: `dEQP-VK.texture.swizzle.component_mapping.color.
+r8g8b8a8_unorm_*` (72 cases, exercises the swizzle path and confirms it
+is unaffected by the extent-clamping change), `dEQP-VK.texture.mipmap.
+3d.*` (168 cases, exercises `resolveImageViewExtent`'s 3D-depth-halving
+branch directly), and `dEQP-VK.texture.filtering.2d_array.*` (822 cases,
+exercises the array-layer sentinel-resolution/clamping branch across many
+sizes and mip configurations). Total: **1,062 Completed, 928 Pass, 134
+NotSupported (border-color-dependent `_compute` variants unsupported by
+this ICD, pre-existing and unrelated to this change), zero Fail, zero
+Unrun.** Artifacts are under
+`C:\dev\VK-GL-CTS\run\feme-20261105-ws1b-viewmaterialization`:
+`cases.txt`, `results\report.txt`. From the LLVM checkout:
+
+```powershell
+$env:FEME_VULKAN_SAFETY_NET_TIMEOUT_MS = '30000'
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261105-ws1b-viewmaterialization\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261105-ws1b-viewmaterialization\results `
+  --workers 1 --batch-size 60 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The 1,062-case list was assembled by filtering the local `vk-default`
+mustpass `texture.txt` to the three groups above (no new module; all
+three already exist in mustpass).
+
+The ICD at commit `28f81282f3b3` (this session's HEAD) has SHA-256
+`ab34d9bd2d3d0aeb5f566ad5a6431879985542ec7066490dcc23fc0ab69d2b38`
+(`libfeme_vulkan.dll`); `llvm-project` was at that same commit when this
+run completed. No full CTS sweep, Direct3D execution, display
+interoperability, or HLK qualification was run this session; both Vulkan
+inventories were not regenerated this entry (no format/extension
+advertisement changed by this pure code-motion commit -- see WS0(a)'s
+recheck below, still valid).
+
 ## Windows WARP roadmap WS1(a): BC1-5/BC6H/BC7 block decoder extraction (2026-11-05)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
