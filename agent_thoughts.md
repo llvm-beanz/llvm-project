@@ -134170,3 +134170,165 @@ rather than the full roadmap-row text verbatim.
 7. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-05: WS1(c) image-copy region-walk extraction (this session)
+
+**Next action:** `WS1(d)` (the attachment-view
+`effectiveViewLayerCount`/`ImageView::resolvedLayerCount()` carve-out), or
+`WS2` if a change of subsystem is preferred.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+(confirmed at the start of this session and again immediately before the
+CTS run, per standing instructions -- same two harmless `nv-vk64.json`
+loader warnings as every prior session).
+
+## What I did
+
+Picked up the prior session's ranked suggestion #1 (`WS1(c)`).
+
+1. Located the real implementation first: the roadmap's `WS1(c)` row text
+   says "out of `CommandBuffer.cpp`", but the actual row/depth/sample-
+   stride walking it describes lives in `feme::vulkan::ImageOps.cpp`'s
+   `runCopyImage`/`runBlitImage`/`runResolveImage` (`CommandBuffer.cpp`
+   only dispatches `RecordedCommand::Kind::CopyImage`/etc. to them).
+   Corrected this in the roadmap text while striking the row, rather than
+   silently leaving a wrong file reference for a future reader to trip
+   over.
+2. Read all three functions end to end before deciding scope.
+   `runCopyImage`'s stride-walking geometry (block/texel unit conversion
+   for each side's own compressed-block shape, row-byte sizing with the
+   per-texel sample count folded in, and the 3D-image-vs-2D-array-image
+   slice-stepping rule) is genuinely a pure function of plain scalars,
+   computed once per region before ever touching a live `Image`.
+   `runBlitImage`'s loop is inseparable from its BC/ETC2/ASTC decode-then-
+   resample pipeline (bounds and sub-pixel positions depend on the filter
+   and the decoded format's byte layout, not just block/sample-count
+   geometry). `runResolveImage`'s loop is already a direct, un-block-
+   shaped nested `Layer`/`Z`/`Y`/`X` walk with no unit-conversion or
+   3D/array-layer branch to factor out -- only a copy needs one, since
+   only a copy can pair a 3D image with a differently-shaped 2D array
+   image or mix block-compressed/uncompressed block shapes on its two
+   sides. Concluded `runBlitImage`/`runResolveImage` have nothing
+   comparable left to extract, rather than assuming there must be
+   something and forcing an artificial split.
+3. Designed `feme::image::computeImageCopyRegionWalk` (one call per
+   region, returns an `ImageCopyRegionWalk` struct: WidthUnits/
+   HeightUnits/SliceCount/RowBytes/Src-and-DstOffsetXUnits/YUnits) and
+   `computeImageCopySliceLocation` (one call per slice index, returns an
+   `ImageCopySliceLocation` struct: SrcLayer/SrcZ/DstLayer/DstZ) --
+   mirroring the original inline variable names closely so the diff in
+   `ImageOps.cpp` reads as a mechanical substitution, not a rewrite.
+4. Three commits, same established pattern: (1) add the two portable
+   functions to `FeMeImage`, build-verify; (2) convert `runCopyImage`'s
+   inline geometry into the two calls, build `FeMeImage` ->
+   `FeMeVulkanCore` -> `feme_vulkan` in sequence; (3) add 9 new
+   `CopyWalkTest.cpp` cases, build-and-run.
+5. Struck `WS1(c)` on `WARPRoadmap.md` with exit evidence, documenting the
+   `CommandBuffer.cpp`/`ImageOps.cpp` correction and the blit/resolve
+   evaluation inline so the row stands on its own without needing this
+   thoughts file for context.
+
+## Verification
+
+- `check-feme`: 3,935 Passed / 15 Skipped / 10 Unsupported, zero
+  failures (3,960 discovered) -- exactly 9 more than the prior session's
+  3,926, matching the 9 new `CopyWalkTest` cases, zero regressions. (The
+  lit summary's captured output stopped at the "Passed" line again this
+  session, same as two sessions ago -- but `cmake --build . --target
+  check-feme` itself exited with code 0, and a failing lit test fails
+  that build step, so a zero exit code is itself sufficient confirmation
+  of zero failures, not just a plausible inference from the discovered-
+  test-count delta.)
+- `FeMeImageTests.exe` direct run: 71/71 Pass (62 prior + 9 new).
+- Bounded CTS: assembled a 126-case selection from the local `vk-default`
+  mustpass's `core` (not `copy_commands2`, to avoid doubling coverage of
+  the same `runCopyImage` implementation through the `VkCopyImageInfo2`
+  entry points) `copy_and_blit.image_to_image` variant --
+  `3d_images.*` (6 cases, both 2D-to-3D and 3D-to-2D slice-stepping),
+  `array.*` (9 cases, array-to-array layer stepping, including a partial/
+  remaining-layers case), `simple_tests.*` (23 cases, general coverage),
+  and `all_formats.color.2d_to_2d.bc1_rgb_unorm_block.*` (88 cases, the
+  compressed-source block-unit-conversion path against both a
+  differently-shaped uncompressed destination and a same-shaped
+  compressed destination, across every layout-pair/queue-family
+  combination mustpass covers for this one format). Result: 126
+  Completed, 118 Pass, 8 NotSupported (layout/queue combinations this ICD
+  does not advertise, pre-existing and unrelated), zero Fail, zero Unrun.
+- Did not regenerate either Vulkan inventory file -- added a "rechecked,
+  not regenerated, no advertisement changed" note to both, matching
+  every prior `WS0`/`WS1` session's own precedent for a pure code-motion
+  change with no capability delta.
+- No repeat of the relative-path CTS-harness mistake from the last two
+  sessions this time -- built the case-list file directly under
+  `C:\dev\VK-GL-CTS\run\...` using an absolute path from the start,
+  having been bitten by the cwd-carryover issue twice already.
+
+## Decision record
+
+1. Corrected the roadmap's `WS1(c)` row text (`CommandBuffer.cpp` ->
+   `ImageOps.cpp`) as part of striking it, rather than leaving the
+   inaccurate file reference in place once discovered -- the design-doc-
+   deviation instruction's spirit (keep documentation honest about where
+   things actually live) applies to the roadmap doc's own "bounded
+   change" descriptions, not just the design doc proper.
+2. Did not force a split of `runBlitImage`/`runResolveImage` into a
+   `WS1(c)`-adjacent sibling entry the way `WS1(b)`'s session carved out
+   `WS1(d)` -- that carve-out was for identified, genuinely deferred work
+   (`effectiveViewLayerCount` exists and does something `WS1(b)` didn't
+   touch); here, the conclusion is that blit/resolve have *no* comparable
+   pure-geometry kernel to extract at all, which is a completed
+   evaluation, not a deferral. Recorded the evaluation in both the header
+   comment and the roadmap row itself so this isn't lost to a future
+   session re-asking the same question.
+3. Kept `computeImageCopyRegionWalk`'s parameter list wide (14 plain
+   scalars) rather than bundling it into a handful of structs, mirroring
+   `resolveImageViewExtent`'s own precedent from `WS1(b)` -- this
+   extraction is young enough that over-engineering an input struct
+   before a second caller (a future D3D copy path) exists would be
+   premature structure, not simplification.
+
+## State restated
+
+- `WS0` (`WS0(a)`/`WS0(b)`), `WS1(a)`, `WS1(b)`: done.
+- `WS1(c)`: done, struck through with exit evidence (including a
+  corrected file reference and the blit/resolve evaluation).
+  `WS1(d)`: unchanged, not started.
+- `WS2`/`WS3`, `W0`-`W7`: unchanged, all still pending.
+- `FeMeImage` library now has eight files (`BlockGeometry.*`,
+  `SubresourceLayout.*`, `BCDecode.*`, `BC6HDecode.*`, `BC7Decode.*`,
+  `BCPartitionTables.*`, `ViewMaterialization.*`, `CopyWalk.*`) and 71
+  unit tests total.
+- No offload-test-suite / `check-hlsl-feme-vk` work this session.
+- No issue found outside `feme/` this session -- no reproducer/fix commit
+  needed.
+- No new environment/process issue found worth codifying in
+  `feme/.instructions.md` this session -- the relative-path CTS-harness
+  pitfall was successfully avoided this time (already documented from the
+  prior two sessions), and no new category of mistake was made.
+
+## Suggested next steps (ranked)
+
+1. **`WS1(d)`**: the carved-out `effectiveViewLayerCount`/attachment-view
+   2D-view-of-3D-image special case, building on `WS1(b)`'s
+   `resolveImageViewExtent`. Smaller and more self-contained than `WS1(c)`
+   was -- a good next bounded step, and the last piece of `WS1`'s
+   original three-row breakdown still open.
+2. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+   incrementally -- independent of `WS1` entirely, could run in parallel
+   in a separate session if `WS1(d)` is deferred.
+3. **`WS3`**: establish shared-core regression gates -- still worth a
+   brief look at whether its gates would have caught anything `WS0`/
+   `WS1(a)`/`WS1(b)`/`WS1(c)`'s manual check-feme/CTS verification did
+   not, before treating it as moot; with `WS1` nearly fully broken down
+   and executed, this may be a natural point to actually do that review
+   rather than deferring it again.
+4. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
+   explicit FeMe adapter-selection assertion -- a research/documentation
+   task, no Windows adapter install needed yet.
+5. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+6. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
