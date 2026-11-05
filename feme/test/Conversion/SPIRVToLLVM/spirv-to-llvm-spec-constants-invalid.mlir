@@ -20,3 +20,26 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
     spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
   }
 }
+
+// -----
+
+// Checks that a `spirv.ModuleSpecConstantOperation` whose enclosed op has
+// no `fold` implementation (e.g. a floating-point width conversion -- this
+// project has only ever actually encountered integer arithmetic here, see
+// `spirv-to-llvm-module-spec-constant-operation.mlir`) is declined, not
+// approximated: `prepareSpecConstants` leaves it out of its resolved-value
+// map, so any real reference to it (here, directly via
+// `spirv.mlir.referenceof`) fails legalization instead of silently
+// miscompiling.
+
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.SpecConstant @sc0 = 1.0 : f32
+  %0 = spirv.mlir.referenceof @sc0 : f32
+  spirv.ModuleSpecConstantOperation @sco wraps "spirv.FConvert"(%0) : (f32) -> f64
+  spirv.SpecConstantComposite @scc (@sco) : !spirv.array<1 x f64>
+  spirv.func @unfoldable_module_spec_constant_operation() -> !spirv.array<1 x f64> "None" {
+    // expected-error@+1 {{failed to legalize operation 'spirv.mlir.referenceof' that was explicitly marked illegal}}
+    %1 = spirv.mlir.referenceof @scc : !spirv.array<1 x f64>
+    spirv.ReturnValue %1 : !spirv.array<1 x f64>
+  }
+}

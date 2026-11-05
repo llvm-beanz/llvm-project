@@ -17500,6 +17500,30 @@ public:
   }
 };
 
+/// Drops `spirv.ModuleSpecConstantOperation` -- the module-scope,
+/// named form of an `OpSpecConstantOp` used as a `spirv.SpecConstantComposite`
+/// constituent (e.g. `WorkgroupSize`'s own `gl_WorkGroupSize.x * .y`), as
+/// opposed to the inline, function-scope form `inlineSpecConstantOperations`
+/// already handles. Mirrors `SpecConstantErasurePattern` above: any real
+/// reference to it (always from a `spirv.SpecConstantComposite`'s own
+/// constituent list) has already been resolved to a compile-time value by
+/// `prepareSpecConstants`'s own constant-folding of this op's enclosed
+/// instruction, so this declaration's removal is unconditional cleanup.
+class ModuleSpecConstantOperationErasurePattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::ModuleSpecConstantOperationOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ModuleSpecConstantOperationOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ModuleSpecConstantOperationOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Returns \p Type's own element type if it (or, for a vector, its element
 /// type) is a *signed* or *unsigned* (not signless) `IntegerType` -- the
 /// same SPIR-V-vs-LLVM integer-signedness mismatch upstream's own
@@ -18337,6 +18361,66 @@ feme::spirv::prepareSpecConstants(mlir::spirv::ModuleOp Module) {
       continue;
     }
 
+    // A module-scope `spirv.ModuleSpecConstantOperation` (e.g.
+    // `WorkgroupSize`'s own `gl_WorkGroupSize.x - gl_WorkGroupSize.y`, an
+    // `OpSpecConstantOp` the deserializer could not inline anywhere since
+    // it is referenced only by symbol from a `spirv.SpecConstantComposite`
+    // constituent, not from any one function-scope point of use). Unlike
+    // the inline, function-scope form (which `inlineSpecConstantOperations`
+    // leaves for LLVM's own constant folder to resolve once its operands
+    // become real constants), this op's result has to be a concrete
+    // compile-time value *now*, directly in `Values`, the same as a plain
+    // `spirv.SpecConstant` -- there is no SSA use site downstream of this
+    // function where a non-constant instruction could still live. Both of
+    // its operands are always either `spirv.mlir.referenceof` (another,
+    // already-processed spec constant -- SPIR-V requires declare-before-use,
+    // so it is already in `Values`) or an ordinary `spirv.Constant`, so
+    // `Operation::fold` on the enclosed op, given those two attributes,
+    // is enough: every enclosed opcode this project has actually
+    // encountered (`ISub`, `IMul`, ...) already implements `fold`.
+    if (auto ModuleSpecConstOp =
+            mlir::dyn_cast<mlir::spirv::ModuleSpecConstantOperationOp>(Op)) {
+      mlir::Operation &EnclosedOp = ModuleSpecConstOp.getBody().front().front();
+      llvm::SmallVector<mlir::Attribute> OperandAttrs;
+      OperandAttrs.reserve(EnclosedOp.getNumOperands());
+      bool AllResolved = true;
+      for (mlir::Value Operand : EnclosedOp.getOperands()) {
+        mlir::Attribute OperandAttr;
+        if (auto RefOf = Operand.getDefiningOp<mlir::spirv::ReferenceOfOp>()) {
+          auto It = Values.find(RefOf.getSpecConst());
+          if (It != Values.end())
+            OperandAttr = It->second.Value;
+        } else if (auto Const =
+                       Operand.getDefiningOp<mlir::spirv::ConstantOp>()) {
+          OperandAttr = Const.getValue();
+        }
+        if (!OperandAttr) {
+          AllResolved = false;
+          break;
+        }
+        OperandAttrs.push_back(OperandAttr);
+      }
+
+      llvm::SmallVector<mlir::OpFoldResult> FoldResults;
+      if (AllResolved &&
+          mlir::succeeded(EnclosedOp.fold(OperandAttrs, FoldResults)) &&
+          FoldResults.size() == 1) {
+        if (auto ResultAttr =
+                mlir::dyn_cast_if_present<mlir::TypedAttr>(
+                    llvm::dyn_cast_if_present<mlir::Attribute>(
+                        FoldResults.front())))
+          Values[ModuleSpecConstOp.getSymName()] = {ResultAttr,
+                                                    ResultAttr.getType()};
+      }
+      // An unresolved fold (an enclosed opcode with no `fold`
+      // implementation, or a non-constant fold result) is simply omitted
+      // from `Values`, same as an unresolved composite below -- any
+      // `spirv.SpecConstantComposite` constituent referencing it then
+      // declines to resolve too, and `ReferenceOfConversionPattern`
+      // reports its own precise diagnostic for any direct use.
+      continue;
+    }
+
     auto CompositeConst =
         mlir::dyn_cast<mlir::spirv::SpecConstantCompositeOp>(Op);
     if (!CompositeConst)
@@ -18580,6 +18664,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
       SetMeshOutputsEXTConversionPattern, EmitMeshTasksEXTConversionPattern,
       SpecConstantErasurePattern, SpecConstantCompositeErasurePattern,
+      ModuleSpecConstantOperationErasurePattern,
       StageIOGlobalVariablePattern, PrivateAggregateGlobalVariablePattern,
       PrivatePointerInitializerGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
