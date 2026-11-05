@@ -68,8 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `ENV6(d)(5)` tessellation edge symmetry/inner set (Tessellation.cpp).
-2. `ENV6(d)(3)` image.store reference check.
-3. `ENV6(c)(3)` scoping (83 + loops.special 12).
-4. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
-5. `ENV5(c)(7)(b)`; offload upstreaming (blocked on push access).
+1. `ENV6(d)(3)` image.store (14).
+2. `ENV6(c)(3)` scoping (83 + loops.special 12).
+3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)` (barrier), offload upstreaming (blocked).
