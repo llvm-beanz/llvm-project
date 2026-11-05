@@ -70,26 +70,31 @@ Please begin work on the WARP roadmap.
 
 ## Suggested next steps (ranked)
 
-1. **`WS1`**: move BC decoders/bridges first, then normalized image-view
-   materialization and reusable copy/resolve kernels out of
-   `CommandBuffer.cpp`/`ImageOps.cpp` into `FeMeImage`, building on both
-   `WS0(a)`'s block-geometry and `WS0(b)`'s subresource-layout functions.
-   Materially larger than `WS0` -- likely needs its own lettered
-   breakdown (`WS1(a)`, `WS1(b)`, ...) the way `WS0` just got, started at
-   the top of a future session rather than retrofitted mid-session.
-2. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+1. **`WS1(b)`**: move normalized image-view materialization (format/
+   swizzle/subresource-range rebasing for sampling, storage, and
+   attachment views) out of `ImageOps.cpp`/`CommandBuffer.cpp` into
+   `FeMeImage`, building on `WS0(a)`/`WS0(b)`/`WS1(a)`. Expect this to be
+   harder than `WS1(a)` -- it touches live `Image` state, not pure
+   functions -- so scope and possibly further break it down (`WS1(b)(1)`
+   is not allowed by the nesting rule, so if it needs splitting, use
+   separate `WS1(b)`/`WS1(d)`-style siblings instead, or keep `WS1(b)`
+   itself narrowly scoped to one view kind at a time within one session).
+2. **`WS1(c)`**: reusable copy/resolve kernels out of `CommandBuffer.cpp`,
+   building on `WS1(b)`. Independent enough conceptually that it could
+   also run before `WS1(b)` if that proves easier to scope first, despite
+   the roadmap listing view materialization first.
+3. **`WS2`**: extract task execution/retained work storage from `Sync.*`
    incrementally -- independent of `WS1`, could run in parallel in a
    separate session.
-3. **`WS3`**: establish shared-core regression gates (nominally meant to
-   precede `WS0` per the roadmap's own text, but `WS0` is now done without
-   them -- worth a brief look at whether `WS3`'s gates would have caught
-   anything `WS0(a)`/`WS0(b)`'s manual check-feme/CTS verification did
-   not, before treating it as moot).
-4. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
+4. **`WS3`**: establish shared-core regression gates -- still worth a
+   brief look at whether its gates would have caught anything `WS0`/
+   `WS1(a)`'s manual check-feme/CTS verification did not, before treating
+   it as moot.
+5. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
    explicit FeMe adapter-selection assertion -- a research/documentation
    task, no Windows adapter install needed yet.
-5. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+6. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
    Windows host/VM outside this process-isolated container.
-6. Backlog carried from prior sessions, still untouched:
+7. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
