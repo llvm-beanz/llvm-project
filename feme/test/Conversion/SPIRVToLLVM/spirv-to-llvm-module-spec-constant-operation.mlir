@@ -31,3 +31,25 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %2 : vector<3xi32>
   }
 }
+
+// -----
+
+// A module-scope operation whose operand is another module-scope
+// operation (a `spirv.mlir.referenceof` of it) folds transitively.
+
+// CHECK-LABEL: llvm.func @nested_ref
+// CHECK: llvm.mlir.constant(dense<28> : vector<2xi32>) : vector<2xi32>
+// CHECK-NOT: spirv.ModuleSpecConstantOperation
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.SpecConstant @sc_x = 8 : i32
+  %0 = spirv.mlir.referenceof @sc_x : i32
+  %1 = spirv.Constant 4 : i32
+  spirv.ModuleSpecConstantOperation @inner wraps "spirv.IMul"(%0, %1) : (i32, i32) -> i32
+  %2 = spirv.mlir.referenceof @inner : i32
+  spirv.ModuleSpecConstantOperation @outer wraps "spirv.ISub"(%2, %1) : (i32, i32) -> i32
+  spirv.SpecConstantComposite @scc (@outer, @outer) : vector<2xi32>
+  spirv.func @nested_ref() -> vector<2xi32> "None" {
+    %3 = spirv.mlir.referenceof @scc : vector<2xi32>
+    spirv.ReturnValue %3 : vector<2xi32>
+  }
+}
