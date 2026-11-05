@@ -84,6 +84,64 @@ A stray `deqp-vk` (PID 86173, 19 h, 100% CPU) from an unrelated
 `/tmp/gf-baseline-run` run (parent PID 1, case list already deleted) was
 not part of this sweep and was killed.
 
+### L533: `memory_model.{message_passing,write_after_read}` fixed -- module-scope `OpSpecConstantOp` composite constituent (36 of 52 cases)
+
+Clustered all 255 `verified-failures.txt` names by first compiler
+diagnostic/symptom. `memory_model` (52 cases) was the largest cluster:
+`createComputePipelines` returned `VK_ERROR_INITIALIZATION_FAILED`
+because the MLIR SPIR-V deserializer rejected
+`OpSpecConstantComposite`'s `gl_WorkGroupSize`-style constituent
+(`%29 = OpSpecConstantOp ISub …; %30 = OpSpecConstantComposite %13 %29
+%29`) with "constituent must be a previously defined constant or
+specialization constant". Root cause: the deserializer only tracked the
+*inline*, per-function-use form of `OpSpecConstantOp`
+(`materializeSpecConstantOperation`); a module-scope use as a composite
+constituent had no resolution path at all.
+
+Fixed upstream in MLIR (non-FeMe, own commits, own isolated
+`mlir-translate`/lit reproducers -- see "External, non-FeMe fixes"
+below): a new named, module-scope, no-result op
+`spirv.ModuleSpecConstantOperation` plus deserializer support
+(`getOrCreateModuleSpecConstantOperation`). Then fixed FeMe's own
+consumer: `prepareSpecConstants` now folds the new op's enclosed
+operation via `Operation::fold` when every operand resolves (from the
+existing `SpecConstantValueMap` or a `spirv.Constant` attribute),
+storing the result under the op's symbol so `SpecConstantComposite`
+constituents referencing it resolve like any other spec constant.
+Operations with no `fold` implementation (observed: float arithmetic)
+are left unresolved -- any real use is declined at legalization,
+matching this project's existing policy of never silently
+approximating an unresolved spec constant (see the sibling
+`spirv-to-llvm-spec-constants-invalid.mlir` matrix-composite case).
+
+**Verification**: re-ran all 255 originally-failing cases together
+(`/tmp/full255_rerun2`, `--batch-size 50 --batch-timeout 300
+--final-timeout 120 --recovery-batch-sizes 20,5,1`, auto-verified
+`Fail`/`DeviceLost` cases alone before trusting them). Result: 36
+`memory_model` cases **Pass** (0 `Fail` in that cluster), 16 `Unrun` --
+the exact same 16 `device.payload_local.{buffer,image}.guard_local.
+{buffer,image}.{comp,vert}` names that were already `Unrun` before this
+fix (a pre-existing hang, tracked separately as `ENV7(e)`, unrelated to
+spec constants). No other cluster regressed: all remaining 203 cases
+kept their prior `Fail` outcome. `check-feme`: 3887/3891 Passed (+1 new
+FeMe lit test), 4 unsupported, 0 failures.
+
+**Gotcha re-learned the hard way**: the first attempt at this
+verification rerun used `--batch-size 255` with no `--batch-timeout`,
+so the single initial-round process had *no* timeout at all (per
+`run_vulkan_cts.py`'s own docstring, `--final-timeout` only bounds the
+finest single-case recovery/verification rounds) and hung forever on
+one of the 16 known-hanging cases. This exact pitfall was already
+documented in `feme/.instructions.md`; re-confirmed it in practice
+rather than adding a new entry.
+
+Next steps for this cluster: the 16 `Unrun` hangs need their own
+`ENV7(e)` investigation (separate from spec constants). The new
+`spirv.ModuleSpecConstantOperation` op still has two known gaps, tracked
+as TODOs rather than live bugs (no CTS case needs either today):
+serialization is unimplemented, and `spirv.mlir.referenceof` cannot
+target it directly (only via a `SpecConstantComposite` constituent).
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
