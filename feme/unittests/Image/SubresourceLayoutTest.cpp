@@ -158,6 +158,63 @@ TEST(SubresourceLayoutTest, SubresourceLayoutArrayLayerOffsetsByLayer) {
   EXPECT_EQ(R.Size, 16u);
 }
 
+TEST(SubresourceLayoutTest, InBoundsRejectsMipLevelPastCount) {
+  EXPECT_FALSE(isInBoundsSubresource(
+      /*Is3D=*/false, /*Width=*/4, /*Height=*/4, /*Depth=*/1,
+      /*MipLevels=*/2, /*ArrayLayers=*/1, /*MipLevel=*/2, /*ArrayLayer=*/0,
+      /*X=*/0, /*Y=*/0, /*Z=*/0, /*UnitWidth=*/1, /*UnitHeight=*/1));
+}
+
+TEST(SubresourceLayoutTest, InBoundsAcceptsCoordinateInsideHalvedMipExtent) {
+  // Mip level 1 of an 8x8 image is 4x4 texels: (3, 3) is in bounds, (4, 0)
+  // is not.
+  EXPECT_TRUE(isInBoundsSubresource(
+      /*Is3D=*/false, /*Width=*/8, /*Height=*/8, /*Depth=*/1,
+      /*MipLevels=*/2, /*ArrayLayers=*/1, /*MipLevel=*/1, /*ArrayLayer=*/0,
+      /*X=*/3, /*Y=*/3, /*Z=*/0, /*UnitWidth=*/1, /*UnitHeight=*/1));
+  EXPECT_FALSE(isInBoundsSubresource(
+      /*Is3D=*/false, /*Width=*/8, /*Height=*/8, /*Depth=*/1,
+      /*MipLevels=*/2, /*ArrayLayers=*/1, /*MipLevel=*/1, /*ArrayLayer=*/0,
+      /*X=*/4, /*Y=*/0, /*Z=*/0, /*UnitWidth=*/1, /*UnitHeight=*/1));
+}
+
+TEST(SubresourceLayoutTest, InBoundsAcceptsBlockGridUnits) {
+  // A 5x5 extent with 4x4 blocks has a 2x2 block grid: (1, 1) in bounds,
+  // (2, 0) is not.
+  EXPECT_TRUE(isInBoundsSubresource(
+      /*Is3D=*/false, /*Width=*/5, /*Height=*/5, /*Depth=*/1,
+      /*MipLevels=*/1, /*ArrayLayers=*/1, /*MipLevel=*/0, /*ArrayLayer=*/0,
+      /*X=*/1, /*Y=*/1, /*Z=*/0, /*UnitWidth=*/4, /*UnitHeight=*/4));
+  EXPECT_FALSE(isInBoundsSubresource(
+      /*Is3D=*/false, /*Width=*/5, /*Height=*/5, /*Depth=*/1,
+      /*MipLevels=*/1, /*ArrayLayers=*/1, /*MipLevel=*/0, /*ArrayLayer=*/0,
+      /*X=*/2, /*Y=*/0, /*Z=*/0, /*UnitWidth=*/4, /*UnitHeight=*/4));
+}
+
+TEST(SubresourceLayoutTest, InBoundsChecksArrayLayerAgainstArrayLayers) {
+  EXPECT_TRUE(isInBoundsSubresource(
+      /*Is3D=*/false, /*Width=*/4, /*Height=*/4, /*Depth=*/1,
+      /*MipLevels=*/1, /*ArrayLayers=*/3, /*MipLevel=*/0, /*ArrayLayer=*/2,
+      /*X=*/0, /*Y=*/0, /*Z=*/0, /*UnitWidth=*/1, /*UnitHeight=*/1));
+  EXPECT_FALSE(isInBoundsSubresource(
+      /*Is3D=*/false, /*Width=*/4, /*Height=*/4, /*Depth=*/1,
+      /*MipLevels=*/1, /*ArrayLayers=*/3, /*MipLevel=*/0, /*ArrayLayer=*/3,
+      /*X=*/0, /*Y=*/0, /*Z=*/0, /*UnitWidth=*/1, /*UnitHeight=*/1));
+}
+
+TEST(SubresourceLayoutTest, InBoundsChecksZAgainstHalvedDepthFor3D) {
+  // An 8-deep 3D image's mip level 1 has depth max(1, 8 >> 1) == 4:
+  // Z == 3 in bounds, Z == 4 is not.
+  EXPECT_TRUE(isInBoundsSubresource(
+      /*Is3D=*/true, /*Width=*/4, /*Height=*/4, /*Depth=*/8,
+      /*MipLevels=*/2, /*ArrayLayers=*/1, /*MipLevel=*/1, /*ArrayLayer=*/0,
+      /*X=*/0, /*Y=*/0, /*Z=*/3, /*UnitWidth=*/1, /*UnitHeight=*/1));
+  EXPECT_FALSE(isInBoundsSubresource(
+      /*Is3D=*/true, /*Width=*/4, /*Height=*/4, /*Depth=*/8,
+      /*MipLevels=*/2, /*ArrayLayers=*/1, /*MipLevel=*/1, /*ArrayLayer=*/0,
+      /*X=*/0, /*Y=*/0, /*Z=*/4, /*UnitWidth=*/1, /*UnitHeight=*/1));
+}
+
 TEST(SubresourceLayoutTest, SubresourceLayout3DCoversWholeDepthRange) {
   // A 3D image's Size is its *whole* depth range (SlicePitch * depth at
   // this mip level), not one array layer's own range (a 3D image has
