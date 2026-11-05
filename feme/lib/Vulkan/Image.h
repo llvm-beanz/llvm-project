@@ -312,7 +312,10 @@ private:
   /// `computeSubresourceLayouts` (Image.cpp) sizes each level's storage
   /// with. Shared by `texelPointer` (`UnitWidth == UnitHeight == 1`) and
   /// `blockPointer` (`UnitWidth`/`UnitHeight` == `blockWidth`/`blockHeight`)
-  /// so both apply the same out-of-bounds check (roadmap E16).
+  /// so both apply the same out-of-bounds check (roadmap E16). (WARP
+  /// roadmap WS0(b)) A thin forwarder onto the portable
+  /// `feme::image::isInBoundsSubresource` -- see `feme/Image/
+  /// SubresourceLayout.h`.
   bool isInBounds(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
                   uint32_t Y, uint32_t Z, uint32_t UnitWidth,
                   uint32_t UnitHeight) const;

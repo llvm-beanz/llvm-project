@@ -95,17 +95,9 @@ Image::Image(VkImageType Type, ImageDimension Dimension, ResourceFormat Format,
 bool Image::isInBounds(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
                        uint32_t Y, uint32_t Z, uint32_t UnitWidth,
                        uint32_t UnitHeight) const {
-  if (MipLevel >= MipLevels)
-    return false;
-  uint32_t LevelWidth = std::max(1u, Width >> MipLevel);
-  uint32_t LevelHeight = std::max(1u, Height >> MipLevel);
-  uint32_t LevelDepth =
-      Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> MipLevel) : 1;
-  uint32_t SlicesAtLevel = Type == VK_IMAGE_TYPE_3D ? LevelDepth : ArrayLayers;
-  uint32_t UnitsWide = (LevelWidth + UnitWidth - 1) / UnitWidth;
-  uint32_t UnitsHigh = (LevelHeight + UnitHeight - 1) / UnitHeight;
-  return X < UnitsWide && Y < UnitsHigh &&
-         uint64_t(ArrayLayer) + Z < SlicesAtLevel;
+  return feme::image::isInBoundsSubresource(
+      Type == VK_IMAGE_TYPE_3D, Width, Height, Depth, MipLevels, ArrayLayers,
+      MipLevel, ArrayLayer, X, Y, Z, UnitWidth, UnitHeight);
 }
 
 void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
