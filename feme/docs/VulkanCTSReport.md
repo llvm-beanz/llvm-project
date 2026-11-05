@@ -142,6 +142,19 @@ as TODOs rather than live bugs (no CTS case needs either today):
 serialization is unimplemented, and `spirv.mlir.referenceof` cannot
 target it directly (only via a `SpecConstantComposite` constituent).
 
+### L534: remaining 16 `memory_model` `Unrun` cases were crashes, now all 52 `Pass`
+
+Running one case alone under `gdb` (not the batch runner) showed the 16
+"hangs" were process crashes the runner reported as `Unrun`: 8 `comp`
+cases segfaulted in `materializeSpecConstantOperation` (a module-scope
+`OpSpecConstantOp` whose operand is another `OpSpecConstantOp`; fixed in
+MLIR via `spirv.mlir.referenceof` of the inner `spirv.ModuleSpecConstantOperation`),
+and 8 `vert` cases aborted with `Cannot select: intrinsic
+llvm.spv.device.memory.barrier` (`VertexWrapper` now lowers barriers to
+fences). Re-run of the 52-case cluster: **52 Pass, 0 Fail, 0 Unrun**.
+Fail total is now 255 - 52 = 203. `check-feme` 3888/3892, 4 unsupported.
+No inventory change (no extension/feature support changed).
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
