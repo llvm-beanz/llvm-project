@@ -6425,6 +6425,32 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
            << " Latch=" << Latch->getName()
            << " ExitBlock=" << ExitBlock->getName() << "\n";
 
+  // Roadmap ENV6(c)(4): a `do { if (divergent) continue; ... } while (...)`
+  // loop puts its own divergent diamond directly in `Header`, where it
+  // looks like a second exit check rather than an internal diamond. If
+  // neither successor leaves the cycle, move `Header`'s body (and branch)
+  // into a fresh block so the branch becomes an ordinary `OtherCondBrBlocks`
+  // member that the existing internal-diamond handling already supports.
+  // Only done when every exit is a real comparison, not a `StructurizeCFG`
+  // flow phi (which is how `Header`'s own exit check relays through the
+  // merge), so shapes where `Header` participates in reaching the exit are
+  // left to the existing recognizers.
+  if (Header != Latch &&
+      llvm::all_of(predecessors(ExitBlock),
+                   [&](BasicBlock *P) {
+                     auto *Br = dyn_cast<CondBrInst>(P->getTerminator());
+                     return P != Header && Br &&
+                            !isa<PHINode>(Br->getCondition());
+                   }))
+    if (auto *HeaderBr = dyn_cast<CondBrInst>(Header->getTerminator()))
+      if (CI.contains(C, HeaderBr->getSuccessor(0)) &&
+          CI.contains(C, HeaderBr->getSuccessor(1)) &&
+          isDivergentBranch(HeaderBr)) {
+        BasicBlock *Body = llvm::SplitBlock(
+            Header, Header->getFirstNonPHIIt(), &DT, /*LI=*/nullptr,
+            /*MSSAU=*/nullptr, Header->getName() + ".body");
+        CI.addBlockToCycle(Body, C);
+      }
 
   // Roadmap H19k: fold away any redundant "Flow" re-derivation of a
   // decision a predecessor already made at compile time, before looking
