@@ -13690,9 +13690,38 @@ std::optional<MatrixWholeAccess> getMatrixWholeAccessFromPtr(mlir::Value Ptr) {
 /// TightMatrix{Store,Load}Pattern's own "has a declared tight layout to
 /// reconcile with" check (see their comments).
 bool hasAccessChainDefiningOp(mlir::Value Ptr) {
-  return mlir::isa_and_nonnull<mlir::spirv::AccessChainOp,
-                                mlir::spirv::InBoundsAccessChainOp>(
-      Ptr.getDefiningOp());
+  mlir::Operation *Def = Ptr.getDefiningOp();
+  if (!mlir::isa_and_nonnull<mlir::spirv::AccessChainOp,
+                             mlir::spirv::InBoundsAccessChainOp>(Def))
+    return false;
+
+  // A chain rooted in a variable with no struct anywhere in its type (e.g. a
+  // `Function`-local array of matrices) never had a tightened declaration,
+  // so it still uses the natural layout just like a bare matrix pointee.
+  mlir::Value Root = Ptr;
+  while (mlir::Operation *Op = Root.getDefiningOp()) {
+    if (auto Chain = mlir::dyn_cast<mlir::spirv::AccessChainOp>(Op))
+      Root = Chain.getBasePtr();
+    else if (auto InBounds =
+                 mlir::dyn_cast<mlir::spirv::InBoundsAccessChainOp>(Op))
+      Root = InBounds.getBasePtr();
+    else
+      break;
+  }
+  auto RootTy = mlir::dyn_cast<mlir::spirv::PointerType>(Root.getType());
+  if (!RootTy)
+    return true;
+  mlir::Type Pointee = RootTy.getPointeeType();
+  while (true) {
+    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Pointee))
+      Pointee = ArrayTy.getElementType();
+    else if (auto RTArrayTy =
+                 mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Pointee))
+      Pointee = RTArrayTy.getElementType();
+    else
+      break;
+  }
+  return mlir::isa<mlir::spirv::StructType>(Pointee);
 }
 
 /// Converts a `spirv.Store` of a whole matrix through a member whose

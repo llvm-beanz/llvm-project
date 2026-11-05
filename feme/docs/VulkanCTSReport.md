@@ -155,6 +155,17 @@ fences). Re-run of the 52-case cluster: **52 Pass, 0 Fail, 0 Unrun**.
 Fail total is now 255 - 52 = 203. `check-feme` 3888/3892, 4 unsupported.
 No inventory change (no extension/feature support changed).
 
+### L535: `glsl.arrays` `mat3` array cases (12) now `Pass` -- `TightMatrix{Load,Store}Pattern` misapplied to a struct-free array of matrices
+
+The cases silently returned wrong values: `Function`-local `mat3[3]` is
+allocated with the natural 16-byte-column layout, but a `spirv.Load`/`Store`
+of one element through an `AccessChain` used the 12-byte tight layout that is
+only correct for a struct member's declared layout. `hasAccessChainDefiningOp`
+now also requires the chain's root pointee (after peeling arrays) to be a
+struct. Re-run of the 12 cases: **12 Pass**; whole `dEQP-VK.glsl.arrays.*`
+group 159/159 Pass. Fail total is now 203 - 12 = 191. `check-feme` 3889/3893,
+4 unsupported. No inventory change.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
