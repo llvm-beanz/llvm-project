@@ -76,6 +76,7 @@
 #include "MemoryBinding.h"
 #include "PhysicalDeviceInfo.h"
 
+#include "feme/Image/ViewMaterialization.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -404,11 +405,15 @@ public:
   /// This view's own `Range.layerCount`, resolved against
   /// `effectiveViewLayerCount` -- see that function's own comment for why
   /// this is not always simply `Img->resolvedLayerCount(...)` (roadmap
-  /// L239).
+  /// L239). Forwards to the portable counterpart (WS1(d),
+  /// ViewMaterialization.h) -- see that function's own comment for why
+  /// this deliberately does not clamp an explicit `Range.layerCount` the
+  /// way `resolveImageViewExtent` does.
   uint32_t resolvedLayerCount() const {
-    return Range.layerCount == VK_REMAINING_ARRAY_LAYERS
-               ? effectiveViewLayerCount(*Img, ViewType) - Range.baseArrayLayer
-               : Range.layerCount;
+    return feme::image::resolveAttachmentViewLayerCount(
+        Img->type() == VK_IMAGE_TYPE_3D, ViewType == VK_IMAGE_VIEW_TYPE_3D,
+        Img->depth(), Img->arrayLayers(), Range.baseArrayLayer,
+        Range.layerCount);
   }
 
 private:

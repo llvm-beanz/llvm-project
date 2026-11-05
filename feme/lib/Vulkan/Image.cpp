@@ -13,6 +13,7 @@
 #include "RenderPass.h"
 
 #include "feme/Image/SubresourceLayout.h"
+#include "feme/Image/ViewMaterialization.h"
 
 #include "llvm/Support/ErrorHandling.h"
 
@@ -196,9 +197,10 @@ ImageDimension ImageView::dimension() const {
 
 uint32_t feme::vulkan::effectiveViewLayerCount(const Image &Img,
                                                VkImageViewType ViewType) {
-  return Img.type() == VK_IMAGE_TYPE_3D && ViewType != VK_IMAGE_VIEW_TYPE_3D
-             ? Img.depth()
-             : Img.arrayLayers();
+  // WS1(d): forwards to the portable counterpart (ViewMaterialization.h).
+  return feme::image::effectiveViewLayerCount(
+      Img.type() == VK_IMAGE_TYPE_3D, ViewType == VK_IMAGE_VIEW_TYPE_3D,
+      Img.depth(), Img.arrayLayers());
 }
 
 namespace {
