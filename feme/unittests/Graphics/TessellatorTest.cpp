@@ -777,8 +777,10 @@ TEST(TessellatorTest, TriangleEdgesProduceBitExactlyEqualCoordinateSets) {
       tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
                  TessOutputPrimitive::TriangleCcw, Factors);
 
-  const float Third = 1.0f / 3.0f;
-  const float TwoThirds = 2.0f / 3.0f;
+  // Boundary coordinates sit on a 2^-16 fixed-point grid so the complement
+  // `1 - x` is exact (`invariance.outer_edge_symmetry` mirrors with it).
+  const float Third = 21845.0f / 65536.0f;
+  const float TwoThirds = 1.0f - Third;
   const std::set<float> Canonical = {0.0f, Third, TwoThirds, 1.0f};
   // Only the outer boundary ring's points are checked here: the interior
   // concentric ring's own points (inset towards the centroid by a

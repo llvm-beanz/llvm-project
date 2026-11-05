@@ -166,6 +166,19 @@ struct. Re-run of the 12 cases: **12 Pass**; whole `dEQP-VK.glsl.arrays.*`
 group 159/159 Pass. Fail total is now 203 - 12 = 191. `check-feme` 3889/3893,
 4 unsupported. No inventory change.
 
+### L536: `tessellation.invariance.outer_edge_symmetry` (22 of 24) now `Pass` -- boundary coordinates on a 2^-16 grid
+
+The CTS mirrors half of each outer edge with a float `1.0 - x` and compares
+against directly generated coordinates with exact equality. Plain `K / N`
+cannot satisfy `x(N-K) == 1 - x(K)` bitwise (e.g. `N = 3`). Triangle/quad
+boundary rings now use `edgeFraction(K, N)`: a 2^-16 fixed-point value that
+depends only on `(K, N)` (so `outer_edge_index_independence`/`common_edge`
+still hold) and whose complement is exact. Whole `dEQP-VK.tessellation.*`
+group: only the 2 documented `inner_triangle_set.*_fractional_odd_spacing`
+(`L346` tension) and `shader_input_output.barrier` (`ENV5(c)(7)(b)`) fail.
+Fail total is now 191 - 22 = 169. `check-feme` 3889/3893, 4 unsupported.
+No inventory change.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under

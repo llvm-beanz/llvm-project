@@ -101,6 +101,23 @@ float computeIsolineIndexFraction(uint32_t I, uint32_t L) {
   return static_cast<float>(I) / L;
 }
 
+/// Returns boundary-edge point \p K's coordinate out of \p N segments on a
+/// 2^-16 fixed-point grid, with `edgeFraction(N - K, N) == 1.0f -
+/// edgeFraction(K, N)` holding bit-exactly (every grid value has far fewer
+/// than 24 significant bits, so the float subtraction is exact). A plain
+/// `K / N` cannot satisfy that for e.g. `N = 3`, and
+/// `invariance.outer_edge_symmetry` compares a shader-side `1.0 - x` mirror
+/// against directly generated coordinates with exact equality. The value
+/// depends only on `(K, N)`, so edges with equal segment counts still agree
+/// bit-for-bit, as `outer_edge_index_independence` requires.
+float edgeFraction(uint32_t K, uint32_t N) {
+  constexpr uint64_t One = 1u << 16;
+  if (2 * K > N)
+    return static_cast<float>(One - (uint64_t(N - K) * One * 2 + N) / (2 * N)) /
+           One;
+  return static_cast<float>((uint64_t(K) * One * 2 + N) / (2 * N)) / One;
+}
+
 /// Appends one triangle's indices to \p Patch, honoring \p Cw the same way
 /// every other triangle emitter in this file does: `Cw` keeps the operand
 /// order, while the "Ccw" case swaps the last two operands.
@@ -245,18 +262,18 @@ RingEdges appendTriangleBoundaryRing(TessellatedPatch &Patch, uint32_t E01,
     Patch.Points.push_back({U, V, W});
   };
   for (uint32_t K = 0; K < E01; ++K) {
-    float T = static_cast<float>(K) / E01;
-    float InvT = static_cast<float>(E01 - K) / E01;
+    float T = edgeFraction(K, E01);
+    float InvT = edgeFraction(E01 - K, E01);
     AddPoint(0, InvT, T, 0.0f);
   }
   for (uint32_t K = 0; K < E12; ++K) {
-    float T = static_cast<float>(K) / E12;
-    float InvT = static_cast<float>(E12 - K) / E12;
+    float T = edgeFraction(K, E12);
+    float InvT = edgeFraction(E12 - K, E12);
     AddPoint(1, 0.0f, InvT, T);
   }
   for (uint32_t K = 0; K < E20; ++K) {
-    float T = static_cast<float>(K) / E20;
-    float InvT = static_cast<float>(E20 - K) / E20;
+    float T = edgeFraction(K, E20);
+    float InvT = edgeFraction(E20 - K, E20);
     AddPoint(2, T, 0.0f, InvT);
   }
   return Edges;
@@ -295,18 +312,18 @@ RingEdges appendTriangleRingBoundary(TessellatedPatch &Patch,
   // `appendTriangleBoundaryRing` -- compute the complementary numerator
   // as an integer subtraction, not a float subtraction after dividing.
   for (uint32_t K = 0; K < Resolution; ++K) {
-    float T = static_cast<float>(K) / Resolution;
-    float InvT = static_cast<float>(Resolution - K) / Resolution;
+    float T = edgeFraction(K, Resolution);
+    float InvT = edgeFraction(Resolution - K, Resolution);
     AddPoint(0, InvT, T, 0.0f);
   }
   for (uint32_t K = 0; K < Resolution; ++K) {
-    float T = static_cast<float>(K) / Resolution;
-    float InvT = static_cast<float>(Resolution - K) / Resolution;
+    float T = edgeFraction(K, Resolution);
+    float InvT = edgeFraction(Resolution - K, Resolution);
     AddPoint(1, 0.0f, InvT, T);
   }
   for (uint32_t K = 0; K < Resolution; ++K) {
-    float T = static_cast<float>(K) / Resolution;
-    float InvT = static_cast<float>(Resolution - K) / Resolution;
+    float T = edgeFraction(K, Resolution);
+    float InvT = edgeFraction(Resolution - K, Resolution);
     AddPoint(2, T, 0.0f, InvT);
   }
   return Edges;
@@ -382,13 +399,13 @@ RingEdges appendQuadBoundaryRing(TessellatedPatch &Patch, uint32_t Ev0,
     Patch.Points.push_back({U, V, 0.0f});
   };
   for (uint32_t K = 0; K < Ev0; ++K)
-    AddPoint(0, static_cast<float>(K) / Ev0, 0.0f);
+    AddPoint(0, edgeFraction(K, Ev0), 0.0f);
   for (uint32_t K = 0; K < Eu1; ++K)
-    AddPoint(1, 1.0f, static_cast<float>(K) / Eu1);
+    AddPoint(1, 1.0f, edgeFraction(K, Eu1));
   for (uint32_t K = 0; K < Ev1; ++K)
-    AddPoint(2, static_cast<float>(Ev1 - K) / Ev1, 1.0f);
+    AddPoint(2, edgeFraction(Ev1 - K, Ev1), 1.0f);
   for (uint32_t K = 0; K < Eu0; ++K)
-    AddPoint(3, 0.0f, static_cast<float>(Eu0 - K) / Eu0);
+    AddPoint(3, 0.0f, edgeFraction(Eu0 - K, Eu0));
   return Edges;
 }
 
