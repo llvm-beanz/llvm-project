@@ -1,5 +1,5 @@
 ---
-model: gpt-6.1-sol
+model: claude-sonnet-5.5
 ---
 # Initial Guidelines
 
@@ -65,10 +65,4 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-This container has a local copy of the Direct3D sources and tests in
-C:\dev\Direct3D. Using those as a base, please evaluate the FeMeWARPDesign.md
-document and create a new WARPRoadmap.md file to provide a roadmap for
-implementing a WARP-like implementation on top of FeMe.
-
-Please prioritize code sharing with the Vulkan ICD and include necessary
-refactoring steps in the roadmap. Commit your results when you are done.
+Please begin work on the WARP roadmap.
