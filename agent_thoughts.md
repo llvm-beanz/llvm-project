@@ -131938,3 +131938,25 @@ No code changes. Roadmap row `ENV6(d)(3)` added. `glsl.arrays`, `tessellation.in
 3. `tessellation.invariance` (24).
 4. `ENV6(c)(3)` scoping.
 5. Offload upstreaming (blocked on push access).
+
+# Session: glsl.arrays mat3 fix, tessellation triage
+
+## Next action
+Dump tessellator output for outer level 2.3 (`outer_edge_symmetry`) and check edge symmetry.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Ran one `glsl.arrays.constructor.float_mat3_compute` alone, took its SPIR-V, reduced to a 7-line MLIR repro.
+3. Root cause: `TightMatrix{Load,Store}Pattern` used the struct-member tight (12-byte) layout for any AccessChain, but a `Function` array of `mat3` is allocated naturally (16-byte). Fixed in `hasAccessChainDefiningOp`; lit test added. 12/12 pass, `glsl.arrays.*` 159/159, `check-feme` 3889 pass.
+4. Triaged `tessellation.invariance`: fast real failures (two symptoms), no timeouts. Roadmap `ENV6(d)(5)`.
+5. image.store (ENV6(d)(3)): not revisited, still needs the CTS expectation check.
+
+## State
+Committed: arrays fix (+docs L535). Fail total 191. Tessellation and image.store unfixed.
+
+## Next steps (ranked)
+1. `ENV6(d)(5)` tessellation edge symmetry/inner set (Tessellation.cpp).
+2. `ENV6(d)(3)` image.store reference check.
+3. `ENV6(c)(3)` scoping (83 + loops.special 12).
+4. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
+5. `ENV5(c)(7)(b)`; offload upstreaming (blocked on push access).
