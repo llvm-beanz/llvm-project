@@ -1,5 +1,53 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS0(a): block-geometry extraction (2026-11-05)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device`. This session implements WARP roadmap `WS0(a)`: `Format.cpp`'s
+`formatElementSize`/`blockWidth`/`blockHeight`/`bytesPerBlock`/
+`isASTCSRGBFormat` are moved verbatim into a new API-neutral `FeMeImage`
+library (`feme/lib/Image`, `feme/include/feme/Image/BlockGeometry.h`);
+`feme::vulkan::Format.{h,cpp}` keep the same signatures as thin forwarders.
+Pure code motion -- no advertised capability or Vulkan behavior changed.
+
+`check-feme` rebuilt its prerequisites (FeMeImage, FeMeImageTests, the ICD,
+`feme-opt`, `FeMeUnitTests`) and passed: **3,875 Passed, 15 Skipped, 10
+Unsupported, zero failures** (3,900 discovered tests; 1,897 lit tests plus
+the unit-test suites), including the new 11-case `FeMeImageTests`. Cached
+(`sccache`), assertions enabled, no PCH.
+
+The local CTS checkout at `12af7ce2dbfd6a95a72cb77dd4f3e9bdaf51d11f` ran a
+bounded 233-case selection -- every `dEQP-VK.api.smoke.*` case (8) plus
+every `dEQP-VK.api.info.format_properties.*` case (225, directly exercising
+`formatFeatureFlags`/`mapVkFormat`, which call the moved functions) from
+`mustpass\main\vk-default\api.txt`: **233 Pass, zero Fail, zero Unrun**.
+Artifacts are under
+`C:\dev\VK-GL-CTS\run\feme-20261105-ws0-blockgeometry`: `cases.txt`,
+`results\report.txt`, `results\qpa\initial-00000.qpa`. From the LLVM
+checkout, the bounded invocation was:
+
+```powershell
+$env:FEME_VULKAN_SAFETY_NET_TIMEOUT_MS = '30000'
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261105-ws0-blockgeometry\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261105-ws0-blockgeometry\results `
+  --workers 1 --batch-size 8 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The ICD at commit `ed9a6cdbb1e2` (this change) has SHA-256
+`c3ed870716c6eae9bcfb765ade857ae6494dd8bf0c9f684f80fe0d715e958536`
+(`libfeme_vulkan.dll`); the CTS binary SHA-256 is unchanged at
+`c829f210ea7ccc544d0394c46f604993ed5e5b8774bce56cb0f7c848bd20a999` (same
+binary as the 2026-11-05 WARP-roadmap documentation session below). Both
+Vulkan inventory generators reproduce the existing tables exactly against
+the local CTS registry; no advertisement changed. This bounded run does not
+replace the historical full audit below; no full CTS sweep, Direct3D
+execution, display interoperability, or HLK qualification was run this
+session.
+
 ## Windows WARP-roadmap documentation audit (2026-11-05)
 
 This session changes documentation only: the source-based WARP evaluation,
