@@ -1,5 +1,67 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS0(b): subresource-layout extraction (2026-11-05)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device`. This session implements WARP roadmap `WS0(b)`, completing `WS0`:
+`feme::vulkan::Image.cpp`'s anonymous-namespace `computeSubresourceLayouts`/
+`computeSubresourceLayout` (the mip-major offset/stride/depth-plane math
+every `Image` sizes its storage with) and `Image::isInBounds` (the
+out-of-bounds check `texelPointer`/`blockPointer` share, roadmap E16) move
+into the portable `FeMeImage` library (`feme/lib/Image/
+SubresourceLayout.cpp`, `feme/include/feme/Image/SubresourceLayout.h`),
+converting their `VkImageType` parameter to a plain `Is3D` bool and the
+`VkDeviceSize`-typed result back to a new `feme::image::SubresourceLayout`.
+`feme::vulkan::Image.{h,cpp}` keep the same signatures as thin forwarders.
+Pure code motion -- no advertised capability or Vulkan behavior changed.
+
+`check-feme` rebuilt its prerequisites and passed: **3,890 Passed, 15
+Skipped, 10 Unsupported, zero failures** (3,915 discovered tests),
+including 15 new `FeMeImageTests` cases (10 for the layout math, 5 for
+`isInBoundsSubresource`). Cached (`sccache`), assertions enabled, no PCH.
+
+The local CTS checkout at `12af7ce2dbfd6a95a72cb77dd4f3e9bdaf51d11f`
+(unchanged) ran a combined bounded selection: every
+`dEQP-VK.image.subresource_layout.*` case (1D/2D/2D-array/3D x 1/2/4/
+all-mip-level combinations across every advertised and unadvertised
+format, 3,537 cases) -- directly exercising the moved layout-table math --
+plus `dEQP-VK.image.host_image_copy.array.r16_unorm.linear.*` (59 cases,
+odd/non-power-of-two array extents) and `...host_image_copy.*large_images*`
+(42 cases) -- exercising `texelPointer`/`isInBoundsSubresource` against
+real pixel data. Total: **3,638 Completed, 1,758 Pass, 1,880 NotSupported
+(unadvertised formats, expected), zero Fail, zero Unrun.** Artifacts are
+under `C:\dev\VK-GL-CTS\run\feme-20261105-ws0b-subresourcelayout`:
+`cases.txt`/`cases-extra.txt`/`cases-full.txt`,
+`results-full\report.txt`. From the LLVM checkout:
+
+```powershell
+$env:FEME_VULKAN_SAFETY_NET_TIMEOUT_MS = '30000'
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261105-ws0b-subresourcelayout\cases-full.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261105-ws0b-subresourcelayout\results-full `
+  --workers 1 --batch-size 50 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The `dEQP-VK.image.subresource_layout.*`/`host_image_copy.*` case lists
+were generated directly from `deqp-vk.exe` itself (`--deqp-runmode=
+txt-caselist --deqp-case=dEQP-VK.image.subresource_layout.*`), since this
+CTS module is not part of the local `vk-default` mustpass case lists used
+by the prior session's smoke runs.
+
+The ICD at commit `61d93acdda7c` (this change) has SHA-256
+`3fa77d3bfbb1b916b29da323ef7a6acd268910fadcf95990b4324a17aa6febed`
+(`libfeme_vulkan.dll`); `llvm-project` was at `37630c9fd537` (HEAD after
+this session's commits) when this run completed. No full CTS sweep,
+Direct3D execution, display interoperability, or HLK qualification was run
+this session; both Vulkan inventories were not regenerated this entry
+(no format/extension advertisement changed by this pure code-motion
+commit -- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+already record their WS0(a) recheck above and nothing here changes that
+conclusion).
+
 ## Windows WARP roadmap WS0(a): block-geometry extraction (2026-11-05)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
