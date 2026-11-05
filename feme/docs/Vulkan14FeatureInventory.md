@@ -20,6 +20,12 @@ reproduces this table exactly. This compiler-correctness change adds no
 feature advertisement; the new CTS comparison is recorded separately in
 `VulkanCTSReport.md`.
 
+Rechecked during the 2026-11-05 Windows WARP-roadmap documentation audit:
+the generator reproduces this table exactly against the local CTS registry
+at checkout `12af7ce2dbfd`. No implementation or feature advertisement changed.
+The eight-case CTS smoke is recorded separately in `VulkanCTSReport.md`;
+it is not a new full feature-query or conformance audit.
+
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---:|---:|---:|
 | 1.0 | 34 of 55 | n/a | n/a |

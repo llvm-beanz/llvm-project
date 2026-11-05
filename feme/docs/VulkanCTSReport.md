@@ -1,5 +1,51 @@
 # Vulkan CTS status
 
+## Windows WARP-roadmap documentation audit (2026-11-05)
+
+This session changes documentation only: the source-based WARP evaluation,
+shared-core refactoring plan, design/index reconciliation, and Windows process
+notes. It adds no Direct3D implementation or Vulkan capability.
+
+`llvm-test check-feme` rebuilt its prerequisites and passed: **3,864 Passed,
+15 Skipped, 10 Unsupported, zero failures** (3,889 discovered tests). The
+generated Ninja graph includes `mlir-translate`, `feme-opt`, `FeMeUnitTests`
+and the ICD before the test command. This was an incremental dependency build,
+not a clean-build audit. The build uses `sccache`, assertions enabled, no PCH,
+and six compile/two link jobs.
+
+The local CTS checkout at `12af7ce2dbfd6a95a72cb77dd4f3e9bdaf51d11f`
+ran all eight `dEQP-VK.api.smoke.*` cases from `mustpass\main\vk-default\api.txt`:
+**8 Pass, zero Fail, zero Unrun**. This includes compute, transfer, sampler
+creation and triangle rendering. `vulkaninfo --summary` in the launching shell
+identified `FeMe CPU Vulkan Device`; the QPA records vendor `0x10000`.
+The CTS build also has `sccache`, disabled PCH and `/UNDEBUG` in Release.
+
+Artifacts are under
+`C:\dev\VK-GL-CTS\run\feme-20261105-warp-roadmap-smoke`: `cases.txt`,
+`results\report.txt`, `results\qpa\initial-00000.qpa`, process logs and
+`verified-failures.txt`. From the LLVM checkout, the bounded invocation was:
+
+```powershell
+$env:FEME_VULKAN_SAFETY_NET_TIMEOUT_MS = '30000'
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261105-warp-roadmap-smoke\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261105-warp-roadmap-smoke\results `
+  --workers 1 --batch-size 8 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+Compiler/ICD sources are at `ae4574207fa6` plus documentation-only edits.
+The tested ICD SHA-256 is
+`8bdd865ef8127ce7b978bb5f478dc12583edac1be9ba85f4abf504036a360f65`;
+the CTS binary SHA-256 is
+`c829f210ea7ccc544d0394c46f604993ed5e5b8774bce56cb0f7c848bd20a999`.
+Both Vulkan inventory generators reproduce the existing tables exactly
+against the local CTS registry. No advertisement changed. This smoke run
+does not replace the historical full audit below; no full CTS sweep,
+Direct3D execution, display interoperability, or HLK qualification was run.
+
 ## Clean-container full audit (2026-11-03; completed)
 
 **The full audit completed at 11:18 UTC. Five requested cases still have

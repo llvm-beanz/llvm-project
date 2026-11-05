@@ -25,6 +25,12 @@ Rechecked after the 2026-11-03 exit-capture repair: the registry generator
 reproduces this table exactly. No instance or device extension
 advertisement changed; see `VulkanCTSReport.md` for the compiler results.
 
+Rechecked during the 2026-11-05 Windows WARP-roadmap documentation audit:
+the generator reproduces this table exactly against the local CTS registry
+at checkout `12af7ce2dbfd`. No implementation or extension advertisement changed.
+The eight-case CTS smoke is recorded separately in `VulkanCTSReport.md`;
+it is not a new full extension-query or conformance audit.
+
 | Status | Count |
 |---|---:|
 | Advertised | 50 |
