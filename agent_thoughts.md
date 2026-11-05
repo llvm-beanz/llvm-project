@@ -131828,3 +131828,68 @@ Triage the 255 failures (`ENV6(c)(3)`/`ENV6(d)` clusters).
 ## Next steps
 1. Cluster the 255 failures; biggest: memory_model (52), tessellation (24).
 2. `ENV7(g)` audit, offload upstreaming.
+
+# 2026-11-05 (memory_model fixed, ENV7(g) audited)
+
+## Next action
+Pick `ENV6(d)(2)` (16 hang cases) or `ENV6(c)(3)` (83-case loop
+architecture effort) next session.
+
+## What happened
+1. Device check: `FeMe CPU Vulkan Device`. OK.
+2. Clustered the 255 failures by first diagnostic. Biggest:
+   `memory_model.{write_after_read,message_passing}` (52).
+3. Root cause: MLIR's SPIR-V deserializer rejected a module-scope
+   `OpSpecConstantOp` used as an `OpSpecConstantComposite` constituent
+   (the `gl_WorkGroupSize` pattern) -- it only ever tracked the inline,
+   per-function-use form.
+4. Fixed upstream in MLIR (2 commits, non-FeMe): new op
+   `spirv.ModuleSpecConstantOperation`, plus deserializer support.
+5. Fixed FeMe's consumer (1 commit): `prepareSpecConstants` now folds
+   the new op via `Operation::fold`; unfoldable ops (float arithmetic)
+   stay unresolved on purpose, so a real reference declines instead of
+   miscompiling.
+6. First rerun attempt hung forever: I forgot `--batch-timeout` on a
+   `--batch-size 255` run, so the single initial-round process had no
+   timeout at all. Already documented in `.instructions.md` -- I just
+   didn't apply it. Killed it, reran properly.
+7. Verified rerun (all 255 cases, `--batch-timeout 300
+   --final-timeout 120`): 36 `memory_model` now Pass, 0 Fail in that
+   cluster, 16 Unrun (same exact names as before -- a pre-existing
+   hang, not caused by this fix). Zero regressions elsewhere.
+8. `ENV7(g)` audit: checked every first-symptom diagnostic in the
+   255-case list for a masking-gap signature. None found. Struck
+   through as "audited, no live case" -- the underlying gap is still
+   unfixed, just not currently exercised.
+9. Updated `Roadmap.md` (split `ENV6(d)` into `(1)` done / `(2)`
+   pending, struck `ENV7(g)`) and `VulkanCTSReport.md` (new `L533`).
+   No `VK_KHR_vulkan_memory_model` inventory change -- this fix is
+   about the dEQP test shaders' spec constants, not the extension
+   itself.
+
+## State restated
+- 4 commits this session: 2 MLIR (non-FeMe), 1 FeMe consumer fix +
+  tests, 1 docs. `check-feme`: 3887/3891 Passed, 4 Unsupported, 0
+  Failed.
+- `ENV6(c)(3)` (83 cases) and `ENV6(d)(2)` (16 hangs) remain untouched
+  this session, as planned.
+- `ENV5(c)(7)(b)` (hull lockstep barriers) and offload upstreaming
+  (3 patches, blocked on push access) also untouched.
+
+## Next steps (ranked)
+1. `ENV6(d)(2)`: isolate the 16 `memory_model`
+   `device.payload_local.*.guard_local.*.{comp,vert}` hangs on their
+   own (alone, no batch) to get a real stack/log instead of a bare
+   timeout -- about 30-60 min to get a first signal.
+2. `ENV6(c)(3)`: scope as its own multi-session milestone before
+   starting (83 cases, `feme-cpu-linearize`/`simdize`/`wrap-entry`
+   architecture gap, not a quick fix) -- a few hours just to plan.
+3. `ENV6(d)` remainder: `glsl.arrays` mat3 constructor (12 cases,
+   silent wrong-value), `image.store.without_format`
+   `a2b10g10r10_sint_pack32` (14 cases, no compile error),
+   `tessellation.invariance` (26 cases, no compile error) -- each
+   likely a half-day reproduce-and-fix once picked up.
+4. `ENV5(c)(7)(b)` hull lockstep barriers (3 cases) -- lowest priority,
+   still just scoped.
+5. offload-test-suite upstreaming (3 patches) -- blocked on push
+   access, no change possible this session.
