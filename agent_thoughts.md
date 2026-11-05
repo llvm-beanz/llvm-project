@@ -133829,3 +133829,156 @@ Continued directly from the prior session's suggested next step
 6. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-05: WS1(a) BC decoder extraction (this session)
+
+**Next action:** `WS1(b)` (normalized image-view materialization out of
+`ImageOps.cpp`/`CommandBuffer.cpp`).
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+(confirmed at the start of this session and again before the CTS run, per
+standing instructions).
+
+## What I did
+
+Picked up the prior session's ranked suggestion #1 (`WS1`), but did not
+start it unscoped -- `WS1`'s roadmap row bundles three genuinely different
+pieces of work (BC decoders, image-view materialization, copy/resolve
+kernels) of very different difficulty, so the first thing I did was split
+it on the roadmap doc into `WS1(a)`/`WS1(b)`/`WS1(c)` (one lowercase
+letter, per the standing nesting rule) and scope this session to `WS1(a)`
+only.
+
+1. Grepped `feme/lib/Vulkan` for every BC/ASTC/ETC2 decoder file and
+   checked their includes: `BCDecode.*` (BC1-5), `BC6HDecode.*`,
+   `BC7Decode.*`, and the `BCPartitionTables.*` data they both share never
+   included anything Vulkan-specific -- pure bitstream decoders taking
+   plain byte spans and pixel-struct output. `ASTCDecode.*`/`ETC2Decode.*`
+   are the same shape but the roadmap text explicitly defers them ("not a
+   D3D requirement"), so I left them alone.
+2. Moved all four BC-family files into `FeMeImage`
+   (`feme/include/feme/Image/{BCDecode,BC6HDecode,BC7Decode,
+   BCPartitionTables}.h`, `feme/lib/Image/*.cpp`), `feme::vulkan` ->
+   `feme::image` namespace only, logic untouched.
+3. Converted the three Vulkan-side implementation files into thin
+   forwarders (same exported signatures, so `BCSamplingBridge.cpp` --
+   the real sampling-path caller -- needed zero changes). Deleted
+   `feme/lib/Vulkan/BCPartitionTables.*` outright rather than forwarding
+   it: grepped for its only two consumers (`BC6HDecode.cpp`/
+   `BC7Decode.cpp`), confirmed both now live in `FeMeImage` and reference
+   `feme::image::bcpartitions` directly, so no Vulkan-side stub was
+   needed.
+4. Six commits total, grouped by BC1-5 vs BC6H/BC7 (library add -> Vulkan
+   forwarder conversion -> new `FeMeImageTests`), matching `WS0`'s
+   established three-commits-per-piece pattern.
+5. Struck `WS1(a)` on `WARPRoadmap.md` with exit evidence; added `WS1(b)`/
+   `WS1(c)` rows describing the still-pending view-materialization and
+   copy/resolve-kernel work.
+
+## Verification
+
+- `check-feme`: 3,912 Passed / 15 Skipped / 10 Unsupported, zero
+  failures (3,937 discovered) -- exactly 22 more than the prior session's
+  3,915, matching the 22 new `FeMeImageTests` cases (10 BC1-5, 6 BC6H, 6
+  BC7), zero regressions.
+- `FeMeImageTests.exe` direct run: 48/48 Pass (26 prior + 22 new).
+- Bounded CTS: every `dEQP-VK.texture.compressed.bc*` case from the local
+  `vk-default` mustpass (192 cases -- this module, unlike `WS0(b)`'s
+  `subresource_layout`, is already in mustpass, so no `--deqp-runmode=
+  txt-caselist` generation step was needed). Result: 192 Completed, 96
+  Pass, 96 NotSupported (all the `*_sparse*` variants -- sparse residency
+  is a separate unrelated capability -- zero Fail, zero Unrun. This
+  exercises every BC1/BC1A/BC2/BC3/BC4/BC5/BC6H/BC7 sub-format the moved
+  decoders implement, through the real `BCSamplingBridge.cpp` sampling
+  path, confirming the forwarder conversion changed no observable
+  behavior.
+- First attempt at the CTS run failed with `FileNotFoundError` on a
+  missing `.qpa` file -- `run_vulkan_cts.py` was invoked with a
+  *relative* `--output-dir` while `--cwd` pointed at the CTS module
+  directory, so the harness's own relative path resolution inside that
+  different working directory produced a path that didn't exist. Fixed by
+  passing an absolute `--output-dir` (and `--case-list`); worth
+  remembering for every future invocation -- use absolute paths for both,
+  not just `--deqp-vk`.
+- Did not regenerate either Vulkan inventory file -- added a "rechecked,
+  not regenerated, no advertisement changed" note to both instead,
+  matching `WS0(b)`'s own precedent for a pure code-motion change with no
+  capability delta.
+
+## Decision record
+
+1. Scoped this session to BC decoders only, not the full `WS1` row, and
+   filed the `WS1(a)`/`(b)`/`(c)` breakdown on the roadmap *before*
+   writing any code -- the prior two sessions' suggested-next-steps both
+   flagged `WS1` as "materially larger than `WS0`" and recommended
+   breaking it down at the start of a session rather than retrofitting
+   mid-session (which the `WS0(b)` session had to do once already for a
+   smaller case). Took that advice this time.
+2. Deleted `BCPartitionTables.*` from `feme/lib/Vulkan` instead of leaving
+   a forwarding stub, unlike every decode function (which kept forwarders)
+   -- it's pure internal data with no external callers, so a forwarding
+   header would just be dead code nobody could ever exercise differently
+   from calling `feme::image::bcpartitions` directly.
+3. Did not touch `ASTCDecode.*`/`ETC2Decode.*` even though they're
+   structurally identical (no Vulkan dependency) -- the roadmap's own text
+   for `WS1` only migrates them "where they share the extracted path,"
+   and right now they don't share any code with the BC family (separate
+   files, separate bit-unpacking logic, no shared partition tables or
+   helpers) -- moving them would be scope creep against the milestone's
+   own stated condition, not a deferral out of laziness.
+4. Did not start `WS1(b)` this session despite having time left -- `WS1(b)`
+   touches live `Image` object state (view rebasing against a real
+   `Image`'s format/subresource range), a meaningfully different kind of
+   extraction than the pure-function decoders/layout-math `WS0`/`WS1(a)`
+   moved, and deserves being scoped at the start of its own session rather
+   than rushed at the end of this one.
+
+## State restated
+
+- `WS0` (`WS0(a)`/`WS0(b)`): done.
+- `WS1(a)`: done, struck through with exit evidence. `WS1(b)`/`WS1(c)`:
+  newly filed on the roadmap, not started.
+- `WS2`/`WS3`, `W0`-`W7`: unchanged, all still pending.
+- `FeMeImage` library now has six files (`BlockGeometry.*`,
+  `SubresourceLayout.*`, `BCDecode.*`, `BC6HDecode.*`, `BC7Decode.*`,
+  `BCPartitionTables.*`) and 48 unit tests total.
+- No offload-test-suite / `check-hlsl-feme-vk` work this session.
+- No issue found outside `feme/` this session -- no reproducer/fix commit
+  needed.
+- No new environment/process issue found worth codifying in
+  `feme/.instructions.md` this session (the CTS relative-path pitfall
+  above is specific to this one invocation, already noted here and in
+  `VulkanCTSReport.md`'s command block using absolute paths).
+
+## Suggested next steps (ranked)
+
+1. **`WS1(b)`**: move normalized image-view materialization (format/
+   swizzle/subresource-range rebasing for sampling, storage, and
+   attachment views) out of `ImageOps.cpp`/`CommandBuffer.cpp` into
+   `FeMeImage`, building on `WS0(a)`/`WS0(b)`/`WS1(a)`. Expect this to be
+   harder than `WS1(a)` -- it touches live `Image` state, not pure
+   functions -- so scope and possibly further break it down (`WS1(b)(1)`
+   is not allowed by the nesting rule, so if it needs splitting, use
+   separate `WS1(b)`/`WS1(d)`-style siblings instead, or keep `WS1(b)`
+   itself narrowly scoped to one view kind at a time within one session).
+2. **`WS1(c)`**: reusable copy/resolve kernels out of `CommandBuffer.cpp`,
+   building on `WS1(b)`. Independent enough conceptually that it could
+   also run before `WS1(b)` if that proves easier to scope first, despite
+   the roadmap listing view materialization first.
+3. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+   incrementally -- independent of `WS1`, could run in parallel in a
+   separate session.
+4. **`WS3`**: establish shared-core regression gates -- still worth a
+   brief look at whether its gates would have caught anything `WS0`/
+   `WS1(a)`'s manual check-feme/CTS verification did not, before treating
+   it as moot.
+5. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
+   explicit FeMe adapter-selection assertion -- a research/documentation
+   task, no Windows adapter install needed yet.
+6. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+7. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
