@@ -133982,3 +133982,191 @@ only.
 7. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-05: WS1(b) image-view extent/border-mask extraction (this session)
+
+**Next action:** `WS1(c)` (reusable copy/resolve kernels), or `WS1(d)`
+(the carved-out attachment-view layer-resolution remainder filed this
+session).
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+(confirmed at the start of this session and again immediately before the
+CTS run, per standing instructions -- two harmless `nv-vk64.json` loader
+warnings both times, unrelated, as in every prior session).
+
+## What I did
+
+Picked up the prior session's ranked suggestion #1 (`WS1(b)`), scoped as
+that session recommended: narrowly, to live `Image`-state-adjacent logic
+rather than the full roadmap-row text verbatim.
+
+1. Read `CommandBuffer.cpp`'s `materializeImageDescriptor` end to end
+   (the per-binding resolution every sampled/storage image descriptor
+   goes through) and its two neighboring helpers
+   (`resolveImageSwizzle`, `compressedFormatBorderComponentMask`) before
+   writing anything.
+2. Traced `Image::resolvedLayerCount` vs. the separate
+   `ImageView::resolvedLayerCount()`/`effectiveViewLayerCount` (only used
+   by `RenderPass.cpp`'s attachment-view path) and confirmed
+   `materializeImageDescriptor` only ever uses the simpler one -- so this
+   step's extraction does not need to unify with, or even touch, the
+   attachment-view special case. Filed that remainder as a new `WS1(d)`
+   roadmap row instead of silently dropping it.
+3. Evaluated `resolveImageSwizzle` (already a one-line wrapper over the
+   portable `feme::cpu::packImageSwizzle`) and the ASTC-decode
+   sRGB-format ternary inside `materializeImageDescriptor` (already a
+   one-line `isASTCSRGBFormat` check against `feme::cpu::ResourceFormat`)
+   -- both already fully portable, nothing left in either worth a
+   separate extraction. Noted this explicitly rather than extracting
+   trivial wrappers just to pad the diff.
+4. Designed `feme::image::resolveImageViewExtent` (`feme/include/feme/
+   Image/ViewMaterialization.h`, `feme/lib/Image/
+   ViewMaterialization.cpp`): takes plain scalar image geometry (width/
+   height/depth/mipLevels/arrayLayers), a `ViewIsTexture3D` bool, and the
+   requested range (baseMipLevel/levelCount/baseArrayLayer/layerCount,
+   with a portable `kRemainingImageViewExtent` sentinel matching
+   `VK_REMAINING_MIP_LEVELS`/`VK_REMAINING_ARRAY_LAYERS`'s numeric value),
+   returns an `ImageViewExtent` struct (resolved Width/Height/Depth/
+   MipLevels/ArrayLayers + a `Valid` flag replacing the original
+   early-return-on-invalid-range idiom). Moved
+   `compressedFormatBorderComponentMask` verbatim alongside it (zero
+   logic change, it only ever operated on `feme::cpu::ResourceFormat`).
+5. Three commits, matching the established pattern: (1) add the two
+   portable functions to `FeMeImage`, build-verify; (2) convert
+   `CommandBuffer.cpp`'s two call sites into forwarders/a single call,
+   reusing the already-computed `ViewIsTexture3D` for the later
+   `IsDecodedImage3D` variable too (removing a duplicate comparison),
+   build `FeMeImage` -> `FeMeVulkanCore` -> `feme_vulkan` in sequence;
+   (3) add 14 new `ViewMaterializationTest.cpp` cases, build-and-run.
+6. Struck `WS1(b)` on `WARPRoadmap.md` with exit evidence, describing the
+   narrowed scope explicitly (what was extracted, what was evaluated and
+   left alone, what was carved out to `WS1(d)`) so a future reader isn't
+   misled by the original, broader row text.
+
+## Verification
+
+- `check-feme`: 3,926 Passed / 15 Skipped / 10 Unsupported, zero
+  failures (3,951 discovered) -- exactly 14 more than the prior session's
+  3,937, matching the 14 new `ViewMaterializationTest` cases, zero
+  regressions.
+- `FeMeImageTests.exe` direct run: 62/62 Pass (48 prior + 14 new).
+- Bounded CTS: assembled a 1,062-case selection from the local
+  `vk-default` mustpass specifically targeting the moved logic --
+  `dEQP-VK.texture.swizzle.component_mapping.color.r8g8b8a8_unorm_*` (72
+  cases, confirms the untouched swizzle path still works after the
+  surrounding extent-clamping rewrite), `dEQP-VK.texture.mipmap.3d.*`
+  (168 cases, directly exercises `resolveImageViewExtent`'s 3D
+  depth-halving-per-mip branch), `dEQP-VK.texture.filtering.2d_array.*`
+  (822 cases, exercises the array-layer sentinel-resolution/clamping
+  branch across many sizes/mip configurations). Result: 1,062 Completed,
+  928 Pass, 134 NotSupported (border-color-dependent `_compute` variants,
+  pre-existing and unrelated), zero Fail, zero Unrun.
+- Repeated the exact relative-vs-absolute-path mistake the prior `WS1(a)`
+  session's thoughts entry warned about: built the case-list file with a
+  *relative* `New-Item -Path run\...` while the shell's cwd was still
+  inside `VK-GL-CTS\external\vulkancts\mustpass\main\vk-default` (left
+  over from an earlier `cd` in the same response) instead of the
+  `VK-GL-CTS` root, so the file landed in the wrong directory and the
+  harness's first invocation failed with `FileNotFoundError` on the
+  case-list path itself (not a `.qpa` path this time, but the same root
+  cause: a relative path resolved against an unexpected cwd). Fixed by
+  moving the file to the correct location and re-running with the
+  already-absolute `--case-list`/`--output-dir` arguments from the start.
+  Did not re-file this as a new `.instructions.md` entry -- it's the same
+  underlying pitfall the prior session already documented there ("use
+  absolute paths for every CTS-harness-adjacent path argument"); this
+  time the *mistake* was in my own shell command building the file, not
+  in the harness invocation itself, so no new generic rule is needed,
+  just a personal reminder to double check `pwd` before relative
+  `New-Item`/`Set-Content` calls when CTS-adjacent.
+- Did not regenerate either Vulkan inventory file -- added a "rechecked,
+  not regenerated, no advertisement changed" note to both, matching
+  `WS0(b)`/`WS1(a)`'s own precedent for a pure code-motion change with no
+  capability delta.
+- Re-reviewed the `CommandBuffer.cpp` diff once more at the end of the
+  session (`git diff f63a46821696..HEAD -- feme/lib/Vulkan/
+  CommandBuffer.cpp`) to confirm only the two intended regions changed
+  and no stray formatting artifacts remained from the earlier aborted
+  whole-file `clang-format -i` attempt (reverted mid-session, redone by
+  hand) -- confirmed clean.
+
+## Decision record
+
+1. Scoped this session's `WS1(b)` to exactly the portable clamping/
+   sentinel-resolution math plus the border-component-mask lookup, not
+   the full roadmap-row text (which also mentions "format/swizzle ...
+   rebasing" and "attachment views"). Chose to strike the row anyway,
+   with an explicit note of the narrower scope and a new `WS1(d)` row for
+   the one piece of unfinished work found (`effectiveViewLayerCount`'s
+   attachment-view special case) -- rather than leaving `WS1(b)` unstruck
+   despite having completed everything that actually needed extracting
+   (swizzle and sRGB-format selection were both already portable
+   one-liners with nothing left to move).
+2. Did not merge `materializeImageDescriptor`'s simple
+   `Image::resolvedLayerCount` behavior with the more complex
+   `ImageView::resolvedLayerCount()`/`effectiveViewLayerCount` used by
+   `RenderPass.cpp`, even though both conceptually resolve "how many
+   array layers does this view see" -- they are used by genuinely
+   different call sites with (as far as I traced) different existing
+   behavior for the 3D-image case, and unifying them would be a
+   behavior change dressed up as refactoring, not pure code motion. Filed
+   the question of whether they *should* unify as part of `WS1(d)`'s
+   roadmap text instead of deciding it unilaterally this session.
+3. Reused the already-computed `ViewIsTexture3D` local for the later
+   `IsDecodedImage3D` variable (previously a separate, identical
+   recomputation) while doing the forwarder conversion -- a one-line
+   simplification directly adjacent to the extraction, not scope creep,
+   since it was discovered naturally while reading the function to decide
+   what to extract.
+
+## State restated
+
+- `WS0` (`WS0(a)`/`WS0(b)`), `WS1(a)`: done.
+- `WS1(b)`: done (narrower scope than the original row text; explicitly
+  documented), struck through with exit evidence. `WS1(c)`: unchanged,
+  not started. `WS1(d)`: newly filed this session (the carved-out
+  attachment-view layer-resolution remainder).
+- `WS2`/`WS3`, `W0`-`W7`: unchanged, all still pending.
+- `FeMeImage` library now has seven files (`BlockGeometry.*`,
+  `SubresourceLayout.*`, `BCDecode.*`, `BC6HDecode.*`, `BC7Decode.*`,
+  `BCPartitionTables.*`, `ViewMaterialization.*`) and 62 unit tests total.
+- No offload-test-suite / `check-hlsl-feme-vk` work this session.
+- No issue found outside `feme/` this session -- no reproducer/fix commit
+  needed.
+- No new environment/process issue found worth codifying in
+  `feme/.instructions.md` this session: the relative-path mistake above
+  is a repeat of an already-documented pitfall (not a new one), and the
+  `clang-format -i` whole-file reformatting risk is already thoroughly
+  covered by two existing headings in `feme/.instructions.md`
+  (`` `clang-format -i` on a whole FeMe/MLIR source file ... `` and the
+  `git clang-format`/`git checkout --` near-miss entry) from prior
+  sessions -- checked before concluding no update was needed.
+
+## Suggested next steps (ranked)
+
+1. **`WS1(c)`**: reusable copy/resolve kernels (row/depth/sample-stride
+   walking shared by `vkCmdCopyImage`/`vkCmdBlitImage`/
+   `vkCmdResolveImage`) out of `CommandBuffer.cpp`, building on `WS1(b)`.
+   The roadmap's natural next step in sequence.
+2. **`WS1(d)`**: the carved-out `effectiveViewLayerCount`/attachment-view
+   2D-view-of-3D-image special case -- smaller and more self-contained
+   than `WS1(c)`, could be done first if a quicker win is preferred, or
+   deliberately deferred since it's attachment-path-only (not on the
+   sampling/storage hot path `WS1(b)`/`WS1(c)` cover).
+3. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+   incrementally -- independent of `WS1`, could run in parallel in a
+   separate session.
+4. **`WS3`**: establish shared-core regression gates -- still worth a
+   brief look at whether its gates would have caught anything `WS0`/
+   `WS1(a)`/`WS1(b)`'s manual check-feme/CTS verification did not, before
+   treating it as moot.
+5. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
+   explicit FeMe adapter-selection assertion -- a research/documentation
+   task, no Windows adapter install needed yet.
+6. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+7. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
