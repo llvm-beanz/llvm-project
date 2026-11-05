@@ -131788,3 +131788,27 @@ Re-run `check-feme` on the Mac with the new commits.
 1. Confirm on the Mac (ASan+UBSan) that all three groups pass.
 2. Add the shim fuzz loop to CI-like tooling if it is cheap.
 3. `ENV6(c)(3)`, `ENV6(d)`, `ENV7(g)` backlog.
+
+# 2026-11-05 (full CTS re-measure started)
+
+## Next action
+Wait for the sweep (~9h), then reconcile into `VulkanCTSReport.md`.
+
+## What happened
+1. Device check: `FeMe CPU Vulkan Device`. OK.
+2. Built case list: previous `all-packages-cases.txt` minus
+   `shader_timeout` (3,269,347 cases).
+3. Started the report's command detached. Output dir:
+   `/home/dev/dev/VK-GL-CTS/run/feme-20261105-full/full-audit`.
+   Driver log: `.../driver.log`.
+4. Did not rebuild the ICD during the sweep (keeps the measurement valid).
+
+## State restated
+- ICD at commit `994467e484c2` plus this note. No code changes.
+- Report/inventories not yet updated; they wait on the sweep.
+
+## Next steps (ranked)
+1. Reconcile the sweep with `feme/utils/vk_cts_reconcile.py`; update the report.
+2. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): triage from the
+   fresh failure list.
+3. `ENV7(g)` audit, then `ENV5(c)(7)(b)`/offload upstreaming.
