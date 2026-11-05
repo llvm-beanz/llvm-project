@@ -58,4 +58,22 @@ computeSubresourceLayout(bool Is3D, uint32_t Depth,
           /*DepthPitch=*/Is3D ? L.SlicePitch : 0};
 }
 
+bool isInBoundsSubresource(bool Is3D, uint32_t Width, uint32_t Height,
+                          uint32_t Depth, uint32_t MipLevels,
+                          uint32_t ArrayLayers, uint32_t MipLevel,
+                          uint32_t ArrayLayer, uint32_t X, uint32_t Y,
+                          uint32_t Z, uint32_t UnitWidth,
+                          uint32_t UnitHeight) {
+  if (MipLevel >= MipLevels)
+    return false;
+  uint32_t LevelWidth = std::max(1u, Width >> MipLevel);
+  uint32_t LevelHeight = std::max(1u, Height >> MipLevel);
+  uint32_t LevelDepth = Is3D ? std::max(1u, Depth >> MipLevel) : 1;
+  uint32_t SlicesAtLevel = Is3D ? LevelDepth : ArrayLayers;
+  uint32_t UnitsWide = (LevelWidth + UnitWidth - 1) / UnitWidth;
+  uint32_t UnitsHigh = (LevelHeight + UnitHeight - 1) / UnitHeight;
+  return X < UnitsWide && Y < UnitsHigh &&
+         uint64_t(ArrayLayer) + Z < SlicesAtLevel;
+}
+
 } // namespace feme::image

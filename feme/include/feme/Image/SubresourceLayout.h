@@ -86,6 +86,27 @@ computeSubresourceLayout(bool Is3D, uint32_t Depth,
                          const feme::cpu::FemeImageSubresourceLayout &L,
                          uint32_t MipLevel, uint32_t ArrayLayer);
 
+/// Whether unit coordinates `(X, Y)` -- texel units when `UnitWidth ==
+/// UnitHeight == 1`, block-grid units otherwise -- plus slice index
+/// `ArrayLayer + Z` fall within mip level \p MipLevel's own declared
+/// extent of an image with the given \p Width/\p Height/\p Depth/\p
+/// MipLevels/\p ArrayLayers (\p Is3D selects the 3D depth-halving-per-mip
+/// rule vs. every other dimension's constant `ArrayLayers` slice count,
+/// matching `computeSubresourceLayouts`' own rule), expressed in the same
+/// `ceil(extent / unit)` grid `computeSubresourceLayouts` sizes each
+/// level's storage with. Shared by a texel-addressing caller
+/// (`UnitWidth == UnitHeight == 1`) and a block-addressing one
+/// (`UnitWidth`/`UnitHeight` == a block-compressed format's own block
+/// shape) so both apply the same out-of-bounds check (roadmap E16); an
+/// out-of-bounds coordinate must not fault (`VK_EXT_image_robustness`'s
+/// `robustImageAccess`), so a caller treats `false` as "read zero" or
+/// "discard the write" rather than computing a wild pointer.
+bool isInBoundsSubresource(bool Is3D, uint32_t Width, uint32_t Height,
+                          uint32_t Depth, uint32_t MipLevels,
+                          uint32_t ArrayLayers, uint32_t MipLevel,
+                          uint32_t ArrayLayer, uint32_t X, uint32_t Y,
+                          uint32_t Z, uint32_t UnitWidth, uint32_t UnitHeight);
+
 } // namespace feme::image
 
 #endif // FEME_INCLUDE_FEME_IMAGE_SUBRESOURCELAYOUT_H
