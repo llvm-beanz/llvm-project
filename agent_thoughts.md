@@ -132533,3 +132533,24 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)` (hull lockstep barrier), offload
    upstreaming: all still blocked/lower-priority, unchanged this
    session.
+
+# Session: stale sweep relaunched
+
+**Next action**: `ls /home/dev/dev/VK-GL-CTS/run/feme-20261106b-full-sweep/report.txt`.
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+1. The first sweep (`feme-20261106-full-sweep`) was stale: `libfeme_vulkan.so`
+   (04:01) was rebuilt after it started (03:59). Killed it by PID.
+2. Relaunched detached as `feme-20261106b-full-sweep` (started 04:18, after
+   the `.so`). Verified it is the only sweep running.
+3. Gotcha: a `kill` with a `$(pgrep ...)` substitution is rejected by the
+   tool. Use literal PIDs, and kill the old sweep *before* launching the new one.
+4. No code changes. Do not rebuild `libfeme_vulkan.so` while it runs, or
+   it goes stale again (or copy the `.so` aside for the sweep).
+
+## Next steps
+1. Check the sweep report; diff against the 105-failure list.
+2. `ENV6(c)(5a)` flatten()-level fix (dedicated session).
+3. `cosh-return-inf-unused` shape check.
+4. `ENV6(c)(5)`-`(7)`, `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
