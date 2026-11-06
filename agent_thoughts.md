@@ -132377,3 +132377,24 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 2. Inspect `cosh-return-inf-unused` for a shared shape.
 3. Full CTS re-measure in the background.
 4. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
+
+# Session: ENV6(c)(5) shared shape found
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I did
+- Pulled the post-structurize module out of the pre-linearize dump; it
+  reproduces standalone with `feme-opt -passes=feme-cpu-linearize`.
+- Committed it as a pinned-diagnostic lit test (`not feme-opt | FileCheck`)
+  so the fix flips it to a positive test.
+- Shape: outer loop has no header exit; its only exit is the divergent
+  `loop.exit.guard` after the inner loop, which also feeds the outer latch.
+  `cosh-return-inf-unused` has the same nesting by CFG inspection.
+- Added roadmap row `ENV6(c)(5a)`.
+
+## Next steps (ranked)
+1. Implement `ENV6(c)(5a)`: treat a post-child-cycle exit guard as the outer
+   loop's exit check in the loop lowering (see the precheck near
+   Linearize.cpp ~8770, `canFlattenLoopBodyRegion`).
+2. Full CTS re-measure in the background.
+3. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
