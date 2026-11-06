@@ -132164,3 +132164,26 @@ Reduce `glsl.demote.dynamic_loop_deriv` to an `.ll` repro and find which "mask-a
 2. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
 3. Full CTS re-measure in the background.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: mesh flat varyings through clipping
+
+## Next action
+`ENV6(e)(3)`: mesh max output size, unresolved `spirv_var_66`.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. The frag shader only paints blue if every check passes. I put a `getenv("BIS")` hook in the CTS test, rebuilt (5s), and bisected conditions. Culprit: `customAttribute2` (flat float), then `customAttribute1.z <= 20.0`.
+3. A debug print of V0/V1/V2 showed the flat value was lerped. Clipping put a clip-made vertex first. Fix: after clipping, restore `Flat` varyings from the original vertex 0.
+4. Second bug: perspective interpolation overshot by rounding. Snap values within 1e-5 relative back into the vertex range.
+5. Unit test `FlatVaryingKeepsProvokingVertexWhenFirstVertexIsClipped` fails without the fix. `check-feme` 3895 passed. 6 CTS cases Pass, 0 regressions in 521 related cases.
+6. Restored the CTS source afterwards (the hook was temporary).
+
+## Lesson
+Bisecting a pass/fail shader by editing the CTS source is cheap here. Do it early.
+
+## Next steps (ranked)
+1. `ENV6(e)(3)` mesh output size (4).
+2. `ENV6(e)(1)` D24S8 (4).
+3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+4. Full CTS re-measure in the background.
+5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).

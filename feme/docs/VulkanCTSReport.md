@@ -241,6 +241,10 @@ Failing total is now 144 (stale list, other regressions unmeasured).
 
 `glsl.demote.dynamic_loop_{deriv,dynamic,texture}` now Pass. `glsl.{demote,discard,loops}` (679 cases): 679 Pass.
 
+### L544: flat varyings through clipping (ENV6(e)(2))
+
+`mesh_shader.ext.misc.{custom_attributes,clip_plane,clip_geom}*` (6 cases) now Pass. Root cause: Sutherland-Hodgman can emit a clip-introduced vertex first, and `Flat` float varyings were lerped there instead of taking the provoking vertex's value; separately, perspective interpolation could overshoot vertex ranges by rounding (20.000002 > 20.0). Regression batch `mesh_shader.ext.misc`, `rasterization.interpolation`, `clipping`, `glsl.linkage`: 466 Pass, 0 Fail (rest NotSupported).
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
