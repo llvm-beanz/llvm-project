@@ -133060,3 +133060,79 @@ this `agent_thoughts.md` entry.
    itself is still not done.
 5. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (re-verified clean again this session).
+
+# Session: ENV6(c)(5b) safe half landed, culprit isolated (L543)
+
+**Win, verified**: `cov-integer-minus-one-increased-before-indexing-array`,
+`cov-loop-struct-array-field-set-value-self-dependency`,
+`cov-loops-and-conditions-fragcoord-always-false-floats-one`, and
+`cov-nested-loops-sample-opposite-corners` now `Pass`. Full corpus:
+**689 Pass / 68 Fail** (was 685/72). `check-feme`: 3907/3911 Passed, 4
+Unsupported, 0 Failed, no regressions. 3 commits landed, in order: the
+`Linearize.cpp` fix, the docs update, this entry.
+
+**What happened, in order**:
+1. `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`,
+   confirmed (standing per-session check, every session).
+2. `L542`'s own ranked next-step #1 was: reduce the regressed case to
+   find out which of its two changed call sites caused it. Checked
+   `git stash list` first in case the reverted diff survived -- it
+   didn't (one unrelated leftover debug-instrumentation stash from an
+   older session, nothing to do with this). Reconstructed both halves
+   from `L542`'s own prose description instead. ~20 min.
+3. Reproduced `cov-nested-loops-array-choose-red-last-iteration`
+   standalone via `FEME_DUMP_IR_PRELINEARIZE=1` against the real
+   `deqp-vk` case, extracted the fragment module, confirmed
+   `feme-opt --llvm -passes=feme-cpu-linearize,verify` alone matches the
+   real case (clean at baseline). ~15 min.
+4. Built and tested **each half alone**, both at the lit/IR level and --
+   this was the key move -- against the **real `deqp-vk` case**, not
+   just the diagnostic text (which turned out to be byte-identical
+   across all four combinations: neither half, each alone, and both
+   together). A silent-miscompile regression like this one is invisible
+   to a diagnostic-text check; only the real rendering output catches it.
+   Result: the `Pre`-probe exemption alone is clean (case stays `Pass`,
+   no regression); the `collectUniformPassThroughRegion` shortcut alone
+   *by itself* flips the case to `Fail`. Combined matches
+   shortcut-alone. Culprit fully isolated. ~75 min (4 build+test cycles).
+5. Landed the `Pre`-probe half only. Full corpus run + `check-feme`
+   confirmed the 4-case win with zero regressions (see **Win** above).
+   ~25 min (corpus run is the dominant cost here).
+6. Updated `Roadmap.md` (`ENV6(c)(5b)` split into done + a new
+   `ENV6(c)(9)` for the still-unsafe shortcut -- kept as a new top-level
+   number per this session's own standing instruction against further
+   lowercase-letter nesting) and `VulkanCTSReport.md` (`L543`). ~15 min.
+7. Re-verified the offload-test-suite patch set (standing instruction):
+   `llvm-beanz/feme` tip (`0cc94c2`) cherry-picks cleanly onto `main`,
+   all 5 stored patches apply cleanly (`git apply --check`), in order.
+   Left a stray `feme-verify` branch and dirty working tree from a prior
+   session's own verification run in that checkout; cleaned up with
+   `git reset --hard HEAD` before finishing. ~10 min.
+
+**Process note for next time**: this session nearly committed a doc
+update by piping a heredoc through `cat >>` straight into the tracked
+`VulkanCTSReport.md` instead of using the `edit` tool -- caught and
+reverted (`git checkout --`) before committing, redone correctly with
+`edit`. The project's own tool policy (`create`/`edit` only for tracked
+files, bash only for running programs) applies to doc files exactly the
+same as source files; there is no "it's just markdown" exception.
+
+**Next steps, ranked**:
+1. `ENV6(c)(9)`: generalize `collectUniformPassThroughRegion`'s
+   already-linearized-child-cycle exemption to also recognize a
+   post-child-cycle relay/guard block (`loop.exit.guard5` in the pinned
+   repro), not just the child's own header -- the pinned
+   `unsupported-nested-loop-divergent-inner-exit-guards-discard.ll` repro
+   from `L542` is a ready-made trace anchor (`FEME_DEBUG_PASSTHROUGH=1`
+   already shows exactly where it gets stuck: transparent through
+   `%Flow12`, then correctly-for-now rejected at `%loop.exit.guard5`).
+   Likely needs `DiamondFlattener`'s own private
+   `isLoopControlOrHeaderRelayEdge`-style logic. This is also the path to
+   actually fixing `cosh-return-inf-unused` itself (still `Fail`).
+2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress.
+4. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (clean again this session; see the stray-branch
+   note in step 7 above if it recurs).
