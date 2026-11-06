@@ -12030,3 +12030,78 @@ new CTS run was needed for this part. Post-fix `check-hlsl-feme-vk`:
 505 Passed, 27 Expectedly Failed, 275 Unsupported, 0 unexpected failures
 (807 total). `check-feme` re-confirmed clean at 3905/3909 Passed, 4
 Unsupported, 0 failures.
+
+## L540: ENV6(e)(7) nested-loop already-uncond-ified child header re-flattened by its parent
+
+Root-caused and fixed `ENV6(e)(7)`
+(`cov-x86-isel-lowering-negative-left-shift`), confirmed by `L539` to be a
+genuinely distinct shape from `ENV6(c)(5a)`, not a retry of it.
+
+Reproduced standalone via `FEME_DUMP_IR_PRELINEARIZE=1 deqp-vk
+--deqp-case=...` to capture the real pre-pass IR, then `feme-opt --llvm
+-passes=feme-cpu-linearize,verify -S` on the captured module for a
+sub-second repro loop (no CTS/Vulkan pipeline needed per iteration). The
+function has an *outer* loop containing an *inner* loop, both
+`HeaderDivergent` (a `stayInLoop`-narrowed per-iteration mask), with the
+inner loop's own body containing a `switch`-lowered
+(`NodeBlock`/`LeafBlock`/`LeafBlock1`) divergent diamond that
+`DiamondFlattener` flattens into `select`s.
+
+**Root cause**: `LoopLinearizer::linearizeCyclePostOrder` processes the
+inner cycle first; its own `HeaderDivergent` handling rewrites the inner
+header's exit-check `CondBrInst` into a plain `UncondBrInst` (via
+`stayInLoop`) after fully flattening its own body diamond. When the outer
+cycle is linearized next, its own `DiamondFlattener::flatten` walk
+reaches the inner loop by stepping into its body region and arrives at
+the inner header -- but the pre-existing `GetAlreadyLinearizedCycleExit`
+shortcut (meant to let an enclosing cycle's walk jump straight from an
+already-linearized child cycle to that child's one exit block, without
+ever re-entering its finalized interior) was only ever checked when the
+reached block's own terminator was *still* a `CondBrInst` matching
+`isLoopControlOrHeaderRelayEdge` -- true for the inner cycle's own
+still-conditional relay/latch block (`Flow9._crit_edge`), but false for
+the inner header itself, whose terminator had already become an
+`UncondBrInst`. The outer walk therefore fell through to ordinary
+unconditional-branch stepping, walking one block at a time through the
+*entire* already-finalized inner loop body a second time, re-flattening
+its switch diamond from scratch with the outer loop's own (different,
+narrower) mask -- and, because a masked resource load's mask operand had
+meanwhile been narrowed from a plain `true` constant to a non-constant
+value by this same re-walk's own earlier `applyStageMasks` call, a branch
+condition `flatten`'s first pass had correctly classified uniform got
+reclassified divergent on this second pass, producing a second,
+conflicting set of `select`s. The final `Narrow` step (retroactively
+narrowing the inner loop's own entry mask once the outer walk finally
+reached the inner loop's relay block) then populated the inner loop's own
+loop-carried `active.live`/`active.sideeffect` phi with one stale and one
+non-dominating incoming value, tripping the observed `verifyModule`
+"Instruction does not dominate all uses!" failure.
+
+**Fix**: check `GetAlreadyLinearizedCycleExit` (in both `validate` and
+`flatten`) as soon as the reached block's own terminator is *not* a
+`CondBrInst`, not only when it still is -- shortcutting straight past an
+already-uncond-ified child header exactly the same way the still-
+conditional relay/latch block already was, so an enclosing cycle's own
+walk never re-enters (let alone re-mutates) a nested, already-linearized
+child cycle's interior at all. The earlier, unconfirmed `RelayBypassBlock`
+patch attempted this session (mirroring `ENV6(c)(5a)`'s own fix) was
+confirmed, via a direct rebuild-and-rerun, *not* to fix this crash, and
+was reverted to keep the final change minimal and focused on the actual
+root cause.
+
+New regression lit test
+`Linearize/env6e7-nested-loop-already-uncond-header-reflattened.ll` (a
+real, near-verbatim `FEME_DUMP_IR_PRELINEARIZE=1` capture), confirmed to
+abort pre-fix and verify cleanly post-fix via `git stash`. `check-feme`:
+1282 lit tests passed (3910 of 3910 total tests discovered across lit +
+unit tests, 4 unsupported), 0 regressions.
+
+**Real `deqp-vk` run**: the targeted
+`cov-x86-isel-lowering-negative-left-shift` now **Pass**es (previously
+aborted the compiler). Full 757-case graphicsfuzz corpus re-run with a
+proper before/after baseline diff (`git stash` vs. fix applied, both
+through the real `feme_vulkan` ICD): baseline 684 Pass / 73 Fail,
+post-fix **685 Pass / 72 Fail**. A direct per-case diff of the two runs
+confirms exactly one case flips (the targeted one) and zero regressions.
+
+Roadmap updated: `ENV6(e)(7)` struck through.
