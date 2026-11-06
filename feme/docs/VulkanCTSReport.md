@@ -237,6 +237,10 @@ Failing total is now 144 (stale list, other regressions unmeasured).
 
 `glsl.discard.{function_,}static_loop_uniform` now Pass. Re-run of the 679-case `glsl.{demote,discard,loops}` set: 676 Pass, 3 Fail (the known `demote.dynamic_loop_{deriv,dynamic,texture}`).
 
+### L543: divergent body diamond in loops (ENV6(e)(4b))
+
+`glsl.demote.dynamic_loop_{deriv,dynamic,texture}` now Pass. `glsl.{demote,discard,loops}` (679 cases): 679 Pass.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under

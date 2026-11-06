@@ -132147,3 +132147,20 @@ Reduce `glsl.demote.dynamic_loop_deriv` to an `.ll` repro and find which "mask-a
 3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
 4. Full CTS re-measure in the background.
 5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: demote dynamic loops fixed
+
+## Next action
+`ENV6(e)(2)`: reduce `mesh_shader.ext.misc.clip_plane*` to a repro.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Debug print showed `HeaderDivergent=1` (not the fold path I guessed). The body check `collectUniformPassThroughRegion` rejected the divergent diamond, though `DiamondFlattener` handles it.
+3. Fallback: if the precheck passes, use an empty region and let `BodyDF` flatten; diagnose if it declines. Lit test `loop-divergent-demote-body-diamond.ll`. `check-feme` 3894 passed. 679-case glsl run all Pass.
+4. Lesson: print the branch flags before theorising about which path runs.
+
+## Next steps (ranked)
+1. `ENV6(e)(2)` mesh attrs/clip (6), `ENV6(e)(3)` mesh output size (4).
+2. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+3. Full CTS re-measure in the background.
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
