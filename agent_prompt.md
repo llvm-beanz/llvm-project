@@ -68,37 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. **Check the sweep first.** `ls -la
-   /home/dev/dev/VK-GL-CTS/run/feme-20261106-full-sweep/report.txt`.
-   - If present: read it, diff against the stale 105-failure list, file
-     any *new* regressions as their own roadmap rows before triaging
-     anything else.
-   - If absent and no `deqp-vk`/`run_vulkan_cts.py` processes are running
-     (`ps aux | grep deqp`): it died mid-run. Follow
-     `.instructions.md`'s "no `--resume` flag" recipe -- union every
-     completed `CasePath` out of all `qpa/*.qpa` files, subtract from
-     `all-cases.txt`, launch a fresh detached sweep (new `--output-dir`)
-     against only the remainder.
-   - Either way, first compare the sweep's `deqp-vk` process start time
-     to `libfeme_vulkan.so`'s mtime -- if the `.so` is newer (it isn't,
-     as of this commit, but will be the moment any future session
-     rebuilds it), the in-flight run is stale; kill and relaunch.
-2. `ENV6(c)(5a)` real fix (flatten()-level, not validate()-level): needs
-   a mask-merging phi at the shared tail block (`Flow2` in the repro)
-   that combines the header-exit-relay path's own live/sideeffect value
-   with the body-diamond's per-arm merge selects, instead of reusing the
-   diamond's own selects unconditionally for every predecessor. This is
-   risky, core-linearizer surgery -- give it a dedicated session with
-   `DiamondFlattener`/`LoopLinearizer` unit tests, not a squeezed-in
-   attempt. Repro still at `/tmp/nl.ll` (regenerate from
-   `/tmp/pl-cov-function-infinite-loop-return-identical-condition.txt`
-   if lost) and the pinned-diagnostic lit test
-   `env6c5-outer-exit-after-inner-loop-unsupported.ll`.
-3. Check `cosh-return-inf-unused` -- its error is the *different*
-   "uniform pass-through region" diagnostic (~`Linearize.cpp` L9116),
-   likely not the same shape as `ENV6(c)(5a)`, not yet re-examined.
-4. `ENV6(c)(5)`-`(7)` graphicsfuzz (~90 cases, big `Linearize`/`SIMDize`
-   cluster): needs its own dedicated multi-session slot, unchanged.
-5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)` (hull lockstep barrier), offload
-   upstreaming: all still blocked/lower-priority, unchanged this
-   session.
+1. Check the sweep report; diff against the 105-failure list.
+2. `ENV6(c)(5a)` flatten()-level fix (dedicated session).
+3. `cosh-return-inf-unused` shape check.
+4. `ENV6(c)(5)`-`(7)`, `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
