@@ -68,21 +68,22 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
 **Next steps, ranked**:
-1. Triage `cosh-return-inf-unused` as its own shape (now confirmed still
-   in the `ENV6(c)(5)` header-exit-to-latch sub-bucket, 8 cases this
-   session) -- carried forward unstarted for three sessions now.
-2. The new 3-case no-diagnostic bucket from this session (listed above)
-   is completely unexplored -- first step would be
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s own method,
-   to check whether it's silent-rendering or a logged-but-unmatched
-   diagnostic.
-3. Chase down why the "pass-through to/from exit check" bucket grew
-   (5 -> 10) instead of only shrinking -- likely an artifact of some
-   earlier session's fix letting cases progress further before bailing
-   out, but not confirmed. Pick one of the 5 newly-appearing cases and
-   check whether it used to hit a *different*, now-fixed diagnostic.
+1. Before re-attempting `ENV6(c)(5b)`, reduce the newly-regressed
+   `cov-nested-loops-array-choose-red-last-iteration` the same way this
+   session reduced `cosh-return-inf-unused`, to isolate whether the
+   `collectUniformPassThroughRegion` shortcut or the `Pre`-probe lambda
+   swap (the fix's two independent changed call sites) is responsible --
+   landing only the safe half may unlock the 4 newly-passing cases
+   without the regression. Est. 1-2 hours (repro + `llvm-reduce` +
+   trace, same workflow as this session).
+2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress; not touched
+   this session.
 4. `GetAlreadyLinearizedCycleExit`'s general-mechanism audit (carried
-   from `L540`, still not done) now has an accurate, current 69-case
-   `ENV6(c)(3)` list to check against instead of a stale one.
+   from `L540`) gains one more data point this session (it is evidently
+   *not* a safe drop-in generalization everywhere) but the broader audit
+   itself is still not done.
 5. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (re-verified clean again this session).
