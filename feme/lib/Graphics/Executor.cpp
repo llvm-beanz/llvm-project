@@ -1919,6 +1919,12 @@ static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
         RowByteOffset =
             (Row % Elt->XfbBufferArrayStride) * RowSizeBytes;
       }
+      // A leaf of an array of structs steps by the struct's own size
+      // between instances (see `SignatureElement::XfbInstanceRows`).
+      if (Elt->XfbInstanceRows != 0)
+        RowByteOffset =
+            uint64_t(Row / Elt->XfbInstanceRows) * Elt->XfbInstanceStride +
+            uint64_t(Row % Elt->XfbInstanceRows) * RowSizeBytes;
       if (BufIdx >= Draw.XfbBuffers.size())
         continue;
       const feme::graphics::PreparedDraw::XfbCaptureBuffer &CB =

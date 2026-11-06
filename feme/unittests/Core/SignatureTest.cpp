@@ -319,6 +319,9 @@ EntrySignature makeRichSignature() {
   XfbCaptured.XfbBuffer = 1;
   XfbCaptured.XfbOffset = 16;
   XfbCaptured.XfbStride = 32;
+  XfbCaptured.RowCount = 4;
+  XfbCaptured.XfbInstanceRows = 2;
+  XfbCaptured.XfbInstanceStride = 48;
   Sig.Elements.push_back(XfbCaptured);
 
   return Sig;
@@ -356,6 +359,8 @@ TEST(SignatureTest, SerializeParseRoundTrips) {
     EXPECT_EQ(Got.XfbBuffer, Want.XfbBuffer);
     EXPECT_EQ(Got.XfbOffset, Want.XfbOffset);
     EXPECT_EQ(Got.XfbStride, Want.XfbStride);
+    EXPECT_EQ(Got.XfbInstanceRows, Want.XfbInstanceRows);
+    EXPECT_EQ(Got.XfbInstanceStride, Want.XfbInstanceStride);
     EXPECT_EQ(Got.CapturedSelfIndex, Want.CapturedSelfIndex);
   }
 }
@@ -366,6 +371,17 @@ TEST(SignatureTest, SerializeParseRoundTripsAnEmptySignature) {
   Expected<EntrySignature> Parsed = parseSignature(Bytes);
   ASSERT_THAT_EXPECTED(Parsed, Succeeded());
   EXPECT_TRUE(Parsed->Elements.empty());
+}
+
+TEST(SignatureTest, VerifyRejectsInconsistentXfbInstanceLayout) {
+  EntrySignature Sig = makeRichSignature();
+  SignatureElement &Elt = Sig.Elements.back();
+  ASSERT_TRUE(verifySignature(Sig));
+  Elt.XfbInstanceStride = 0;
+  EXPECT_FALSE(verifySignature(Sig));
+  Elt.XfbInstanceStride = 48;
+  Elt.XfbInstanceRows = 3;
+  EXPECT_FALSE(verifySignature(Sig));
 }
 
 TEST(SignatureTest, ParseRejectsTooShort) {

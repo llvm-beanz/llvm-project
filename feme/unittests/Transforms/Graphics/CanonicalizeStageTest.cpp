@@ -860,6 +860,43 @@ TEST(CanonicalizeStageTest,
                {0, 0}, {0, 1}, {1, 0}, {1, 1}}));
 }
 
+/// An xfb block member that is an array of structs records, on each
+/// leaf, how many rows one struct instance holds and the struct's byte
+/// stride, so the executor's capture steps between instances by the stride
+/// instead of packing every instance's rows contiguously.
+TEST(CanonicalizeStageTest, RecordsXfbInstanceLayoutForArrayOfStructMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global { [2 x { i32, [2 x <2 x float>] }] }, !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store <2 x float> <float 1.000000e+00, float 2.000000e+00>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 8)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 48}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  const SignatureElement *Leaf = nullptr;
+  for (const SignatureElement &E : Sig->Elements)
+    if (E.XfbInstanceRows != 0)
+      Leaf = &E;
+  ASSERT_NE(Leaf, nullptr);
+  EXPECT_EQ(Leaf->XfbInstanceStride, 24u);
+  EXPECT_EQ(Leaf->RowCount % Leaf->XfbInstanceRows, 0u);
+  EXPECT_TRUE(verifySignature(*Sig));
+}
+
 /// (Roadmap L363) `isShapeCompatible`'s own marker-unwrapping, before
 /// this, only ever ran on \p Declared (a struct member's own declared
 /// type) -- documented as safe because a *value*'s own type (\p Actual)

@@ -144,12 +144,29 @@ bool checkXfbCapture(const EntrySignature &Sig, raw_ostream *ErrOS) {
                    "without a transform-feedback buffer");
         Ok = false;
       }
+      if (Elt.XfbInstanceRows != 0 || Elt.XfbInstanceStride != 0) {
+        report(ErrOS, "element " + Twine(Elt.ElementID) +
+                          ": transform-feedback instance layout is set "
+                          "without a transform-feedback buffer");
+        Ok = false;
+      }
       continue;
     }
     if (Elt.Direction != SignatureDirection::Output) {
       report(ErrOS, "element " + Twine(Elt.ElementID) +
                         ": transform-feedback buffer is only meaningful on "
                         "an output element");
+      Ok = false;
+    }
+    // A struct-array instance layout needs both halves, and its rows per
+    // instance must evenly divide the element's own row count.
+    if ((Elt.XfbInstanceRows != 0) != (Elt.XfbInstanceStride != 0) ||
+        (Elt.XfbInstanceRows != 0 &&
+         (Elt.XfbInstanceRows > Elt.RowCount ||
+          Elt.RowCount % Elt.XfbInstanceRows != 0))) {
+      report(ErrOS, "element " + Twine(Elt.ElementID) +
+                        ": transform-feedback instance layout is "
+                        "inconsistent with the element's own row count");
       Ok = false;
     }
     // (Roadmap H101g) A non-zero `XfbBufferArrayStride` must evenly
@@ -195,8 +212,9 @@ bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
 /// transform-feedback buffer, has-transform-feedback-offset flag,
 /// transform-feedback offset, transform-feedback stride,
 /// captured-self-index flag (roadmap L82), transform-feedback-buffer-array
-/// stride (roadmap H101g).
-constexpr size_t NumFixedFieldsPerElement = 25;
+/// stride (roadmap H101g), transform-feedback instance rows and instance
+/// stride.
+constexpr size_t NumFixedFieldsPerElement = 27;
 
 std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
   size_t TotalSemanticBytes = 0;
@@ -246,6 +264,8 @@ std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
     WriteNext(Elt.XfbStride);
     WriteNext(Elt.CapturedSelfIndex ? 1u : 0u);
     WriteNext(Elt.XfbBufferArrayStride);
+    WriteNext(Elt.XfbInstanceRows);
+    WriteNext(Elt.XfbInstanceStride);
   }
   assert(P == Bytes.data() + Bytes.size() &&
          "computed size did not match bytes actually written");
@@ -458,6 +478,18 @@ Expected<EntrySignature> feme::parseSignature(ArrayRef<uint8_t> Bytes) {
     if (!XfbBufferArrayStride)
       return XfbBufferArrayStride.takeError();
     Elt.XfbBufferArrayStride = *XfbBufferArrayStride;
+
+    Expected<uint32_t> XfbInstanceRows =
+        ReadField("transform-feedback instance rows");
+    if (!XfbInstanceRows)
+      return XfbInstanceRows.takeError();
+    Elt.XfbInstanceRows = *XfbInstanceRows;
+
+    Expected<uint32_t> XfbInstanceStride =
+        ReadField("transform-feedback instance stride");
+    if (!XfbInstanceStride)
+      return XfbInstanceStride.takeError();
+    Elt.XfbInstanceStride = *XfbInstanceStride;
 
     Sig.Elements.push_back(std::move(Elt));
   }

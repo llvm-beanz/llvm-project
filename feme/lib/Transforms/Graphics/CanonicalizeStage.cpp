@@ -348,6 +348,10 @@ struct ParsedSPIRVDecorations {
   std::optional<uint32_t> XfbBuffer;
   std::optional<uint32_t> XfbOffset;
   std::optional<uint32_t> XfbStride;
+  /// `SignatureElement::XfbInstanceRows`/`XfbInstanceStride`, set by
+  /// `addStageIOStructMembers` for a leaf of an array of structs.
+  uint32_t XfbInstanceRows = 0;
+  uint32_t XfbInstanceStride = 0;
   /// (Roadmap H173) The `Stream` decoration -- a geometry entry point's
   /// own per-output-variable stream assignment (`SignatureElement::
   /// Stream`, "always 0 for every non-geometry stage" default when
@@ -996,7 +1000,15 @@ void addStageIOStructMembers(
                                  unsigned WrappedAddrSpace,
                                  const ParsedSPIRVDecorations &WrappedD,
                                  Type *FieldTy) {
-      AddElement(WrappedGV, WrappedAddrSpace, WrappedD,
+      // The innermost array of structs fixes the per-instance layout;
+      // every outer level is contiguous multiples of the same struct.
+      ParsedSPIRVDecorations InstanceD = WrappedD;
+      if (InstanceD.XfbOffset && InstanceD.XfbInstanceRows == 0) {
+        InstanceD.XfbInstanceRows = getStageIOFlattenedRowCount(FieldTy);
+        InstanceD.XfbInstanceStride = static_cast<uint32_t>(
+            DL.getTypeAllocSize(ArrTy->getElementType()).getFixedValue());
+      }
+      AddElement(WrappedGV, WrappedAddrSpace, InstanceD,
                 ArrayType::get(FieldTy, ArrTy->getNumElements()));
     };
     addStageIOStructMembers(WrappedAddElement, GV, AddrSpace, BaseD,
@@ -4485,6 +4497,10 @@ struct NestedStageIOField {
   /// dimension are two independent axes that happen to share the same
   /// `RowCount` here only by coincidence of this fuzz case's shape).
   bool DeferRowScale;
+  /// The leaf's own per-value `RowCount`, unscaled by any array-of-struct
+  /// level; lets an enclosing level count the leaf values one instance
+  /// holds when \p DeferRowScale folds instances additively.
+  uint32_t LeafRowCount;
 };
 
 /// (Roadmap H115) Generalizes the old (roadmap H101t) "genuine
@@ -4530,11 +4546,20 @@ NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
       // multiplicative scaling by `Inner.RowCount` happens exactly once,
       // downstream, in `storeStageIOValue`/`loadStageIOValue`'s own
       // `ArrayType` decomposition of this same leaf's `RowCount` rows.
-      uint64_t Row = Inner.DeferRowScale ? Instance + Inner.Row
-                                        : Instance * Inner.RowCount + Inner.Row;
+      uint64_t InnerValues =
+          Inner.LeafRowCount ? Inner.RowCount / Inner.LeafRowCount : 1;
+      // A multi-row value (e.g. a matrix) is addressed in units of its own
+      // rows downstream, so scale the instance by values, not raw rows.
+      uint64_t ValueRows = getStageIOFlattenedRowCount(ValueTy);
+      uint64_t InstanceRows = ValueRows > 1 && Inner.RowCount % ValueRows == 0
+                                  ? Inner.RowCount / ValueRows
+                                  : Inner.RowCount;
+      uint64_t Row = Inner.DeferRowScale
+                         ? Instance * InnerValues + Inner.Row
+                         : Instance * InstanceRows + Inner.Row;
       return {Inner.IDStart, Row, Inner.Component,
               static_cast<uint32_t>(ArrTy->getNumElements()) * Inner.RowCount,
-              Inner.DeferRowScale};
+              Inner.DeferRowScale, Inner.LeafRowCount};
     }
     // An ordinary (non-genuine-multi-member) array member -- not this
     // shape; fall through to the plain-leaf path below, which already
@@ -4593,7 +4618,7 @@ NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
   bool DeferRowScale = RowCount > 1 &&
                        DL.getTypeAllocSize(ValueTy) ==
                            DL.getTypeAllocSize(Ty);
-  return {0, Row, Component, RowCount, DeferRowScale};
+  return {0, Row, Component, RowCount, DeferRowScale, RowCount};
 }
 
 /// Resolves \p Ptr -- a load/store's pointer operand -- against \p
@@ -5966,6 +5991,10 @@ bool canonicalizeSPIRVStage(
       Elt.RowCount = Shape.RowCount;
       Elt.RowCountIsVertexArray = RowCountIsVertexArray;
       Elt.XfbBufferArrayStride = XfbBufferArrayStride;
+      if (D.XfbBuffer) {
+        Elt.XfbInstanceRows = D.XfbInstanceRows;
+        Elt.XfbInstanceStride = D.XfbInstanceStride;
+      }
       Elt.Interpolation = getInterpolationMode(D);
       Elt.Frequency = Info.Frequency;
       Elt.FromInputPatch = Info.FromInputPatch;

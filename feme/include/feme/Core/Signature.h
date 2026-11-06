@@ -339,6 +339,19 @@ struct SignatureElement {
   /// their own, separately-bound buffers.
   uint32_t XfbBufferArrayStride = 0;
 
+  /// For a leaf of a struct that is itself (a nesting of) an array of
+  /// offset-less structs inside a transform-feedback block (e.g. `S s[2];`
+  /// with `S { ivec3 a; mat2 b[2]; float c; }`), the number of rows one
+  /// struct instance's own copy of this leaf spans, and the byte distance
+  /// between consecutive struct instances in the captured record. `Row`
+  /// then splits into `(Row / XfbInstanceRows, Row % XfbInstanceRows)` and
+  /// lands at `Instance * XfbInstanceStride + InnerRow * RowSize` instead
+  /// of packing every row back to back, which would overwrite the sibling
+  /// leaves sitting between instances. Both 0 when the element is not this
+  /// shape.
+  uint32_t XfbInstanceRows = 0;
+  uint32_t XfbInstanceStride = 0;
+
   SignatureInterpolationMode Interpolation =
       SignatureInterpolationMode::Perspective;
   SignatureFrequency Frequency = SignatureFrequency::PerVertex;
@@ -474,8 +487,9 @@ bool verifySignature(const EntrySignature &Sig,
 /// Version 6 appends `SignatureElement::CapturedSelfIndex` (roadmap L82).
 /// Version 7 appends `SignatureElement::XfbBufferArrayStride` (roadmap
 /// H101g). Version 8 changes `SignatureElement::XfbOffset` from a plain
-/// `uint32_t` to `std::optional<uint32_t>` (roadmap L419(p)).
-constexpr uint32_t SignatureAbiVersion = 8;
+/// `uint32_t` to `std::optional<uint32_t>` (roadmap L419(p)). Version 9
+/// appends `SignatureElement::XfbInstanceRows`/`XfbInstanceStride`.
+constexpr uint32_t SignatureAbiVersion = 9;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each
