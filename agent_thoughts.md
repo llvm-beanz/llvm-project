@@ -132668,3 +132668,17 @@ Next steps, ranked:
 1. `ENV6(c)(5a)` (75 graphicsfuzz + left-shift).
 2. `ENV5(c)(7)(b)` multi-barrier hull (1 case).
 3. cosh-return-inf-unused; offload (blocked).
+
+# Session: device check only, ENV6(c)(5a) not started
+
+Next action: start `ENV6(c)(5a)` with a fresh context.
+
+1. Device confirmed: `FeMe CPU Vulkan Device`.
+2. Tree clean. No code changes this session.
+3. I did not start the flatten()-level fix. It needs a dedicated session.
+
+Next steps, ranked:
+1. `ENV6(c)(5a)`: add a mask-merging phi at the shared tail block. Starting points: `Linearize.cpp` `DiamondFlattener::validate`, `canFlattenLoopBodyRegion` and `linearizeCycle`. Don't retry the `validate()`-only relaxation.
+2. `ENV5(c)(7)(b)` multi-barrier hull (1 case).
+3. `cosh-return-inf-unused` shape check.
+4. Add the `LC_ALL=C sort` before `comm` note to `.instructions.md`.
