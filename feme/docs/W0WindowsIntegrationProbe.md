@@ -604,6 +604,89 @@ no device contract; `createDevice` still returns `E_NOTIMPL` after capturing
 the audit evidence, so the probe's overall `FAILED(Result)` expectation is
 unchanged and no new CTest assertion needed loosening.
 
+### W0(g) follow-up: callback liveness probe and newer-version control
+
+Collected 2026-11-07 (same container session, direct continuation of the
+prior measurement). Two independent, bounded experiments, both still
+implementing no capability beyond the existing two caps and still returning
+`E_NOTIMPL` from `createDevice`:
+
+**1. Callback-liveness probe (`callback-probe` variant, pins
+`D3D12DDI_SUPPORTED_0010`, the same version that already reached
+`CreateDevice`).** Rather than only null-checking `p12UMCallbacks`, this
+variant also dereferences and *calls* exactly one entry --
+`p12UMCallbacks->pfnSetErrorCb(hRTDevice, E_NOTIMPL)` -- wrapped in SEH
+(`__try`/`__except`) so a fault would be caught and reported rather than
+crashing the harness. `pfnSetErrorCb` was chosen deliberately because it is
+pure user-mode (its first parameter is `D3D10DDI_HRTDEVICE`, with no
+kernel-mode-routed argument) and purely diagnostic -- the documented
+mechanism for a driver to report a device error back to the runtime, not an
+allocation/resource operation. The two representative kernel-routed
+(`pKTCallbacks`) entries, `pfnAllocateCb`/`pfnDeallocateCb`, are still only
+null-checked, never invoked, per the explicit "not an allocation/resource
+call" instruction.
+
+Measured result, container inbox runtime, repeated 3 times
+(`ctest --repeat until-fail:3`; 9/9 passed per run):
+
+```text
+Bootstrap calls: Open=1 Size=1 Versions=2 Caps=1 Optional=0 Fill=0 Create=1 Close=1 Destroy=0
+GetCaps Type values queried (1 total): 1074
+CreateDevice args: Interface=786442 Version=0 pKTCallbacks=non-null p12UMCallbacks=non-null
+CreateDevice inner callback pointers (read-only, never invoked unless noted): pKTCallbacks->pfnAllocateCb=non-null pKTCallbacks->pfnDeallocateCb=non-null p12UMCallbacks->pfnSetErrorCb=non-null
+Callback probe (p12UMCallbacks->pfnSetErrorCb): Attempted=1 Completed=1 ExceptionCaught=0 ExceptionCode=0x00000000
+```
+
+**The callback completed normally, with no SEH exception caught.** This is
+the first direct evidence that a thunk-service callback supplied through
+this owned-identity, no-kernel-driver-installed path is not merely a
+non-null pointer but is genuinely *live and callable* -- the stock runtime's
+own error-reporting machinery accepted a real call from this LLVM-owned
+`d3d10warp.dll`. This remains narrowly scoped: it says nothing yet about
+whether the kernel-routed (`pKTCallbacks`) allocation/residency callbacks are
+similarly live, since those were deliberately not invoked here, and it says
+nothing about whether a real resource/allocation contract could be built on
+top of this -- only that the one pure user-mode diagnostic callback this
+experiment chose to call did not fault.
+
+**2. Newer-pinned-version control (`pinned-version-newer` variant, pins
+`D3D12DDI_SUPPORTED_0119`, the newest `D3D12DDI_SUPPORTED_0NNN` macro in this
+WDK's `d3d12umddi.h`, "Interface Version R8").** Same two caps answered
+identically; everything else unchanged.
+
+Measured result, container inbox runtime, repeated 3 times (same `ctest`
+run; 9/9 passed):
+
+```text
+Bootstrap calls: Open=1 Size=0 Versions=2 Caps=1 Optional=0 Fill=0 Create=0 Close=1 Destroy=0
+GetCaps Type values queried (1 total): 1074
+CreateDevice args: Interface=0 Version=0 pKTCallbacks=null p12UMCallbacks=null
+```
+
+**`CreateDevice` is not reached (`Create=0`), and notably `CalcPrivateDeviceSize`
+is not reached either (`Size=0`)** -- the runtime stops silently right after
+`GetCaps` succeeds, the same single cap query as the working case, with no
+additional cap queries logged and no fallback to an older interface version
+attempted. This directly answers this session's control question: reaching
+`CreateDevice` with this minimal two-cap implementation is **not** simply "any
+pinned version works once the observed caps are answered" -- it is specific
+to (at least) the older `D3D12DDI_SUPPORTED_0010` version tested so far. The
+`D3D12DDI_ADAPTERFUNCS` table itself is unversioned (checked: its six
+function-pointer fields are unconditionally defined, not gated behind any
+`D3D_UMD_INTERFACE_VERSION` macro), so the divergence is not caused by the
+adapter-function table shape; its cause is not yet established. A natural
+bounded follow-up is bisecting across the intermediate
+`D3D12DDI_SUPPORTED_0NNN` values to find where this behavior changes,
+rather than guessing at a cause.
+
+Both new variants are permanent CTest entries (`os-routed-callback-probe`,
+`os-routed-pinned-version-newer`), both using the existing
+`--warp-bootstrap-audit` probe mode; neither asserts a specific value for the
+new evidence fields (consistent with the audit-only philosophy already
+established for this harness) beyond a basic internal-consistency check (if
+the callback probe ran at all, it must report either completing or having
+been caught by SEH, never neither).
+
 ### Reproduce the B investigation
 
 In the container's x64 developer shell with SDK/WDK 28000, use CMake >= 3.29
