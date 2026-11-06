@@ -132187,3 +132187,22 @@ Bisecting a pass/fail shader by editing the CTS source is cheap here. Do it earl
 3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
 4. Full CTS re-measure in the background.
 5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: mesh output size block unwrap
+
+## Next action
+`ENV6(e)(1)`: D24S8 resolve attachment (4).
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. `FEME_DUMP_IR_PRECANON=1` showed the fragment input is `<{ [19 x <4 x i32>] }>` read via a byte-array GEP. The dynamic-row code only walked arrays, not the wrapping struct.
+3. Unwrap single-member structs first. Lit test `spirv-canonicalize-stage-single-member-block-dynamic-row.ll`. `check-feme` 3896 passed; 4 CTS cases Pass; 1053-case batch no failures.
+
+## Lesson
+`feme-opt` is a separate target from `feme_vulkan`; rebuild both before checking a lit repro.
+
+## Next steps (ranked)
+1. `ENV6(e)(1)` D24S8 (4).
+2. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+3. Full CTS re-measure in the background.
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).

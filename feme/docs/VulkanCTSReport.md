@@ -245,6 +245,10 @@ Failing total is now 144 (stale list, other regressions unmeasured).
 
 `mesh_shader.ext.misc.{custom_attributes,clip_plane,clip_geom}*` (6 cases) now Pass. Root cause: Sutherland-Hodgman can emit a clip-introduced vertex first, and `Flat` float varyings were lerped there instead of taking the provoking vertex's value; separately, perspective interpolation could overshoot vertex ranges by rounding (20.000002 > 20.0). Regression batch `mesh_shader.ext.misc`, `rasterization.interpolation`, `clipping`, `glsl.linkage`: 466 Pass, 0 Fail (rest NotSupported).
 
+### L545: single-member block dynamic row access (ENV6(e)(3))
+
+`mesh_shader.ext.properties.max_mesh_output_size_*_no_view_index` (4 cases) now Pass. `getDynamicRowIndexedAccess` did not unwrap a struct-typed single-member interface block. Regression batch `mesh_shader.ext`, `glsl.linkage`, `multisample_interpolation`: 1053 Pass, 0 Fail (rest NotSupported).
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
