@@ -405,6 +405,8 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     return FormatInfo{1, 2, false};
   case ResourceFormat::D32_FLOAT:
     return FormatInfo{1, 4, true};
+  case ResourceFormat::X8_D24_UNORM:
+    return FormatInfo{1, 4, false};
   case ResourceFormat::D24_UNORM_S8_UINT:
     // Depth (24 bits, stored in the low 24 bits of a 32-bit word) and
     // stencil (8 bits, the high byte) packed into one 4-byte word.
@@ -570,6 +572,7 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("d16-unorm", ResourceFormat::D16_UNORM)
           .Case("d32-float", ResourceFormat::D32_FLOAT)
           .Case("d24-unorm-s8-uint", ResourceFormat::D24_UNORM_S8_UINT)
+          .Case("x8-d24-unorm", ResourceFormat::X8_D24_UNORM)
           .Case("d32-float-s8x24-uint", ResourceFormat::D32_FLOAT_S8X24_UINT)
           .Case("s8-uint", ResourceFormat::S8_UINT)
           .Case("a8-unorm", ResourceFormat::A8_UNORM)
@@ -2207,6 +2210,7 @@ Error packDepthClear(ResourceFormat Format, double Depth,
     memcpy(Texel.data(), &F, sizeof(F));
     return Error::success();
   }
+  case ResourceFormat::X8_D24_UNORM:
   case ResourceFormat::D24_UNORM_S8_UINT: {
     // Read-modify-write: only the low 24 bits are depth, and the high
     // byte (stencil) must survive untouched (see this function's header
@@ -2249,6 +2253,7 @@ Error unpackDepth(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Depth = F;
     return Error::success();
   }
+  case ResourceFormat::X8_D24_UNORM:
   case ResourceFormat::D24_UNORM_S8_UINT: {
     uint32_t Word;
     memcpy(&Word, Texel.data(), sizeof(Word));
@@ -2549,6 +2554,8 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "d32-float";
   case ResourceFormat::D24_UNORM_S8_UINT:
     return "d24-unorm-s8-uint";
+  case ResourceFormat::X8_D24_UNORM:
+    return "x8-d24-unorm";
   case ResourceFormat::D32_FLOAT_S8X24_UINT:
     return "d32-float-s8x24-uint";
   case ResourceFormat::S8_UINT:

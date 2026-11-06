@@ -58,6 +58,8 @@ TEST(FormatTest, MapsDepthStencilFormats) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_D32_SFLOAT), ResourceFormat::D32_FLOAT);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_D24_UNORM_S8_UINT),
             ResourceFormat::D24_UNORM_S8_UINT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_X8_D24_UNORM_PACK32),
+            ResourceFormat::X8_D24_UNORM);
 }
 
 TEST(FormatTest, MapsMaintenance5Formats) {

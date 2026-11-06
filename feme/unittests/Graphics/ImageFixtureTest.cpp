@@ -1204,6 +1204,18 @@ TEST(ImageFixtureTest, PacksDepthAndStencilIndependentlyForCombinedFormat) {
   EXPECT_NEAR(Depth, 1.0, 1e-6);
 }
 
+TEST(ImageFixtureTest, RoundTripsDepthForX8D24Format) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packDepthClear(cpu::ResourceFormat::X8_D24_UNORM, 0.5, Texel),
+      Succeeded());
+  double Depth = -1.0;
+  ASSERT_THAT_ERROR(
+      unpackDepth(cpu::ResourceFormat::X8_D24_UNORM, Texel, Depth),
+      Succeeded());
+  EXPECT_NEAR(Depth, 0.5, 1e-6);
+}
+
 TEST(ImageFixtureTest, PackDepthClearStillSupportsPureDepthFormats) {
   std::array<uint8_t, 4> Texel{};
   ASSERT_THAT_ERROR(

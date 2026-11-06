@@ -351,6 +351,11 @@ enum class ResourceFormat : uint32_t {
   // same hard-coded-switch-case reason as `E5B9G9R9_UFLOAT` immediately
   // above.
   B8G8R8A8_UNORM_SRGB,
+
+  // (Roadmap ENV6(e)(1)) `VK_FORMAT_X8_D24_UNORM_PACK32`: the depth-only sibling of
+  // `D24_UNORM_S8_UINT`, same 4-byte word with the high byte unused.
+  X8_D24_UNORM,
+  // Appended at the tail so existing hard-coded numeric values hold.
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.

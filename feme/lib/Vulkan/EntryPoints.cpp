@@ -2842,6 +2842,7 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
       Format && (*Format == feme::cpu::ResourceFormat::D16_UNORM ||
                  *Format == feme::cpu::ResourceFormat::D32_FLOAT ||
                  *Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
+                 *Format == feme::cpu::ResourceFormat::X8_D24_UNORM ||
                  *Format == feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT);
   VkFormatFeatureFlags2 DepthComparisonLinear =
       (IsDepthFormat && (pFormatProperties->formatProperties.linearTilingFeatures &

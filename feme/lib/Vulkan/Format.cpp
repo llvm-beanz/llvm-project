@@ -153,6 +153,8 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::D24_UNORM_S8_UINT;
   case VK_FORMAT_D32_SFLOAT_S8_UINT:
     return ResourceFormat::D32_FLOAT_S8X24_UINT;
+  case VK_FORMAT_X8_D24_UNORM_PACK32:
+    return ResourceFormat::X8_D24_UNORM;
   case VK_FORMAT_S8_UINT:
     return ResourceFormat::S8_UINT;
   // (Roadmap E5) `VK_KHR_maintenance5`'s two new formats.
@@ -357,6 +359,7 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::E5B9G9R9_UFLOAT:
   case ResourceFormat::D32_FLOAT:
   case ResourceFormat::D24_UNORM_S8_UINT:
+  case ResourceFormat::X8_D24_UNORM:
     return 4;
   case ResourceFormat::R32G32_FLOAT:
   case ResourceFormat::R32G32_UINT:

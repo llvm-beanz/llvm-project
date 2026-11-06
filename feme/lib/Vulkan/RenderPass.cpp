@@ -131,6 +131,7 @@ bool isSupportedDepthAttachmentFormat(feme::cpu::ResourceFormat Format) {
   return Format == feme::cpu::ResourceFormat::D16_UNORM ||
          Format == feme::cpu::ResourceFormat::D32_FLOAT ||
          Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
+         Format == feme::cpu::ResourceFormat::X8_D24_UNORM ||
          // (Roadmap L3) `D32_FLOAT_S8X24_UINT` (`VK_FORMAT_D32_SFLOAT_
          // S8_UINT`) is the other of the two combined depth-stencil
          // formats Vulkan's spec guarantees at least one of is supported

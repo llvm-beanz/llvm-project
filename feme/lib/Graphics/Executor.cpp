@@ -975,6 +975,7 @@ Expected<float> readDepth(const AttachmentView &Depth, uint32_t SampleCount,
     memcpy(&V, Depth.Data.data() + Idx * 2, 2);
     return V / 65535.0f;
   }
+  case cpu::ResourceFormat::X8_D24_UNORM:
   case cpu::ResourceFormat::D24_UNORM_S8_UINT: {
     double D;
     if (Error E = unpackDepth(
@@ -1025,10 +1026,11 @@ Expected<float> quantizeDepthForFormat(cpu::ResourceFormat Format,
         std::lround(std::clamp(Value, 0.0f, 1.0f) * 65535.0f));
     return V / 65535.0f;
   }
+  case cpu::ResourceFormat::X8_D24_UNORM:
   case cpu::ResourceFormat::D24_UNORM_S8_UINT:
   case cpu::ResourceFormat::D32_FLOAT_S8X24_UINT: {
     size_t Size =
-        Format == cpu::ResourceFormat::D24_UNORM_S8_UINT ? 4 : 8;
+        Format != cpu::ResourceFormat::D32_FLOAT_S8X24_UINT ? 4 : 8;
     std::array<uint8_t, 8> Scratch{};
     if (Error E = packDepthClear(
             Format, Value, MutableArrayRef<uint8_t>(Scratch.data(), Size)))
@@ -1059,6 +1061,7 @@ Error writeDepth(AttachmentView &Depth, uint32_t SampleCount, int32_t PX,
     memcpy(Depth.Data.data() + Idx * 2, &V, 2);
     return Error::success();
   }
+  case cpu::ResourceFormat::X8_D24_UNORM:
   case cpu::ResourceFormat::D24_UNORM_S8_UINT:
     // A read-modify-write of only the low 24 bits: the high byte
     // (stencil) may be shared with `writeStencil` on the very same word
@@ -1095,6 +1098,7 @@ float depthBiasR(cpu::ResourceFormat Format, float MaxZ) {
   switch (Format) {
   case cpu::ResourceFormat::D16_UNORM:
     return std::ldexp(1.0f, -16);
+  case cpu::ResourceFormat::X8_D24_UNORM:
   case cpu::ResourceFormat::D24_UNORM_S8_UINT:
     return std::ldexp(1.0f, -24);
   case cpu::ResourceFormat::D32_FLOAT:
