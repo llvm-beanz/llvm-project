@@ -3048,6 +3048,22 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
 
     auto *Br = dyn_cast<CondBrInst>(Term);
 
+    // Roadmap ENV6(e)(7): mirrors `flatten`'s own identical new check
+    // (see its comment for the full rationale) -- `validate` must stay in
+    // exact lockstep with `flatten`'s walk, so it needs the same
+    // shortcut for a child cycle's own header once that header's exit
+    // check has already been rewritten to a plain `UncondBrInst` by the
+    // child's own earlier `linearizeCycle` call (making `Br` here null,
+    // so the `Br &&`-gated check just below never even gets a chance to
+    // try `GetAlreadyLinearizedCycleExit` at all). Without this, this
+    // walk falls through to ordinary successor-stepping and re-validates
+    // (and re-claims into `MergeVisited`) the child's entire
+    // already-finalized interior a second time.
+    if (!Br && GetAlreadyLinearizedCycleExit) {
+      if (BasicBlock *ExitBB = GetAlreadyLinearizedCycleExit(Cur))
+        return validate(ExitBB, End, Quiet, Depth + 1);
+    }
+
     // Roadmap L151: a cycle-boundary exemption must be checked before
     // `MergeVisited` below, since a cycle's own exit edge may legitimately
     // be revisited by more than one walk (see `CycleBoundaryBlocks`'s own
@@ -3619,6 +3635,41 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
     }
 
     Instruction *Term = Cur->getTerminator();
+
+    // Roadmap ENV6(e)(7): `GetAlreadyLinearizedCycleExit(Cur)` below (at
+    // the `CondBrInst`-gated check just below this one) only ever fires
+    // when `Cur`'s own terminator is *still* a `CondBrInst` matching
+    // `isLoopControlOrHeaderRelayEdge` -- true for a child cycle's own
+    // still-conditional relay/latch block, but false for that same
+    // child's own *header*, once that header's own exit check has
+    // already been rewritten from a `CondBrInst` to a plain
+    // `UncondBrInst` by the child's own earlier `linearizeCycle` call
+    // (exactly what a `HeaderDivergent` child does to its own header, see
+    // `stayInLoop`). An *enclosing* cycle's own walk reaching that header
+    // falls through to ordinary `UncondBrInst` stepping instead, walking
+    // one block at a time through the child's entire already-flattened
+    // interior (re-flattening every still-`CondBrInst`-terminated diamond
+    // it finds there a second time, with this walk's own, by-then
+    // different, mask) before the `CondBrInst`-gated check finally fires
+    // at the child's own relay/latch block -- by which point stale and
+    // freshly-rebuilt values for the exact same child-loop-carried mask
+    // phi have already been produced, corrupting it (confirmed the hard
+    // way: an "Instruction does not dominate all uses" `verifyModule`
+    // failure on exactly such a phi, reducing
+    // `dEQP-VK.graphicsfuzz.cov-x86-isel-lowering-negative-left-shift`).
+    // Checking `GetAlreadyLinearizedCycleExit` here too, before `Term`'s
+    // own type is examined at all, shortcuts straight past the child's
+    // already-finalized header the exact same way the relay/latch block
+    // is shortcut past below, so this walk never re-enters (let alone
+    // re-mutates) the child's interior in the first place.
+    if (!isa<CondBrInst>(Term) && GetAlreadyLinearizedCycleExit) {
+      if (BasicBlock *ExitBB = GetAlreadyLinearizedCycleExit(Cur)) {
+        if (NarrowChildEntryMasks)
+          NarrowChildEntryMasks(Cur, Masks);
+        Cur = ExitBB;
+        continue;
+      }
+    }
 
     // Mirrors `validate`'s own cycle-control-edge boundary (see its
     // comment): this walk must stop here too, matching whatever `validate`
