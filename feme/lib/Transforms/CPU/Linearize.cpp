@@ -2148,18 +2148,39 @@ public:
   /// calls would make them defer the very diamond they exist to flatten,
   /// leaving it permanently unflattened (confirmed live: `feme-cpu-
   /// simdize` then rejects the untouched divergent branch outright).
+  /// Roadmap ENV6(c)(5a): optional, only ever supplied by
+  /// `LoopLinearizer::linearizeCycle`'s own `flattenLoopBodyRegion` call
+  /// site, as `HeaderExit->RelayBlock` -- a cycle header's own relayed
+  /// exit check's last hop (see `ExitCheck::RelayBlock`'s own comment,
+  /// and `recoverRelayExitCheck`, which computes it) -- for a cycle
+  /// whose header relays an "exit this iteration's body early" edge
+  /// through a chain that happens to land on a block the body region's
+  /// own walk *also* reaches as an ordinary diamond's reconvergence
+  /// point -- e.g. the tail exit-check block of a `StructurizeCFG`-style
+  /// inner loop whose header exit and latch exit check share one
+  /// `Flow`-style merge block. Left `nullptr` everywhere else (in
+  /// particular, never supplied to `run()`'s own whole-function instance,
+  /// nor to `flattenLoopBodyDiamond`'s single-diamond callers, neither of
+  /// which can reach this shape at all: a diamond entirely inside a loop
+  /// body never has a header's own relay edge feeding one of its blocks
+  /// from outside). See `isRelayBypassMergeBlock`'s own comment for
+  /// exactly which merge shape this authorizes, and `flatten`'s matching
+  /// `RelayBypassBlock` case for how the resulting merge's own masks are
+  /// combined.
   DiamondFlattener(
       Function &F, DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
       StableUniformityInfo &UI, SmallPtrSetImpl<BasicBlock *> &MergeVisited,
       SmallPtrSetImpl<BasicBlock *> &ResolvedBlocks,
       GetAlreadyLinearizedCycleExitFn GetAlreadyLinearizedCycleExit = nullptr,
       NarrowChildEntryMasksFn NarrowChildEntryMasks = nullptr,
-      bool IsWholeFunctionPass = false)
+      bool IsWholeFunctionPass = false,
+      BasicBlock *RelayBypassBlock = nullptr)
       : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI),
         GetAlreadyLinearizedCycleExit(GetAlreadyLinearizedCycleExit),
         NarrowChildEntryMasks(NarrowChildEntryMasks),
         MergeVisited(MergeVisited), ResolvedBlocks(ResolvedBlocks),
-        IsWholeFunctionPass(IsWholeFunctionPass) {}
+        IsWholeFunctionPass(IsWholeFunctionPass),
+        RelayBypassBlock(RelayBypassBlock) {}
 
   /// Validates and then flattens every divergent diamond reachable from
   /// \p F's entry block, or from the exit block of any cycle reached along
@@ -2360,6 +2381,29 @@ public:
     return ReachesEnd(Br->getSuccessor(0)) || ReachesEnd(Br->getSuccessor(1));
   }
 
+  /// Roadmap ENV6(c)(5a): whether \p Succ, reached here via an ordinary
+  /// `UncondBr` fallthrough from some other block in this walk's own
+  /// region, is actually `RelayBypassBlock` itself -- the loop header's
+  /// own exit-relay chain's last hop (`ExitCheck::RelayBlock`, the
+  /// literal CFG predecessor of the cycle's real exit block), which can
+  /// *also*, incidentally, be an ordinary diamond's reconvergence point
+  /// inside this body region (e.g. an inner loop whose header exit check
+  /// relays through a chain that happens to land on the same `Flow`-style
+  /// merge block the body's own last diamond arm reconverges at). This is
+  /// deliberately narrow -- an exact block-identity match, not a generic
+  /// "tolerate any extra predecessor" relaxation, which `validate`'s own
+  /// `ENV6(c)(2)(h)` check must otherwise keep rejecting (see its
+  /// comment) to avoid silently mis-flattening a genuinely-shared merge
+  /// point this milestone does not support. `RelayBypassBlock` is only
+  /// ever non-null for a `flattenLoopBodyRegion` call (see the
+  /// constructor parameter's own comment); every other caller leaves this
+  /// `nullptr` unconditionally.
+  bool isRelayBypassMergeBlock(BasicBlock *Succ) {
+    return RelayBypassBlock && Succ == RelayBypassBlock &&
+           Succ->hasNPredecessors(2);
+  }
+
+
   /// Roadmap L292: a read-only, structure-only pre-check for whether a
   /// later `flattenLoopBodyRegion(Start, End, ...)` call will succeed --
   /// mirrors that method's own `validate` precondition exactly, without
@@ -2382,7 +2426,6 @@ public:
     // Mirrors `flattenLoopBodyRegion`'s own tolerance for the loop's real
     // exit check sitting directly before `End`.
     return llvm::all_of(CycleBoundaryBlocks, [&](BasicBlock *BB) {
-      auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
       return isTolerableTailExitCheck(BB, End);
     });
   }
@@ -2959,6 +3002,21 @@ private:
   /// load before that cycle computed), in which case it is exactly as
   /// tainted there as it was where it was created.
   SmallPtrSet<Value *, 16> MaskedLoadResults;
+
+  /// Roadmap ENV6(c)(5a): see the constructor parameter's own comment.
+  /// `nullptr` for every instance except a `flattenLoopBodyRegion` call
+  /// whose cycle's header exit check relays through a block shared with
+  /// an in-region diamond's own reconvergence point.
+  BasicBlock *RelayBypassBlock = nullptr;
+
+  /// Roadmap ENV6(c)(5a): the `MaskPair` in effect entering
+  /// `flattenLoopBodyRegion`'s own region -- i.e. exactly what a lane
+  /// that takes the header's relay edge (never executing any of this
+  /// region's own masked ops) still carries when it reaches
+  /// `RelayBypassBlock`'s merge point. Populated once, at the top of
+  /// `flattenLoopBodyRegion` itself, before `flatten` ever runs; unused
+  /// (left default-constructed) whenever `RelayBypassBlock` is `nullptr`.
+  MaskPair RelayBypassMasks;
 };
 
 bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
@@ -3158,7 +3216,8 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
       // executes the inner diamond's branch at all. Rejecting here
       // (recognized, not silently mis-flattened) gives a clean
       // diagnostic instead of malformed IR.
-      if (Succ != End && !isCycleHeader(Succ) && !Succ->hasNPredecessors(1)) {
+      if (Succ != End && !isCycleHeader(Succ) && !Succ->hasNPredecessors(1) &&
+          !isRelayBypassMergeBlock(Succ)) {
         if (!Quiet)
           diagnose(F, "block '" + Succ->getName() +
                           "' is reached both by this region's own "
@@ -3376,6 +3435,13 @@ DiamondFlattener::flattenLoopBodyRegion(BasicBlock *Start, BasicBlock *End,
   // diagnostic at all.
   CycleBoundaryBlocks.clear();
   LastRegionVisited.clear();
+  // Roadmap ENV6(c)(5a): capture the region's own entry masks for
+  // `isRelayBypassMergeBlock`'s merge, if this call has a
+  // `RelayBypassBlock` at all -- must happen before `validate`/`flatten`
+  // below so both see the exact value a lane bypassing this whole region
+  // via the header's relay edge still carries.
+  if (RelayBypassBlock)
+    RelayBypassMasks = Masks;
   if (!validate(Start, End, /*Quiet=*/true))
     return std::nullopt;
   for (BasicBlock *BB : CycleBoundaryBlocks) {
@@ -3658,6 +3724,39 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
           UBr->setSuccessor(0, RedirectTo);
         }
         return Masks;
+      }
+      // Roadmap ENV6(c)(5a): `validate` already confirmed (via the
+      // identical `isRelayBypassMergeBlock` check) that `Succ` is
+      // `RelayBypassBlock` itself -- the header's own exit-relay chain's
+      // last hop, with exactly one *other* predecessor besides `Cur`
+      // (this walk's own diamond-arm fallthrough). That other
+      // predecessor carries `RelayBypassMasks` -- the masks that were in
+      // effect entering this whole region, unmodified by anything this
+      // walk has masked along the way, since a lane taking the relay
+      // edge never executes this region's own body at all. A real `phi`
+      // (not this pass's usual `select`, since the two values are
+      // defined on two physically different incoming edges, not a
+      // single arm's own branch) merges that bypass value with `Masks`
+      // as it stands now, exactly the way `Succ`'s own pre-existing
+      // loop-carried data phis already merge the same two edges.
+      if (isRelayBypassMergeBlock(Succ)) {
+        BasicBlock *OtherPred = nullptr;
+        for (BasicBlock *P : predecessors(Succ))
+          if (P != Cur)
+            OtherPred = P;
+        assert(OtherPred && "isRelayBypassMergeBlock already confirmed a "
+                            "second predecessor exists");
+        IRBuilder<> MergeBuilder(&*Succ->getFirstInsertionPt());
+        PHINode *LivePN = MergeBuilder.CreatePHI(Masks.Live->getType(), 2,
+                                                 "live.relay.merge");
+        LivePN->addIncoming(Masks.Live, Cur);
+        LivePN->addIncoming(RelayBypassMasks.Live, OtherPred);
+        PHINode *SideEffectPN = MergeBuilder.CreatePHI(
+            Masks.SideEffect->getType(), 2, "sideeffect.relay.merge");
+        SideEffectPN->addIncoming(Masks.SideEffect, Cur);
+        SideEffectPN->addIncoming(RelayBypassMasks.SideEffect, OtherPred);
+        Masks.Live = LivePN;
+        Masks.SideEffect = SideEffectPN;
       }
       Cur = Succ;
       continue;
@@ -8762,7 +8861,10 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       SmallPtrSet<BasicBlock *, 16> PrecheckResolvedBlocks;
       DiamondFlattener Precheck(F, DT, PDT, CI, UI, PrecheckMergeVisited,
                                 PrecheckResolvedBlocks,
-                                GetAlreadyLinearizedCycleExit);
+                                GetAlreadyLinearizedCycleExit,
+                                /*NarrowChildEntryMasks=*/nullptr,
+                                /*IsWholeFunctionPass=*/false,
+                                /*RelayBypassBlock=*/HeaderExit->RelayBlock);
       bool PrecheckResult =
           Precheck.canFlattenLoopBodyRegion(HeaderStayInLoop, Latch);
       if (!PrecheckResult) {
@@ -8836,7 +8938,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       rethreadNestedEntryMasks(ChildHeader, ChildMasks);
     };
     DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited, ResolvedBlocks,
-                        GetAlreadyLinearizedCycleExit, NarrowChildEntryMasks);
+                        GetAlreadyLinearizedCycleExit, NarrowChildEntryMasks,
+                        /*IsWholeFunctionPass=*/false,
+                        /*RelayBypassBlock=*/HeaderExit->RelayBlock);
     std::optional<MaskPair> MasksAtLatch =
         DF.flattenLoopBodyRegion(HeaderStayInLoop, Latch, BodyEntryMasks);
     if (!MasksAtLatch) {
