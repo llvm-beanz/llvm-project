@@ -135489,3 +135489,141 @@ relative links and patch whitespace, preserving existing unchanged-line
 terminators. The pre-existing launch-prompt edits were in the next-steps
 section this request supersedes; retained its corpus-triage and backlog items
 while replacing the stale host-only blocker with W0(f).
+
+## 2026-11-06: W0(f) container-first adapter-probe verification session
+
+**Next action taken**: Per the request's explicit selected direction
+("container-first, application-local user-mode software-driver integration
+with stock Windows D3D12/DXGI") and ranked suggested-next-steps, picked
+`W0(f)` first: build `feme/utils/windows-adapter-probe` in this Windows
+container and run its four CTest cases, recording exact OS/kit/runtime/WARP
+identities and outcomes, without assuming the prior host-only results prove
+container success.
+
+**Device check**: `vulkaninfo --summary | Select-String deviceName` ->
+`FeMe CPU Vulkan Device`. Confirmed first, as required every session.
+
+**What I did**:
+1. Re-read `feme/docs/W0WindowsIntegrationProbe.md` and the current
+   `WARPRoadmap.md` `W0` table in full (a prior session had already added
+   `W0(e)` (struck, host measurements) and `W0(f)` (container+bootstrap,
+   unstruck) -- the grep tool's regex matching misbehaved against this file
+   for parenthesized patterns like `W0\(f\)` for reasons I didn't chase down;
+   `Select-String` worked reliably as a fallback throughout this session).
+2. Configured and built `feme/utils/windows-adapter-probe` standalone in
+   this container (`cmake -S ... -B C:\dev\adapter-probe -G Ninja
+   -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON`)
+   -- configured cleanly with **no** `CMAKE_MT` workaround needed, unlike the
+   host's documented SDK 28000 `mt.exe` failure.
+3. Ran all four CTest cases (`reference-warp`, `software-reference-warp`,
+   `rejection-stub`, `missing-module`): all four passed, with the same
+   HRESULTs, identity values, and DDI-counter-zero result as the host.
+4. Found three container-local third-party D3D12 binaries already present
+   from unrelated build restores (not fetched for this task): NuGet WARP
+   1.0.19 and 1.0.21 (from the OffloadTest D3D12 test-infra restore and a
+   `DirectXShaderCompiler` build respectively), and Agility SDK core 619
+   (same OffloadTest restore). Ran the probe directly (not via `ctest`)
+   against each as an extended matrix, plus a second build configured with
+   `FEME_PROBE_AGILITY_VERSION=619`/`FEME_PROBE_AGILITY_CORE=...` to exercise
+   the Agility-core combinations the host doc's matrix covered. Every
+   combination passed identically to the host.
+5. Wrote all of this into a new "Container measurements" section of
+   `W0WindowsIntegrationProbe.md`, updated its header "next step" callout
+   (container step is done; next is the bootstrap), marked item 1 of its
+   "Remaining work" numbered list as done, and rewrote the "Container
+   starting point" section from "next action" prose into recorded results
+   plus the Agility-matrix reproduction command shape.
+6. Updated `WARPRoadmap.md`: struck `W0(f)` through for its container-
+   measurement scope only, and split its much larger remaining piece
+   (identify a third-party adapter bootstrap, reach `OpenAdapter12`,
+   negotiate DDI, close a distinct FeMe prototype) into a new sibling
+   `W0(g)` row -- keeping to the one-lowercase-letter nesting limit rather
+   than nesting further under `W0(f)`. Updated every other `W0(a)`/`W0(c)`/
+   `W0(d)`/`W1`-dependency cross-reference in the doc that pointed at the
+   old `W0(f)` bootstrap scope to point at `W0(g)` instead.
+7. Cleaned up the two scratch build directories (`C:\dev\adapter-probe`,
+   `C:\dev\adapter-probe-agility`) after recording results -- they are
+   outside the repository and reproducible from the documented commands.
+
+**Verification**: `ctest --test-dir C:\dev\adapter-probe -V` -> 4/4 passed
+(0.35s total). Direct `feme-windows-adapter-probe.exe` invocations against
+NuGet WARP 1.0.19/1.0.21 and the Agility-619-core build all exited 0 with
+the expected HRESULT/identity/module-path output. No FeMe production/test
+source was touched -- only the pre-existing, already-committed probe sources
+were built and run as-is -- so no `check-feme`/Vulkan CTS run was performed
+this session (matches the established precedent for documentation/probe-only
+sessions; the FeMe Vulkan ICD and ordinary `check-feme` surface are entirely
+unaffected by a standalone-CMake-project build outside `feme/CMakeLists.txt`).
+`git status --short` clean before and after each commit.
+
+**Decision record**:
+1. Split `W0(f)` into a struck measurement-only row plus a new `W0(g)`
+   bootstrap row, rather than either (a) leaving `W0(f)` fully unstruck
+   despite having done real, verifiable work, or (b) striking the entire
+   original `W0(f)` text including the bootstrap/`OpenAdapter12` sentences
+   that are nowhere near done. This mirrors the precedent already set for
+   `WS1(b)`/`WS1(d)` and `W0(c)`'s own partial-completion handling earlier
+   this roadmap: a row only gets struck for the portion of its acceptance
+   text actually satisfied, with the rest carried forward as a named
+   sibling, not silently left implicit in prose.
+2. Did not attempt the `W0(g)` bootstrap work itself this session (identify
+   a third-party adapter identity/thunk contract and implement the actual
+   `OpenAdapter12` path) -- the user's own ranked step 1 text asked to
+   "verify reference WARP **before** extending the FeMe adapter bootstrap,"
+   and this is a substantially different, much larger engineering task
+   (writing real DDI open/negotiation/close logic against
+   `d3d12umddi.h`/`d3d10umddi.h`) that deserves its own bounded session(s)
+   rather than being rushed alongside the measurement verification.
+3. Treated the three container-local third-party binaries (NuGet WARP
+   1.0.19/1.0.21, Agility 619 core) found under `DirectXShaderCompiler` and
+   `llvm-project/build` as legitimate extended-matrix inputs rather than
+   something to fetch or install freshly -- they already exist from
+   unrelated FeMe/DXC/OffloadTest build restores, so using them adds no new
+   dependency and no system change, consistent with the "no system changes"
+   constraint repeated throughout `W0WindowsIntegrationProbe.md`.
+4. No new `.instructions.md` entry this session: the one process quirk hit
+   (the `grep` tool producing empty results against `WARPRoadmap.md` for
+   parenthesized patterns, while plain-text `Select-String`/PowerShell
+   matching the same pattern worked) is a transient within-session tool
+   observation, not a reproducible environment/build gotcha worth codifying
+   -- I did not chase down whether it is a real regex-engine issue or a
+   one-off, since `Select-String` was a reliable fallback throughout.
+
+**Process note**: nothing added to `feme/.instructions.md` this session (see
+decision-record item 4 above for why the one odd tool behavior observed
+wasn't codified).
+
+**State**: `W0(e)` and `W0(f)` are both now fully struck (host and container
+measurements respectively, both closed). `W0(g)` is the new, wholly open
+next step: the actual third-party adapter bootstrap through `OpenAdapter12`
+negotiation. `W0(a)` and `W0(d)` remain partially done (per their own
+existing text, now additionally grounded in container evidence, not just
+host evidence). `W0(c)` is unchanged from the prior session (partially done,
+blocked on `W0(b)`'s contract decision and `W0(g)`/`W1(a)`'s future runner).
+`WS0`-`WS3` remain fully closed. Git tree is clean as of the final commit
+below.
+
+**Suggested next steps (ranked)**:
+1. **`W0(g)`**: the newly-split, concrete next step -- identify the public
+   third-party adapter identity/thunk bootstrap contract (likely centered on
+   `d3d12umddi.h`'s `OpenAdapter12`/`D3D12DDIARG_OPENADAPTER` and the
+   DXGI/DDI thunk-service callbacks the design doc's `DXGIDevice.cpp`
+   evidence row already flagged), then extend an LLVM-owned prototype (a
+   new, separate standalone project alongside `windows-adapter-probe`, not
+   a modification to the existing reference/rejection probe) through open/
+   negotiate/close with a distinct FeMe identity. This is a substantially
+   larger task than this session's measurement work and should likely be
+   broken into its own smaller bounded steps once started (e.g., first just
+   getting `OpenAdapter12` to be *called* with a minimal stub returning a
+   deliberate, loud failure, before attempting any real DDI table).
+2. Re-examine whether any part of `W0(c)`'s DXBC/DXIL-input classification
+   can be sharpened without a host: the grep-confirmed candidate list in
+   `W0DirectXTestCorpusClassification.md` (`BasicAPI.cpp`,
+   `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
+   `PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
+   `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) was left as "needs
+   individual triage" rather than resolved one-by-one; carried forward
+   unchanged, still cheap and bounded as a change of pace from `W0(g)`'s
+   more open-ended design work.
+3. Backlog carried from prior sessions, still untouched: `ENV6(c)(3)`/
+   `ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
