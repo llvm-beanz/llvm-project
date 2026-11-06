@@ -2680,6 +2680,13 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
       // silently mis-targeted at whatever row 0's own first lane
       // happened to be, rather than the real target row).
       Type *Ty = GV->getValueType();
+      // A single-member interface block (`out Block { T x[N]; } b[]`) is one
+      // signature element; its lone member's array levels are the rows.
+      while (auto *StructTy = dyn_cast<StructType>(Ty)) {
+        if (StructTy->getNumElements() != 1)
+          return std::nullopt;
+        Ty = StructTy->getElementType(0);
+      }
       uint64_t Row = 0;
       uint64_t Residual = ByteOffset;
       Value *DynamicRowIndex = nullptr;
