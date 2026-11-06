@@ -207,6 +207,18 @@ Fail, none outside the stale failure list. Failing total is now at most 146
 (109 of the stale 255 now pass). `check-feme` 3891/3895, 4 unsupported. No
 inventory change.
 
+### L539: Failing-list refresh -- 146 of the stale 255 still `Fail`
+
+A full re-run of all ~3.27M cases is not feasible in one session, so the 255
+`verified-failures.txt` cases were re-run via the batch runner: 109 `Pass`,
+146 `Fail` (list saved as `verified-failures-146.txt` next to it). Largest
+clusters: `image.store` 14 (waived CTS quirk, `ENV6(d)(3)`), `mesh_shader.ext`
+10, `spirv_assembly.instruction` 7, `renderpass2` 6, `demote` 5,
+`transform_feedback.fuzz` 4, `wsi.xcb` 4, `glsl.derivate` 3; the remaining ~93
+are `graphicsfuzz` linearize/simdize cases (`ENV6(c)(5)`-`(7)`) and singletons.
+Failing total is 146 (new failures outside the old list were not re-measured).
+No inventory change.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
