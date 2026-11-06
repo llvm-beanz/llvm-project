@@ -132775,3 +132775,104 @@ Next steps, ranked:
    drifts again -- the content, not just the line endings, has already
    diverged once (stale `XFAIL: Lavapipe && host-arm64`, old comment
    text) and may again.
+
+# Session: ENV6(e)(7) landed
+
+**Done:** `ENV6(e)(7)` (`cov-x86-isel-lowering-negative-left-shift`) is
+fixed, tested, and struck through on the roadmap. This was ranked next
+step #1 from last session's own entry.
+
+1. Device confirmed: `FeMe CPU Vulkan Device`.
+2. Reproduced standalone (no CTS needed per iteration): captured the
+   real pre-pass IR via `FEME_DUMP_IR_PRELINEARIZE=1 deqp-vk
+   --deqp-case=...`, then fed it straight into `feme-opt --llvm
+   -passes=feme-cpu-linearize,verify -S` for a sub-second repro loop.
+3. First attempt (a `BodyDF` `RelayBypassBlock` patch mirroring
+   `ENV6(c)(5a)`'s own fix, per last session's hunch) did **not** fix
+   the crash -- rebuilt and reran, identical verifier error. Reverted it
+   once the real fix was found, to keep the final diff minimal.
+4. Root-caused via targeted `errs()` tracing (temporary, removed before
+   committing) of `DiamondFlattener::flatten`'s own block-by-block walk
+   and `Masks.Live`'s identity at each step: the function has an *outer*
+   loop containing an *inner* loop, both `HeaderDivergent`. The inner
+   loop's own `linearizeCycle` call fully flattens its body's
+   switch-lowered divergent diamond and rewrites its own header's exit
+   check from a `CondBrInst` to a plain `UncondBrInst` (via
+   `stayInLoop`). When the *outer* loop is linearized next, its own
+   `DiamondFlattener::flatten`/`validate` walk reaches the inner header --
+   but the existing `GetAlreadyLinearizedCycleExit` shortcut (meant to
+   let an enclosing walk jump straight from an already-linearized child
+   cycle to its one exit block) was only ever checked while the reached
+   block's terminator was *still* a `CondBrInst` matching
+   `isLoopControlOrHeaderRelayEdge` -- true for the inner loop's own
+   still-conditional relay/latch block, false for its own
+   already-uncond-ified header. The outer walk fell through to ordinary
+   `UncondBr` stepping, walked block-by-block through the *entire*
+   already-finalized inner loop body a second time, and re-flattened its
+   switch diamond from scratch with a different mask -- confirmed via
+   the trace that a masked-load's mask operand, narrowed from a plain
+   `true` constant to a non-constant value by this very re-walk's own
+   `applyStageMasks` call on an earlier block, flipped a branch
+   condition's uniform/divergent classification between the two passes,
+   producing a second, conflicting set of `select`s. The final `Narrow`
+   step then corrupted the inner loop's own loop-carried
+   `active.live`/`active.sideeffect` phi with one stale and one
+   non-dominating incoming value -- the observed "Instruction does not
+   dominate all uses!" failure.
+5. Fix: check `GetAlreadyLinearizedCycleExit` (in both `validate` and
+   `flatten`) as soon as the reached block's terminator is *not* a
+   `CondBrInst`, not only while it still is -- shortcuts past an
+   already-uncond-ified child header the same way the still-conditional
+   relay/latch block already was, so an enclosing cycle's own walk never
+   re-enters (let alone re-mutates) a nested, already-linearized child
+   cycle's interior at all. 51 lines added, nothing removed.
+6. Verification, in order:
+   - `opt -passes=verify` clean on the repro (confirmed `EXIT: 0`).
+   - New regression lit test
+     `env6e7-nested-loop-already-uncond-header-reflattened.ll` (a real,
+     near-verbatim capture), confirmed to abort pre-fix / pass post-fix
+     via `git stash`.
+   - `check-feme`: 3910/3910 total tests (1282 lit + unit tests), 4
+     unsupported, 0 failures.
+   - Real `deqp-vk`: the targeted case now **Pass**es (previously
+     aborted the compiler).
+   - Full 757-case graphicsfuzz corpus, baseline vs. fix via `git
+     stash`: 684 Pass / 73 Fail before, **685 Pass / 72 Fail** after. A
+     direct per-case diff of the two full logs confirms exactly one
+     case flips and zero regressions.
+7. Docs updated: `Roadmap.md` (`ENV6(e)(7)` struck through),
+   `VulkanCTSReport.md` (new `## L540` section). No feature or extension
+   changed, so the two inventory docs were left alone.
+8. Offload-test-suite check (ranked step #4 from last session): fetched
+   the `feme` branch tip fresh from `llvm-beanz` into a scratch
+   worktree and ran `git am --keep-cr` for all five stored patches --
+   all five still apply cleanly. No drift found this session.
+
+Commits this session (in order): core `Linearize.cpp` fix; new
+regression lit test; roadmap/CTS-report docs; this thoughts entry.
+
+Next steps, ranked:
+1. Re-measure the `ENV6(c)(5)`/`ENV6(c)(6)` roadmap cluster counts --
+   still an open item from two sessions ago, not touched this session
+   either (this session's own corpus diff only exercised the targeted
+   case plus whatever `graphicsfuzz.*` already covers; the cluster
+   counts in `ENV6(c)(5)`/`ENV6(c)(6)`'s own roadmap rows predate even
+   `ENV6(c)(5a)`'s fix and have never been directly re-verified).
+2. Triage `cosh-return-inf-unused` as its own shape (two distinct "only
+   a uniform pass-through region" bail-outs plus a mask-affecting-op
+   diagnostic -- confirmed by two sessions now to be unrelated to both
+   `ENV6(c)(5a)`'s and this session's fix).
+3. The `GetAlreadyLinearizedCycleExit` fix this session landed is a
+   general mechanism (any already-uncond-ified child header, not just
+   this one shape) -- worth a quick audit of whether any other
+   known-unfixed `ENV6(c)(3)`/`ENV6(c)(5)`/`ENV6(c)(6)` cluster case
+   happens to share the exact "enclosing loop's walk reaches an
+   already-linearized nested loop's own header" shape and gets fixed
+   incidentally; the 757-case corpus diff this session found exactly
+   one flip, so if there's overlap it's likely small, but not yet
+   checked directly against the untriaged clusters' own case lists.
+4. None of the offload-test-suite patch set is at risk right now (all 5
+   re-verified this session with a fresh `llvm-beanz/feme` fetch), but
+   keep re-checking each session per standing instructions -- upstream
+   `WaveActiveMax.test` content (not just line endings) has drifted
+   once before and may again.
