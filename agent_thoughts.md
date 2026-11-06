@@ -134935,3 +134935,162 @@ nothing relevant to this session's work that wasn't already followed.
 5. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-07: Closing WS2, establishing WS3(a) shared-core regression gate
+
+## Next action
+Resolve `WS2`'s previously-undecided third piece (per the last several
+sessions' own ranked suggested-next-steps), then move on to `WS3`
+(establish shared-core regression gates).
+
+## Device check
+`vulkaninfo --summary | Select-String deviceName` -> `FeMe CPU Vulkan
+Device` (confirmed at session start and again immediately before the
+`check-feme` run, per the standing "every time" rule). The stale
+`nv-vk64.json` loader warnings are expected/harmless, as in every prior
+session.
+
+## What I did
+1. Directly re-read `feme/lib/Vulkan/Sync.cpp`'s `makeSubmissionTask`/
+   `makeFenceSignalTask` and `feme/lib/Vulkan/CommandBuffer.cpp`'s
+   `executeCommandBuffer`/`executeCommandsInto` to verify (not just
+   infer from `WS2(a)`/`WS2(b)`'s own notes) whether `WS2`'s third
+   original piece -- command execution/CPU-draw-worker paths -- has any
+   portable kernel left. Confirmed it does not: `makeSubmissionTask`'s
+   closure is built entirely from Vulkan-specific types, and
+   `executeCommandBuffer`'s dispatch loop is inseparable from bound
+   pipeline/descriptor-set/push-constant/graphics state.
+2. Updated `feme/docs/WARPRoadmap.md` to explicitly close `WS2` with no
+   further lettered rows, with that evidence recorded inline, and
+   updated the opening summary paragraph. Documentation-only change, no
+   build/test needed. Committed as `efce91e50f6c`.
+3. Designed and implemented `WS3`'s first slice: a `check-feme-shared-
+   core` CMake custom target (mirroring the existing `check-feme-fuzz`
+   precedent) that runs FeMe's shared-core, API-neutral library test
+   binaries (`FeMeExecutionTests`, `FeMeImageTests`) directly via a new
+   `feme/utils/check-feme-shared-core.py` driver, reporting each
+   binary's own named test failures rather than only an aggregate pass
+   count -- directly matching `WS3`'s own exit-evidence text ("compare
+   named failures, not only pass totals").
+4. Normalized the new Python file's CRLF line endings to LF immediately
+   (per the documented `.instructions.md` gotcha) before building.
+5. Reconfigured CMake, built and ran `check-feme-shared-core` in
+   isolation: both binaries passed cleanly. Committed as `1711d47abdd7`.
+6. Ran the full `check-feme` lit suite to confirm the CMake addition
+   didn't regress anything project-wide: 3,978 discovered/3,953
+   Passed/15 Skipped/10 Unsupported, zero failures -- identical to the
+   prior session's baseline.
+7. Updated `feme/docs/WARPRoadmap.md` again: split the single `WS3` row
+   into a struck `WS3(a)` (this session's work) and an open `WS3(b)`
+   row carrying forward the still-undesigned "byte/image comparisons
+   and unchanged capability manifests" half of `WS3`'s original
+   exit-evidence text. Committed as `a41d2cdb90b5`.
+
+## Verification
+- `check-feme-shared-core` (new target): both `FeMeExecutionTests.exe`
+  and `FeMeImageTests.exe` pass cleanly, 2/2 binaries, 0 named failures.
+- Full `check-feme`: 3,978 discovered/3,953 Passed/15 Skipped/10
+  Unsupported, zero failures (matches the prior session's baseline
+  exactly -- expected, since no production code changed this session).
+- No CTS re-run performed this session: neither commit touched any
+  production/runtime code (the first was documentation-only; the
+  second added only a CMake target and a standalone test-runner
+  script), so there is nothing a CTS pass could exercise that
+  `check-feme`'s existing coverage doesn't already. This mirrors the
+  precedent set by the prior session's `WS2`-closure commit, which also
+  needed no CTS run for the same reason.
+- `feme/.instructions.md` re-skimmed (tail ~60 lines): no new
+  environment/process issue found worth codifying; the existing
+  CRLF-on-new-files note was followed correctly for the new Python
+  script.
+
+## Decision record
+1. **`WS2` is closed, no `WS2(c)`.** Re-confirmed directly this session
+   (not merely restating the prior session's conclusion): both
+   `makeSubmissionTask` and `executeCommandBuffer` are genuinely
+   Vulkan-specific command-execution/graphics-pipeline semantics with
+   no generic task-dispatch or retained-storage mechanics left inside
+   them. This closes a question three consecutive sessions had each
+   flagged as still open.
+2. **`WS3`'s first slice is a test-subset CMake target, not a new test
+   framework.** The roadmap's "move portable tests with their helpers"
+   instruction turned out to already be satisfied incrementally: every
+   `WS0`-`WS2` extraction added its new portable logic's own tests
+   directly into `FeMeImageTests`/`FeMeExecutionTests` as it went, never
+   leaving them only indirectly exercised through `FeMeVulkanTests`/CTS.
+   What was actually missing was a *fast, scoped* way to run just those
+   binaries with named failures, as a quick local gate before paying
+   for the full `check-feme` lit suite's project-wide test discovery
+   (currently ~580-600s) -- so that's what `WS3(a)` builds, following
+   the `check-feme-fuzz` target's own established pattern rather than
+   inventing a new mechanism.
+3. **`WS3` is split into `WS3(a)`/`WS3(b)`, not claimed fully done.**
+   The roadmap's original exit-evidence text also named "byte/image
+   comparisons and unchanged capability manifests" -- a materially
+   different, more involved mechanism (diffing rendered image bytes or
+   CTS result snapshots and the two Vulkan capability inventories
+   across commits) that this session's test-subset target does not
+   cover and was not designed this session. Rather than either silently
+   dropping that half of the original text or inflating this session's
+   bounded CMake-target change into an open-ended design effort, it's
+   carried forward explicitly as an un-struck `WS3(b)` row with its own
+   placeholder exit evidence, matching the nesting-depth rule (one
+   lowercase letter, `WS3(b)` not `WS3(a)(1)`) and the established
+   pattern of splitting an over-broad roadmap row once its first
+   concrete slice is done (as `WS1`/`WS2` were both split previously).
+4. **No CTS run or inventory update this session.** Both commits are
+   infrastructure/documentation only -- no production or runtime code
+   changed -- so there is no new behavior for a CTS pass to exercise,
+   and the two Vulkan capability inventories have nothing to
+   regenerate against. This mirrors the precedent the prior session's
+   `WS2`-closure commit set for the same reason, and keeps the standing
+   rule's intent ("run CTS after each change" meaning each
+   *behavior-affecting* change) rather than running a bounded CTS pass
+   that would trivially reproduce the last session's own numbers with
+   zero diagnostic value.
+
+## Process note
+No new environment/process issue surfaced this session; `.instructions.md`
+was re-skimmed and nothing needed adding.
+
+## State restated
+- `WS0`, all of `WS1` (`a`-`d`), all of `WS2` (`a`-`b`, now explicitly
+  closed with no `c`), and `WS3(a)` are done. `WS3(b)` is open and
+  undesigned.
+- Commits this session (newest last): `efce91e50f6c` (close WS2
+  explicitly), `1711d47abdd7` (add check-feme-shared-core regression
+  gate), `a41d2cdb90b5` (roadmap: strike WS3(a), add WS3(b)).
+- Full `check-feme`: 3,978 discovered/3,953 Passed/15 Skipped/10
+  Unsupported, zero failures (unchanged from last session, as
+  expected). `check-feme-shared-core`: 2/2 binaries pass, 0 named
+  failures.
+- `feme/docs/VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+  `VulkanExtensionInventory.md` are unchanged this session (no CTS run,
+  see Decision record #4) -- their most recent entries remain the prior
+  session's `WS2(b)` ones.
+
+## Suggested next steps (ranked)
+1. **`WS3(b)`**: design and implement the still-open "byte/image
+   comparisons and unchanged capability manifests" regression-gate
+   half of `WS3`. Candidates worth evaluating: (a) a checked-in Vulkan
+   capability-manifest snapshot compared against each session's
+   regenerated `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.
+   md`, flagging an unexplained diff; (b) a small script diffing two
+   `run_vulkan_cts.py` `report.txt` runs' *named* pass/fail sets (not
+   just totals) across a shared-core change, so a newly-failing case
+   name is caught even if the aggregate counts happen to coincidentally
+   match. This is the one piece of `WS3`'s original scope not yet even
+   designed, after three sessions of flagging "resolve `WS3`" as a
+   priority -- worth actually starting now that `WS3(a)` establishes
+   the simpler half is done.
+2. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
+   an explicit FeMe adapter-selection assertion -- a research/
+   documentation task, no Windows adapter install needed yet. Carried
+   forward unchanged across many sessions now; still cheap and
+   bounded if a change of pace from `WS3(b)`'s more open-ended design
+   work is wanted.
+3. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+4. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
