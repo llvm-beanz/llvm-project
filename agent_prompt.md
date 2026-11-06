@@ -68,7 +68,8 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `ENV6(e)(2)` mesh attrs/clip (6), `ENV6(e)(3)` mesh output size (4).
-2. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
-3. Full CTS re-measure in the background.
-4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+1. `ENV6(e)(3)` mesh output size (4).
+2. `ENV6(e)(1)` D24S8 (4).
+3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+4. Full CTS re-measure in the background.
+5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
