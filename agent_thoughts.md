@@ -135627,3 +135627,209 @@ below.
    more open-ended design work.
 3. Backlog carried from prior sessions, still untouched: `ENV6(c)(3)`/
    `ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
+
+# 2026-11-06: W0(g) direct-call experiment finds no public `OpenAdapter12` bootstrap, triggers W0(b)
+
+## Next action
+Execute the session's own top-ranked suggested next step: `W0(g)`'s
+"identify the public third-party adapter identity/thunk bootstrap" step,
+per the user's explicit sequencing ("verify reference WARP before
+extending the FeMe adapter bootstrap").
+
+## Device check
+`vulkaninfo --summary | Select-String deviceName` -> `FeMe CPU Vulkan
+Device` (confirmed at session start, per the standing "every time"
+rule).
+
+## What I did
+1. Read `W0WindowsIntegrationProbe.md`'s "Remaining work" item 2 and
+   `WARPRoadmap.md`'s `W0(g)` row, then read the relevant WDK headers
+   (`d3d12umddi.h`'s `D3D12DDIARG_OPENADAPTER`/`D3D12DDI_ADAPTERFUNCS`,
+   `d3dumddi.h`'s `D3DDDI_ADAPTERCALLBACKS`) to understand the public
+   `OpenAdapter12` contract's actual shape before writing anything.
+2. Built a second standalone, non-FeMe-CMake-tracked project,
+   `feme/utils/windows-adapter-bootstrap/` (kept separate from
+   `windows-adapter-probe`, per the user's own explicit instruction).
+   `BootstrapStub.cpp` implements a *real* `OpenAdapter12` that fills in
+   a full `D3D12DDI_ADAPTERFUNCS` table with instrumented functions,
+   each returning a deliberate, distinguishable result past the open
+   boundary (mostly `E_NOTIMPL`; no real device/resource/command
+   contract -- that's explicitly out of scope here).
+   `DirectHarness.cpp` does **not** use DXGI or `D3D12CreateDevice` at
+   all: it `LoadLibraryExW`s the stub directly, resolves `OpenAdapter12`
+   with `GetProcAddress`, and calls it by hand with a zeroed
+   `D3DDDI_ADAPTERCALLBACKS` and a minimal `D3D12DDIARG_OPENADAPTER`,
+   then exercises every filled-in table entry and reads back call
+   counters via an exported getter.
+3. Hit one build error: including `<dxgi.h>` after `<d3d10umddi.h>`/
+   `<d3d12umddi.h>` without first including `<winternl.h>` broke
+   `d3dkmddi.h` parsing (`DXGKDDI_RENDER` redefinition). The existing
+   `RejectionStub.cpp` already includes `<winternl.h>` first; adding the
+   same include to `DirectHarness.cpp` fixed it immediately. Not
+   investigated further or added to `.instructions.md` -- it's an
+   include-order requirement already implicitly documented by the
+   existing stub's own include list, not a new environment gotcha.
+4. Configured (sccache, no PCH, Debug/assertions) and built cleanly in
+   `C:\dev\adapter-bootstrap` (scratch, outside the repo). Ran the new
+   `direct-openadapter12` CTest case: **passed**. `OpenAdapter12`
+   returned `S_OK` with a fully filled table; `pfnGetSupportedVersions`/
+   `pfnGetOptionalDDITables`/`pfnCloseAdapter` returned `S_OK`;
+   `pfnGetCaps`/`pfnCreateDevice` returned the deliberate `E_NOTIMPL`;
+   `pfnCalcPrivateDeviceSize` returned the sentinel `64`; every
+   exercised counter was exactly 1. This proves the entry point and
+   table-filling mechanics are self-consistently implementable and
+   callable in user mode with **no** kernel involvement -- but it is a
+   direct call, not an OS-routed one, and does not by itself answer
+   whether DXGI/D3D12 would ever route a third-party module there.
+5. Combined that direct-call result with the prior session's
+   rejection-stub counters (`OpenAdapter10`/`OpenAdapter10_2`/
+   `OpenAdapter12` all stay at zero through a full
+   `CreateSoftwareAdapter` -> `D3D12CreateDevice` ->
+   `DXGI_ERROR_UNSUPPORTED` sequence, host and container) and did
+   targeted public-documentation research:
+   - Microsoft's own `IDXGIFactory::CreateSoftwareAdapter` docs
+     reference only "the Windows Vista Driver Development Kit" (the
+     D3D10-era UMD contract) -- no `OpenAdapter12`/D3D12 contract is
+     documented there.
+   - DXCore's adapter enumeration is documented as listing only
+     adapters a kernel-mode (WDDM/MCDM) driver has already registered
+     with Windows -- there is no public API to register a pure
+     user-mode adapter so DXCore (and therefore D3D12) will see it.
+   - The reference WARP export table's private ordinal-199
+     `WarpPrivateApi` (already noted in the host measurements) is
+     consistent with Microsoft's own WARP using an internal loading
+     path specific to its own identity, not the public
+     `CreateSoftwareAdapter` contract either.
+6. Concluded: **no public, no-install, third-party route to
+   `OpenAdapter12` was found.** This answers `W0(g)`'s bootstrap-
+   identification step with a *negative* result, which **triggers
+   `W0(b)`'s decision gate** (installed-adapter/kernel-driver
+   alternative, private-compatibility scope change, or application-
+   local COM runtime) rather than closing it. I deliberately did **not**
+   select an alternative myself -- the design doc's own text requires
+   "an explicit product/design decision" for this, and nothing in this
+   session's evidence picks one option over the others on technical
+   grounds alone (each has a real cost: a kernel driver needs
+   signing/installation even if minimal; private compatibility
+   contradicts the design's existing prohibition without separate
+   approval; a COM runtime gives up stock-driver-proof status by the
+   design doc's own definition).
+7. Wrote up the direct-call measurements and the decision finding as a
+   new section in `W0WindowsIntegrationProbe.md` (with the full
+   per-call result table, the four-point decision record, and an
+   explicit "this document does not select an alternative" disclaimer),
+   updated its "Next step" callout, and struck remaining-work item 2
+   with a link to the new section.
+8. Updated `WARPRoadmap.md`: partial-struck `W0(g)`'s "identify a
+   public third-party adapter identity/thunk bootstrap" clause as done
+   (negative result), marked the rest of the row as blocked on `W0(b)`,
+   and updated `W0(b)`'s row text from a conditional "if not viable" to
+   an explicit "Triggered 2026-11-06" with a link. Updated the opening
+   summary paragraph and the `W0(c)`/`W0(d)` cross-reference paragraphs
+   to mention the new `W0(g)` -> `W0(b)` dependency.
+9. Cleaned up the scratch `C:\dev\adapter-bootstrap` build directory
+   after recording results (same precedent as prior sessions' probe
+   builds) -- fully reproducible from the documented CMake commands.
+
+## Verification
+- `cmake --build C:\dev\adapter-bootstrap`: clean build, sccache +
+  assertions (Debug default) + `CMAKE_DISABLE_PRECOMPILE_HEADERS=ON`,
+  no `CMAKE_MT` workaround needed (same as this session's prior
+  container finding).
+- `ctest --test-dir C:\dev\adapter-bootstrap -V`: `direct-openadapter12`
+  passed, with every HRESULT/counter matching the designed expectation
+  exactly (see point 4 above).
+- `git status --short` clean before and after each commit; `git show
+  --stat` confirmed each commit's shape (one purely-additive code
+  commit, one targeted doc-edit commit).
+- No `check-feme` build or Vulkan CTS run performed this session --
+  same judgment call as the prior `W0(f)` session: only a new
+  standalone, non-FeMe-CMake-tracked project (outside
+  `feme/CMakeLists.txt`) was built/run, plus documentation; no FeMe
+  production or test source changed.
+
+## Decision record
+1. **Built a second standalone project rather than modifying
+   `windows-adapter-probe`.** The user's own task description explicitly
+   called for "a new, separate standalone project alongside
+   windows-adapter-probe, not a modification to it" -- followed
+   literally rather than folding the direct-call experiment into the
+   existing probe's CLI.
+2. **Did not attempt to make the stub's `OpenAdapter12` do anything
+   beyond deliberate, loud `E_NOTIMPL`/sentinel-value responses.** A
+   real device/resource/command DDI table is an enormous, separate
+   engineering task (the full D3D12 UMD surface); implementing even a
+   corner of it before answering the much cheaper "is there a public
+   route to this entry point at all" question would have been premature
+   investment in a path that might be fully blocked by `W0(b)`.
+3. **Did not pick a `W0(b)` alternative.** Doing so would have silently
+   expanded this session's scope from "answer a bounded research
+   question" to "make an unreviewed architecture decision" -- exactly
+   what the design document's own text warns against ("request an
+   explicit product/design decision", "no alternative is selected
+   merely because..."). The negative finding is recorded as clearly and
+   completely as I could make it; the choice among alternatives is left
+   for an explicit future decision.
+4. **Treated the DXCore/CreateSoftwareAdapter documentation research as
+   sufficient evidence for a documented (not absolute) negative
+   finding**, rather than trying to read actual Windows DXGI/D3D12
+   runtime source (unavailable) or spending further sessions on
+   additional probing. The existing rejection-stub counters (already
+   measured) plus this session's new direct-call result plus consistent
+   public documentation across three independent sources (DXGI's own
+   `CreateSoftwareAdapter` docs, DXCore's adapter-enumeration docs, and
+   the WARP export table's private-ordinal pattern) together make a
+   reasonably strong case without requiring Windows source access that
+   isn't available in this environment anyway.
+
+## Process note
+No new environment or process issue was found this session worth adding
+to `feme/.instructions.md` -- the one build hiccup (point 3 above,
+`<winternl.h>` include ordering) was a straightforward fix already
+implicitly documented by the existing `RejectionStub.cpp`'s own include
+list, not a new gotcha.
+
+## State
+`W0(e)` and `W0(f)` remain fully struck/closed (host and container
+measurements). `W0(g)`'s bootstrap-identification clause is now struck
+with a negative result; the rest of its row (reach `OpenAdapter12` via
+that contract, negotiate a pinned DDI, close a distinct FeMe prototype)
+is explicitly marked blocked on `W0(b)`. `W0(b)` is now marked
+"Triggered" rather than a conditional fallback -- an explicit decision
+among its three listed alternatives is needed before any further
+prototype-runtime work continues. `W0(a)`, `W0(c)`, and `W0(d)` remain
+partially done, unchanged in substance from before this session.
+`WS0`-`WS3` remain fully closed from earlier sessions. Git tree is clean
+as of the final commit (this `agent_thoughts.md` entry's own commit is
+still pending as this is written -- see next steps below for the
+closing-commit action this session still owes).
+
+## Suggested next steps (ranked)
+1. **Resolve `W0(b)`'s now-triggered decision gate.** This is now the
+   single blocking item for all further `W0`/`W1` D3D12-adapter work.
+   The three listed alternatives each have a real, different cost
+   (kernel-driver signing/installation even if minimal and "software
+   only"; a private-compatibility project explicitly contradicting the
+   design's existing prohibition without separate sign-off; an
+   application-local COM runtime that gives up the design's own
+   "stock Windows driver proof" framing entirely) -- this needs an
+   explicit, human product/design decision, not another autonomous
+   research pass. A future session's most useful contribution here
+   would likely be fleshing out each alternative's concrete cost/scope
+   (e.g., what a genuinely minimal "stub" kernel-mode driver's signing
+   and installation requirements actually look like on a Windows
+   11/Server 2025 target) to make that decision easier, without
+   selecting one outright.
+2. **`W0(c)`'s DXBC/DXIL-input classification sharpening**: still
+   carried forward unchanged across many sessions -- resolve the
+   "needs individual triage" candidate file list (`BasicAPI.cpp`,
+   `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
+   `PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
+   `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) one-by-one from
+   `C:\dev\Direct3D` (read-only reference checkout) to determine which
+   actually consume DXBC inputs versus merely reference DXBC-related
+   constants/headers. Independent of the `W0(b)` decision, so a good
+   change of pace if that decision isn't ready yet.
+3. Backlog carried from many prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
+   re-measure.
