@@ -132652,3 +132652,19 @@ Next steps, ranked:
 1. `ENV6(c)(5a)` (75 graphicsfuzz + left-shift).
 2. The 3 misc failures (`info`, `api.driver_properties`, `tessellation.shader_input_output`) are unexamined.
 3. cosh-return-inf-unused; offload (blocked).
+
+# Session: misc 3 failures triaged
+
+**Next action:** `ENV6(c)(5a)` flatten()-level fix (dedicated session; no sweep running).
+
+1. Device confirmed.
+2. The 3 "misc" sweep failures are all known, not new:
+   - `tessellation.shader_input_output.barrier`: "tessellation-control ... exactly one group-sync barrier" = `ENV5(c)(7)(b)` (hull lockstep barriers).
+   - `info.device_mandatory_features`: missing `robustImageAccess`, `vulkanMemoryModel`, etc. (`ENV5`).
+   - `api.driver_properties.conformance_version`: FeMe reports no conformance version (intentional, not conformant).
+3. No code changes.
+
+Next steps, ranked:
+1. `ENV6(c)(5a)` (75 graphicsfuzz + left-shift).
+2. `ENV5(c)(7)(b)` multi-barrier hull (1 case).
+3. cosh-return-inf-unused; offload (blocked).
