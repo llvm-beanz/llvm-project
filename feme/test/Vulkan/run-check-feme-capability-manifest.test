@@ -1,0 +1,30 @@
+// check-feme-capability-manifest.py (roadmap WS3(b)) must name which
+// specific row of a capability-manifest table drifted from its generator,
+// not just report "something changed", and must also report a manifest
+// that still matches as "unchanged" without raising a false alarm.
+//
+// Inputs/check-feme-capability-manifest/feme stands in for the real
+// feme/ subtree: its fake vk_gen_feature_inventory.py/
+// vk_gen_extension_inventory.py always emit a fixed two-row table
+// regardless of their (ignored) vk.xml/version/advertised-file arguments,
+// so this test exercises check-feme-capability-manifest.py's own diff
+// logic, not the real generators or a real vk.xml. The fixture's
+// Vulkan14FeatureInventory.md table matches the fake feature generator's
+// output exactly (the "unchanged" path); its VulkanExtensionInventory.md
+// table deliberately differs in one row from the fake extension
+// generator's output (the "drifted" path), so one run of the script
+// covers both outcomes.
+//
+// RUN: not %python %S/../../utils/check-feme-capability-manifest.py \
+// RUN:   --vk-xml %S/Inputs/check-feme-capability-manifest/fake-vk.xml \
+// RUN:   --feme-source-dir \
+// RUN:     %S/Inputs/check-feme-capability-manifest/feme \
+// RUN:   --python %python > %t.out 2>&1
+// RUN: FileCheck %s < %t.out
+//
+// CHECK: Vulkan14FeatureInventory: unchanged
+// CHECK: VulkanExtensionInventory: drifted
+// CHECK-NEXT: ---
+// CHECK-NEXT: +++
+// CHECK: -| `VK_FAKE_extension_two` | Not implemented |  |
+// CHECK: +| `VK_FAKE_extension_two` | Advertised |  |
