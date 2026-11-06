@@ -132418,3 +132418,39 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 2. Check `cosh-return-inf-unused` for the same shape.
 3. Full CTS re-measure in the background.
 4. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
+
+# Session: ENV6(c)(5a) flatten-level blocker found, reverted
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I tried (reverted, nothing committed to Linearize.cpp)
+- Relaxed `validate`'s shared-merge check in the `UncondBrInst` arm to
+  tolerate a successor that is the cycle's own tail exit check (detected
+  via `isLoopControlOrHeaderRelayEdge`). This made `canFlattenLoopBodyRegion`
+  accept `cov-function-infinite-loop-return-identical-condition`'s inner
+  loop.
+- But the subsequent `flatten()` call produced an invalid module:
+  `Flow2` is both the diamond merge (`11`/`18` arms -> `Flow3` -> `Flow2`)
+  and the loop's header-exit relay target (`.Flow2_crit_edge` -> `Flow2`
+  directly). `flatten`'s existing diamond-merge mask logic defines
+  `live.merge5`/`sideeffect.merge6` only on the `Flow3` arm and reuses them
+  unconditionally as the header phi's incoming value for *every* edge into
+  `Flow2` -- including the direct relay edge that never runs `Flow3` --
+  `Instruction does not dominate all uses`.
+- Tried forcibly setting `FoldHeaderExitIntoMask = true` as a bypass; same
+  verifier failure (the merge logic itself is the problem, not which
+  branch picks it).
+- Reverted the whole experiment; `git status` is clean except docs.
+
+## Next steps (ranked)
+1. `ENV6(c)(5a)`: this needs a `flatten()`-level fix (not just `validate`):
+   when a merge block the diamond logic resolves is *also* a loop header's
+   exit-relay target, the relay path's own live/sideeffect value (computed
+   when it folds the header exit, if it does) must feed the header's
+   per-iteration phi directly, bypassing the diamond arm's own per-arm
+   merge selects. This is a nontrivial, risky change to the core mask
+   bookkeeping -- needs its own dedicated session with careful unit tests
+   around `DiamondFlattener`/`LoopLinearizer` mask interactions.
+2. Full CTS re-measure in the background (safe, no code risk).
+3. `image_query.samples_storage`.
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
