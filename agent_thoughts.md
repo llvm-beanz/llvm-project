@@ -135268,3 +135268,111 @@ script's own logical execution order.
 3. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+## 2026-11-06: W0(c) Direct3D test corpus classification session
+
+**Next action taken**: With `WS0`-`WS3` all fully closed (prior sessions),
+the roadmap's own next milestone in sequence is `W0`. Per the ranked
+suggested-next-steps carried into this session, picked `W0(c)`/`W0(d)`
+first since both are research/documentation tasks needing no Windows
+adapter install.
+
+**Device check**: `vulkaninfo --summary | Select-String deviceName` ->
+`FeMe CPU Vulkan Device`. Confirmed first, as required every session.
+
+**What I did**:
+1. Re-read `C:\dev\Direct3D\.github\copilot-instructions.md` (required before
+   touching that checkout at all -- it is a copy of the host's checkout, not
+   a push target).
+2. Surveyed the test-bearing directories: `src\D3D12Conf\**` (conformance
+   submodule), `src\AutoUnitTests`, `src\UnitTests`, `src\d3dtest\{func,conf,
+   common}`, and `src\warp\tests`.
+3. Classified the corpus into `W0(c)`'s five named categories: public
+   black-box (`D3D12Conf`, `AutoUnitTests`, `UnitTests`, `d3dtest\func`),
+   WARP-private/white-box (`src\warp\tests\**`, `SoftGpuApiHelper`,
+   `d3dtest\conf\PrivateHeaders`), DXBC/DXIL-input (`D3D11On12.cpp` and a
+   handful of other `AutoUnitTests` files, confirmed via grep), optional/
+   preview-feature (`WorkGraphs`, `GenericPrograms`, `SamplerFeedback`,
+   `EnhancedBarriers`, `Raytracing`, ...), and display/HLK-dependency
+   (`Displayable`, `DirectSR`, `VideoBlit`, anything on `SoftGpuApiHelper`,
+   `MultiGPU`/`Multiengine`).
+4. Reviewed source/test redistribution: the whole checkout carries Microsoft
+   Corporation copyright headers; `D3D12Conf`'s own `README.md` says it is
+   shared with the IHV-facing `GraphicsHLK` repo (weaker restriction than the
+   rest of the tree, but not eliminated without FeMe's own license
+   determination). Recorded a conservative rule: read for behavioral
+   understanding only, never vendor file/test/shader content verbatim.
+5. Designed (not implemented) `W0(d)`'s FeMe adapter-selection/identity
+   assertion for a future runner -- there is no FeMe D3D12 runner yet
+   (blocked on `W0(a)`/`W1(a)`), so this is a design record, not code.
+6. Wrote all of the above into a new
+   `feme/docs/W0DirectXTestCorpusClassification.md`; normalized its CRLF
+   (the `create` tool writes CRLF on this container; repo is LF) before
+   committing.
+7. Updated `WARPRoadmap.md`: added a paragraph after the `W0` table
+   recording `W0(c)` as **partially done** (classification + redistribution
+   review complete; legacy-shader-determination and test-authoring pieces
+   explicitly blocked on `W0(a)`/`W0(b)`'s boundary decision and a future
+   runner, respectively) and noting `W0(d)`'s design is also recorded.
+   Updated the opening summary paragraph to match. Did not strike `W0(c)`
+   through (it is not fully done) and did not add further lettered rows
+   (the remaining pieces are blocked on existing upstream milestones, not
+   new work needing decomposition -- keeps nesting at zero extra letters).
+
+**Verification**: Documentation-only change; no FeMe production/test code
+touched. `git status --short` clean before and after each commit; `git diff
+--stat` confirmed each commit's shape (new-file add, then a small, additive
+roadmap edit).
+
+**Decision record**:
+1. Did not strike `W0(c)` through, even though its headline "classify the
+   corpus" deliverable is done -- its acceptance text bundles two more
+   pieces (legacy-shader determination, LLVM-owned test authoring) that are
+   genuinely blocked on other milestones, not merely postponed by choice.
+   Marking it fully struck would overclaim; leaving it a bare unstruck row
+   with no explanation would have looked like no progress happened at all.
+   The explanatory paragraph pattern (already used for closing `WS2`/`WS3`)
+   was reused here for a *partial*-progress case instead of a closure case.
+2. Did not add `W0(c)`/`W0(e)`-style new lettered rows for the blocked
+   pieces, since the nesting-avoidance rule is about not inventing new
+   breakdown structure for work that already has a named home (`W0(a)`/
+   `W0(b)` for the boundary decision, `W1(a)` for the runner) -- adding new
+   rows would have duplicated existing milestones under a different name.
+3. No CTS run this session: only documentation changed, no FeMe
+   production/runtime code. Matches the established precedent from the
+   `WS2`-closure and `WS3(a)` sessions (both documentation/tooling-only,
+   both skipped the CTS run with the same justification).
+4. Treated `D3D12Conf`'s `GraphicsHLK`-sharing note as relevant context, not
+   a license clearance -- recorded it but still applied the conservative
+   no-vendoring rule to all four non-public-blackbox categories (and,
+   pending an actual FeMe license determination, to `D3D12Conf` too).
+
+**Process note**: nothing new for `feme/.instructions.md` this session --
+no new environment/tooling gotcha was hit (the CRLF-on-create mitigation was
+already documented and applied without surprises).
+
+**State**: `WS0`-`WS3` remain fully closed (unchanged from prior sessions).
+`W0(c)` is now partially done (classification + redistribution review);
+`W0(a)`, `W0(b)`, and the remaining pieces of `W0(c)`/`W0(d)` are still
+open, each blocked on a Windows host/VM outside this process-isolated
+container (`W0(a)`/`W0(b)`) or on `W0(a)`/`W0(b)` themselves (`W0(c)`'s
+legacy-shader piece, `W0(d)`'s implementation). Git tree is clean as of the
+final commit below.
+
+**Suggested next steps (ranked)**:
+1. **`W0(a)`/`W0(b)`** (Direct3D sense): the only way to make further
+   progress on `W0` as a whole now that `W0(c)`'s non-blocked pieces are
+   done -- still blocked on a suitable Windows host/VM outside this
+   process-isolated container, per the roadmap's own text. If such a host
+   becomes available, this is next in sequence.
+2. Re-examine whether any part of `W0(c)`'s DXBC/DXIL-input classification
+   can be sharpened without a host: the grep-confirmed candidate list in
+   `W0DirectXTestCorpusClassification.md` (`BasicAPI.cpp`,
+   `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
+   `PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
+   `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) was left as "needs
+   individual triage" rather than resolved one-by-one; a short, bounded
+   follow-up could read each file and record which actually consume DXBC
+   inputs versus merely reference DXBC-related constants/headers.
+3. Backlog carried from prior sessions, still untouched: `ENV6(c)(3)`/
+   `ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
