@@ -111,3 +111,34 @@ add_custom_target(check-feme-fuzz
   USES_TERMINAL
   )
 set_target_properties(check-feme-fuzz PROPERTIES FOLDER "Tests")
+
+# WARP roadmap WS3: a fast, named-failure regression gate scoped to
+# FeMe's shared-core, API-neutral libraries (`FeMeImage`, `FeMeExecution`,
+# ...) -- built up incrementally by `WS0`-`WS2`'s own extractions, each
+# of which added its portable logic's tests directly to one of these
+# binaries. Unlike `check-feme` (which discovers thousands of unrelated
+# tests across the whole project via lit), this runs only the listed
+# gtest binaries directly and reports each one's own named failures, for
+# a quick local check after a shared-core-only change before paying for
+# a full `check-feme`/CTS run.
+set(FEME_SHARED_CORE_TEST_TARGETS
+  FeMeExecutionTests
+  FeMeImageTests
+  )
+
+set(FEME_SHARED_CORE_TEST_ARGS "")
+foreach(shared_core_test ${FEME_SHARED_CORE_TEST_TARGETS})
+  list(APPEND FEME_SHARED_CORE_TEST_ARGS
+    "--gtest-binary=$<TARGET_FILE:${shared_core_test}>")
+endforeach()
+
+add_custom_target(check-feme-shared-core
+  COMMAND ${Python3_EXECUTABLE}
+          ${FEME_SOURCE_DIR}/utils/check-feme-shared-core.py
+          ${FEME_SHARED_CORE_TEST_ARGS}
+  DEPENDS ${FEME_SHARED_CORE_TEST_TARGETS}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  COMMENT "Running FeMe shared-core library regression tests"
+  USES_TERMINAL
+  )
+set_target_properties(check-feme-shared-core PROPERTIES FOLDER "Tests")
