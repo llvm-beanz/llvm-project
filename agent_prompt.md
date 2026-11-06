@@ -68,27 +68,32 @@ mid-investigation to avoid losing documentation.
 
 Please begin work on the WARP roadmap. Suggested next steps:
 
-**Suggested next steps (ranked)**:
-1. **`W0(g)`**: the newly-split, concrete next step -- identify the public
-   third-party adapter identity/thunk bootstrap contract (likely centered on
-   `d3d12umddi.h`'s `OpenAdapter12`/`D3D12DDIARG_OPENADAPTER` and the
-   DXGI/DDI thunk-service callbacks the design doc's `DXGIDevice.cpp`
-   evidence row already flagged), then extend an LLVM-owned prototype (a
-   new, separate standalone project alongside `windows-adapter-probe`, not
-   a modification to the existing reference/rejection probe) through open/
-   negotiate/close with a distinct FeMe identity. This is a substantially
-   larger task than this session's measurement work and should likely be
-   broken into its own smaller bounded steps once started (e.g., first just
-   getting `OpenAdapter12` to be *called* with a minimal stub returning a
-   deliberate, loud failure, before attempting any real DDI table).
-2. Re-examine whether any part of `W0(c)`'s DXBC/DXIL-input classification
-   can be sharpened without a host: the grep-confirmed candidate list in
-   `W0DirectXTestCorpusClassification.md` (`BasicAPI.cpp`,
+1. **Resolve `W0(b)`'s now-triggered decision gate.** This is now the
+   single blocking item for all further `W0`/`W1` D3D12-adapter work.
+   The three listed alternatives each have a real, different cost
+   (kernel-driver signing/installation even if minimal and "software
+   only"; a private-compatibility project explicitly contradicting the
+   design's existing prohibition without separate sign-off; an
+   application-local COM runtime that gives up the design's own
+   "stock Windows driver proof" framing entirely) -- this needs an
+   explicit, human product/design decision, not another autonomous
+   research pass. A future session's most useful contribution here
+   would likely be fleshing out each alternative's concrete cost/scope
+   (e.g., what a genuinely minimal "stub" kernel-mode driver's signing
+   and installation requirements actually look like on a Windows
+   11/Server 2025 target) to make that decision easier, without
+   selecting one outright.
+2. **`W0(c)`'s DXBC/DXIL-input classification sharpening**: still
+   carried forward unchanged across many sessions -- resolve the
+   "needs individual triage" candidate file list (`BasicAPI.cpp`,
    `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
    `PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
-   `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) was left as "needs
-   individual triage" rather than resolved one-by-one; carried forward
-   unchanged, still cheap and bounded as a change of pace from `W0(g)`'s
-   more open-ended design work.
-3. Backlog carried from prior sessions, still untouched: `ENV6(c)(3)`/
-   `ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
+   `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) one-by-one from
+   `C:\dev\Direct3D` (read-only reference checkout) to determine which
+   actually consume DXBC inputs versus merely reference DXBC-related
+   constants/headers. Independent of the `W0(b)` decision, so a good
+   change of pace if that decision isn't ready yet.
+3. Backlog carried from many prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
+   re-measure.
+
