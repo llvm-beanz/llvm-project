@@ -132876,3 +132876,88 @@ Next steps, ranked:
    keep re-checking each session per standing instructions -- upstream
    `WaveActiveMax.test` content (not just line endings) has drifted
    once before and may again.
+
+# Session: ENV6(c)(5)/ENV6(c)(6) cluster counts re-measured (L541)
+
+**Done**: re-measured the `ENV6(c)(5)`/`ENV6(c)(6)` roadmap cluster
+counts. This was ranked next step #1 from the `L540` session. No code
+change this session -- a pure re-measurement, same `L541` convention
+used for a prior docs-only `VulkanCTSReport.md` entry (`L507`'s own
+clustering method).
+
+1. Confirmed `FeMe CPU Vulkan Device` (standing per-session check, done
+   twice: start of session and again before the sweep).
+2. Rebuilt `feme_vulkan` (ccache, assertions on, no PCH -- already
+   configured, no CMake changes needed) and ran `check-feme`:
+   3906/3910 Passed, 4 Unsupported, 0 Failed. ~4 minutes.
+3. Ran the full 757-case `vk-default/graphicsfuzz.txt` mustpass corpus
+   via `run_vulkan_cts.py --batch-size 20 --workers 6 --batch-timeout
+   300 --final-timeout 60`. ~2 minutes (fast this time -- no hangs hit).
+   Result: **685 Pass / 72 Fail**, exactly matching `L540`'s own
+   post-`ENV6(e)(7)` count. No drift since that session.
+4. Re-clustered the 72 solo-verified `verify-*.log` failures by first
+   `error:` line, normalized the same way `L507` did (quoted identifiers
+   -> `'X'`, digits -> `N`).
+
+**Numbers, before (stale, from `L507`'s original 106-case clustering)
+vs. now**:
+- `ENV6(c)(3)` total: 83 -> **69**.
+- `ENV6(c)(5)` (empty-diamond-arm + both uniform-pass-through variants):
+  37 -> **29** (11 + 10 + 8).
+- `ENV6(c)(6)` (no-reconvergence-point + both simdize bail-outs):
+  29 -> **26** (10 + 15 + 1).
+- The "branch's own check is not the sole entry into its continuation"
+  diagnostic (previously 7 cases) no longer appears **at all** in the
+  current 72 -- fully resolved incidentally by some earlier session's
+  fix, never tracked as its own closed milestone.
+- A **new** 3-case bucket appeared with no compiler diagnostic at all
+  (`cov-do-while-negative-iterator-nested-loops-increment-array-
+  element`, `cov-function-always-return-negative-bitfield-extract`,
+  `cov-nested-loop-not-greater-than-increment-array-element`) -- not
+  present in `L507`'s original clustering, not investigated this
+  session (out of scope for a counts-only re-measurement).
+- One category (`only a uniform pass-through region to/from the exit
+  check`) actually *grew*, 5 -> 10. Plausible explanation, not
+  confirmed: fixing earlier-stage bugs in other clusters let more cases
+  progress further through the pipeline before hitting a bail-out,
+  landing on this particular diagnostic instead of an earlier one. Not
+  chased down this session -- flagged for whoever triages this cluster
+  next.
+
+5. Updated `Roadmap.md`'s `ENV6(c)(3)`/`(5)`/`(6)` rows with the new
+   counts and breakdowns; added `VulkanCTSReport.md`'s `L541` entry with
+   the full method and numbers. Committed together (one commit, since
+   both record the same single measurement).
+6. Re-verified the offload-test-suite patch set (ranked next step #4
+   from `L540`, standing per-session instruction): fresh `git clone` +
+   `git remote add llvm-beanz https://github.com/llvm-beanz/offload-
+   test-suite.git` + `git fetch llvm-beanz feme` + `git am --keep-cr` on
+   all 5 stored patches from a fresh checkout of `llvm-beanz/feme`'s
+   current tip. All 5 apply cleanly, no drift. (Needed a one-time local
+   `git config user.email`/`user.name` in the scratch clone -- it had no
+   identity configured; not a repo issue, just a fresh-clone artifact,
+   cleaned up after.)
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no
+update -- no feature/extension status changed, docs-and-measurement-only
+session.
+
+**Next steps, ranked**:
+1. Triage `cosh-return-inf-unused` as its own shape (now confirmed still
+   in the `ENV6(c)(5)` header-exit-to-latch sub-bucket, 8 cases this
+   session) -- carried forward unstarted for three sessions now.
+2. The new 3-case no-diagnostic bucket from this session (listed above)
+   is completely unexplored -- first step would be
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s own method,
+   to check whether it's silent-rendering or a logged-but-unmatched
+   diagnostic.
+3. Chase down why the "pass-through to/from exit check" bucket grew
+   (5 -> 10) instead of only shrinking -- likely an artifact of some
+   earlier session's fix letting cases progress further before bailing
+   out, but not confirmed. Pick one of the 5 newly-appearing cases and
+   check whether it used to hit a *different*, now-fixed diagnostic.
+4. `GetAlreadyLinearizedCycleExit`'s general-mechanism audit (carried
+   from `L540`, still not done) now has an accurate, current 69-case
+   `ENV6(c)(3)` list to check against instead of a stale one.
+5. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (re-verified clean again this session).
