@@ -3711,6 +3711,24 @@ TEST_F(ImageSamplingTest, LoadFetchesD24UnormS8UintDepthAspect) {
   EXPECT_NEAR(Out1[0], 0x400000 / 16777215.0f, 1e-6f);
 }
 
+// Roadmap ENV6(e)(1): `X8_D24_UNORM` shares `D24_UNORM_S8_UINT`'s word
+// layout; before this test it had no runtime element-size/unpack entry, so
+// an input-attachment depth read returned zero.
+TEST_F(ImageSamplingTest, LoadFetchesX8D24UnormDepth) {
+  uint32_t Storage[1][2] = {{0xFFFFFFFFu, 0x00400000u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 2, 1,
+                                        ResourceFormat::X8_D24_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out0[4], Out1[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out0);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, /*Sample=*/0, true, Out1);
+  EXPECT_FLOAT_EQ(Out0[0], 1.0f);
+  EXPECT_NEAR(Out1[0], 0x400000 / 16777215.0f, 1e-6f);
+}
+
 TEST_F(ImageSamplingTest, LoadFetchesD32FloatS8X24UintDepthAspect) {
   // Texel 0: depth word = 0.75f, stencil word = 0xFF (a nonzero value in
   // the second 4-byte word that must not leak into the decoded depth).

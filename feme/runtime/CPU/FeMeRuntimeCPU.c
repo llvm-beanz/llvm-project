@@ -2213,7 +2213,8 @@ femeRTImageFormatElementSize(uint32_t Format) {
   // separate words -- see `packDepthClear`'s own comment, ImageFixture.cpp)
   // rather than the narrower pure-depth-format's, since `femeRTFetchTexel2D`
   // derives its X-axis texel stride from this same return value.
-  case 33: // D24_UNORM_S8_UINT
+  case 33:  // D24_UNORM_S8_UINT
+  case 133: // X8_D24_UNORM (roadmap ENV6(e)(1)): same 4-byte word.
     return 4;
   case 34: // D32_FLOAT_S8X24_UINT
     return 8;
@@ -2907,6 +2908,7 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
   // descriptor named `VK_IMAGE_ASPECT_DEPTH_BIT` or `_STENCIL_BIT` (see
   // this row's roadmap entry), so a stencil-aspect sample of a combined
   // format is a known, separate, not-yet-handled case.
+  case 133: // X8_D24_UNORM (roadmap ENV6(e)(1)): high byte unused.
   case 33: { // D24_UNORM_S8_UINT: low 24 bits are depth, high byte stencil.
     uint32_t Word;
     __builtin_memcpy(&Word, Ptr, sizeof(Word));
