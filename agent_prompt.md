@@ -68,7 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. ENV6(c)(5): reduce 2-3 of the 14 "body shape" loop cases first.
-2. Full CTS re-measure beyond the failing list (new regressions unmeasured).
+1. Dump `FEME_DUMP_IR_PRELINEARIZE` for those 3, reduce with feme-opt, look for a shared shape.
+2. Full CTS re-measure in the background.
 3. `image_query.samples_storage`.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
