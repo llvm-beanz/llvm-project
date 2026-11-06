@@ -72,6 +72,12 @@ The original compute-only baseline is no longer current:
   shader input requirements of the promised Direct3D profile.
 
 There is still no FeMe Direct3D frontend or installed software adapter.
+The 2026-11-06 [Windows integration probe](W0WindowsIntegrationProbe.md)
+establishes reference-WARP loading through `CreateSoftwareAdapter` on inbox
+and Agility runtimes and executable-local WARP DLL selection. An LLVM-owned
+rejection stub fails before DDI open negotiation. A valid third-party
+user-mode bootstrap remains unproven; a new kernel miniport must not be treated
+as necessary merely because the stock runtime uses adapter/thunk services.
 The shared ray-tracing library remains planned. Existing Vulkan functionality
 is evidence for reuse, not proof of Direct3D feature-level compliance.
 The broader scheduling index remains [Roadmap.md](Roadmap.md) (§1.10 and
@@ -299,7 +305,18 @@ replacement:
 The first prototype must resolve the exact supported Windows integration
 contract before runtime implementation begins. D3D12's device driver interface
 is versioned with Windows and the WDK; it is not equivalent to implementing the
-public `ID3D12*` interfaces. The prototype should answer:
+public `ID3D12*` interfaces.
+
+First investigate the user-mode software-adapter route using the
+[host probe](W0WindowsIntegrationProbe.md). `CreateSoftwareAdapter` success,
+executable-local DLL loading, and WARP reference-device success are three
+different observations; none proves a third-party FeMe device. Determine
+whether required adapter/thunk services can be supplied under a supported
+public contract before requiring a new miniport or switching to a COM runtime.
+The installed-adapter product goal and the prohibition on undocumented WARP
+binary compatibility are unchanged by these experiments.
+
+The prototype should answer:
 
 - Whether a render-only or software display adapter can be installed and
   enumerated on each target Windows version without a physical display device.
