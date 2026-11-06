@@ -68,8 +68,8 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. Reduce the nested-loop case above into a `feme-opt` lit repro
-   (outer loop whose latch branch is an inner loop's `loop.exit.guard`).
-2. Inspect `cosh-return-inf-unused` for a shared shape.
-3. Full CTS re-measure in the background.
-4. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
+1. Implement `ENV6(c)(5a)`: treat a post-child-cycle exit guard as the outer
+   loop's exit check in the loop lowering (see the precheck near
+   Linearize.cpp ~8770, `canFlattenLoopBodyRegion`).
+2. Full CTS re-measure in the background.
+3. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
