@@ -11923,3 +11923,12 @@ Sweep of 3,244,369 cases: 731,492 Pass / 2,512,427 NotSupported / 404 Fail /
 199 `x8_d24_unorm_pack32` (fixed: runtime lacked format 133; all 199 re-run
 pass), 102 `glsl.derivate.*.vec4_highp` (`ENV6(e)(6)`, open), 1
 `graphicsfuzz.cov-x86-isel-lowering-negative-left-shift` (`ENV6(e)(7)`, open).
+
+## L535: Helper-lane varying snap fix
+
+`Executor.cpp` no longer snaps *uncovered* helper lanes' interpolated
+varyings to the vertex range. `glsl.derivate.*` now 1347 Pass / 21 Fail
+(was 102 `vec4_highp` failures): the remaining 21 are
+`vec4_highp.fbo_msaa{2,4}` (18) and `fwidth*.fbo_float` (3). No regressions
+in `pipeline.monolithic.bind_buffers_2.*` (0 fail) or `glsl.builtin_var.*`
+(0 fail). `check-feme`: 3905 passed, 4 unsupported.

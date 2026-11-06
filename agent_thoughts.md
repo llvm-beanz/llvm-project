@@ -132585,3 +132585,19 @@ Next steps, ranked:
 1. Derivate vec4_highp (`ENV6(e)(6)`).
 2. `ENV6(c)(5a)` flatten()-level fix: now unblocks ~75 graphicsfuzz cases plus left-shift. Dedicated session.
 3. cosh-return-inf-unused; offload (blocked).
+
+# Session: derivate vec4_highp fix
+
+**Next action:** triage `glsl.derivate.*.vec4_highp.fbo_msaa{2,4}` (18 cases).
+
+1. Device confirmed: FeMe CPU Vulkan Device.
+2. Root cause found by logging the CTS first-stage check (LOG_ALL): only 4 diagonal pixels failed. Instrumenting the executor showed a helper lane at 74.99954 snapped to 75 (vertex min). The "noise snap" in varying interpolation applied to helper lanes too.
+3. Fix: snap only when the lane is covered. Regression test `HelperLaneVaryingIsNotSnappedToVertexRange` fails before, passes after. `check-feme` 3905 pass.
+4. glsl.derivate: 102 -> 21 failures. No regressions in bind_buffers_2 or builtin_var.
+5. Added shell/process gotchas to `.instructions.md`.
+
+Next steps, ranked:
+1. derivate vec4_highp fbo_msaa{2,4} (18) and fwidth fbo_float (3, 3.4e-5 off, rounding).
+2. `ENV6(c)(5a)` flatten()-level fix (also unblocks negative-left-shift).
+3. cosh-return-inf-unused; offload (blocked).
+4. A full sweep rerun when convenient (library changed; old sweep now stale).
