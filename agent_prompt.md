@@ -67,28 +67,22 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-Next steps, ranked:
-1. Re-measure the `ENV6(c)(5)`/`ENV6(c)(6)` roadmap cluster counts --
-   still an open item from two sessions ago, not touched this session
-   either (this session's own corpus diff only exercised the targeted
-   case plus whatever `graphicsfuzz.*` already covers; the cluster
-   counts in `ENV6(c)(5)`/`ENV6(c)(6)`'s own roadmap rows predate even
-   `ENV6(c)(5a)`'s fix and have never been directly re-verified).
-2. Triage `cosh-return-inf-unused` as its own shape (two distinct "only
-   a uniform pass-through region" bail-outs plus a mask-affecting-op
-   diagnostic -- confirmed by two sessions now to be unrelated to both
-   `ENV6(c)(5a)`'s and this session's fix).
-3. The `GetAlreadyLinearizedCycleExit` fix this session landed is a
-   general mechanism (any already-uncond-ified child header, not just
-   this one shape) -- worth a quick audit of whether any other
-   known-unfixed `ENV6(c)(3)`/`ENV6(c)(5)`/`ENV6(c)(6)` cluster case
-   happens to share the exact "enclosing loop's walk reaches an
-   already-linearized nested loop's own header" shape and gets fixed
-   incidentally; the 757-case corpus diff this session found exactly
-   one flip, so if there's overlap it's likely small, but not yet
-   checked directly against the untriaged clusters' own case lists.
-4. None of the offload-test-suite patch set is at risk right now (all 5
-   re-verified this session with a fresh `llvm-beanz/feme` fetch), but
-   keep re-checking each session per standing instructions -- upstream
-   `WaveActiveMax.test` content (not just line endings) has drifted
-   once before and may again.
+**Next steps, ranked**:
+1. Triage `cosh-return-inf-unused` as its own shape (now confirmed still
+   in the `ENV6(c)(5)` header-exit-to-latch sub-bucket, 8 cases this
+   session) -- carried forward unstarted for three sessions now.
+2. The new 3-case no-diagnostic bucket from this session (listed above)
+   is completely unexplored -- first step would be
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s own method,
+   to check whether it's silent-rendering or a logged-but-unmatched
+   diagnostic.
+3. Chase down why the "pass-through to/from exit check" bucket grew
+   (5 -> 10) instead of only shrinking -- likely an artifact of some
+   earlier session's fix letting cases progress further before bailing
+   out, but not confirmed. Pick one of the 5 newly-appearing cases and
+   check whether it used to hit a *different*, now-fixed diagnostic.
+4. `GetAlreadyLinearizedCycleExit`'s general-mechanism audit (carried
+   from `L540`, still not done) now has an accurate, current 69-case
+   `ENV6(c)(3)` list to check against instead of a stale one.
+5. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (re-verified clean again this session).
