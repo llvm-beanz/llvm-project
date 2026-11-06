@@ -132571,3 +132571,17 @@ Next steps, ranked:
 2. negative-left-shift.
 3. Rerun the remaining x8_d24 cases from `/tmp/newfail.txt` and record in VulkanCTSReport.md.
 4. ENV6(c)(5a) flatten-level fix; cosh-return-inf-unused; offload (blocked).
+
+# Session: x8_d24 verify, left-shift triage
+
+**Next action:** triage `glsl.derivate.*.vec4_highp` (102 cases).
+
+1. Device confirmed: FeMe CPU Vulkan Device.
+2. All 199 x8_d24 sweep failures re-run: 199/199 pass. Recorded in VulkanCTSReport L534 and Roadmap `ENV6(e)(5)`.
+3. negative-left-shift: linearize verifier error, "does not dominate" on diamond merge selects feeding header phis from `Flow9._crit_edge`. Same shape as `ENV6(c)(5a)`. Not fixed; folded into that row as `ENV6(e)(7)`.
+4. Derivate vec4_highp not started this session.
+
+Next steps, ranked:
+1. Derivate vec4_highp (`ENV6(e)(6)`).
+2. `ENV6(c)(5a)` flatten()-level fix: now unblocks ~75 graphicsfuzz cases plus left-shift. Dedicated session.
+3. cosh-return-inf-unused; offload (blocked).
