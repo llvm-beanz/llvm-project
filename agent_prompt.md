@@ -68,7 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. derivate vec4_highp fbo_msaa{2,4} (18) and fwidth fbo_float (3, 3.4e-5 off, rounding).
-2. `ENV6(c)(5a)` flatten()-level fix (also unblocks negative-left-shift).
-3. cosh-return-inf-unused; offload (blocked).
-4. A full sweep rerun when convenient (library changed; old sweep now stale).
+1. fwidth fbo_float (3).
+2. `ENV6(c)(5a)` flatten-level fix (unblocks negative-left-shift).
+3. Full sweep rerun (library changed).
+4. cosh-return-inf-unused; offload (blocked).
