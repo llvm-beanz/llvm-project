@@ -135833,3 +135833,102 @@ closing-commit action this session still owes).
 3. Backlog carried from many prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
    re-measure.
+
+## 2026-11-07: W0(b) alternative cost/scope research (no selection)
+
+**Next action taken**: Per the request's explicit ranked next step #1 --
+flesh out each of `W0(b)`'s three decision-gate alternatives' concrete
+cost/scope from primary sources, without autonomously selecting one --
+researched Windows kernel-driver signing requirements, WARP's own runtime
+registration mechanism, and enumerated the application-local COM runtime
+alternative's added surface.
+
+**Device check**: `vulkaninfo --summary | Select-String deviceName` ->
+`FeMe CPU Vulkan Device`. Confirmed first, as required every session.
+
+**What I did**:
+1. Confirmed a clean git tree matching the end of the prior session (`W0(g)`
+   bootstrap-contract negative finding committed, `W0(b)` marked
+   "Triggered").
+2. Fetched Microsoft's primary
+   [Driver Signing offerings](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/driver-signing-offerings)
+   page in full (it had been truncated mid-read before compaction). Found
+   its explicit per-OS acceptance table and a dedicated "Windows Server
+   signed drivers" section stating Windows Server >= 2016 does **not**
+   accept attestation-signed drivers at all, only HLK-tested dashboard
+   signing -- directly relevant since this container's measured OS is
+   Windows Server 2025 Datacenter 24H2.
+3. Fetched Microsoft's primary
+   [Loading Test Signed Code](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option)
+   page and cross-checked with secondary sources that enabling
+   `bcdedit /set testsigning on` fails under Secure Boot until it is
+   disabled in firmware -- meaning even the lightest-weight signing option
+   needs a dedicated host/VM with firmware access and a reboot, not this
+   process-isolated container.
+4. Searched for and read a summary of how WARP itself registers as a DXGI
+   adapter (`IDXGIFactory4::EnumWarpAdapter`, a runtime-internal special
+   case, not a general third-party contract) to sharpen alternative (b)'s
+   framing: it would mean impersonating/hooking a WARP-specific special
+   case, not extending a general-purpose one.
+5. Wrote a new `### W0(b) alternative cost/scope evaluation (not a
+   selection)` section in `W0WindowsIntegrationProbe.md`, with per-alternative
+   findings, citations, and an explicit statement that no alternative is
+   selected by this document.
+6. Linked the new section from `WARPRoadmap.md`'s `W0(b)` row, without
+   striking or resolving the row itself.
+7. Committed the doc changes in a single commit (both files only touch the
+   same `W0(b)` cost-research topic, so one commit was appropriate rather
+   than splitting further).
+
+**Verification**: Both edits are additive documentation; no FeMe production
+or test source was touched, so per established precedent no `check-feme`
+build or Vulkan CTS re-run was performed this session.
+
+**Decision record**: As explicitly instructed, this session does **not**
+select among `W0(b)`'s three alternatives. The new findings most strongly
+narrow alternative (a): attestation signing is unavailable on this
+container's own Windows Server OS family (confirmed from a primary Microsoft
+source, resolving the prior session's "unverified" flag on that specific
+claim), and test-signing mode -- the only lightweight kernel-driver option --
+requires Secure Boot disabled on a dedicated host/VM, reinforcing (not
+newly discovering) that `W0(a)`/kernel-driver work needs a host/VM outside
+this container. Alternative (a)'s realistic shape for a research project is
+therefore a dedicated test-signed development VM, not an HLK-certified
+production driver, unless shipping a signed driver later becomes a hard
+requirement.
+
+**Process note**: Some blog-style secondary sources this session surfaced
+specific dates (an "April 2026" cross-signing trust removal, a "March 2027"
+SBOM/VEX requirement) that could not be confirmed against the primary
+Microsoft pages actually fetched. These are recorded in the probe doc only
+as items needing verification, not as established fact -- worth remembering
+that search-summarized blog content sometimes states unverifiable specifics
+with unwarranted confidence.
+
+**State**: Git tree clean after this section's commit. `W0(b)` remains
+"Triggered", now with a cost/scope evaluation available but still awaiting
+an explicit human decision among its three alternatives. `W0(c)`'s DXBC/DXIL
+classification candidate list remains untouched. `WS0`-`WS3` remain fully
+closed.
+
+**Suggested next steps (ranked)**:
+1. **Make the `W0(b)` decision explicitly** (human/product call, not an
+   agent task): with cost/scope now documented for all three alternatives,
+   this is the single blocking item for all further `W0(g)`/`W1`
+   D3D12-adapter work. If alternative (a) is chosen, the next concrete step
+   would be provisioning a dedicated host/VM (not this container) with
+   Secure Boot disabled and test-signing enabled, then re-attempting
+   `W0(g)`'s `OpenAdapter12` prototype through that distinct FeMe identity.
+   If alternative (c) is chosen, the next step would be scoping a minimal
+   COM-activation/DXGI-equivalent surface as its own sub-milestone.
+2. **`W0(c)`'s DXBC/DXIL-input classification sharpening**: still carried
+   forward unchanged across many sessions -- resolve the "needs individual
+   triage" candidate file list (`BasicAPI.cpp`, `GBVExecuteIndirect.cpp`,
+   `Library.cpp`, `MultiGPU.cpp`, `PipelineStateObject.cpp`,
+   `Raytracing.cpp`, `ResourceBinding.cpp`, `ShaderRootSig.cpp`,
+   `util.{cpp,h}`, `pch.hpp`) one-by-one from `C:\dev\Direct3D` (read-only
+   reference checkout). Independent of the `W0(b)` decision, so a good
+   change of pace if that decision isn't ready yet.
+3. Backlog carried from many prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
+   re-measure.
