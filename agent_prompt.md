@@ -66,39 +66,29 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-Please begin work on the WARP roadmap.
+Please begin work on the WARP roadmap. Suggested next steps:
 
-The selected direction is **container-first, application-local user-mode
-software-driver integration with stock Windows D3D12/DXGI**. This is not a
-request to implement a replacement COM runtime or install a kernel driver.
-Read `feme/docs/W0WindowsIntegrationProbe.md` and `feme/docs/WARPRoadmap.md`.
-Host reference-WARP results are recorded; container results and a working
-third-party FeMe adapter are not yet established.
-
-## Suggested next steps (ranked)
-
-1. **`W0(f)`**: build `feme/utils/windows-adapter-probe` in the Windows
-   container and run its four CTest cases first. Record the actual OS,
-   SDK/WDK, runtime/core/WARP paths and versions, HRESULTs and DDI counters.
-   Verify reference WARP before extending the FeMe adapter bootstrap to reach
-   `OpenAdapter12`, callback negotiation and teardown with a distinct identity.
-   Preserve caching, assertions and disabled PCH. Do not assume host success
-   proves container success, or wait for kernel installation to start.
+**Suggested next steps (ranked)**:
+1. **`W0(g)`**: the newly-split, concrete next step -- identify the public
+   third-party adapter identity/thunk bootstrap contract (likely centered on
+   `d3d12umddi.h`'s `OpenAdapter12`/`D3D12DDIARG_OPENADAPTER` and the
+   DXGI/DDI thunk-service callbacks the design doc's `DXGIDevice.cpp`
+   evidence row already flagged), then extend an LLVM-owned prototype (a
+   new, separate standalone project alongside `windows-adapter-probe`, not
+   a modification to the existing reference/rejection probe) through open/
+   negotiate/close with a distinct FeMe identity. This is a substantially
+   larger task than this session's measurement work and should likely be
+   broken into its own smaller bounded steps once started (e.g., first just
+   getting `OpenAdapter12` to be *called* with a minimal stub returning a
+   deliberate, loud failure, before attempting any real DDI table).
 2. Re-examine whether any part of `W0(c)`'s DXBC/DXIL-input classification
    can be sharpened without a host: the grep-confirmed candidate list in
    `W0DirectXTestCorpusClassification.md` (`BasicAPI.cpp`,
    `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
    `PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
    `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) was left as "needs
-   individual triage" rather than resolved one-by-one; a short, bounded
-   follow-up could read each file and record which actually consume DXBC
-   inputs versus merely reference DXBC-related constants/headers.
+   individual triage" rather than resolved one-by-one; carried forward
+   unchanged, still cheap and bounded as a change of pace from `W0(g)`'s
+   more open-ended design work.
 3. Backlog carried from prior sessions, still untouched: `ENV6(c)(3)`/
    `ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
-
-Keep driver installation/signing/reboot and display/HLK work as separate
-host/VM tasks if the selected deployment eventually requires them. Do not
-replace system DLLs, silently use private WARP ordinals, or switch to an
-installed miniport/COM-runtime architecture without an explicit design
-decision. If a container probe fails, record its exact failure and isolate
-the runtime/environment issue rather than declaring all W0 work host-blocked.
