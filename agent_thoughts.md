@@ -132219,3 +132219,82 @@ Bisecting a pass/fail shader by editing the CTS source is cheap here. Do it earl
 2. `transform_feedback.fuzz` (4).
 3. Full CTS re-measure in the background.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: opunreachable.all fixed-point fold (ENV5(b))
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I did
+- `spirv_assembly.instruction.compute.opunreachable.all` (1 of the 7 remaining
+  `spirv_assembly.instruction` cases): `modulo4()`'s switch lowers to a
+  branch whose condition is only *transitively* constant (urem/icmp/phi
+  through `LowerSwitch` flow blocks), with an `unreachable` arm.
+  `foldConstantConditionBranches` only folded a branch whose condition was
+  *already* a literal `ConstantInt`, so this reached `DiamondFlattener` as a
+  misdiagnosed "no reconvergence point" error.
+- Fix: iterate instruction simplification + branch folding + dead-block
+  elimination to a fixed point, gated on "some branch has a bare
+  `unreachable` arm" (so it's a no-op for every other function).
+
+## The regression I almost shipped
+- First version broke 1 unit test:
+  `LinearizeTest.TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit`.
+- Root cause: `EliminateUnreachableBlocks` collapses a phi down to its value
+  once it has only one incoming edge left -- *even inside a real loop's own
+  backedge condition*. My fixed-point loop then re-folded that now-literal
+  backedge branch, deleting the loop's CFG backedge before `LoopLinearizer`
+  ever ran. The old single-pass code accidentally avoided this by simply
+  never looping back to look again.
+- Fix: compute the function's loop blocks via `CycleInfo` *before* any
+  folding; only fold a loop block's branch on the very first iteration
+  (matching old behavior for loops exactly), unlimited iteration elsewhere.
+  Added `constant-condition-fold-preserves-loop-backedge.ll` as a dedicated
+  regression test for this, plus
+  `constant-condition-computed-branch-unreachable-arm.ll` for the fix itself.
+- Codified the `EliminateUnreachableBlocks` phi-collapse gotcha in
+  `feme/.instructions.md` since it's a general LLVM utility trap, not FeMe-
+  specific, and easy to hit again in any pass that re-derives analyses after
+  calling it.
+
+## Verification
+- `check-feme`: 3899/3903 passed, 4 Unsupported, 0 Failed (was 3896 before
+  this session's new tests).
+- `opunreachable.all`: Pass (was Fail).
+- `spirv_assembly.instruction.*` regression batch: ran ~75% before the
+  590s timeout (no crash, no hang); 0 new Fail. The 3 pre-existing
+  `barrier.{in_if,in_switch,in_loop}` failures (`ENV5(c)(7)(b)`, the
+  lockstep-barrier gap) are unchanged, as expected -- unrelated shape.
+
+## What I did not do
+- Did not touch `opptrequal`/`opptrnotequal`'s `wg_comparisons_*`
+  (`ENV5(a)`, already documented as the `feme-cpu-simdize` groupshared-
+  broadcast structural gap) or `image_query.samples_storage` (`ENV5(d)`,
+  already documented as an untriaged genuine runtime gap with no error
+  logged). Both are pre-existing, separately-tracked items, not part of
+  this fix.
+- Did not start `ENV6(c)(5)`-`(7)` graphicsfuzz (~90 cases, large
+  `Linearize`/`SIMDize` architecture cluster) or `transform_feedback.fuzz`
+  (4 cases: one I spot-checked fails on a *different*, unrelated
+  `spirv.GlobalVariable` legalization gap -- a nested
+  struct-array-of-matrices stage-output shape -- that's its own
+  investigation, not a quick follow-on to this fix).
+- Did not run a full CTS re-measure: at ~3.27M cases it does not fit in one
+  session; the 146-failure verified list is already known stale (15+ cases
+  fixed since) and a fresh full run needs its own dedicated multi-session
+  background slot.
+- `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming: untouched, as every
+  prior session's next-steps said (all three are either separate
+  architecture efforts or blocked on push access).
+
+## Next steps (ranked)
+1. `dEQP-VK.transform_feedback.fuzz.{2_level_struct_array,single_struct_array}.
+   {std_geometry,std_vertex}` (4 cases): triage the `spirv.GlobalVariable`
+   nested-struct-array-of-matrices XFB legalization failure as its own item
+   -- it is not the same bug class as `opunreachable.all`.
+2. `ENV6(c)(5)`-`(7)` graphicsfuzz (~90 cases): large `Linearize`/`SIMDize`
+   architecture cluster, needs its own dedicated multi-session slot (per
+   the roadmap row's own "likely needs one shared region" framing).
+3. Kick off a background full CTS re-measure once a session has enough
+   headroom to let it run unattended for its full duration; the current
+   146-failure list is stale.
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked, unchanged).
