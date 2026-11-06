@@ -70,29 +70,25 @@ Please begin work on the WARP roadmap.
 
 ## Suggested next steps (ranked)
 
-1. **`WS2(b)`**: generalize `feme::vulkan::PendingExecutionRefCounted`
-   (`ExecutionLifetime.h`)'s retain/release-with-deferred-destroy
-   pattern into `FeMeExecution`, parameterizing its opaque deferred-
-   destroy payload type instead of hardcoding `const
-   VkAllocationCallbacks *`. Builds directly on this session's
-   `FeMeExecution` library; a clean, bounded next slice with an
-   identified, concrete scope already written into the roadmap.
-2. **`WS2`'s command-execution/CPU-draw-worker-paths scope**: not yet
-   decided whether this needs its own lettered row or should be
-   evaluated for being out of scope (genuinely Vulkan-specific command
-   building, not task-dispatch mechanics, per this session's decision
-   record #3) -- worth a short, dedicated look once `WS2(b)` is done,
-   before assuming `WS2` is fully covered by `(a)`/`(b)` alone.
-3. **`WS3`**: establish shared-core regression gates -- still carried
-   forward from the last several sessions' own suggestions, now with
-   `WS1` and `WS2(a)` both done as additional evaluation material for
-   whether its gates would have caught anything manual check-feme/CTS
-   verification did not.
-4. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
+1. **Resolve `WS2`'s undecided third piece**: either write the "probably
+   out of scope" conclusion from this session's decision record #3
+   explicitly into `WARPRoadmap.md` (closing `WS2` with no further
+   lettered rows), or spend a short, dedicated look actually trying to
+   find a portable kernel in `Sync.cpp`'s submission-building closure/
+   `CommandBuffer.cpp`'s execution loop before accepting that
+   conclusion. Cheap, bounded, and overdue -- flagged by name three
+   sessions running now.
+2. **`WS3`**: establish shared-core regression gates. With `WS1` and all
+   of `WS2` now fully done, this is the natural point to actually ask
+   whether gates like this would have caught anything manual
+   `check-feme`/CTS verification did not, rather than deferring the
+   question again -- there is now a complete, closed body of extraction
+   work (`WS0`/`WS1(a-d)`/`WS2(a-b)`) to evaluate it against.
+3. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
    an explicit FeMe adapter-selection assertion -- a research/
    documentation task, no Windows adapter install needed yet.
-5. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+4. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
    Windows host/VM outside this process-isolated container.
-6. Backlog carried from prior sessions, still untouched:
+5. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
