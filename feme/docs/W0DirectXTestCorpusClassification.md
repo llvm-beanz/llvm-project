@@ -75,12 +75,63 @@ legacy shader execution").
 - `src\AutoUnitTests\D3D11On12.cpp`: exercises the D3D11-on-12 legacy-shader
   compatibility path directly; its `getbins.cmd`/`getbinsfrombuildshare.cmd`
   fetch precompiled binaries rather than compiling shaders from source.
-- `src\AutoUnitTests\{BasicAPI,GBVExecuteIndirect,Library,MultiGPU,
-  PipelineStateObject,Raytracing,ResourceBinding,ShaderRootSig,util}.cpp`
-  and `pch.hpp`: reference DXBC-related symbols/headers (grep-confirmed);
-  each needs individual triage for whether it is DXBC-input or merely
-  DXBC-adjacent (e.g. format/reflection constants) before being treated as a
-  legacy-shader test.
+- `src\AutoUnitTests\util.{cpp,h}`: **DXBC-input infrastructure.** Defines
+  `GetDefaultVS()`/`GetDefaultPS()`/`GetDefaultCS()`, returning
+  `D3D12_SHADER_BYTECODE` views over `g_DefaultVS`/`g_DefaultPS`/`g_DefaultCS`
+  -- byte arrays hardcoded directly in the source (grep-confirmed: `g_DefaultPS`
+  begins `68, 88, 66, 67` = ASCII `"DXBC"`), not compiled from HLSL at test
+  build/run time at all. Also defines the shared `CompileShader()` helper,
+  which calls `D3DCompile` (fxc); every caller of it in this file list passes
+  a legacy `vs_4_0`/`vs_5_0`/`vs_5_1`/`ps_5_0`/`ps_5_1` profile string, which
+  `D3DCompile` always emits as DXBC (it has no SM6.x/DXIL output mode). This
+  file is the shared source of DXBC inputs for most of the rest of the list
+  below, not merely DXBC-adjacent.
+- `src\AutoUnitTests\BasicAPI.cpp`: **DXBC-input, confirmed.** Calls
+  `GetDefaultVS()`/`GetDefaultPS()`/`GetDefaultCS()` (hardcoded DXBC blobs,
+  above) repeatedly for PSO creation, and one test directly manipulates a
+  `DXBCHeader`/`DXBC_HASH_SIZE` (zeroing the container hash) to produce a
+  deliberately corrupt shader -- both are direct DXBC-container consumption,
+  not merely a DXBC-adjacent constant reference. (Its `DXILLib`/
+  `g_TestShaders` raytracing-library use elsewhere in the same file is DXIL,
+  not DXBC -- the file mixes both input kinds.)
+- `src\AutoUnitTests\GBVExecuteIndirect.cpp`: **DXBC-input, confirmed.** Its
+  own local `CompileShader()` helper (distinct from `util.cpp`'s) calls
+  `D3DCompile` with `vs_5_0`/`ps_5_0` profiles.
+- `src\AutoUnitTests\Library.cpp`: **DXBC-input, confirmed.** Calls
+  `D3DCompile` directly; the surrounding comment is explicit ("Use DXBC with
+  a different thread-group size from `GetDefaultCS`...").
+- `src\AutoUnitTests\MultiGPU.cpp`: **DXBC-input, confirmed.** Calls the
+  shared `util.cpp` `CompileShader()` helper with a `vs_5_1` profile.
+- `src\AutoUnitTests\PipelineStateObject.cpp`: **DXBC-input, confirmed.**
+  Both calls `GetDefaultVS()`/`GetDefaultCS()` (hardcoded DXBC blobs) and
+  makes over a dozen direct `D3DCompile` calls, all with legacy
+  `vs_4_0`/`vs_5_0`/`ps_5_0`/`ps_5_1` profiles -- the single largest DXBC
+  consumer in this list.
+- `src\AutoUnitTests\Raytracing.cpp`: **DXBC-input, confirmed (partially).**
+  Primarily a DXIL raytracing-library test (`SetDXILLibrary` on
+  build-time-embedded DXIL blobs such as `g_TrivialRaytracingUnsigned`), but
+  two non-raytracing graphics/compute PSO tests in the same file call
+  `GetDefaultVS()`/`GetDefaultCS()` (hardcoded DXBC blobs), so the file as a
+  whole is not DXIL-only.
+- `src\AutoUnitTests\ResourceBinding.cpp`: **DXBC-input, confirmed, and
+  deliberately dual-tested.** Calls `GetDefaultVS()`/`GetDefaultPS()`/
+  `GetDefaultCS()` throughout, and explicitly branches on a `bTestDXBCShaders`
+  flag to select between the hardcoded DXBC shaders above and separate
+  `DefaultVSDXIL`/`DefaultPSDXIL`/`DefaultCSDXIL` DXIL variants -- i.e. this
+  file intentionally exercises both legacy DXBC and DXIL inputs side by side
+  as a single parameterized test, making it the strongest direct evidence in
+  this corpus that WARP's own test suite treats DXBC shader-model support as
+  a first-class, deliberately verified compatibility surface.
+- `src\AutoUnitTests\ShaderRootSig.cpp`: **DXBC-input, confirmed.** Parses
+  hardcoded DXBC blobs (`g_Shader1`/`g_Shader2`) directly with `CDXBCParser`/
+  `DXBCGetRootSignature`/`PSVRuntimeInfoFromDXBC`/`DXBCGetShaderFeatureInfo`
+  -- this is root-signature-in-container extraction from a real DXBC
+  container, not an adjacent constant reference.
+- `src\AutoUnitTests\pch.hpp`: **DXBC-adjacent only, not itself DXBC-input.**
+  The one file in this list that is merely DXBC-adjacent: it only
+  `#include`s `"DXBCUtils.h"` (a precompiled-header aggregator with no test
+  logic or shader blob of its own); the actual DXBC consumption happens in
+  the `.cpp` files above that use the types it declares.
 - No current evidence of DXBC inputs inside `src\D3D12Conf` itself (grep for
   `DXBC`/`D3DCompile`/`CompileShader(` found no matches there); its shaders
   appear to be DXIL-only, compiled from HLSL at build time via FXC/DXC.

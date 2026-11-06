@@ -200,8 +200,19 @@ reboot was performed, in the container or on the host.
 the local test corpus is classified into the five named categories (public
 black-box, WARP-private/white-box, DXBC/DXIL-input, optional/preview-feature,
 display/HLK-dependency), and source/test redistribution permissions are
-reviewed and recorded there. The remaining legacy-shader audit must determine
-the selected stock-runtime contract's requirements and schedule compatibility
+reviewed and recorded there. The DXBC/DXIL-input category's one-by-one
+triage is now complete (2026-11-06): of the ten candidate files, nine
+(`BasicAPI.cpp`, `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
+`PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
+`ShaderRootSig.cpp`, `util.{cpp,h}`) are confirmed DXBC-input (hardcoded DXBC
+blobs, `D3DCompile` calls with legacy `vs`/`ps_4_0`/`5_0`/`5_1` profiles, or
+direct DXBC-container parsing); only `pch.hpp` is merely DXBC-adjacent (a
+header include, no blob or parsing logic of its own).
+`ResourceBinding.cpp`'s explicit `bTestDXBCShaders` flag is the strongest
+evidence that WARP's own suite treats DXBC shader-model support as a
+first-class, deliberately dual-tested compatibility surface rather than an
+incidental one. The remaining legacy-shader audit must determine the
+selected stock-runtime contract's requirements and schedule compatibility
 gaps before claiming compliance. LLVM-owned reference tests now exist in the
 standalone probe, but FeMe execution tests still need the prototype/runner
 from `W0(g)`/`W1(a)`, and `W0(g)` itself is now blocked on `W0(b)`'s decision
