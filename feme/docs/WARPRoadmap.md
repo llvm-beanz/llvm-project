@@ -1,11 +1,14 @@
 # FeMe WARP-like software adapter roadmap
 
 **Selected direction: container-first, application-local user-mode software
-driver using stock Windows D3D12/DXGI.** Begin W0(f) by running the standalone
-reference/rejection probes inside the Windows container, then establish the
-adapter bootstrap needed to reach DDI negotiation. W0(a)'s host measurements are
-recorded in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md):
-inbox and Agility runtimes open reference WARP through `CreateSoftwareAdapter`,
+driver using stock Windows D3D12/DXGI.** `W0(f)`'s container measurement step
+is done: the standalone reference/rejection probes ran inside the Windows
+container and matched the host's results exactly, with an extended NuGet-WARP/
+Agility-core matrix also passing. The next step is `W0(g)`: identify the
+adapter bootstrap needed to reach `OpenAdapter12` DDI negotiation. W0(a)'s host
+measurements are recorded in
+[W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md): inbox and
+Agility runtimes open reference WARP through `CreateSoftwareAdapter`,
 and executable-local WARP loading works. A rejection stub fails before its
 DDI open functions are called; this does not prove a kernel driver is required.
 `WS0` (image block-geometry + subresource-layout extraction) and `WS1`
@@ -166,21 +169,26 @@ throwaway-capable prototype, not an adapter compliance claim.
 
 | Step | Work and acceptance |
 |---|---|
-| W0(a) | Pin OS builds, SDK/WDK, DDI, inbox/Agility runtime versions, and reference WARP binary. Prove discovery, opening, callback negotiation, and teardown for a distinct FeMe identity through the selected user-mode stock-runtime path. W0(e) supplies host measurements; W0(f) supplies container and prototype proof. Installed render-only/software-adapter feasibility, miniport/INF/signing/CI requirements are a separate deployment evaluation, not prerequisites for this bring-up. Kernel installation and reboot tests, if required, belong on an approved host/VM. |
+| W0(a) | Pin OS builds, SDK/WDK, DDI, inbox/Agility runtime versions, and reference WARP binary. Prove discovery, opening, callback negotiation, and teardown for a distinct FeMe identity through the selected user-mode stock-runtime path. W0(e) supplies host measurements; W0(f) supplies matching container measurements; W0(g) supplies the prototype/DDI-negotiation proof. Installed render-only/software-adapter feasibility, miniport/INF/signing/CI requirements are a separate deployment evaluation, not prerequisites for this bring-up. Kernel installation and reboot tests, if required, belong on an approved host/VM. |
 | W0(b) | Decision gate if the selected user-mode stock-runtime path is not viable: explicitly approve an installed-adapter alternative, a private-compatibility scope change, or an application-local COM runtime. For the COM alternative, document added COM, DXGI, debug-layer/DRED and distribution work. A custom runtime harness is not stock Windows driver proof. No alternative is selected merely because a container lacks driver-install/reboot support; none patches system WARP. Private WARP dependencies remain prohibited unless separately approved in the design. |
 | W0(c) | Classify the local test corpus: public black-box tests, WARP-private/white-box tests, DXBC/DXIL inputs, optional/preview features, display/HLK dependencies. Determine required legacy shader support from the selected contract. Review source/test redistribution permissions before reuse; author LLVM-owned focused tests from public contracts. |
 | W0(d) | Add an explicit FeMe adapter selection/identity assertion to the future runner. List and execute one applicable test on reference WARP, then demonstrate selection of the prototype through the chosen boundary. Record unavailable infrastructure as blocked, not Pass. WARP-only white-box tests remain oracle tests, never generic FeMe coverage. |
 | ~~W0(e)~~ | ~~Measure the no-install host integration paths: inbox/Agility runtime and reference-WARP versions, `CreateSoftwareAdapter`, executable-local WARP substitution, and an LLVM-owned rejection stub with DDI entry-point counters. Run an applicable public-API WARP queue/fence test.~~ Completed 2026-11-06; evidence and reproduction instructions in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md). This closes measurements only, not FeMe device creation. |
-| W0(f) | Container-first user-mode proof: build the standalone probe in the Windows container; run all four CTest cases and record OS/kit/runtime/WARP identities and exact outcomes before implementation. Verify reference WARP and the expected pre-DDI stub rejection; do not substitute host results. Identify a public third-party adapter identity/thunk bootstrap, reach `OpenAdapter12`, negotiate a pinned DDI and close a distinct FeMe prototype against the verified runtimes. Headless device/queue/fence and later shader execution stay container-testable. A new kernel driver is not a proven prerequisite. If only private WARP compatibility works, stop at W0(b)'s explicit design decision rather than silently changing architecture. |
+| ~~W0(f)~~ | ~~Container-first user-mode proof: build the standalone probe in the Windows container; run all four CTest cases and record OS/kit/runtime/WARP identities and exact outcomes before implementation. Verify reference WARP and the expected pre-DDI stub rejection; do not substitute host results.~~ Completed 2026-11-06; container evidence, an extended NuGet-WARP/Agility-core matrix, and reproduction instructions are in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md#container-measurements). All four CTest cases passed with no discrepancy from the host measurements. This closes the container measurement step only -- it is not FeMe DDI negotiation; `W0(g)` below carries that forward. |
+| W0(g) | Identify a public third-party adapter identity/thunk bootstrap, reach `OpenAdapter12`, negotiate a pinned DDI and close a distinct FeMe prototype against the runtimes `W0(f)` verified (inbox and container-local NuGet WARP/Agility SDK). Headless device/queue/fence and later shader execution stay container-testable. A new kernel driver is not a proven prerequisite. If only private WARP compatibility works, stop at W0(b)'s explicit design decision rather than silently changing architecture. |
 
 W0(a) and W0(d) are **partially done**, not complete. W0(e) supplies the host
-version/loading measurements and W0(d)'s reference-test evidence. W0(f) names
+version/loading measurements, W0(f) supplies the matching container
+measurements, and both supply W0(d)'s reference-test evidence. W0(g) names
 the remaining user-mode bootstrap proof; installed-driver feasibility,
-distinct FeMe identity/device creation, and container runtime verification
-remain open. The user-mode stock-runtime direction is selected; its feasibility
-is not yet proven, and W0(b) is a conditional fallback decision. Installed-path
-evaluation is separate from the container bring-up gate. No driver installation,
-signing changes, or reboot was performed.
+distinct FeMe identity/device creation, and DDI negotiation itself remain
+open -- the container measurement step `W0(f)` closed only establishes that
+the verified runtimes behave identically in the container, not that a FeMe
+bootstrap through them is possible. The user-mode stock-runtime direction is
+selected; its feasibility is not yet proven, and W0(b) is a conditional
+fallback decision. Installed-path evaluation is separate from the container
+bring-up gate. No driver installation, signing changes, or reboot was
+performed, in the container or on the host.
 
 `W0(c)` is **partially done**, recorded in
 [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md):
@@ -191,20 +199,20 @@ reviewed and recorded there. The remaining legacy-shader audit must determine
 the selected stock-runtime contract's requirements and schedule compatibility
 gaps before claiming compliance. LLVM-owned reference tests now exist in the
 standalone probe, but FeMe execution tests still need the prototype/runner
-from `W0(f)`/`W1(a)`. These are contract/implementation dependencies, not a
+from `W0(g)`/`W1(a)`. These are contract/implementation dependencies, not a
 blanket host/VM blocker. `W0(c)` is left unstruck rather than
 split into further lettered rows -- both blockers are existing upstream `W0`/
 `W1` milestones, not new work needing its own breakdown.
 
 `W0(d)`'s FeMe future-runner adapter-selection/identity-assertion design (not
-yet an implementation) is also recorded in that document. W0(e)'s standalone
-runner now implements reference-WARP identity checking and the public queue/
-fence oracle test, but it cannot assert a FeMe device identity until
-`W0(f)`/`W1(a)` supply one.
+yet an implementation) is also recorded in that document. W0(e)/W0(f)'s
+standalone runner now implements reference-WARP identity checking and the
+public queue/fence oracle test in both the host and the container, but it
+cannot assert a FeMe device identity until `W0(g)`/`W1(a)` supply one.
 
 ### W1: Objects and first headless compute
 
-Depends on the selected W0 integration proof (W0(f), or a separately approved
+Depends on the selected W0 integration proof (W0(g), or a separately approved
 W0(b) alternative) and WS2; reuses existing `CompiledStage` and artifact
 reflection. Pending installed-driver, display or HLK evaluation does not block
 user-mode headless W1 once the selected boundary is proven.
