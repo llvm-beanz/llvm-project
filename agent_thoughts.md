@@ -132298,3 +132298,27 @@ Confirmed device: `FeMe CPU Vulkan Device`.
    headroom to let it run unattended for its full duration; the current
    146-failure list is stale.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked, unchanged).
+
+# Session: XFB arrays of structs (ENV6(c)(8))
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I did
+- 4 `transform_feedback.fuzz.*struct_array.std_{vertex,geometry}` cases now pass.
+- Three separate bugs, found one at a time:
+  1. Type conversion: array of offset-less structs inside an xfb block
+     wasn't tightened (committed earlier, lit test added).
+  2. Capture: executor packed rows contiguously per element. Leaves of an
+     array of structs need to hop by struct size. Added
+     `XfbInstanceRows`/`XfbInstanceStride` (signature ABI v9).
+  3. Canonicalize: instance index was scaled in raw rows, but a `mat2`
+     store counts in value units. Row ended up 2x too big -> heap overrun
+     ("double free"). Fixed in `resolveNestedStageIOField`.
+- ABI bump broke 8 lit tests with embedded blobs; migrated by script.
+- XFB non-fuzz regression: 131,575 cases, 0 failures.
+
+## Next steps (ranked)
+1. `ENV6(c)(5)`-`(7)` graphicsfuzz (~90): needs its own multi-session slot.
+2. Background full CTS re-measure (failing list is stale).
+3. `image_query.samples_storage` (no error logged).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
