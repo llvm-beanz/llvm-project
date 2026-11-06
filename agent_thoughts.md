@@ -132339,3 +132339,19 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 2. Full CTS re-measure beyond the failing list (new regressions unmeasured).
 3. `image_query.samples_storage`.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: ENV6(c)(5) representative selection
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I did
+- Picked 3 "loop has an internal branch in a body shape" reproducers; no code changes:
+  - `graphicsfuzz.cosh-return-inf-unused`
+  - `graphicsfuzz.cov-function-infinite-loop-return-identical-condition`
+  - `graphicsfuzz.cov-function-loops-vector-mul-matrix-never-executed`
+
+## Next steps (ranked)
+1. Dump `FEME_DUMP_IR_PRELINEARIZE` for those 3, reduce with feme-opt, look for a shared shape.
+2. Full CTS re-measure in the background.
+3. `image_query.samples_storage`.
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
