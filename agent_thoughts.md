@@ -132111,3 +132111,22 @@ Reduce `glsl.demote.dynamic_loop_{deriv,dynamic,texture}` (`ENV6(e)(4a)`): the l
 3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
 4. Full CTS re-measure in the background.
 5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: discard in uniform loops
+
+## Next action
+Reduce `glsl.demote.dynamic_loop_deriv` to an `.ll` repro and find which "mask-affecting op" check rejects it.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. `discard.static_loop_uniform`: the precheck `canFlattenLoopBodyRegion` required no boundary blocks. The real flatten tolerated a tail exit check but only if a successor was `End` itself. Here one was a relay.
+3. Added `isTolerableTailExitCheck` shared by both. Lit test `loop-discard-tail-exit-check-relay.ll`. Updated one CHECK in `nested-loop-abandoned-child-exit-block-merged.ll`: it still diagnoses, just with a later message.
+4. `check-feme` otherwise clean. 2 CTS cases fixed, 679-case regression run has no new failures.
+5. Gotcha: the QPA/stdout IR dump ends with the ICD's own error text. Cut it before feeding `feme-opt`.
+
+## Next steps (ranked)
+1. `ENV6(e)(4a)` remaining 3 demote cases.
+2. `ENV6(e)(2)` mesh attrs/clip (6), `ENV6(e)(3)` mesh output size (4).
+3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+4. Full CTS re-measure in the background.
+5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).

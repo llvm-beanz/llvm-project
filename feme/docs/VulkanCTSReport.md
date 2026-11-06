@@ -233,6 +233,10 @@ Failing total is now 144 (stale list, other regressions unmeasured).
 
 `glsl.demote.dynamic_loop_{always,uniform}` now Pass. A 679-case `glsl.{demote,discard,loops}` batch run shows only 5 failures, all previously known (3 `demote.dynamic_loop_*`, 2 `discard.*static_loop_uniform`).
 
+### L542: loop-body precheck tail exit check (ENV6(e)(4a))
+
+`glsl.discard.{function_,}static_loop_uniform` now Pass. Re-run of the 679-case `glsl.{demote,discard,loops}` set: 676 Pass, 3 Fail (the known `demote.dynamic_loop_{deriv,dynamic,texture}`).
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
