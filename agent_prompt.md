@@ -68,7 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `ENV6(e)(1)` D24S8 (4).
-2. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+1. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+2. `transform_feedback.fuzz` (4).
 3. Full CTS re-measure in the background.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
