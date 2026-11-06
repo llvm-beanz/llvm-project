@@ -68,20 +68,27 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
 Next steps, ranked:
-1. Reduce `ENV6(e)(7)` (`cov-x86-isel-lowering-negative-left-shift`):
-   dump with `FEME_DUMP_IR_PRELINEARIZE=1`, find the call site building
-   `live.merge31`/`sideeffect.merge32`, and look at
-   `flattenKnownDivergentBranch` or the `HeaderDivergent` `BodyDF` path
-   (~line 9335) -- a sibling fix to this session's, not a retry of it.
-2. Re-measure the `ENV6(c)(5)`/`ENV6(c)(6)` roadmap cluster counts; only 2
-   corpus cases flipped this session, so those counts are still
-   unverified guesses from earlier sessions.
-3. Triage `cosh-return-inf-unused` as its own shape (two distinct "only a
-   uniform pass-through region" bail-outs plus a mask-affecting-op
-   diagnostic -- not this session's relay-block shape at all).
-4. None of the offload-test-suite patch set is at risk right now (0001-
-   0005 verified to reapply clean with `--keep-cr` from a fresh
-   cherry-pick), but keep an eye out if upstream `WaveActiveMax.test`
-   drifts again -- the content, not just the line endings, has already
-   diverged once (stale `XFAIL: Lavapipe && host-arm64`, old comment
-   text) and may again.
+1. Re-measure the `ENV6(c)(5)`/`ENV6(c)(6)` roadmap cluster counts --
+   still an open item from two sessions ago, not touched this session
+   either (this session's own corpus diff only exercised the targeted
+   case plus whatever `graphicsfuzz.*` already covers; the cluster
+   counts in `ENV6(c)(5)`/`ENV6(c)(6)`'s own roadmap rows predate even
+   `ENV6(c)(5a)`'s fix and have never been directly re-verified).
+2. Triage `cosh-return-inf-unused` as its own shape (two distinct "only
+   a uniform pass-through region" bail-outs plus a mask-affecting-op
+   diagnostic -- confirmed by two sessions now to be unrelated to both
+   `ENV6(c)(5a)`'s and this session's fix).
+3. The `GetAlreadyLinearizedCycleExit` fix this session landed is a
+   general mechanism (any already-uncond-ified child header, not just
+   this one shape) -- worth a quick audit of whether any other
+   known-unfixed `ENV6(c)(3)`/`ENV6(c)(5)`/`ENV6(c)(6)` cluster case
+   happens to share the exact "enclosing loop's walk reaches an
+   already-linearized nested loop's own header" shape and gets fixed
+   incidentally; the 757-case corpus diff this session found exactly
+   one flip, so if there's overlap it's likely small, but not yet
+   checked directly against the untriaged clusters' own case lists.
+4. None of the offload-test-suite patch set is at risk right now (all 5
+   re-verified this session with a fresh `llvm-beanz/feme` fetch), but
+   keep re-checking each session per standing instructions -- upstream
+   `WaveActiveMax.test` content (not just line endings) has drifted
+   once before and may again.
