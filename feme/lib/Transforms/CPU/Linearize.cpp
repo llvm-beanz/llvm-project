@@ -2007,15 +2007,80 @@ bool hasStageMaskOps(Function &F) {
 /// statically resolvable.
 static bool foldConstantConditionBranches(Function &F) {
   bool Changed = false;
-  for (auto BBI = F.begin(), BBE = F.end(); BBI != BBE;) {
-    BasicBlock &BB = *BBI++;
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  // A branch condition that is a pure function of literals (e.g. the
+  // `urem 1000, 4` a SPIR-V switch-on-constant lowers to, merged through
+  // `LowerSwitch`'s phi-of-constants flow blocks) only becomes a literal
+  // `ConstantInt` once its feeding instructions and the single-incoming
+  // phis left by pruning dead edges are simplified, so iterate to a fixed
+  // point.
+  // Only worth doing (and only safe to do without perturbing unrelated
+  // shapes) when some conditional branch has a bare `unreachable` arm.
+  auto IsBareUnreachable = [](BasicBlock *BB) {
+    return BB->size() == 1 && isa<UnreachableInst>(BB->front());
+  };
+  bool HasUnreachableArm = any_of(F, [&](BasicBlock &BB) {
     auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
-    if (!Br || !isa<ConstantInt>(Br->getCondition()))
-      continue;
-    Changed |= ConstantFoldTerminator(&BB, /*DeleteDeadConditions=*/true);
+    return Br && (IsBareUnreachable(Br->getSuccessor(0)) ||
+                  IsBareUnreachable(Br->getSuccessor(1)));
+  });
+  // A genuine loop's own backedge condition must reach `LoopLinearizer`
+  // unfolded even if it happens to reduce to a literal (e.g. this helper's
+  // own `EliminateUnreachableBlocks` call collapsing a loop header's
+  // multi-incoming phi down to its one surviving, constant incoming value)
+  // -- that reduction is exactly the input `LoopLinearizer` itself expects
+  // and correctly lowers via its own uniform-condition mask codegen.
+  // Re-folding such a branch *here* instead would erase the loop's CFG
+  // backedge entirely before `LoopLinearizer` ever runs. Computed once, on
+  // the function's original cycles, before any of this helper's own
+  // mutations -- later iterations below only ever fold a *non-loop* block's
+  // branch past the first.
+  SmallPtrSet<BasicBlock *, 8> LoopBlocks;
+  {
+    DominatorTree DT(F);
+    CycleInfo CI;
+    CI.compute(F);
+    for (CycleRef C : CI.toplevel_cycles())
+      for (BasicBlock *BB : CI.getBlocks(C))
+        LoopBlocks.insert(BB);
   }
-  if (Changed)
-    EliminateUnreachableBlocks(F);
+  auto IsConstant = [](const Use &U) { return isa<Constant>(U.get()); };
+  bool Progress;
+  bool FirstIteration = true;
+  do {
+    Progress = false;
+    if (HasUnreachableArm)
+      for (BasicBlock &BB : F)
+        for (Instruction &I : make_early_inc_range(BB)) {
+          if (I.isTerminator() || I.mayHaveSideEffects() || I.use_empty())
+            continue;
+          auto *Phi = dyn_cast<PHINode>(&I);
+          if (Phi ? Phi->getNumIncomingValues() != 1
+                  : !all_of(I.operands(), IsConstant))
+            continue;
+          if (Value *V = simplifyInstruction(&I, SimplifyQuery(DL))) {
+            I.replaceAllUsesWith(V);
+            I.eraseFromParent();
+            Progress = true;
+          }
+        }
+    bool Folded = false;
+    for (auto BBI = F.begin(), BBE = F.end(); BBI != BBE;) {
+      BasicBlock &BB = *BBI++;
+      if (!FirstIteration && LoopBlocks.contains(&BB))
+        continue;
+      auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
+      if (!Br || !isa<ConstantInt>(Br->getCondition()))
+        continue;
+      Folded |= ConstantFoldTerminator(&BB, /*DeleteDeadConditions=*/true);
+    }
+    if (Folded) {
+      EliminateUnreachableBlocks(F);
+      Progress = true;
+    }
+    Changed |= Progress;
+    FirstIteration = false;
+  } while (Progress);
   return Changed;
 }
 
