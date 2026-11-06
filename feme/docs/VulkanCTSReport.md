@@ -12311,3 +12311,117 @@ final commit. No `Linearize.cpp` commit, since the fix was reverted.
    audit itself is still not done.
 5. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (re-verified clean again this session).
+
+## L543: `ENV6(c)(5b)` safe half landed -- `Pre`-probe exemption alone gives the 4-case win with zero regression
+
+**Done**: isolated `L542`'s reverted two-call-site fix into its two
+independent changes, tested each alone against both the real `deqp-vk`
+regression case and the full corpus (ranked next step #1 from `L542`),
+and landed the half that is safe.
+
+1. Confirmed `FeMe CPU Vulkan Device` (standing per-session check).
+2. Checked for the reverted fix's diff first (`git stash list`): the one
+   stash present was unrelated leftover debug instrumentation from an
+   older session, not `L542`'s fix -- it had been reverted with a plain
+   `git checkout --` and was genuinely gone. Reconstructed both changes
+   from `L542`'s own description and the surrounding code (the `Pre`
+   `DiamondFlattener` probe's hardcoded nullptr-returning lambda at the
+   `BodyRegionStart`/`Latch` call site, and a new optional
+   `GetAlreadyLinearizedCycleExitFn` parameter threaded into
+   `collectUniformPassThroughRegion`'s own worklist loop, defaulted to
+   null everywhere except the one `BodyRegionStart` call site that
+   actually has a nested child cycle to worry about).
+3. Reproduced `cov-nested-loops-array-choose-red-last-iteration` (the
+   regressed case) standalone: `FEME_DUMP_IR_PRELINEARIZE=1` against the
+   real case, extracted the fragment module, confirmed `feme-opt --llvm
+   -passes=feme-cpu-linearize,verify` on it alone is clean (no
+   diagnostic) at baseline, matching the real case's own `Pass`. ~15
+   minutes.
+4. Built and tested each half **alone**, both at the IR/lit level (the
+   pinned `unsupported-nested-loop-divergent-inner-exit-guards-discard.ll`
+   repro from `L542` plus the new standalone regression repro) and, more
+   importantly, against the **real `deqp-vk` cases**, since the IR-level
+   diagnostic text turned out to be identical regardless of which half
+   (or neither, or both) was applied -- a silent-miscompile regression
+   like this one is invisible to the lit-level check entirely:
+   - `Pre`-probe exemption alone: pinned repro's diagnostics unchanged
+     (still the same two generic messages, `FEME_DEBUG_PASSTHROUGH=1`
+     trace confirms it never even gets a chance to help this specific
+     shape). Real `deqp-vk`: `cov-nested-loops-array-choose-red-last-
+     iteration` **stays `Pass`** (no regression); `cosh-return-inf-unused`
+     itself stays `Fail` (expected, per `L542`).
+   - `collectUniformPassThroughRegion` shortcut alone: pinned repro's
+     trace *does* show the exemption firing (`%Flow12` -> transparent ->
+     `%loop.exit.guard5`, then correctly still rejected there, matching
+     `L542`'s "different obstacle" finding) -- but the real `deqp-vk`
+     case for `cov-nested-loops-array-choose-red-last-iteration` **flips
+     to `Fail` on its own**, with `cosh-return-inf-unused` still `Fail`
+     too. This isolates the regression entirely to this one change.
+   - Both together (reconstructing `L542`'s original combined fix):
+     identical real-`deqp-vk` results to the shortcut-alone case (same
+     regression), confirming the `Pre`-probe half contributes nothing
+     extra on top once the shortcut is present for this exact shape.
+   ~75 minutes (four build/test cycles, each a `ninja feme_vulkan` plus
+   two targeted `deqp-vk --deqp-case` runs).
+5. Landed the `Pre`-probe exemption alone. Ran the full 757-case
+   graphicsfuzz corpus via `run_vulkan_cts.py`: **689 Pass / 68 Fail**
+   against the established **685/72** baseline -- exactly the 4-case win
+   (`cov-integer-minus-one-increased-before-indexing-array`,
+   `cov-loop-struct-array-field-set-value-self-dependency`,
+   `cov-loops-and-conditions-fragcoord-always-false-floats-one`,
+   `cov-nested-loops-sample-opposite-corners`, all confirmed `Pass` in
+   this run's own report), **zero new failures** (68 = 72 - 4 exactly;
+   `cov-nested-loops-array-choose-red-last-iteration` itself confirmed
+   `Pass` in this run too). `check-feme`: 3907/3911 Passed, 4
+   Unsupported, 0 Failed -- identical to baseline, no regressions.
+6. Did not attempt the `collectUniformPassThroughRegion` shortcut's own
+   fix this session (recognizing the post-child-cycle relay/guard block,
+   not just the child's header, needs `DiamondFlattener`'s own private
+   relay-chase logic per `L542`'s own assessment) -- scoped out as a
+   separate, larger follow-up (`ENV6(c)(9)`), same as `L542` concluded,
+   now with a confirmed-isolated culprit instead of an unresolved "which
+   half" question.
+7. No new lit test added: the existing pinned
+   `unsupported-nested-loop-divergent-inner-exit-guards-discard.ll` from
+   `L542` is unaffected by this change (same two diagnostics, confirmed
+   above) and remains a correct regression anchor for the still-open
+   `ENV6(c)(9)` work; the positive validation for *this* change is the
+   real `deqp-vk` corpus run (per this project's own established
+   practice -- see `L539`/`ENV6(c)(5a)` for the same pattern), since a
+   hand-reduced "now passes" lit repro would not exercise the live
+   `getExitBlocks`/`CI` state this exemption depends on without a full
+   pass pipeline anyway.
+8. Updated `Roadmap.md`: split `ENV6(c)(5b)` into **done** (the `Pre`-
+   probe half, struck through) and a new `ENV6(c)(9)` entry for the
+   remaining `collectUniformPassThroughRegion` generalization (per this
+   session's standing instruction, kept to one new top-level milestone
+   number rather than nesting a further lowercase letter under
+   `ENV6(c)(5b)`).
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no update
+-- internal compiler-correctness fix only, no feature/extension status
+change.
+
+**offload-test-suite**: re-verified the patch set this session per
+standing instructions -- `llvm-beanz/feme` branch tip (`0cc94c2`)
+cherry-picks cleanly, all 5 stored patches apply cleanly with `git am
+--keep-cr`, in order, no conflicts. Nothing to update there.
+
+**Commits** (3, in order): the `Linearize.cpp` fix; `Roadmap.md` +
+`VulkanCTSReport.md` together; this `agent_thoughts.md` entry.
+
+**Next steps, ranked**:
+1. `ENV6(c)(9)`: generalize `collectUniformPassThroughRegion`'s
+   already-linearized-child-cycle exemption to also recognize a
+   post-child-cycle relay/guard block (not just the child's own header)
+   without regressing `cov-nested-loops-array-choose-red-last-iteration`
+   -- likely needs `DiamondFlattener`'s own private
+   `isLoopControlOrHeaderRelayEdge`-style logic, reused or re-derived.
+   This would also be the path to actually fixing `cosh-return-inf-
+   unused`'s own outer-loop layer, still `Fail`.
+2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress.
+4. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (re-verified clean again this session).
