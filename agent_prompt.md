@@ -68,32 +68,24 @@ mid-investigation to avoid losing documentation.
 
 Please begin work on the WARP roadmap. Suggested next steps:
 
-1. **Resolve `W0(b)`'s now-triggered decision gate.** This is now the
-   single blocking item for all further `W0`/`W1` D3D12-adapter work.
-   The three listed alternatives each have a real, different cost
-   (kernel-driver signing/installation even if minimal and "software
-   only"; a private-compatibility project explicitly contradicting the
-   design's existing prohibition without separate sign-off; an
-   application-local COM runtime that gives up the design's own
-   "stock Windows driver proof" framing entirely) -- this needs an
-   explicit, human product/design decision, not another autonomous
-   research pass. A future session's most useful contribution here
-   would likely be fleshing out each alternative's concrete cost/scope
-   (e.g., what a genuinely minimal "stub" kernel-mode driver's signing
-   and installation requirements actually look like on a Windows
-   11/Server 2025 target) to make that decision easier, without
-   selecting one outright.
-2. **`W0(c)`'s DXBC/DXIL-input classification sharpening**: still
-   carried forward unchanged across many sessions -- resolve the
-   "needs individual triage" candidate file list (`BasicAPI.cpp`,
-   `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
-   `PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
-   `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) one-by-one from
-   `C:\dev\Direct3D` (read-only reference checkout) to determine which
-   actually consume DXBC inputs versus merely reference DXBC-related
-   constants/headers. Independent of the `W0(b)` decision, so a good
+**Suggested next steps (ranked)**:
+1. **Make the `W0(b)` decision explicitly** (human/product call, not an
+   agent task): with cost/scope now documented for all three alternatives,
+   this is the single blocking item for all further `W0(g)`/`W1`
+   D3D12-adapter work. If alternative (a) is chosen, the next concrete step
+   would be provisioning a dedicated host/VM (not this container) with
+   Secure Boot disabled and test-signing enabled, then re-attempting
+   `W0(g)`'s `OpenAdapter12` prototype through that distinct FeMe identity.
+   If alternative (c) is chosen, the next step would be scoping a minimal
+   COM-activation/DXGI-equivalent surface as its own sub-milestone.
+2. **`W0(c)`'s DXBC/DXIL-input classification sharpening**: still carried
+   forward unchanged across many sessions -- resolve the "needs individual
+   triage" candidate file list (`BasicAPI.cpp`, `GBVExecuteIndirect.cpp`,
+   `Library.cpp`, `MultiGPU.cpp`, `PipelineStateObject.cpp`,
+   `Raytracing.cpp`, `ResourceBinding.cpp`, `ShaderRootSig.cpp`,
+   `util.{cpp,h}`, `pch.hpp`) one-by-one from `C:\dev\Direct3D` (read-only
+   reference checkout). Independent of the `W0(b)` decision, so a good
    change of pace if that decision isn't ready yet.
 3. Backlog carried from many prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
    re-measure.
-
