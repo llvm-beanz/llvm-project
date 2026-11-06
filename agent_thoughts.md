@@ -132961,3 +132961,102 @@ session.
    `ENV6(c)(3)` list to check against instead of a stale one.
 5. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (re-verified clean again this session).
+
+# Session: cosh-return-inf-unused triaged, fix reverted (regression found) (L542)
+
+**Done**: root-caused `cosh-return-inf-unused` (ranked next step #1 from
+`L541`, carried forward unstarted for three sessions). Attempted a fix,
+confirmed it works for part of the shape, found a real corpus regression
+via a careful before/after diff, and reverted rather than land it. Net
+result: no code change landed this session, but the shape is now fully
+understood and a pinned lit test exists to anchor the next attempt.
+
+1. Confirmed `FeMe CPU Vulkan Device` (standing per-session check).
+2. Found a leftover `FEME_DUMP_IR_PRELINEARIZE=1` dump from a prior
+   session, extracted the fragment-shader module, confirmed `feme-opt
+   --llvm -passes=feme-cpu-linearize,verify` reproduces the exact 3
+   diagnostics standalone. ~15 minutes.
+3. Used `llvm-reduce` (interestingness test grepping the "pass-through
+   region" diagnostic) to shrink the repro to 36 lines. ~10 minutes.
+4. Traced both repros with `FEME_DEBUG_LINEARIZE_TRACE=1`: the real
+   shape is 4 nested cycles (two near-duplicate inner self-loops with
+   their own divergent exits feeding discard guards, nested in a middle
+   loop, nested in an outer loop; middle and outer both
+   `HeaderDivergent=1`). Root cause: `collectUniformPassThroughRegion`
+   and the `Pre` `DiamondFlattener` probe lack the
+   `GetAlreadyLinearizedCycleExit` exemption that
+   `DiamondFlattener::validate`/`flatten` already have (from
+   `ENV6(e)(7)`), so each rejects an already-processed child cycle's own
+   divergent terminator as a new unsupported branch. ~45 minutes.
+5. Implemented the fix: shared the existing exemption lambda into both
+   gaps; inside `collectUniformPassThroughRegion`'s worklist loop, kept
+   the child header in `Visited` (unlike `flatten`'s own pattern) so the
+   caller's post-loop re-narrowing still runs on it. Built cleanly.
+   ~30 minutes.
+6. Verified: the repro's **middle**-loop diagnostic layer was
+   eliminated; the **outer** layer still fails, now against a different
+   obstacle (a post-child-cycle relay/guard block, needing
+   `DiamondFlattener`'s private relay-chase logic, not yet generalized --
+   out of scope this session). `check-feme`: 3906/3910 Passed, 4
+   Unsupported, 0 Failed, matching baseline.
+7. Ran the full 757-case graphicsfuzz corpus **with and without** the
+   fix (`git stash`/`pop` around a rebuild each time) and diffed the two
+   `report.txt` Fail lists with `comm` (hit the "sort before comm isn't
+   enough without `LC_ALL=C`" gotcha here -- documented in
+   `.instructions.md`). Before: 685 Pass / 72 Fail. After: 688 Pass / 69
+   Fail. **4 cases newly `Pass`, but 1 case newly `Fail`**
+   (`cov-nested-loops-array-choose-red-last-iteration`). Confirmed this
+   is a real regression, not a flake, by running that one case
+   standalone 3x against each build (consistently Pass/Fail each way).
+   `cosh-return-inf-unused` itself stayed `Fail` in both runs, as
+   expected. ~40 minutes (two full corpus sweeps plus the standalone
+   re-checks).
+8. **Decision: reverted the fix** (`git checkout --` on `Linearize.cpp`).
+   A rendering-correctness pass with an unexplained silent regression
+   (not caught by the lit suite) is not safe to land speculatively, even
+   though net case count improved. Landing "the wrong half" risked
+   shipping a real visual-correctness bug for the sake of 3 net extra
+   Pass cases.
+9. Added a pinned lit test instead,
+   `Linearize/unsupported-nested-loop-divergent-inner-exit-guards-discard.ll`
+   (the `llvm-reduce`d 36-line repro, kept with its machine-generated
+   block names since hand-renaming changed which diagnostic fires), so
+   the shape is a fast, ready-made regression anchor for whoever
+   re-attempts this. `check-feme` with just the new test: 3907/3911
+   Passed, 4 Unsupported, 0 Failed.
+10. Updated `Roadmap.md` (new `ENV6(c)(5b)` row, not struck through --
+    not done) and `VulkanCTSReport.md` (`L542` entry) with the full
+    writeup, including the regression and the newly-passing cases.
+11. Re-verified the offload-test-suite patch set (standing instruction):
+    `llvm-beanz/feme` tip (`0cc94c2`) cherry-picks cleanly, all 5 stored
+    patches apply cleanly with `git am --keep-cr`, no drift.
+12. Codified the `LC_ALL=C sort` gotcha (step 7) in `.instructions.md`.
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no
+update -- internal compiler-correctness investigation only, no
+feature/extension status change.
+
+**Commits** (4, in order): the new lit test; `Roadmap.md` +
+`VulkanCTSReport.md` together; `.instructions.md`'s `LC_ALL=C` note;
+this `agent_thoughts.md` entry.
+
+**Next steps, ranked**:
+1. Before re-attempting `ENV6(c)(5b)`, reduce the newly-regressed
+   `cov-nested-loops-array-choose-red-last-iteration` the same way this
+   session reduced `cosh-return-inf-unused`, to isolate whether the
+   `collectUniformPassThroughRegion` shortcut or the `Pre`-probe lambda
+   swap (the fix's two independent changed call sites) is responsible --
+   landing only the safe half may unlock the 4 newly-passing cases
+   without the regression. Est. 1-2 hours (repro + `llvm-reduce` +
+   trace, same workflow as this session).
+2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress; not touched
+   this session.
+4. `GetAlreadyLinearizedCycleExit`'s general-mechanism audit (carried
+   from `L540`) gains one more data point this session (it is evidently
+   *not* a safe drop-in generalization everywhere) but the broader audit
+   itself is still not done.
+5. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (re-verified clean again this session).
