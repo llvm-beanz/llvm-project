@@ -11932,3 +11932,7 @@ varyings to the vertex range. `glsl.derivate.*` now 1347 Pass / 21 Fail
 `vec4_highp.fbo_msaa{2,4}` (18) and `fwidth*.fbo_float` (3). No regressions
 in `pipeline.monolithic.bind_buffers_2.*` (0 fail) or `glsl.builtin_var.*`
 (0 fail). `check-feme`: 3905 passed, 4 unsupported.
+
+## L536: MSAA helper-lane snap gating
+
+The snap now also requires non-negative barycentrics. `glsl.derivate.*vec4_highp`: 150 Pass / 3 Fail (the 3 `fwidth*.fbo_float` rounding cases); the 18 `fbo_msaa{2,4}` cases pass. `check-feme`: 3905 passed.

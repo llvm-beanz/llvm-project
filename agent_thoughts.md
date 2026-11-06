@@ -132601,3 +132601,16 @@ Next steps, ranked:
 2. `ENV6(c)(5a)` flatten()-level fix (also unblocks negative-left-shift).
 3. cosh-return-inf-unused; offload (blocked).
 4. A full sweep rerun when convenient (library changed; old sweep now stale).
+
+# Session: derivate MSAA fix
+
+**Next action:** look at `fwidth*.fbo_float` (3 cases, 3.4e-5 off on one pixel).
+
+1. Device confirmed.
+2. The MSAA failures were the same snap bug: a lane can have a nonzero sample mask while its pixel center is outside the triangle. Gated the snap on B0,B1,B2 >= 0. 18 cases now pass. `check-feme` 3905 pass.
+
+Next steps, ranked:
+1. fwidth fbo_float (3).
+2. `ENV6(c)(5a)` flatten-level fix (unblocks negative-left-shift).
+3. Full sweep rerun (library changed).
+4. cosh-return-inf-unused; offload (blocked).
