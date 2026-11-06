@@ -68,6 +68,13 @@ regenerated this entry -- moving the FIFO task-runner mechanics into
 `FeMeExecution` behind an unchanged `QueueExecutor` wrapper changes no
 feature advertisement, so this table is unaffected.
 
+Rechecked after the 2026-11-06 WARP roadmap `WS2(b)`
+`PendingExecutionRefCounted` retained-work-storage extraction (pure code
+motion, see `VulkanCTSReport.md`): not regenerated this entry -- moving
+the retain/release/deferred-destroy counter into `FeMeExecution` behind
+an unchanged `PendingExecutionRefCounted` type alias changes no feature
+advertisement, so this table is unaffected.
+
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---:|---:|---:|
 | 1.0 | 34 of 55 | n/a | n/a |

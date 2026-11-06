@@ -1,5 +1,80 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS2(b): PendingExecutionRefCounted retained-work-storage extraction (2026-11-06)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` (confirmed at session start and again immediately before this CTS
+run). This session implements WARP roadmap `WS2(b)`, carried forward from
+the prior `WS2(a)` session: `feme::vulkan::PendingExecutionRefCounted`
+(`feme/lib/Vulkan/ExecutionLifetime.h`)'s retain/release-with-deferred-
+destroy counter -- used by twelve consumer types (`Pipeline`, `RenderPass`,
+`Framebuffer`, `Buffer`, `Image`, `ImageView`, `DescriptorSet`,
+`BufferView`, `Sampler`, `Event`, `QueryPool`, `DeviceMemory`,
+`CommandBuffer`) to defer a `vkDestroy*` call until every `TaskExecutor`
+task that referenced the object beforehand has finished running -- stored
+a `const VkAllocationCallbacks *` as its only Vulkan-specific detail: an
+opaque payload it never itself dereferences, just remembers between a
+deferred `requestDestroy` and the later `releaseAndTakeDeferredDestroy`
+that permits the actual free. That counter/mutex logic moves into a new,
+portable `feme::execution::DeferredDestroyRefCounted<PayloadT>` template
+(`feme/include/feme/Execution/DeferredDestroyRefCounted.h`,
+`feme/lib/Execution/DeferredDestroyRefCounted.cpp`), the second class
+under `FeMeExecution`. `PendingExecutionRefCounted` becomes a plain type
+alias instantiating it on `const VkAllocationCallbacks *` -- unlike
+`WS2(a)`'s `QueueExecutor`/`TaskExecutor` composed-wrapper split, no
+Vulkan-specific policy sits on top of this class's behavior for any
+consumer, so a type alias (not a wrapper) is the correct, minimal shape:
+every one of the twelve consumer files needed zero source changes, since
+`retainForExecution`/`releaseAndTakeDeferredDestroy`/`requestDestroy`
+keep their exact current names and signatures.
+
+`check-feme` rebuilt its prerequisites and passed: **3,953 Passed, 15
+Skipped, 10 Unsupported, zero failures** (3,978 discovered tests, 3,973
+prior + 5 new `FeMeExecutionTests` cases: immediate destroy with no
+pending tasks, deferred destroy released by one retain, deferred destroy
+released only once both of two retains release, release without any
+destroy request not freeing, and a non-Vulkan `int` payload plus a
+pointer payload proving genuine type parameterization).
+`FeMeExecutionTests.exe` run directly showed **11/11 passed** (6
+pre-existing `TaskExecutor` cases + 5 new). `FeMeVulkanTests.exe` run
+directly also showed **892 passed / 15 skipped / zero failed** (907
+total), including the pre-existing `ExecutionLifetimeTest` suite
+(`SyncTest.cpp`, unchanged) passing unmodified -- direct confirmation the
+twelve consumers' behavior is unaffected by the alias conversion. Cached
+(`sccache`), assertions enabled, no PCH.
+
+The local CTS checkout (unchanged) reran the identical bounded 490-case
+selection used for `WS2(a)` (`dEQP-VK.api.device_init.*`, `api.smoke.*`,
+a `synchronization.basic.*` sample, and `synchronization2.
+timeline_semaphore.{wait_before_signal,one_to_n}.*` samples), since
+`PendingExecutionRefCounted` guards the exact same destroy-while-in-
+flight races those paths exercise. Total: **490 Completed, 477 Pass, 12
+NotSupported, zero unexpected failures, zero Unrun** -- identical result
+counts to `WS2(a)`'s run, as expected for a pure internal extraction with
+no behavior change. The same one unrelated `TimedOut`
+(`dEQP-VK.api.device_init.create_instance_device_intentional_alloc_fail.basic`)
+recurred, confirming it is unrelated to this or the prior session's
+changes. Artifacts are under `C:\dev\VK-GL-CTS\run\feme-20261106-ws2b`:
+`cases.txt`, `results\report.txt`. From the LLVM checkout:
+
+```powershell
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261106-ws2b\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261106-ws2b\results `
+  --workers 1 --batch-size 60 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The ICD at this session's HEAD has SHA-256
+`41c5d181bf645994f4ff659eb6d7f36d7e69fd6e6b2dd1943b8198f29170067e`
+(`libfeme_vulkan.dll`); `llvm-project` was at that same commit when this
+run completed. No full CTS sweep, Direct3D execution, display
+interoperability, or HLK qualification was run this session; both Vulkan
+inventories were not regenerated this entry (no format/extension
+advertisement changed by this pure code-motion commit).
+
 ## Windows WARP roadmap WS2(a): QueueExecutor task-runner extraction (2026-11-06)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
