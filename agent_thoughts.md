@@ -136186,3 +136186,122 @@ commits, which also didn't touch `check-feme`-covered code.
    not re-litigated here.
 4. Backlog, untouched again this session: `ENV6(c)(3)`/`ENV6(d)` CTS triage,
    `ENV7(g)` audit, full Vulkan CTS re-measure.
+
+# 2026-11-06: W0(g) follow-up -- answering GetCaps truthfully reaches CreateDevice, thunk pointers non-null
+
+## TL;DR
+
+- Implemented the prior session's exact next step: answered the two observed
+  `GetCaps` queries truthfully and minimally in `BootstrapStub.cpp`.
+- **`CreateDevice` is now reached** (`Create=1`, was `0`). The runtime never
+  even queries the second, older cap once the first succeeds (`Caps=1`, was
+  `2`) -- confirming it really was a fallback.
+- **Both `pKTCallbacks` and `p12UMCallbacks` are non-null** at `CreateDevice`.
+  This is the first direct evidence that the stock runtime hands a real
+  kernel-routed thunk-callback table to an *owned, non-installed* UMD
+  identity reached purely through `EnumWarpAdapter` substitution -- no
+  kernel driver installed, no private ordinal, no forwarding.
+- The negotiated `Interface=786442`/`Version=0` decode exactly to the pinned
+  `D3D12DDI_SUPPORTED_0010` (`0x000C000A` = major `12`, minor `10`; build
+  `0`) -- the runtime negotiated precisely what was advertised.
+- **Not yet proven**: whether those thunk pointers are actually *callable*.
+  No callback has been invoked. `createDevice` still returns `E_NOTIMPL`
+  after capturing the audit evidence -- no device contract exists yet, and
+  none should until `W0(b)` is resolved.
+
+## What I did
+
+1. Confirmed `vulkaninfo --summary` -> `FeMe CPU Vulkan Device` (mandatory,
+   every session, every time).
+2. Read `BootstrapStub.cpp`'s current state (left by the prior session) and
+   re-looked-up the exact struct shapes in `d3d12umddi.h` (WDK 10.0.28000.0):
+   - `D3D12DDI_3DPIPELINESUPPORT1_DATA_0081` (for cap `1074`): a 2-field
+     struct, `HighestRuntimeSupportedFeatureLevel` (input) and
+     `MaximumDriverSupportedFeatureLevel` (output) -- both
+     `D3D12DDI_3DPIPELINELEVEL`. Confirmed via the header's own `// input`/
+     `// output` comments that echoing the input back as the output is a
+     true statement, not a fabricated capability.
+   - `D3D12DDICAPS_TYPE_3DPIPELINESUPPORT` (cap `1007`, older/legacy): its
+     `pData` is a bare `D3D12DDI_3DPIPELINELEVEL` enum value (the header's
+     comment literally says "drivers only report the maximum level they
+     support") -- answered with the lowest defined value,
+     `D3D12DDI_3DPIPELINELEVEL_1_0_GENERIC`, a truthful floor.
+   - `D3D12DDIARG_GETCAPS`'s `pData`/`DataSize` fields, to guard both
+     answers with a `DataSize >=  sizeof(...)` check before writing.
+3. Edited `getCaps` in `BootstrapStub.cpp` to answer exactly these two caps
+   (by `Args->Type`), returning `S_OK` with the truthful data above; every
+   other cap (and the two caps themselves if `pData`/`DataSize` don't match
+   what's expected) still returns `E_NOTIMPL` as before. Updated the file's
+   top-of-file comment to describe this.
+4. Rebuilt `negotiation`/`pinned-version` variants in the existing
+   `C:\dev\warp-interposition` build dir (sccache, LLD, Debug `/Z7`, no
+   PCH -- unchanged project settings from the prior session, just rebuilt).
+   Clean build, no new warnings.
+5. Ran `ctest -V --repeat until-fail:3`: **7/7 passed, 3 repeats, no flakes**.
+   `os-routed-pinned-version` now prints:
+   ```
+   Bootstrap calls: Open=1 Size=0 Versions=2 Caps=1 Optional=0 Fill=0 Create=1 Close=1 Destroy=0
+   GetCaps Type values queried (1 total): 1074
+   CreateDevice args: Interface=786442 Version=0 pKTCallbacks=non-null p12UMCallbacks=non-null
+   ```
+   vs. the prior session's `Caps=2 ... Create=0 ... pKTCallbacks=null
+   p12UMCallbacks=null`. `AdapterProbe.cpp`'s existing audit-mode assertions
+   (`Open==1 && Versions>0 && Caps>0 && Close==1 && Destroy==0`, and overall
+   `FAILED(Result)`) already tolerated a variable `Create` count, so no test
+   harness changes were needed -- only the production stub changed.
+6. Decoded `Interface=786442` by hand against the header's version macros:
+   `D3D12DDI_MAJOR_VERSION` is `12` (`0x0C`), and `D3D12DDI_SUPPORTED_0010`'s
+   `D3D12DDI_INTERFACE_VERSION_R1` component is `0x000A` (minor `10`);
+   `(12<<16)|10 = 786442`. `Version=0` matches
+   `D3D12DDI_BUILD_VERSION_0010 = 0`. This confirms the runtime negotiated
+   exactly the one version this experiment advertised, not something else.
+7. Wrote up the follow-up finding as a new subsection in
+   `W0WindowsIntegrationProbe.md` (after the existing `### W0(g)
+   pinned-DDI/thunk-service audit` section), flagging the open
+   callback-liveness question as the next bounded step rather than attempting
+   it this session (invoking a kernel-routed thunk callback starts to shade
+   into device-implementation territory, which still needs `W0(b)`).
+8. Updated `WARPRoadmap.md`'s `W0(g)` row/narrative with a further strike-
+   through of the "answer those two caps truthfully" sub-clause, while
+   keeping the overall milestone open (real device, callback liveness, and
+   `W0(b)` are still unresolved).
+9. Added a `.instructions.md` knowledge bullet recording this finding so a
+   future session doesn't have to re-derive it, and doesn't mistake a
+   non-null thunk pointer for a proven working kernel-routed path.
+10. Committed in two steps: code
+    (`3d7dc5b4de3e`), then docs (`0267687bc4f5`).
+
+## Why no `check-feme`/Vulkan CTS this session
+
+Only `feme/utils/windows-adapter-bootstrap/BootstrapStub.cpp` (a standalone
+CMake project with no FeMe/LLVM library dependency) and documentation
+changed. No `feme/lib`, `feme/include`, or shared Vulkan-core production code
+was touched, so there is nothing for `check-feme` or the Vulkan CTS to
+regress-test -- consistent with every prior `W0`/windows-utils-only session.
+
+## Next steps (ranked)
+
+1. **Probe thunk-callback liveness, carefully, as its own bounded step.**
+   `pKTCallbacks`/`p12UMCallbacks` are non-null, but nothing has been called
+   through them yet. A good first bounded probe would be reading (not
+   calling through) one *documented, clearly side-effect-free* field --
+   e.g. checking whether `p12UMCallbacks`'s function pointers themselves are
+   non-null (without invoking them), as a cheaper intermediate step before
+   attempting an actual call. If an actual call is attempted, pick the most
+   diagnostic-feeling one available (not an allocation/resource call) and be
+   prepared for it to fault or hang; this is genuinely unexplored territory
+   and should stay clearly labeled as "observing Windows's behavior," not
+   "building a device."
+2. **Try a newer pinned DDI version as a control.** This session only tested
+   the earliest baseline (`D3D12DDI_SUPPORTED_0010`). A follow-up pinning a
+   substantially newer version (while still answering only the same two
+   caps) would help separate "any version works once caps are answered"
+   from "only the oldest/simplest version works this easily."
+3. **`W0(b)`'s product/compatibility decision remains the single blocking
+   item** for anything beyond audit work -- unchanged across many sessions,
+   not re-litigated here. The evidence keeps narrowing toward "this is
+   missing implementation, not a private boundary," but that doesn't itself
+   constitute the explicit human sign-off the design doc requires before
+   building a real device/ABI surface.
+4. Backlog, untouched again this session: `ENV6(c)(3)`/`ENV6(d)` CTS triage,
+   `ENV7(g)` audit, full Vulkan CTS re-measure.
