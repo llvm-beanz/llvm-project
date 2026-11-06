@@ -1,6 +1,5 @@
 ---
 model: claude-sonnet-5.5
-resume: 867b2fbf-2238-40d8-8a30-ea8036208e37
 ---
 # Initial Guidelines
 
@@ -68,7 +67,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-Next steps, ranked:
-1. `ENV6(c)(5a)` (75 graphicsfuzz + left-shift).
-2. `ENV5(c)(7)(b)` multi-barrier hull (1 case).
-3. cosh-return-inf-unused; offload (blocked).
+1. `ENV6(c)(5a)`: add a mask-merging phi at the shared tail block. Starting
+   points: `Linearize.cpp` `DiamondFlattener::validate`,
+   `canFlattenLoopBodyRegion` and `linearizeCycle`. Don't retry the
+   `validate()`-only relaxation.
