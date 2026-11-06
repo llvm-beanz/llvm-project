@@ -6359,7 +6359,16 @@ mlir::Type getTightNestedStructType(mlir::spirv::StructType NestedStruct,
           MemberTy = mlir::LLVM::LLVMArrayType::get(
               TightElement, ArrayTy.getNumElements());
       } else {
-        MemberTy = Converter.convertType(ElementTy);
+        // An array of matrices with no declared stride (an offset-less
+        // nested struct's own member) must not inherit the natural
+        // conversion's vector-ABI alignment, which would grow this
+        // struct past the footprint an enclosing block reserved for it.
+        if (!ArrayTy.getArrayStride() &&
+            mlir::isa<mlir::spirv::MatrixType>(ArrayTy.getElementType()))
+          MemberTy = getTightNestedArrayOfVectorsOrMatricesType(
+              NestedStruct, I, ElementTy, Converter);
+        if (!MemberTy)
+          MemberTy = Converter.convertType(ElementTy);
         // (Roadmap K6j) An array-of-matrix (or a further-nested array
         // of vectors/matrices) member -- unlike the array-of-vector
         // case just above, which already has its own tight substitution
@@ -6425,6 +6434,41 @@ mlir::Type getTightNestedStructType(mlir::spirv::StructType NestedStruct,
     return Result;
   return layOutStructIfOffsetsMatch(NestedStruct, TightMembers, nullptr,
                                     /*AllowInteriorPad=*/true);
+}
+
+/// If \p ElementTy is an array, at any nesting depth, whose innermost
+/// element is a struct declaring no `Offset` of its own, returns the same
+/// array nesting rebuilt around getTightNestedStructType of that struct --
+/// the array analog of the nested-struct member case in
+/// convertOffsetStructTypeIgnoringDecorations, needed for the same reason
+/// (an enclosing offset-decorated block such as a transform feedback
+/// output reserves no vector-ABI padding for the element's body). Returns
+/// null if \p ElementTy is not such an array, if the tight struct fails
+/// to convert, or if an array level's declared Stride disagrees with its
+/// element's tight size.
+mlir::Type
+getTightNestedArrayOfStructsType(mlir::Type ElementTy,
+                                 const mlir::TypeConverter &Converter) {
+  auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy);
+  if (!ArrayTy)
+    return nullptr;
+  mlir::Type Inner = ArrayTy.getElementType();
+  mlir::Type TightInner;
+  if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(Inner)) {
+    if (StructTy.hasOffset())
+      return nullptr;
+    TightInner = getTightNestedStructType(StructTy, Converter);
+  } else {
+    TightInner = getTightNestedArrayOfStructsType(Inner, Converter);
+  }
+  if (!TightInner)
+    return nullptr;
+  if (unsigned Stride = ArrayTy.getArrayStride()) {
+    mlir::DataLayout DL;
+    if (DL.getTypeSize(TightInner) != Stride)
+      return nullptr;
+  }
+  return mlir::LLVM::LLVMArrayType::get(TightInner, ArrayTy.getNumElements());
 }
 
 /// Pads an already-converted \p Type (an array element, or a struct
@@ -7472,7 +7516,12 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
                      : convertOffsetStructTypeIgnoringDecorations(
                            NestedStructTy, Converter, nullptr);
     else {
-      MemberTy = Converter.convertType(ElementTy);
+      // An array of offset-less structs inside an offset-decorated block
+      // needs the same tight element body a bare nested struct member gets.
+      if (Type.hasOffset())
+        MemberTy = getTightNestedArrayOfStructsType(ElementTy, Converter);
+      if (!MemberTy)
+        MemberTy = Converter.convertType(ElementTy);
       // (Roadmap K6a) The ordinarily-registered spirv::ArrayType
       // conversion (convertArrayTypeIgnoringDecorations) fails outright
       // -- rather than deferring to this function's own later "tight"
@@ -8157,6 +8206,7 @@ bool remapNestedStructMemberIndices(
       // by \p RealStructTy above -- fall back to the ordinary (non-
       // \p RealStructTy) path the next time a struct level is reached,
       // exactly as before this roadmap item.
+      mlir::Type RealElementTy = RealArrayElementTy;
       RealStructTy = nullptr;
       ElementType = ArrayTy.getElementType();
       // (Roadmap L289) This array's own element may itself be a vector
@@ -8181,7 +8231,33 @@ bool remapNestedStructMemberIndices(
             Rewriter.getIntegerAttr(LLVMIndexType, 0));
         Indices.insert(Indices.begin() + Pos + 1, Zero);
       }
-      RealArrayElementTy = nullptr;
+      // A matrix element substituted by its tight column-vector marker
+      // structs (see getTightMatrixType) needs the same extra `0` ahead
+      // of a component-selecting index, one position further in (past the
+      // column selector).
+      if (Pos + 2 < Op.getIndices().size() &&
+          mlir::isa<mlir::spirv::MatrixType>(ElementType)) {
+        auto RealMatrixTy =
+            mlir::dyn_cast_or_null<mlir::LLVM::LLVMArrayType>(RealElementTy);
+        if (RealMatrixTy &&
+            getTightVectorMarkerInnerType(RealMatrixTy.getElementType())) {
+          mlir::Type LLVMIndexType = Indices[Pos + 2].getType();
+          mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+              Rewriter, Op.getLoc(), LLVMIndexType,
+              Rewriter.getIntegerAttr(LLVMIndexType, 0));
+          Indices.insert(Indices.begin() + Pos + 2, Zero);
+        }
+      }
+      // A struct (or further array) reached through this array follows
+      // its real converted element rather than being re-derived in
+      // isolation, which can disagree with its tightened embedded form.
+      RealStructTy =
+          mlir::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(RealElementTy);
+      RealArrayElementTy =
+          mlir::dyn_cast_or_null<mlir::LLVM::LLVMArrayType>(RealElementTy)
+              ? mlir::cast<mlir::LLVM::LLVMArrayType>(RealElementTy)
+                    .getElementType()
+              : nullptr;
     } else if (auto RTArrayTy =
                    mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(CurrentType)) {
       RealStructTy = nullptr;
