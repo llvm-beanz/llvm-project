@@ -9258,8 +9258,25 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   bool BodyFlattenOnly = false;
   if (!BodyRegion && HeaderDivergent) {
     SmallPtrSet<BasicBlock *, 16> PreMerge, PreResolved;
+    // Roadmap ENV6(c)(5b): mirrors `GetAlreadyLinearizedCycleExitForBody`
+    // just below -- lets this feasibility probe's own `validate` walk
+    // treat an already-linearized child cycle's own header as
+    // transparent too, instead of a stub that always declines the
+    // exemption.
+    auto GetAlreadyLinearizedCycleExitForPre =
+        [&](BasicBlock *ChildHeader) -> BasicBlock * {
+      CycleRef ChildCycle = CI.getCycle(ChildHeader);
+      if (!ChildCycle.isValid() || ChildCycle == C ||
+          !CI.contains(C, ChildHeader))
+        return nullptr;
+      ArrayRef<BasicBlock *> Exits = getExitBlocks(ChildCycle);
+      SmallPtrSet<BasicBlock *, 2> UniqueExits(Exits.begin(), Exits.end());
+      if (UniqueExits.size() != 1)
+        return nullptr; // Multiple exits: not yet supported here.
+      return *UniqueExits.begin();
+    };
     DiamondFlattener Pre(F, DT, PDT, CI, UI, PreMerge, PreResolved,
-                         [](BasicBlock *) -> BasicBlock * { return nullptr; });
+                         GetAlreadyLinearizedCycleExitForPre);
     if (Pre.canFlattenLoopBodyRegion(BodyRegionStart, Latch)) {
       BodyRegion.emplace();
       BodyFlattenOnly = true;
