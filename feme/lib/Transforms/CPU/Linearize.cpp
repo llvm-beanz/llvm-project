@@ -9032,6 +9032,19 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   std::optional<SmallPtrSet<BasicBlock *, 8>> BodyRegion =
       collectUniformPassThroughRegion(BodyRegionStart, Latch, ExitBlock, C,
                                        PeeledFrom);
+  // Roadmap ENV6(e)(4b): a divergent diamond in the body (e.g. a `demote`
+  // guarded by a per-lane condition) is not a uniform pass-through region,
+  // but `DiamondFlattener` below can still flatten it. Defer to it.
+  bool BodyFlattenOnly = false;
+  if (!BodyRegion && HeaderDivergent) {
+    SmallPtrSet<BasicBlock *, 16> PreMerge, PreResolved;
+    DiamondFlattener Pre(F, DT, PDT, CI, UI, PreMerge, PreResolved,
+                         [](BasicBlock *) -> BasicBlock * { return nullptr; });
+    if (Pre.canFlattenLoopBodyRegion(BodyRegionStart, Latch)) {
+      BodyRegion.emplace();
+      BodyFlattenOnly = true;
+    }
+  }
   if (!BodyRegion) {
     diagnose(F, "loop at '" + Header->getName() +
                     "' has an internal branch in a body shape this "
@@ -9168,6 +9181,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   if (std::optional<MaskPair> FlattenedMasks = BodyDF.flattenLoopBodyRegion(
           BodyRegionStart, Latch, MasksAtLatch)) {
     MasksAtLatch = *FlattenedMasks;
+  } else if (BodyFlattenOnly) {
+    diagnose(F, "loop at '" + Header->getName() +
+                    "' has a divergent body diamond this milestone could "
+                    "not flatten; unsupported (roadmap ENV6(e)(4b))");
+    return false;
   } else {
     for (BasicBlock *BB : *BodyRegion) {
       applyStageMasks(*BB, MasksAtLatch);
