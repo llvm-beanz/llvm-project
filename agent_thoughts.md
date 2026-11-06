@@ -135453,3 +135453,39 @@ prototype. A deliberately incomplete DLL's rejection is not evidence that
 user-mode integration is impossible. Read the new report and begin W0(f);
 consider the installed WDDM or COM-runtime alternatives only at the explicit
 boundary decision gate.
+
+## 2026-11-06: Establish container-first WARP user-mode direction
+
+**Next action**: In the Windows container, build
+`feme/utils/windows-adapter-probe` and run its four CTest cases. Record
+container-specific reference-WARP and rejection-stub evidence before extending
+the adapter bootstrap under W0(f).
+
+The user explicitly requested documentation establishing this direction.
+Updated the launch prompt, WARP roadmap/design, general roadmap, FeMe
+instructions and integration report consistently:
+
+1. The selected first approach is an application-local user-mode software
+   driver using stock Windows D3D12/DXGI, developed in the Windows container.
+   It is not an automatically selected replacement COM runtime or installed
+   miniport.
+2. Container reference tests are the first action. Host results are recorded
+   evidence, not proof that the container runtime or third-party FeMe driver
+   works. Record exact runtime/environment failures rather than declaring all
+   work blocked by unavailable kernel installation.
+3. FeMe identity, adapter/bootstrap, pinned DDI/callback negotiation, teardown
+   and later headless execution remain implementation requirements. W1 depends
+   on the selected boundary proof, not pending installed-driver/HLK evaluation.
+4. Driver installation/signing/reboot and display/HLK work remain separate
+   approved host/VM deployment tasks if needed. A private-WARP dependency,
+   installed-adapter fallback or COM-runtime alternative requires an explicit
+   W0(b) design decision. Full FL 12_2, presentation, capability honesty and
+   source-redistribution constraints are unchanged.
+
+**Validation**: Documentation-only; no production code, probe implementation,
+Vulkan advertisement or test behavior changed. No container test run, CTS
+pass or completed FeMe device was claimed. Checked documentation consistency,
+relative links and patch whitespace, preserving existing unchanged-line
+terminators. The pre-existing launch-prompt edits were in the next-steps
+section this request supersedes; retained its corpus-triage and backlog items
+while replacing the stale host-only blocker with W0(f).
