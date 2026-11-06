@@ -132398,3 +132398,23 @@ Confirmed device: `FeMe CPU Vulkan Device`.
    Linearize.cpp ~8770, `canFlattenLoopBodyRegion`).
 2. Full CTS re-measure in the background.
 3. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
+
+# Session: ENV6(c)(5a) diagnosis corrected
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I found (no fix yet)
+- Last session's reading was wrong. Debug print in
+  `canFlattenLoopBodyRegion` showed the failing loop is the *inner* one:
+  `validate(11, Flow2._crit_edge)` fails.
+- Why: header `9` exits via `.Flow2_crit_edge -> Flow2`, and `Flow2` is
+  also the body's merge + tail exit check. So `Flow2` has a predecessor
+  outside the region `[11, latch)`.
+- Updated the roadmap row with this. Debug print reverted; no code change.
+
+## Next steps (ranked)
+1. In `DiamondFlattener::validate`, tolerate a merge whose extra predecessor
+   is the header's exit relay (or exclude that relay when the header exit is folded).
+2. Check `cosh-return-inf-unused` for the same shape.
+3. Full CTS re-measure in the background.
+4. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
