@@ -68,7 +68,6 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. Derivate vec4_highp (why only vec4 highp; z/w non-planarity?).
-2. negative-left-shift.
-3. Rerun the remaining x8_d24 cases from `/tmp/newfail.txt` and record in VulkanCTSReport.md.
-4. ENV6(c)(5a) flatten-level fix; cosh-return-inf-unused; offload (blocked).
+1. Derivate vec4_highp (`ENV6(e)(6)`).
+2. `ENV6(c)(5a)` flatten()-level fix: now unblocks ~75 graphicsfuzz cases plus left-shift. Dedicated session.
+3. cosh-return-inf-unused; offload (blocked).
