@@ -70,27 +70,20 @@ Please begin work on the WARP roadmap.
 
 ## Suggested next steps (ranked)
 
-1. **`WS3(b)`**: design and implement the still-open "byte/image
-   comparisons and unchanged capability manifests" regression-gate
-   half of `WS3`. Candidates worth evaluating: (a) a checked-in Vulkan
-   capability-manifest snapshot compared against each session's
-   regenerated `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.
-   md`, flagging an unexplained diff; (b) a small script diffing two
-   `run_vulkan_cts.py` `report.txt` runs' *named* pass/fail sets (not
-   just totals) across a shared-core change, so a newly-failing case
-   name is caught even if the aggregate counts happen to coincidentally
-   match. This is the one piece of `WS3`'s original scope not yet even
-   designed, after three sessions of flagging "resolve `WS3`" as a
-   priority -- worth actually starting now that `WS3(a)` establishes
-   the simpler half is done.
-2. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
-   an explicit FeMe adapter-selection assertion -- a research/
-   documentation task, no Windows adapter install needed yet. Carried
-   forward unchanged across many sessions now; still cheap and
-   bounded if a change of pace from `WS3(b)`'s more open-ended design
-   work is wanted.
-3. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
-   Windows host/VM outside this process-isolated container.
-4. Backlog carried from prior sessions, still untouched:
+1. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus
+   (`C:\dev\Direct3D`, per the environment's own instructions: read its
+   `.github\copilot-instructions.md` first, it is a copy of the host's
+   checkout, not a push target) into public black-box/WARP-private
+   white-box/DXBC-DXIL-input/optional-preview-feature/display-HLK-
+   dependency categories, and add an explicit FeMe adapter-selection
+   assertion to a future runner -- a research/documentation task, no
+   Windows adapter install needed yet. With `WS0`-`WS3` all now fully
+   closed, this (or `W0(a)`/`W0(b)`) is the roadmap's own next
+   milestone in sequence, not a parallel-track item anymore.
+2. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container, per the
+   roadmap's own text ("kernel installation and reboot tests belong on
+   a suitable Windows host/VM, not this process-isolated container").
+3. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
