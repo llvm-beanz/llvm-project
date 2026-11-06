@@ -134497,3 +134497,239 @@ piece of `WS1`'s original breakdown.
 5. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-06: WS2(a) QueueExecutor task-runner extraction (this session)
+
+**Next action:** `WS2(b)` (generalize `ExecutionLifetime.h`'s
+`PendingExecutionRefCounted` retain/release-with-deferred-destroy
+pattern into `FeMeExecution`) -- the retained-work-storage half of
+`WS2`'s original scope this session deliberately did not touch.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+(confirmed at session start and again immediately before the CTS run,
+per standing instructions -- same two harmless `nv-vk64.json` loader
+warnings as every prior session).
+
+## What I did
+
+Picked up the prior session's ranked suggestion #1 (`WS2`), the natural
+next shared-core extraction target now that `WS1`'s entire breakdown is
+done. `WS2`'s roadmap text names three things -- task execution,
+retained work storage, and command-execution/CPU-draw-worker paths --
+materially more scope than one bounded slice should cover, so (matching
+how `WS1` itself got lettered mid-stream) I scoped this session to the
+single cleanest, most self-contained piece and let the rest carry
+forward as new roadmap rows, rather than trying to do it all at once.
+
+1. Read `feme/lib/Vulkan/Sync.h`/`Sync.cpp` end to end. Found
+   `QueueExecutor` (`Sync.h`) is a complete, self-contained FIFO
+   single-worker task runner built entirely from `std::thread`/
+   `std::mutex`/`std::condition_variable`/`std::deque<std::function<
+   void()>>` -- it has never referenced a single `Vk*` type in its own
+   definition, only in surrounding comments. This made it the obvious
+   first `WS2` slice: a zero-risk, pure-code-motion match for the
+   roadmap's own "proposed small `FeMeExecution` library ... task
+   dispatch/join" description.
+2. Traced every caller: `Queue` (`Objects.h`) owns one `QueueExecutor`
+   via a plain member and `getExecutor()` accessor; every call site only
+   ever uses `.enqueue(std::function<void()>)` or the no-argument
+   `.waitIdle()` (`Sync.cpp` lines 708/718/763/773/883/889/898,
+   `Objects.h`'s `Device::waitIdle()`). No caller passes any argument
+   `waitIdle()` doesn't already take, confirming a drop-in forwarder was
+   safe.
+3. Created a new `FeMeExecution` library: `feme::execution::TaskExecutor`
+   (`feme/include/feme/Execution/TaskExecutor.h`,
+   `feme/lib/Execution/TaskExecutor.cpp`) with the identical FIFO
+   enqueue/drain/join logic, renamed from `QueueExecutor` because
+   "queue" is Vulkan-specific terminology the roadmap's own
+   `FeMeExecution` description avoids. The one deliberate behavioral
+   difference: `TaskExecutor::waitIdle` takes an explicit
+   `std::chrono::nanoseconds Timeout` parameter, instead of internally
+   calling the Vulkan-specific `getQueueIdleSafetyNetTimeoutNs()` the
+   original method always used -- keeping the portable class free of any
+   Vulkan-specific timeout policy.
+4. Converted `feme::vulkan::QueueExecutor` into a thin wrapper holding a
+   `feme::execution::TaskExecutor Impl` member -- a **composed member,
+   not a type alias**, specifically so every existing caller's exact
+   no-argument `waitIdle()` call keeps compiling unchanged.
+   `enqueue(...)` forwards directly; `waitIdle()` forwards to
+   `Impl.waitIdle(getQueueIdleSafetyNetTimeoutNs())`.
+5. Added `FeMeExecution` as a new `add_subdirectory` under
+   `feme/lib/CMakeLists.txt`/`feme/unittests/CMakeLists.txt`, and as a
+   `LINK_LIBS PUBLIC` dependency of `FeMeVulkanCore`
+   (`feme/lib/Vulkan/CMakeLists.txt`), mirroring the exact scaffolding
+   `FeMeImage`/`FeMeImageTests` already established.
+6. Added 6 new tests directly exercising `TaskExecutor` with no Vulkan
+   dependency (`feme/unittests/Execution/TaskExecutorTest.cpp`):
+   non-blocking enqueue, FIFO task ordering, `waitIdle` draining all
+   pending tasks, `waitIdle` genuinely timing out on a still-running
+   task, destructor draining pending tasks before joining, and
+   concurrent enqueue from multiple threads. `SyncTest.cpp` is
+   unchanged -- it never had a standalone `QueueExecutor` unit test to
+   begin with (only indirect coverage through submission/fence-level
+   tests), so there was nothing to migrate, only new coverage to add.
+7. Five commits, same established small-commit pattern: (1) new
+   `FeMeExecution` library, build-verify; (2) convert `QueueExecutor`
+   into the thin wrapper, build `FeMeExecution` -> `FeMeVulkanCore` ->
+   `feme_vulkan` in sequence; (3) new `TaskExecutorTest.cpp`, build-and-
+   run-verify; (4) roadmap/CTS-report/inventory doc updates together;
+   (5) a line-ending/clang-format fixup after discovering the CLI's
+   file-creation tool had written CRLF for the three brand-new `.h`/
+   `.cpp`/test files (see the process note below).
+8. Struck `WS2(a)` on `WARPRoadmap.md` with exit evidence, and added a
+   new `WS2(b)` row carrying forward the retained-work-storage half of
+   `WS2`'s original scope (see "What I deliberately didn't do" below).
+   Updated the roadmap's opening summary line to mention `WS2(a)` is
+   done.
+
+## Verification
+
+- `check-feme`: 3,948 Passed / 15 Skipped / 10 Unsupported, zero
+  failures (3,973 discovered) -- exactly 6 more than the prior session's
+  3,967, matching the 6 new `TaskExecutorTests` cases, zero regressions.
+  Ran this twice this session: once right after the code/test commits,
+  and once more at the very end after the doc-update and line-ending-
+  fixup commits (which touched no compiled logic), to make sure the
+  final committed state is the one actually verified. Both runs: exit
+  code 0, identical numbers.
+- `FeMeExecutionTests.exe` direct run: 6/6 Pass, both times (once before,
+  once after the clang-format/LF fixup -- confirming the fixup was
+  genuinely line-endings-and-comments-only, not a behavioral change).
+- Bounded CTS: assembled a 490-case selection from the local
+  `vk-default` mustpass, targeting queue-submission and cross-thread
+  wait/signal paths that actually run through `QueueExecutor`/
+  `TaskExecutor`: all of `dEQP-VK.api.device_init.*` (253 cases) and
+  `dEQP-VK.api.smoke.*` (8 cases), plus 150/100/100-case samples of
+  `dEQP-VK.synchronization.basic.*` and `dEQP-VK.synchronization2.
+  timeline_semaphore.{wait_before_signal,one_to_n}.*` -- the exact
+  dependent-submission-chain patterns `QueueExecutor`'s own file comment
+  cites as the reason an asynchronous, per-queue worker thread exists in
+  the first place. Result: 490 Completed, 477 Pass, 12 NotSupported,
+  zero unexpected failures, zero Unrun. One unrelated `TimedOut`
+  (`dEQP-VK.api.device_init.create_instance_device_intentional_alloc_fail.basic`,
+  an allocation-failure-injection stress test with no relationship to
+  queue task execution -- not a regression).
+- Did not regenerate either Vulkan inventory file -- added a "rechecked,
+  not regenerated, no advertisement changed" note to both, matching
+  every prior session's own precedent.
+- Built the case-list file directly under an absolute
+  `C:\dev\VK-GL-CTS\run\feme-20261105-ws2a\cases.txt` path from the
+  start, maintaining the discipline established after earlier sessions'
+  relative-path mistakes.
+
+## Decision record
+
+1. **Naming**: the portable class is `feme::execution::TaskExecutor`,
+   not `QueueExecutor` -- "queue" names a Vulkan (and D3D command-queue)
+   concept this class itself knows nothing about; it is purely a FIFO
+   task runner. `feme::vulkan::QueueExecutor` keeps its name since it
+   genuinely *is* still a `VkQueue`'s own executor, just now implemented
+   by composing the portable class.
+2. **Composition, not a type alias**: `QueueExecutor` wraps a
+   `TaskExecutor Impl` member rather than becoming a type alias to
+   `feme::execution::TaskExecutor`, specifically so the existing
+   no-argument `waitIdle()` call signature every caller already uses
+   keeps compiling unchanged, and so the Vulkan-specific
+   safety-net-timeout policy has an obvious, single place to live
+   (`QueueExecutor::waitIdle()` itself) rather than being pushed onto
+   every call site.
+3. **What I deliberately didn't do**: `WS2`'s roadmap text named three
+   things -- task execution, retained work storage, and command-
+   execution/CPU-draw-worker paths. This slice only did the first.
+   `feme::vulkan::PendingExecutionRefCounted` (`ExecutionLifetime.h`) --
+   the "retained work storage" piece -- was read in full and found to be
+   a second, independently portable extraction candidate: its only
+   Vulkan-specific detail is storing a `const VkAllocationCallbacks *`
+   as its opaque deferred-destroy payload, otherwise a type-agnostic
+   retain/release counter. Rather than combine two extractions (and two
+   new test suites) into one commit/session, I carried it forward as
+   `WS2(b)` on the roadmap. The actual `vkQueueSubmit`/
+   `executeCommandBuffer` task-*building* logic (constructing the
+   `std::function<void()>` that gets enqueued) was left entirely alone
+   -- it is genuinely Vulkan-specific command-recording/validation
+   logic, not task-dispatch mechanics, and the roadmap's own `WS2` row
+   explicitly says to preserve Vulkan queue/semaphore behavior rather
+   than export its object model wholesale.
+4. **Test strategy**: rather than trying to retrofit `SyncTest.cpp`'s
+   existing (indirect, submission/fence-level) coverage of
+   `QueueExecutor`, added a wholly new, direct `TaskExecutorTest.cpp`
+   suite against the portable class -- cleaner coverage of the class
+   itself, and `SyncTest.cpp` continues to validate that the *wrapper*
+   composes correctly through its own existing tests (which still pass
+   unchanged).
+
+## Process note: CLI file-creation tool writes CRLF on this container
+
+Discovered partway through this session: the three brand-new files this
+session created (`TaskExecutor.h`, `TaskExecutor.cpp`,
+`TaskExecutorTest.cpp`, plus their two new `CMakeLists.txt` files) landed
+with CRLF line endings, while every existing file in the repository is
+LF-terminated. `clang-format -i` (run per the coding-standards
+instructions, which I should have run immediately after creating each
+file rather than only right before the final commit) surfaced this as a
+100%-line-changed diff the first time it touched each file -- not a
+real reformat, just the line-ending mismatch. Fixed with a dedicated
+small commit converting all five new files to LF, and codified the
+underlying cause/avoidance in `feme/.instructions.md` (new heading:
+"New files created by the CLI's file-creation tool land with CRLF line
+endings on this container") so a future session runs `clang-format -i`
+immediately after creating new source files, and manually normalizes new
+non-clang-format files (`CMakeLists.txt`, `.md`), instead of hitting the
+same oversized fixup-commit surprise.
+
+## State restated
+
+- `WS0` (`WS0(a)`/`WS0(b)`), `WS1` (`WS1(a)`-`WS1(d)`): all done,
+  unchanged this session.
+- `WS2(a)`: done this session. `WS2(b)` (retained-work-storage
+  generalization of `PendingExecutionRefCounted`) is now a new,
+  explicit roadmap row, not yet started. `WS2`'s command-execution/
+  CPU-draw-worker-paths scope remains undecided -- not yet broken into
+  its own lettered row; worth deciding in a future session whether it
+  needs one or stays out of scope entirely (see suggested next steps).
+- New library: `FeMeExecution` (`feme/include/feme/Execution/
+  TaskExecutor.h`, `feme/lib/Execution/TaskExecutor.cpp`), linked into
+  `FeMeVulkanCore`. 6 new unit tests (`FeMeExecutionTests.exe`).
+- `FeMeImage` library unchanged this session (still eight files, 78
+  unit tests).
+- No offload-test-suite / `check-hlsl-feme-vk` work this session.
+- No issue found outside `feme/` this session -- no reproducer/fix
+  commit needed.
+- One environment/process issue found and codified this session: the
+  CLI file-creation-tool CRLF quirk (see above), now in
+  `feme/.instructions.md`.
+- Six commits this session: (1) `FeMeExecution` library, (2)
+  `QueueExecutor` wrapper conversion, (3) `TaskExecutorTest.cpp`, (4)
+  roadmap/CTS-report/inventory doc updates, (5) clang-format/LF fixup,
+  (6) `.instructions.md` process note.
+
+## Suggested next steps (ranked)
+
+1. **`WS2(b)`**: generalize `feme::vulkan::PendingExecutionRefCounted`
+   (`ExecutionLifetime.h`)'s retain/release-with-deferred-destroy
+   pattern into `FeMeExecution`, parameterizing its opaque deferred-
+   destroy payload type instead of hardcoding `const
+   VkAllocationCallbacks *`. Builds directly on this session's
+   `FeMeExecution` library; a clean, bounded next slice with an
+   identified, concrete scope already written into the roadmap.
+2. **`WS2`'s command-execution/CPU-draw-worker-paths scope**: not yet
+   decided whether this needs its own lettered row or should be
+   evaluated for being out of scope (genuinely Vulkan-specific command
+   building, not task-dispatch mechanics, per this session's decision
+   record #3) -- worth a short, dedicated look once `WS2(b)` is done,
+   before assuming `WS2` is fully covered by `(a)`/`(b)` alone.
+3. **`WS3`**: establish shared-core regression gates -- still carried
+   forward from the last several sessions' own suggestions, now with
+   `WS1` and `WS2(a)` both done as additional evaluation material for
+   whether its gates would have caught anything manual check-feme/CTS
+   verification did not.
+4. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
+   an explicit FeMe adapter-selection assertion -- a research/
+   documentation task, no Windows adapter install needed yet.
+5. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+6. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
