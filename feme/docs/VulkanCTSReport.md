@@ -12017,3 +12017,16 @@ diagnostics (two distinct "only a uniform pass-through region" bail-outs
 plus a mask-affecting-op diagnostic), not this shape at all. Roadmap
 updated: `ENV6(c)(5a)` struck through; `ENV6(e)(7)` corrected to note it
 needs independent investigation, not "blocked on `ENV6(c)(5a)`".
+
+**Follow-up same session**: re-applying the `offload-test-suite` patch set
+to validate `check-hlsl-feme-vk` end-to-end surfaced an unrelated,
+pre-existing process gap -- patch 0004 (`WaveActiveMax.test`) failed to
+`git am` because that test file has genuine upstream CRLF line endings
+and plain `git am` strips the trailing `\r` from unchanged context lines.
+Fixed by using `git am --keep-cr` and regenerating the stored patch from a
+clean `--keep-cr` apply (see `feme/.instructions.md` and
+`feme/offload-test-suite-patches/README.md`); no FeMe code involved, so no
+new CTS run was needed for this part. Post-fix `check-hlsl-feme-vk`:
+505 Passed, 27 Expectedly Failed, 275 Unsupported, 0 unexpected failures
+(807 total). `check-feme` re-confirmed clean at 3905/3909 Passed, 4
+Unsupported, 0 failures.
