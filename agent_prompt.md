@@ -68,8 +68,8 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `mesh_shader.ext` (10), `renderpass2` (6), `demote` (5).
-2. `ENV6(c)(5)` representatives (graphicsfuzz, ~90).
-3. `spirv_assembly.instruction` (7), `transform_feedback.fuzz` (4).
-4. A full re-measure in a long background run (new regressions outside the list are unchecked).
+1. `ENV6(e)(4)` demote (5), `ENV6(e)(2)` mesh attrs/clip (6).
+2. `ENV6(e)(3)` mesh output size (4).
+3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+4. Full CTS re-measure in the background.
 5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
