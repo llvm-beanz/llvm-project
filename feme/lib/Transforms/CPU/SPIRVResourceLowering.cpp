@@ -2503,6 +2503,28 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
+    // Roadmap ENV6(e): `OpImageQuerySamples` against a *storage* image
+    // (`dEQP-VK.spirv_assembly.instruction.image_query.samples_storage`,
+    // a `RWTexture2DMS`/`image2DMS` handle, roadmap L73's own storage-image
+    // counterpart) -- see `hasOnlySupportedImageUses`'s identical
+    // `isQuerySamplesCall` check for a *sampled* image handle for why this
+    // is spec-legal only against a multisampled shape: a storage image's
+    // own `OpImageQuerySamples` reaches this function (not that one)
+    // because `classifyStorageImage2DHandle` classifies `sampled == 2`
+    // handles, and `lowerImageAccesses`'s own `isQuerySamplesCall` branch
+    // already lowers either kind identically via `createQuerySamples` (it
+    // dispatches purely on `Shape`, not on sampled-vs-storage) -- only
+    // this classifier was missing the case, leaving every multisampled
+    // storage-image handle's `OpImageQuerySamples` use unrecognized and
+    // the whole handle un-normalizable.
+    if (isQuerySamplesCall(*CI)) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      if (Shape != ImageShape::Plain2DMS && Shape != ImageShape::Array2DMS)
+        return false;
+      continue;
+    }
+
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
     if (!isCoordN(CI->getArgOperand(1), CoordWidth, /*Float=*/false))

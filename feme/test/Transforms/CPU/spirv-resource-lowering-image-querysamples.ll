@@ -50,3 +50,44 @@ declare target("spirv.Image", float, 1, 0, 1, 1, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg2(i32, i32, i32, i32, ptr)
 declare i32 @"feme.query.samples.1"(
     target("spirv.Image", float, 1, 0, 1, 1, 1, 0))
+
+; Roadmap ENV6(e): the storage-image counterpart
+; (`dEQP-VK.spirv_assembly.instruction.image_query.samples_storage`,
+; GLSL's `imageSamples(image2DMS)`/HLSL's `RWTexture2DMS::GetDimensions`'s
+; own sample count) -- `classifyStorageImage2DHandle` classifies a
+; `Sampled == 2` handle (`hasOnlySupportedStorageImageUses`), which
+; previously had no `isQuerySamplesCall` case at all, leaving every
+; multisampled storage-image handle's `OpImageQuerySamples` use
+; unrecognized and the whole handle un-normalizable.
+
+; CHECK-LABEL: define i32 @storage_image_2dms_query_samples(
+define i32 @storage_image_2dms_query_samples() {
+  %img = call target("spirv.Image", float, 1, 0, 0, 1, 2, 0)
+      @llvm.spv.resource.handlefrombinding.timg3(i32 0, i32 2, i32 1, i32 0, ptr null)
+  ; CHECK: call i32 @feme.cpu.image.querysamples.i32(ptr %image_heap, i32 %image_heap_count, i32 {{[0-9]+}})
+  %samples = call i32 @"feme.query.samples.2"(
+      target("spirv.Image", float, 1, 0, 0, 1, 2, 0) %img)
+  ret i32 %samples
+}
+
+; The arrayed storage counterpart (`Array2DMS`).
+
+; CHECK-LABEL: define i32 @storage_image_array2dms_query_samples(
+define i32 @storage_image_array2dms_query_samples() {
+  %img = call target("spirv.Image", float, 1, 0, 1, 1, 2, 0)
+      @llvm.spv.resource.handlefrombinding.timg4(i32 0, i32 3, i32 1, i32 0, ptr null)
+  ; CHECK: call i32 @feme.cpu.image.querysamples.i32(ptr %image_heap, i32 %image_heap_count, i32 {{[0-9]+}})
+  %samples = call i32 @"feme.query.samples.3"(
+      target("spirv.Image", float, 1, 0, 1, 1, 2, 0) %img)
+  ret i32 %samples
+}
+
+declare target("spirv.Image", float, 1, 0, 0, 1, 2, 0)
+    @llvm.spv.resource.handlefrombinding.timg3(i32, i32, i32, i32, ptr)
+declare i32 @"feme.query.samples.2"(
+    target("spirv.Image", float, 1, 0, 0, 1, 2, 0))
+
+declare target("spirv.Image", float, 1, 0, 1, 1, 2, 0)
+    @llvm.spv.resource.handlefrombinding.timg4(i32, i32, i32, i32, ptr)
+declare i32 @"feme.query.samples.3"(
+    target("spirv.Image", float, 1, 0, 1, 1, 2, 0))
