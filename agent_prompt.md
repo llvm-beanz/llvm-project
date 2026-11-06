@@ -68,8 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. Check the sweep report; diff against the 105-failure list.
-2. `ENV6(c)(5a)` flatten()-level fix (dedicated session).
-3. `cosh-return-inf-unused` shape check.
-4. `ENV6(c)(5)`-`(7)`, `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
-
+1. Derivate vec4_highp (why only vec4 highp; z/w non-planarity?).
+2. negative-left-shift.
+3. Rerun the remaining x8_d24 cases from `/tmp/newfail.txt` and record in VulkanCTSReport.md.
+4. ENV6(c)(5a) flatten-level fix; cosh-return-inf-unused; offload (blocked).
