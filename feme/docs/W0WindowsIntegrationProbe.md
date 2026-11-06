@@ -1,10 +1,11 @@
 # W0 Windows user-mode integration probe
 
-**Next step: identify a public third-party adapter identity/thunk bootstrap
-and extend an LLVM-owned prototype through `OpenAdapter12`, callback
-negotiation, and teardown with a distinct FeMe identity. The container
-measurement step below is now complete; the selected direction remains a
-user-mode software driver through stock D3D12/DXGI, not kernel installation.**
+**Next step: `W0(b)`'s decision gate is now triggered. No public, no-install,
+third-party route to `OpenAdapter12` was found -- see
+[Decision: no public third-party route to `OpenAdapter12` was found](#decision-no-public-third-party-route-to-openadapter12-was-found).
+An explicit approval is needed among an installed-adapter (kernel-mode
+driver) alternative, a private-compatibility scope change, or an
+application-local COM runtime before further `W0(g)` prototype work.**
 
 This is host and container evidence for [WARPRoadmap.md](WARPRoadmap.md),
 collected on 2026-11-06. The user selected stock-runtime user-mode/software-adapter probing
@@ -113,22 +114,33 @@ It does not select a replacement COM runtime or require a kernel installation.
    required.~~ Completed 2026-11-06; see
    [Container measurements](#container-measurements) below. All four cases
    passed, with an extended NuGet-WARP/Agility-core matrix also passing.
-2. Identify the public, modern third-party software-adapter bootstrap contract
+2. ~~Identify the public, modern third-party software-adapter bootstrap contract
    needed to provide valid identity/thunk services and reach `OpenAdapter12`.
-   No kernel installation is needed to build or run the loading experiments.
+   No kernel installation is needed to build or run the loading experiments.~~
+   Completed 2026-11-06 with a negative result; see
+   [Decision: no public third-party route to `OpenAdapter12` was found](#decision-no-public-third-party-route-to-openadapter12-was-found).
+   No such contract was found; this triggers item 4 below.
 3. Extend an LLVM-owned prototype through open/callback negotiation/close with a
    distinct FeMe identity. Measure the chosen DDI version and teardown, including
    failure cleanup, rather than inferring support from the installed headers.
+   The [direct-call experiment](#direct-openadapter12-invocation-bypassing-dxgi)
+   shows the entry point's own mechanics are callable; item 2's negative
+   result means this step cannot proceed through a third-party, no-install
+   `OpenAdapter12` route without first resolving item 4.
 4. If only WARP-private binary compatibility makes the application-local UMD
    route work, request an explicit product/design decision. Do not silently
    impersonate Microsoft's adapter, use ordinal 199, or declare an installed
    miniport mandatory. The alternatives are an approved compatibility project,
    the separately installed WDDM path, or the application-local COM runtime.
+   **This item is now reached**: no public contract was found (item 2), so an
+   explicit decision among these alternatives is needed before further
+   prototype work.
 
 W0(a), W0(b), and W0(d) remain incomplete: there is no FeMe D3D12 device, and
 no installed-path test. The user-mode stock-runtime direction is selected and
-now container-verified at the measurement level, but DDI-negotiation
-feasibility remains open. The reference-test portion of W0(d) has host and
+now container-verified at the measurement level, but no public bootstrap
+route to `OpenAdapter12` was found, so `W0(b)`'s decision gate is now
+triggered rather than closed. The reference-test portion of W0(d) has host and
 now container evidence only. Installed-driver, signing/reboot, display and
 HLK work are separate host/VM tasks if that deployment requires them; they do
 not block continuing W0(f)'s bootstrap step (tracked as `W0(g)` in
@@ -181,6 +193,91 @@ the rejection stub's `OpenAdapter12` counter stays at zero in every run,
 confirming the stub (and, by the same loader mechanics, any future FeMe
 module without a real DDI implementation) is rejected before reaching that
 negotiation, not evidence that negotiation itself would succeed.
+
+## Direct `OpenAdapter12` invocation (bypassing DXGI)
+
+Collected 2026-11-06 in the container, using a second LLVM-owned standalone
+project, [windows-adapter-bootstrap](../utils/windows-adapter-bootstrap/),
+kept separate from `windows-adapter-probe` above. It answers a question the
+rejection-stub result above could not: is `OpenAdapter12` and the DDI table
+it fills in mechanically callable at all, independent of whether DXGI ever
+routes to it?
+
+`BootstrapStub.cpp` implements a real (if minimal) `OpenAdapter12` that fills
+in a public `D3D12DDI_ADAPTERFUNCS` table with instrumented functions, each
+returning a deliberate, distinguishable result (`E_NOTIMPL` past the open/
+negotiate boundary; no real device, resource, or command contract).
+`DirectHarness.cpp` does not use DXGI or `D3D12CreateDevice` at all: it loads
+the stub directly with `LoadLibraryExW`, resolves `OpenAdapter12` with
+`GetProcAddress`, and calls it by hand with a zeroed `D3DDDI_ADAPTERCALLBACKS`
+(safe only because this stub's DDI functions never invoke it) and a minimal
+`D3D12DDIARG_OPENADAPTER`.
+
+| Call (direct, not OS-routed) | Result |
+|---|---|
+| `OpenAdapter12` | `S_OK`; `D3D12DDI_ADAPTERFUNCS` fully filled; `hAdapter` set |
+| `pfnGetSupportedVersions` | `S_OK`; 0 supported interface versions |
+| `pfnGetCaps` | `E_NOTIMPL` (deliberate) |
+| `pfnCalcPrivateDeviceSize` | `64` (deliberate sentinel) |
+| `pfnGetOptionalDDITables` | `S_OK`; 0 optional tables |
+| `pfnCreateDevice` | `E_NOTIMPL` (deliberate) |
+| `pfnCloseAdapter` | `S_OK` |
+| Call counters after the sequence | each of `OpenAdapter12`/`CalcPrivateDeviceSize`/`GetSupportedVersions`/`GetCaps`/`GetOptionalDDITables`/`CreateDevice`/`CloseAdapter` is exactly 1; `FillDDITable`/`DestroyDevice` are 0 (never exercised by this sequence) |
+
+CTest case `direct-openadapter12` passed. **This is a direct DDI call, not an
+OS-routed adapter; it is not evidence that DXGI/D3D12CreateDevice can reach
+this module.** It does establish that the public `OpenAdapter12`/
+`D3D12DDI_ADAPTERFUNCS` contract, as declared in the WDK's `d3d12umddi.h`, is
+self-consistently implementable and callable in user mode with no kernel
+involvement -- the missing piece is exclusively the OS-side routing from a
+third-party module to that entry point, not the entry point's own mechanics.
+
+### Decision: no public third-party route to `OpenAdapter12` was found
+
+Combining this session's direct-call result with the prior rejection-stub
+result and public documentation research:
+
+1. The rejection stub's `OpenAdapter10`/`OpenAdapter10_2`/`OpenAdapter12`
+   counters all stay at zero through a full `CreateSoftwareAdapter` ->
+   `D3D12CreateDevice` -> `DXGI_ERROR_UNSUPPORTED` sequence (host and
+   container, this and the prior session). `D3D12CreateDevice` rejects the
+   software-adapter object before touching any UMD entry point.
+2. Microsoft's public
+   [`IDXGIFactory::CreateSoftwareAdapter`](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgifactory-createsoftwareadapter)
+   documentation only references "the Windows Vista Driver Development Kit"
+   (the D3D10-era UMD contract) and does not document an `OpenAdapter12`/
+   D3D12 contract. No other public DXGI/D3D12/DXCore API documents a
+   third-party route to `OpenAdapter12`; DXCore's adapter enumeration is
+   explicitly documented as listing only adapters a kernel-mode (WDDM/MCDM)
+   driver has already registered with Windows, not a way to register a
+   purely user-mode adapter.
+3. This session's direct-call experiment above shows the entry point and
+   table-filling mechanics are not themselves the obstacle -- a correctly
+   shaped `OpenAdapter12` is trivially callable by hand. The obstacle is
+   specifically that nothing in the public DXGI/D3D12/DXCore surface routes a
+   third-party module's `OpenAdapter12` the way `CreateSoftwareAdapter`
+   routes to `OpenAdapter10`/`OpenAdapter10_2`.
+4. The reference WARP export table's private ordinal-199 `WarpPrivateApi`
+   (noted in the host measurements above) is consistent with Microsoft's own
+   WARP being loaded through an internal path specific to WARP's identity,
+   not through the public `CreateSoftwareAdapter` contract either -- further
+   evidence (not proof, since no Windows source was read) that no general
+   public bootstrap contract for third-party D3D12 software adapters exists
+   today.
+
+**No public, third-party, no-install bootstrap contract to `OpenAdapter12`
+was found.** This answers `W0(g)`'s "identify a public third-party adapter
+identity/thunk bootstrap" step with a negative result rather than a positive
+one. Per the remaining-work list above, this **triggers `W0(b)`'s decision
+gate**: an explicit approval is needed among (a) an installed-adapter
+alternative (kernel-mode driver, even a minimal/stub one, per this session's
+web research), (b) a private-compatibility scope change (depending on WARP's
+own private loading path, which the design document already prohibits
+without separate approval), or (c) an application-local COM runtime (with its
+own documented added DXGI/debug-layer/DRED/distribution cost). This document
+does not select an alternative; it records that the gate is now reached and
+recommends evaluating option (a) first, since it is the only one not already
+flagged as requiring a separate design exception.
 
 ### Container starting point
 
