@@ -70,25 +70,27 @@ Please begin work on the WARP roadmap.
 
 ## Suggested next steps (ranked)
 
-1. **Resolve `WS2`'s undecided third piece**: either write the "probably
-   out of scope" conclusion from this session's decision record #3
-   explicitly into `WARPRoadmap.md` (closing `WS2` with no further
-   lettered rows), or spend a short, dedicated look actually trying to
-   find a portable kernel in `Sync.cpp`'s submission-building closure/
-   `CommandBuffer.cpp`'s execution loop before accepting that
-   conclusion. Cheap, bounded, and overdue -- flagged by name three
-   sessions running now.
-2. **`WS3`**: establish shared-core regression gates. With `WS1` and all
-   of `WS2` now fully done, this is the natural point to actually ask
-   whether gates like this would have caught anything manual
-   `check-feme`/CTS verification did not, rather than deferring the
-   question again -- there is now a complete, closed body of extraction
-   work (`WS0`/`WS1(a-d)`/`WS2(a-b)`) to evaluate it against.
-3. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
+1. **`WS3(b)`**: design and implement the still-open "byte/image
+   comparisons and unchanged capability manifests" regression-gate
+   half of `WS3`. Candidates worth evaluating: (a) a checked-in Vulkan
+   capability-manifest snapshot compared against each session's
+   regenerated `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.
+   md`, flagging an unexplained diff; (b) a small script diffing two
+   `run_vulkan_cts.py` `report.txt` runs' *named* pass/fail sets (not
+   just totals) across a shared-core change, so a newly-failing case
+   name is caught even if the aggregate counts happen to coincidentally
+   match. This is the one piece of `WS3`'s original scope not yet even
+   designed, after three sessions of flagging "resolve `WS3`" as a
+   priority -- worth actually starting now that `WS3(a)` establishes
+   the simpler half is done.
+2. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
    an explicit FeMe adapter-selection assertion -- a research/
-   documentation task, no Windows adapter install needed yet.
-4. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   documentation task, no Windows adapter install needed yet. Carried
+   forward unchanged across many sessions now; still cheap and
+   bounded if a change of pace from `WS3(b)`'s more open-ended design
+   work is wanted.
+3. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
    Windows host/VM outside this process-isolated container.
-5. Backlog carried from prior sessions, still untouched:
+4. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
