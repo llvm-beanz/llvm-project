@@ -68,71 +68,22 @@
 #ifndef FEME_LIB_VULKAN_EXECUTIONLIFETIME_H
 #define FEME_LIB_VULKAN_EXECUTIONLIFETIME_H
 
-#include <vulkan/vulkan_core.h>
+#include "feme/Execution/DeferredDestroyRefCounted.h"
 
-#include <mutex>
+#include <vulkan/vulkan_core.h>
 
 namespace feme::vulkan {
 
-/// See the file comment. All public methods are safe to call from any
-/// thread (the calling host thread doing a `vkDestroy*`, or a
-/// `QueueExecutor` worker thread finishing a task), and are `const` so
-/// they remain usable through a `const Pipeline *`/`const RenderPass *`/
-/// etc. (recorded commands reference several of these types that way).
-class PendingExecutionRefCounted {
-public:
-  /// Called once per `QueueExecutor` task that references this object,
-  /// synchronously on the submitting host thread, before that task is
-  /// enqueued (`vkQueueSubmit`/`vkQueueSubmit2`, `Sync.cpp`) -- this must
-  /// happen before any other thread can possibly call this object's own
-  /// `vkDestroy*`, for the same reason `Fence::retainForPendingSignal`'s
-  /// own comment (`Sync.h`) gives.
-  void retainForExecution() const {
-    std::lock_guard<std::mutex> Lock(Mutex);
-    ++PendingTasks;
-  }
-
-  /// Called by a `QueueExecutor` task once it finishes running (whether it
-  /// succeeded, failed, or skipped work because the device was already
-  /// lost). If a `vkDestroy*` call already asked to destroy this object
-  /// while this was the last outstanding task (`requestDestroy` below
-  /// returned false), returns true and sets \p OutCallbacks to the
-  /// `VkAllocationCallbacks *` that call was given -- the caller must then
-  /// free this object with an `Allocator` built from that pointer.
-  /// Otherwise returns false and leaves \p OutCallbacks untouched.
-  bool releaseAndTakeDeferredDestroy(
-      const VkAllocationCallbacks *&OutCallbacks) const {
-    std::lock_guard<std::mutex> Lock(Mutex);
-    --PendingTasks;
-    if (PendingTasks != 0 || !DestroyRequested)
-      return false;
-    OutCallbacks = PendingDestroyCallbacks;
-    return true;
-  }
-
-  /// `vkDestroy*`: returns true if the caller may free this object
-  /// immediately (the ordinary case: every `QueueExecutor` task that ever
-  /// referenced it has already finished running). Returns false if at
-  /// least one such task has not finished yet -- in that case this object
-  /// defers its own destruction (remembering \p Callbacks) until that task
-  /// releases it (`releaseAndTakeDeferredDestroy` above), instead of
-  /// letting the caller free memory a `QueueExecutor` worker thread might
-  /// still be reading.
-  bool requestDestroy(const VkAllocationCallbacks *Callbacks) const {
-    std::lock_guard<std::mutex> Lock(Mutex);
-    if (PendingTasks == 0)
-      return true;
-    DestroyRequested = true;
-    PendingDestroyCallbacks = Callbacks;
-    return false;
-  }
-
-private:
-  mutable int PendingTasks = 0;
-  mutable bool DestroyRequested = false;
-  mutable const VkAllocationCallbacks *PendingDestroyCallbacks = nullptr;
-  mutable std::mutex Mutex;
-};
+/// See the file comment. WARP roadmap WS2(b) moved this class's actual
+/// counter/mutex/deferred-payload logic into the portable
+/// `feme::execution::DeferredDestroyRefCounted` template -- this is a
+/// plain alias instantiating it on the one payload type every consumer
+/// in this codebase uses, `const VkAllocationCallbacks *`, so every
+/// existing consumer's calls (`retainForExecution`,
+/// `releaseAndTakeDeferredDestroy`, `requestDestroy`) keep their exact
+/// current names, signatures, and behavior unchanged.
+using PendingExecutionRefCounted =
+    feme::execution::DeferredDestroyRefCounted<const VkAllocationCallbacks *>;
 
 } // namespace feme::vulkan
 
