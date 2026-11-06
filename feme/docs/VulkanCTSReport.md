@@ -11915,3 +11915,11 @@ multi-session architecture efforts); `ENV6(c)(5)`-`(7)` graphicsfuzz (~90
 cases, large `Linearize`/`SIMDize` cluster); `ENV5(c)(7)(b)` (hull
 lockstep barrier, 3 cases, lowest priority); offload-test-suite
 upstreaming (3 patches, blocked on push access).
+
+## L534: Full sweep `feme-20261106b-full-sweep` and X8_D24 fix
+
+Sweep of 3,244,369 cases: 731,492 Pass / 2,512,427 NotSupported / 404 Fail /
+46 QualityWarning / 0 Unrun. 302 failures had no earlier baseline. Clusters:
+199 `x8_d24_unorm_pack32` (fixed: runtime lacked format 133; all 199 re-run
+pass), 102 `glsl.derivate.*.vec4_highp` (`ENV6(e)(6)`, open), 1
+`graphicsfuzz.cov-x86-isel-lowering-negative-left-shift` (`ENV6(e)(7)`, open).
