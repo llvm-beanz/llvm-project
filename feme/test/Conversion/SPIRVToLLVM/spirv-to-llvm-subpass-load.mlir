@@ -113,7 +113,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment]
 // every prior case in this file uses.
 
 // CHECK-LABEL: llvm.func @load_subpass_signed
-// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load.i32(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i32, i32, i32, !llvm.target<"spirv.SignedImage", i32, 6, 0, 0, 0, 2, 0>) -> i32
+// CHECK: %[[R:.*]] = llvm.call @feme.stage.subpass.load.i32.signed(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i32, i32, i32, !llvm.target<"spirv.SignedImage", i32, 6, 0, 0, 0, 2, 0>) -> i32
 // CHECK: llvm.return %[[R]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
   spirv.GlobalVariable @in_signed bind(0, 0) {input_attachment_index = 0 : i32} : !spirv.ptr<!spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
@@ -147,5 +147,29 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment]
     %zero = spirv.Constant dense<0> : vector<2xi32>
     %2 = spirv.ImageRead %1, %zero : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, vector<2xi32> -> f32
     spirv.ReturnValue %2 : f32
+  }
+}
+
+// -----
+
+// ENV6(c)(5) triage: a module reading both an `isubpassInput` (si32) and a
+// `usubpassInput` (ui32) lowers to two handle types (`spirv.SignedImage` and
+// `spirv.Image`); the callee declarations must not collide.
+
+// CHECK-LABEL: llvm.func @load_subpass_signed_and_unsigned
+// CHECK: llvm.call @feme.stage.subpass.load.i32.signed(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i32, i32, i32, !llvm.target<"spirv.SignedImage", i32, 6, 0, 0, 0, 2, 0>) -> i32
+// CHECK: llvm.call @feme.stage.subpass.load.i32(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (i32, i32, i32, !llvm.target<"spirv.Image", i32, 6, 0, 0, 0, 2, 0>) -> i32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, InputAttachment], []> {
+  spirv.GlobalVariable @in_s bind(0, 0) {input_attachment_index = 0 : i32} : !spirv.ptr<!spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @in_u bind(0, 1) {input_attachment_index = 1 : i32} : !spirv.ptr<!spirv.image<ui32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+  spirv.func @load_subpass_signed_and_unsigned() -> si32 "None" {
+    %0 = spirv.mlir.addressof @in_s : !spirv.ptr<!spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>
+    %zero = spirv.Constant dense<0> : vector<2xi32>
+    %2 = spirv.ImageRead %1, %zero : !spirv.image<si32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, vector<2xi32> -> si32
+    %3 = spirv.mlir.addressof @in_u : !spirv.ptr<!spirv.image<ui32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, UniformConstant>
+    %4 = spirv.Load "UniformConstant" %3 : !spirv.image<ui32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>
+    %5 = spirv.ImageRead %4, %zero : !spirv.image<ui32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>, vector<2xi32> -> ui32
+    spirv.ReturnValue %2 : si32
   }
 }

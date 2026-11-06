@@ -9457,6 +9457,12 @@ getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
                                      : "feme.stage.subpass.load.f32");
   if (IsMultisampled)
     NameBuf += ".ms";
+  // `isubpassInput` (SignedImage) and `usubpassInput` (Image) share the same
+  // `i32` element type but not the handle type, so they need distinct
+  // declarations.
+  if (auto TargetTy = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(HandleTy);
+      TargetTy && TargetTy.getExtTypeName() == "spirv.SignedImage")
+    NameBuf += ".signed";
   llvm::StringRef Name = NameBuf;
   if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
     return Existing;
