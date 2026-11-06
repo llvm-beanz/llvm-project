@@ -135094,3 +135094,177 @@ was re-skimmed and nothing needed adding.
 4. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-06: Closing WS3 -- check-feme-capability-manifest (WS3(b))
+
+## Next action
+Resolve `WS3`'s remaining undesigned piece (`WS3(b)`: "byte/image
+comparisons and unchanged capability manifests"), per the prior
+session's own top-ranked suggested next step.
+
+## Device check
+`vulkaninfo --summary | Select-String deviceName` -> `FeMe CPU Vulkan
+Device` (confirmed at session start, per the standing "every time"
+rule). Stale `nv-vk64.json` loader warnings are expected/harmless, as
+in every prior session.
+
+## What I did
+1. Investigated what tooling already existed before designing anything
+   new: found `feme/utils/vk_cts_reconcile.py` (built well before this
+   WARP-roadmap work, for `ENV6`-era CTS flakiness triage) already does
+   named, per-case CTS result diffing via `--baseline-qpa` -- it
+   compares actual statuses, not aggregate totals, and reports
+   "Changed case names"/"Unexpected failure names" explicitly. This
+   already satisfies the "byte/image comparisons"/named-CTS-failure
+   half of `WS3`'s original exit-evidence text (dEQP-VK's own cases
+   perform the underlying byte/image comparisons); there was nothing
+   new to build there, only to recognize it already covers this.
+2. Found `feme/utils/vk_gen_feature_inventory.py`/
+   `vk_gen_extension_inventory.py` (the existing generators behind
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`) already
+   emit exactly the Markdown table each doc has checked in -- so a
+   diff-based drift checker just needs to re-run each generator with
+   the same inputs and diff its output against the doc's own committed
+   table region.
+3. Wrote `feme/utils/check-feme-capability-manifest.py`: re-runs both
+   generators, extracts each doc's committed table (from its known
+   header line to EOF), and diffs the two, naming the specific
+   added/removed/changed row(s) rather than only reporting "something
+   changed" -- directly automating the "compare named failures, not
+   only pass totals" exit-evidence text, and replacing every prior
+   session's hand-eyeballed "the generator reproduces this table
+   exactly" prose sentence with an actual check.
+4. Verified it against the real, current docs (both report
+   "unchanged"), then negative-tested it by editing one row in the
+   real committed doc, confirming it named that exact row as drifted,
+   and reverted the edit via `git checkout --`.
+5. Added `feme/test/Vulkan/run-check-feme-capability-manifest.test`
+   (lit test) with a fake-generator fixture
+   (`Inputs/check-feme-capability-manifest/`) so `check-feme` itself
+   verifies the script's own diff logic -- both the "unchanged" and
+   "drifted" paths in one test -- without needing a real external
+   VK-GL-CTS checkout, mirroring the existing `run-vulkan-cts.test`'s
+   fake-`deqp-vk` precedent.
+6. Hit and fixed a genuine bug while developing the test: Python's
+   stdout is block-buffered when redirected to a file (unlike stderr,
+   unbuffered), so a `print(...)`/`sys.stderr.write(...)` sequence can
+   appear out of logical order in a `> %t.out 2>&1`-redirected lit
+   test. Added `flush=True`/explicit `.flush()` calls so the combined
+   output is deterministically ordered. Codified this in
+   `feme/.instructions.md` (see Process note below).
+7. Documented the new script in both inventory docs' own "regenerate
+   after changing" sections, and decided deliberately **not** to wire
+   it into `check-feme` as a build target -- it needs a real external
+   `vk.xml`, not guaranteed present in every build environment, so it
+   stays a manually-run gate (same design choice `run_vulkan_cts.py`
+   itself already makes).
+8. Ran full `check-feme`: 3,979 discovered (up by 1, the new test)/
+   3,954 Passed/15 Skipped/10 Unsupported, zero failures.
+9. Updated `feme/docs/WARPRoadmap.md`: struck `WS3(b)` with the above
+   as exit evidence, added a paragraph explicitly closing `WS3`
+   entirely (no further lettered rows -- `WS3(a)`'s test-subset gate,
+   `WS3(b)`'s capability-manifest checker, and the pre-existing
+   `vk_cts_reconcile.py` together cover the original row's full
+   exit-evidence text), and updated the opening summary paragraph.
+
+## Verification
+- `check-feme-capability-manifest.py --vk-xml <real VK-GL-CTS vk.xml>`:
+  both `Vulkan14FeatureInventory`/`VulkanExtensionInventory` report
+  "unchanged" against the current committed docs.
+- Negative test: a deliberate single-row edit to the real
+  `Vulkan14FeatureInventory.md` (reverted before commit) was correctly
+  reported as "drifted", with a unified diff naming that exact row.
+- `run-check-feme-capability-manifest.test` (via direct `lit.py`
+  invocation and via the full `check-feme` suite): passes, exercising
+  both the "unchanged" (feature half) and "drifted" (extension half)
+  paths in one test against a fake-generator fixture.
+- Full `check-feme`: 3,979 discovered/3,954 Passed/15 Skipped/10
+  Unsupported, zero failures.
+- No CTS run performed this session: every commit touched only
+  tooling, tests, or documentation -- no production/runtime code
+  changed -- so there is no new behavior for a CTS pass to exercise,
+  and the two capability inventories have nothing new to regenerate
+  against (confirmed unchanged by the new script itself, which is a
+  stronger check than a CTS run would add here). This mirrors the
+  precedent the `WS2`-closure and `WS3(a)` commits both set for the
+  same reason.
+- `feme/.instructions.md` updated with one new entry (the stdout/
+  stderr flush-ordering gotcha); no other new environment/process
+  issue found.
+
+## Decision record
+1. **`WS3(b)`'s "byte/image comparisons" half needed no new code.**
+   `vk_cts_reconcile.py`'s `--baseline-qpa` comparison already named
+   per-case diffs, built for an unrelated purpose (`ENV6` CTS triage)
+   well before this roadmap existed. Rather than building a redundant
+   second mechanism, this session's decision was to read its source
+   directly, confirm it already satisfies this exit-evidence text, and
+   record that explicitly in the roadmap rather than silently ignoring
+   it or re-building it from scratch.
+2. **The capability-manifest checker regenerates and diffs, it does
+   not re-derive from scratch.** Rather than writing new logic to
+   enumerate Vulkan's feature/extension surface (which
+   `vk_gen_feature_inventory.py`/`vk_gen_extension_inventory.py`
+   already do correctly), the new script's only job is invoking those
+   generators the same way the docs' own "regenerate after changing"
+   instructions already do, and diffing the result -- keeping the
+   actual enumeration logic in one place.
+3. **Not wired into `check-feme` as a build target.** Consistent with
+   how `run_vulkan_cts.py` itself is handled (lit-tested with a fake
+   `deqp-vk` stand-in, but never a `check-feme` target, since it needs
+   a real external CTS checkout): `check-feme-capability-manifest.py`
+   needs a real external `vk.xml`, so it is lit-tested against a fake
+   generator fixture (proving its own diff logic is correct) but stays
+   a manually-invoked gate, documented next to each doc's regenerate
+   instructions, not a `check-feme` dependency.
+4. **`WS3` is now claimed fully closed, not left open with further
+   lettered rows.** `WS3(a)`/`WS3(b)` plus the recognized pre-existing
+   `vk_cts_reconcile.py` capability together cover every piece of the
+   original row's exit-evidence text word-for-word
+   ("`check-feme`, affected CTS groups, byte/image comparisons and
+   unchanged capability manifests; compare named failures, not only
+   pass totals"). No further `WS3(c)` is warranted.
+
+## Process note
+Added one new `.instructions.md` entry this session: a Python script
+whose combined stdout+stderr output a lit test's `CHECK`/`CHECK-NEXT`
+sequence depends on must flush every `print()`/`sys.stderr.write()`
+explicitly, since stdout is block-buffered when redirected to a file
+while stderr is not, and the two can otherwise interleave out of the
+script's own logical execution order.
+
+## State restated
+- `WS0`, all of `WS1` (`a`-`d`), all of `WS2` (`a`-`b`, closed, no
+  `c`), and all of `WS3` (`a`-`b`, closed, no `c`) are now done.
+- Commits this session (newest last): `2858279974ef` (add
+  check-feme-capability-manifest.py + lit test + fixture), `ca6b8bf3da91`
+  (document it in both inventory docs), `c78a0951af8c` (roadmap: strike
+  WS3(b), close WS3), `50cbd3a6f4f2` (instructions: flush-ordering
+  note).
+- Full `check-feme`: 3,979 discovered/3,954 Passed/15 Skipped/10
+  Unsupported, zero failures.
+- `feme/docs/VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/
+  `VulkanExtensionInventory.md` are functionally unchanged this
+  session beyond the new cross-reference text added to the latter two
+  (no CTS run, no capability drift -- confirmed by the new script
+  itself) -- their most recent substantive entries remain the prior
+  session's `WS2(b)` ones.
+
+## Suggested next steps (ranked)
+1. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus
+   (`C:\dev\Direct3D`, per the environment's own instructions: read its
+   `.github\copilot-instructions.md` first, it is a copy of the host's
+   checkout, not a push target) into public black-box/WARP-private
+   white-box/DXBC-DXIL-input/optional-preview-feature/display-HLK-
+   dependency categories, and add an explicit FeMe adapter-selection
+   assertion to a future runner -- a research/documentation task, no
+   Windows adapter install needed yet. With `WS0`-`WS3` all now fully
+   closed, this (or `W0(a)`/`W0(b)`) is the roadmap's own next
+   milestone in sequence, not a parallel-track item anymore.
+2. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container, per the
+   roadmap's own text ("kernel installation and reboot tests belong on
+   a suitable Windows host/VM, not this process-isolated container").
+3. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
