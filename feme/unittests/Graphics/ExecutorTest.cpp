@@ -33,6 +33,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 using namespace feme;
@@ -6420,6 +6421,100 @@ TEST(ExecutorTest, FragCoordDerivativeIsZeroOnAFramebufferSmallerThanAQuad) {
   // produce) is exactly the pre-fix, bugged value this guards against.
   EXPECT_EQ(Storage[0], 0u) << "dFdx(gl_FragCoord.x)";
   EXPECT_EQ(Storage[1], 0u) << "dFdy(gl_FragCoord.y)";
+}
+
+// Roadmap ENV6(e)(6): a helper lane's varying legitimately extrapolates a
+// hair past the primitive's vertex range. Snapping it back to the vertex
+// extreme (a fix for *covered* lanes' rounding noise) corrupted
+// `dFdx` at the primitive's edge pixels
+// (`dEQP-VK.glsl.derivate.dfdx.linear.vec4_highp`). The varying here
+// falls by 0.0005 per pixel to its minimum at x = 1.4, so the uncovered
+// lane at x = 1.5 extrapolates 5e-5 below that minimum.
+constexpr char VaryingDerivativeFragmentShaderIR[] = R"(
+  define void @fs_varying_deriv() #0 {
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %dx = call float @feme.stage.derivative.x.fine.f32(float %v)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %dx, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare float @feme.stage.derivative.x.fine.f32(float)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, HelperLaneVaryingIsNotSnappedToVertexRange) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {makeElement(0, SignatureDirection::Input, 4,
+                                /*Location=*/0),
+                    makeElement(1, SignatureDirection::Output, 4,
+                                /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, VaryingDerivativeFragmentShaderIR, "fs_varying_deriv",
+                   FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1,
+      {AttachmentFormat{cpu::ResourceFormat::R32G32B32A32_FLOAT, 2, 2}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false);
+
+  std::vector<uint8_t> Storage(2u * 2u * 16u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R32G32B32A32_FLOAT, 2, 2};
+  std::array<AttachmentView, 1> Attachs{Color};
+
+  // Pixel-space vertices (-1,-1), (-1,3), (1.4,1) on a 2x2 target; the
+  // varying is 75 + 0.0005 * (1.4 - x).
+  std::vector<float> VertexData = {
+      -2.0f, -2.0f, 0.0f, 75.0012f, 0.0f, 0.0f, 1.0f, //
+      -2.0f, 2.0f,  0.0f, 75.0012f, 0.0f, 0.0f, 1.0f, //
+      0.4f,  0.0f,  0.0f, 75.0f,    0.0f, 0.0f, 1.0f, //
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 2.0f, 2.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 2, 2};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  float Dx;
+  std::memcpy(&Dx, Storage.data(), sizeof(Dx));
+  EXPECT_NEAR(Dx, -0.0005f, 2e-5f);
 }
 
 // Roadmap L114: a fragment shader that reads `gl_SamplePosition`

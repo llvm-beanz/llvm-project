@@ -4584,14 +4584,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                     // A covered sample's barycentrics are a convex
                     // combination, so only rounding can push `Value`
                     // outside its vertices' range (e.g. 20.000002 for
-                    // vertex values <= 20.0); snap such noise back.
+                    // vertex values <= 20.0); snap such noise back. Helper
+                    // lanes (no coverage) legitimately extrapolate outside
+                    // the primitive, and snapping them would corrupt the
+                    // quad's derivatives (`glsl.derivate.*.vec4_highp`).
                     float Lo = std::min({V0, V1, V2});
                     float Hi = std::max({V0, V1, V2});
                     float Tol = 1e-5f * std::max(std::fabs(Lo), std::fabs(Hi));
-                    if (Value < Lo && Value >= Lo - Tol)
-                      Value = Lo;
-                    else if (Value > Hi && Value <= Hi + Tol)
-                      Value = Hi;
+                    if (Quad.SampleMask[Lane] != 0) {
+                      if (Value < Lo && Value >= Lo - Tol)
+                        Value = Lo;
+                      else if (Value > Hi && Value <= Hi + Tol)
+                        Value = Hi;
+                    }
                     memcpy(&Bits, &Value, 4);
                   } else {
                     Bits = Tri.Varyings[0][Idx];
