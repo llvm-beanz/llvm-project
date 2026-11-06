@@ -1,14 +1,36 @@
-; RUN: not feme-opt --llvm -passes="function(instnamer),feme-cpu-linearize" -S %s 2>&1 | FileCheck %s
+; RUN: feme-opt --llvm -passes="function(instnamer),feme-cpu-linearize" -S %s | FileCheck %s
 
-; Roadmap ENV6(c)(5): a real pre-`feme-cpu-linearize` capture of
+; Roadmap ENV6(c)(5)/ENV6(c)(5a): a real pre-`feme-cpu-linearize` capture of
 ; `dEQP-VK.graphicsfuzz.cov-function-infinite-loop-return-identical-
 ; condition`. The outer loop (header `bb7`) has no exit of its own; its only
 ; exit is `loop.exit.guard`, the divergent branch reached *after* the inner
 ; loop (header `9`) finishes. That branch both leaves the outer loop and
-; feeds its latch, so `canFlattenLoopBodyRegion` rejects the body. This
-; test pins the current diagnostic; flip it to a positive test when the
-; shape is lowered.
-; CHECK: error: feme-cpu-linearize: function 'main': loop at '{{.*}}' has an internal branch in a body shape
+; feeds its latch, which used to make `canFlattenLoopBodyRegion` reject the
+; body outright (`Flow2` was reached both by the inner body diamond's own
+; fallthrough and by the inner loop header's own exit-relay edge). Fixed by
+; `ENV6(c)(5a)`'s mask-merging phi at the shared `Flow2` tail block, which
+; threads the header's own active masks (`%active.live`/`%active.sideeffect`,
+; live into `bb8` on the relay edge) together with the inner body diamond's
+; own per-arm merge masks (`%live.merge51`/`%sideeffect.merge52`, live via
+; `Flow3`), instead of silently reusing the diamond's own merge masks
+; unconditionally for every predecessor into `Flow2` (which produced
+; "Instruction does not dominate all uses" verifier failures before this
+; milestone, the reason a plain `validate()`-only relaxation alone was never
+; sufficient -- see `isRelayBypassMergeBlock`'s own comment in
+; `Linearize.cpp`).
+
+; CHECK: bb8:
+; CHECK-NEXT: %.03 = phi i32 [ %i14, %Flow2._crit_edge ], [ %i7, %bb6 ]
+; CHECK-NEXT: %active.live = phi i1 [ true, %bb6 ], [ %live.relay.merge, %Flow2._crit_edge ]
+; CHECK-NEXT: %active.sideeffect = phi i1 [ true, %bb6 ], [ %sideeffect.relay.merge, %Flow2._crit_edge ]
+
+; CHECK: Flow2:
+; CHECK-NEXT: %i14 = phi i32 [ %i18, %Flow3 ], [ poison, %.Flow2_crit_edge ]
+; CHECK-NEXT: %i15 = phi i1 [ false, %Flow3 ], [ true, %.Flow2_crit_edge ]
+; CHECK-NEXT: %i16 = phi i1 [ %i46.linearized, %Flow3 ], [ true, %.Flow2_crit_edge ]
+; CHECK-NEXT: %live.relay.merge = phi i1 [ %live.merge51, %Flow3 ], [ %active.live, %.Flow2_crit_edge ]
+; CHECK-NEXT: %sideeffect.relay.merge = phi i1 [ %sideeffect.merge52, %Flow3 ], [ %active.sideeffect, %.Flow2_crit_edge ]
+
 
 @spirv_var_21.str = private constant [13 x i8] c"spirv_var_21\00"
 @spirv_var_40.str = private constant [13 x i8] c"spirv_var_40\00"
