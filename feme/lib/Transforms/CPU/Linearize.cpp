@@ -61,6 +61,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/PostDominators.h"
@@ -4407,6 +4408,17 @@ private:
                     const MaskPair &MasksAtLatch,
                     Value **OutPerLaneContinue = nullptr);
 
+  /// Roadmap ENV6(e)(4): a `discard`/`demote` in a loop body narrows the
+  /// latch masks below the body-entry masks, but `ExitBlock`'s own
+  /// `feme.cpu.stage.return.masks` was seeded from the loop's entry mask
+  /// before the loop was linearized. Carries each lane's last-seen
+  /// live/side-effect state in a pair of accumulator phis (held once a
+  /// lane stops running the body) and re-applies it to \p ExitBlock.
+  void accumulateExitMasks(BasicBlock *Header, BasicBlock *Latch,
+                           BasicBlock *ExitBlock, const MaskPair &EntryMasks,
+                           const MaskPair &BodyEntryMasks,
+                           const MaskPair &MasksAtLatch);
+
   bool linearizeCycle(CycleRef C);
 
   /// Roadmap L197: attempts every descendant of \p C, post-order (deepest
@@ -6346,6 +6358,50 @@ Value *LoopLinearizer::createUniformMaskAny(IRBuilderBase &B, Value *Mask,
   Value *V = createMaskAny(B, Mask, Name);
   KnownUniformValues.insert(V);
   return V;
+}
+
+void LoopLinearizer::accumulateExitMasks(BasicBlock *Header, BasicBlock *Latch,
+                                         BasicBlock *ExitBlock,
+                                         const MaskPair &EntryMasks,
+                                         const MaskPair &BodyEntryMasks,
+                                         const MaskPair &MasksAtLatch) {
+  if (MasksAtLatch.Live == BodyEntryMasks.Live &&
+      MasksAtLatch.SideEffect == BodyEntryMasks.SideEffect)
+    return;
+  // A stale relay predecessor stays listed until the caller's
+  // `EliminateUnreachableBlocks` runs; only another live predecessor would
+  // make `Latch`'s accumulated masks wrong for `ExitBlock`.
+  BasicBlock &Entry = Header->getParent()->getEntryBlock();
+  for (BasicBlock *Pred : predecessors(ExitBlock))
+    if (Pred != Latch && isPotentiallyReachable(&Entry, Pred))
+      return;
+  Type *I1Ty = Type::getInt1Ty(Header->getContext());
+  PHINode *AccLive = PHINode::Create(I1Ty, 2, "exit.acc.live");
+  AccLive->insertBefore(Header->getFirstNonPHIIt());
+  PHINode *AccSideEffect = PHINode::Create(I1Ty, 2, "exit.acc.sideeffect");
+  AccSideEffect->insertBefore(Header->getFirstNonPHIIt());
+  IRBuilder<> B(Latch->getTerminator());
+  Value *NextLive = B.CreateSelect(BodyEntryMasks.Live, MasksAtLatch.Live,
+                                   AccLive, "exit.acc.live.next");
+  Value *NextSideEffect =
+      B.CreateSelect(BodyEntryMasks.Live, MasksAtLatch.SideEffect,
+                     AccSideEffect, "exit.acc.sideeffect.next");
+  for (BasicBlock *Pred : predecessors(Header)) {
+    bool IsBackedge = Pred == Latch;
+    AccLive->addIncoming(
+        IsBackedge
+            ? NextLive
+            : cast<PHINode>(EntryMasks.Live)->getIncomingValueForBlock(Pred),
+        Pred);
+    AccSideEffect->addIncoming(IsBackedge
+                                   ? NextSideEffect
+                                   : cast<PHINode>(EntryMasks.SideEffect)
+                                         ->getIncomingValueForBlock(Pred),
+                               Pred);
+  }
+  MaskPair ExitMasks{NextLive, NextSideEffect};
+  applyStageMasks(*ExitBlock, ExitMasks);
+  rethreadNestedEntryMasks(ExitBlock, ExitMasks);
 }
 
 Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
@@ -8726,6 +8782,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       Value *Continue =
           closeLatch(Latch, Header, *MasksAtLatch, &PerLaneContinue);
       CondBrInst::Create(Continue, Header, ExitBlock, Latch);
+      accumulateExitMasks(Header, Latch, ExitBlock, Masks, BodyEntryMasks,
+                          *MasksAtLatch);
       // Roadmap H94a/L292: restore `HeaderExit->RelayBlock`'s own
       // leftover `ExitBlock` phi value at `Latch`'s own new edge --
       // copied verbatim from the `HeaderDivergent` case's own identical
@@ -8813,6 +8871,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   applyStageMasks(*Header, Masks);
   rethreadNestedEntryMasks(Header, Masks);
   MaskPair MasksAtLatch = Masks;
+  MaskPair BodyEntryMasksDivergent = Masks;
   // Roadmap L292: `HeaderExit`'s own match may be via a relay (see
   // `ExitCheck::RelayBlock`'s own comment, and `recoverRelayExitCheck`)
   // rather than a direct edge from `Header` itself to `ExitBlock` --
@@ -8966,6 +9025,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     Value *Cond = HeaderExit->Cond;
     Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
     MasksAtLatch = stayInLoop(B, Masks, Staying, "active.header");
+    BodyEntryMasksDivergent = MasksAtLatch;
     // Never really exit here: always continue toward the latch, letting an
     // inactive lane's iterations become no-ops instead (see the file
     // comment above).
@@ -9173,6 +9233,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // divergent check already deactivated.
     Continue = closeLatch(Latch, Header, MasksAtLatch, &PerLaneContinue);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
+    if (HeaderDivergent)
+      accumulateExitMasks(Header, Latch, ExitBlock, Masks,
+                          BodyEntryMasksDivergent, MasksAtLatch);
   }
   // Roadmap H94a/L292: `Latch` just became (or already was) a predecessor
   // of `ExitBlock` via the `CondBrInst::Create` just above -- restore
