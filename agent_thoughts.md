@@ -136305,3 +136305,67 @@ regress-test -- consistent with every prior `W0`/windows-utils-only session.
    building a real device/ABI surface.
 4. Backlog, untouched again this session: `ENV6(c)(3)`/`ENV6(d)` CTS triage,
    `ENV7(g)` audit, full Vulkan CTS re-measure.
+
+# W0(g) callback-liveness probe + newer-version control
+
+Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
+(mandatory first step, done again).
+
+## Done this session
+
+1. Finished the `AdapterProbe.cpp` edit left in-progress by the prior
+   session's checkpoint: wired up the extended 9-parameter
+   `FeMeBootstrapGetAudit` call site (3 new read-only null-check fields) and
+   the new `FeMeBootstrapGetCallbackProbe` export, plus print statements for
+   both.
+2. Reconfigured and rebuilt `C:\dev\warp-interposition` (new CMake variants
+   added: `pinned-version-newer`, `callback-probe`). Clean build, no
+   warnings, SEH compiled fine under the project's existing `/W4 /WX` flags
+   with no `/EHa` needed.
+3. Ran `ctest -V --repeat until-fail:3`: **9/9 passed, 3 repeats, no flakes.**
+4. **Callback-liveness result**: calling `p12UMCallbacks->pfnSetErrorCb`
+   once, wrapped in SEH, **completed normally** (`Attempted=1 Completed=1
+   ExceptionCaught=0`). The real runtime's diagnostic callback is live and
+   callable through this owned, no-kernel-driver-installed identity -- not
+   just a non-null pointer.
+5. **Newer-pinned-version control result**: pinning
+   `D3D12DDI_SUPPORTED_0119` (newest in this WDK) with the same two caps
+   answered shows `Create=0` and even `Size=0` (`CalcPrivateDeviceSize` not
+   reached) -- the runtime silently stops right after the one `GetCaps` call
+   succeeds. This disproves "any pinned version reaches `CreateDevice` once
+   caps are answered"; it's specific to (at least) `D3D12DDI_SUPPORTED_0010`.
+   Checked `D3D12DDI_ADAPTERFUNCS`: it's unversioned (no
+   `D3D_UMD_INTERFACE_VERSION`-gated fields), so that's not the cause.
+6. Documented both findings in `W0WindowsIntegrationProbe.md` (new
+   subsection) and updated the `W0(g)` roadmap row with both strike-throughs
+   and the new bisection follow-up. No `.instructions.md` change -- no
+   environment/process issue surfaced this session (clean build, no new
+   flags needed).
+7. Committed in two steps: code (`d7d1aa951fab`), docs (`fac307225739`).
+
+## Why no `check-feme`/Vulkan CTS this session
+
+Only `feme/utils/windows-adapter-bootstrap/BootstrapStub.cpp`,
+`feme/utils/windows-adapter-probe/AdapterProbe.cpp`,
+`feme/utils/windows-warp-interposition/CMakeLists.txt` (all standalone,
+no FeMe/LLVM library dependency), and documentation changed. No `feme/lib`,
+`feme/include`, or shared Vulkan-core production code touched.
+
+## Next steps (ranked)
+
+1. **Bisect pinned DDI versions.** Only the oldest (`0010`) and newest
+   (`0119`) have been tried. Add 2-3 intermediate `D3D12DDI_SUPPORTED_0NNN`
+   control variants (same pattern as `pinned-version-newer`) to narrow where
+   `CreateDevice`-reachability changes -- this is a bounded, mechanical next
+   step, no new judgment calls needed.
+2. **`pKTCallbacks` liveness remains untested.** Only the pure user-mode
+   `pfnSetErrorCb` was invoked. The kernel-routed entries
+   (`pfnAllocateCb`/`pfnDeallocateCb`) are still only null-checked per this
+   session's explicit "not an allocation/resource call" instruction -- any
+   future probe of those needs fresh, explicit approval since it starts to
+   shade into real resource-contract territory.
+3. **`W0(b)`'s product/compatibility decision remains the single blocking
+   item** for anything beyond audit work -- unchanged across many sessions,
+   not re-litigated here.
+4. Backlog, untouched again this session: `ENV6(c)(3)`/`ENV6(d)` CTS triage,
+   `ENV7(g)` audit, full Vulkan CTS re-measure.
