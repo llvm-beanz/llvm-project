@@ -132355,3 +132355,25 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 2. Full CTS re-measure in the background.
 3. `image_query.samples_storage`.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: ENV6(c)(5) pre-linearize IR dumps
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I found (no code changes)
+- `cov-function-infinite-loop-return-identical-condition`: outer loop
+  (`7` -> inner loop `9` -> `Flow2` -> `loop.exit.guard` -> back to `7` or
+  out to `func(.exit`). The inner loop's exit guard is the outer loop's own
+  divergent latch/exit branch, so that branch isn't an "empty diamond arm"
+  -- it sits on another cycle's boundary. That is the "own-cycle-boundary-
+  crossing" shape in the error text.
+- `cosh-return-inf-unused`: different message ("only a uniform pass-through
+  region from header exit check to latch"); not yet inspected.
+- IR dumps saved in /tmp (scratch, not committed): `pl-*.txt`.
+
+## Next steps (ranked)
+1. Reduce the nested-loop case above into a `feme-opt` lit repro
+   (outer loop whose latch branch is an inner loop's `loop.exit.guard`).
+2. Inspect `cosh-return-inf-unused` for a shared shape.
+3. Full CTS re-measure in the background.
+4. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
