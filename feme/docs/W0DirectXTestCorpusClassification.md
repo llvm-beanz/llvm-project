@@ -1,5 +1,12 @@
 # W0(c) Direct3D test corpus classification
 
+**Current integration direction (2026-11-06):** container-first application-local
+user-mode software driver through stock D3D12/DXGI. The
+[integration report](W0WindowsIntegrationProbe.md) supplies a standalone
+reference-WARP runner and the next container verification steps. The FeMe
+selection helper below remains a design until W0(f)/W1(a) supplies a valid
+FeMe adapter; kernel installation is not a prerequisite for starting this work.
+
 This records the classification required by `W0(c)` in
 [WARPRoadmap.md](WARPRoadmap.md). It is a research/documentation artifact: no
 Direct3D source or test data is copied into this repository, and `C:\dev\

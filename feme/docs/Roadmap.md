@@ -1647,8 +1647,8 @@ frontend exists; the shared CPU/image/raster/tessellation/mesh machinery does.
 
 | Gap | Owner section | Priority |
 |---|---|---|
-| The integration boundary is undecided: whether a software/render-only adapter can be installed and enumerated through DXGI at all, versus an application-local compatibility runtime. Choosing wrong invalidates most object-layer work, so W0 is explicitly a throwaway-capable prototype and gates every Windows-facing line of code | "Replacement and Deployment Model", W0 | P0 |
-| No selected adapter SDK/WDK/DDI, signing, INF or Windows adapter CI contract. The Windows development container provides local Direct3D sources/tests, not an installed FeMe adapter or HLK lab | W0 | P0 |
+| Selected direction: container-first application-local user-mode software driver using stock D3D12/DXGI. Host reference-WARP loading is measured, but container verification and a distinct FeMe adapter bootstrap/DDI/device remain unproven. W0(f) is the next implementation gate; W0(b) is an explicit fallback decision, not an automatic switch to a COM runtime | "Replacement and Deployment Model", W0(f) | P0 |
+| Container OS/SDK/WDK/runtime/WARP/DDI and CI contract must be recorded by the standalone probe and FeMe prototype. Installed-adapter signing/INF/kernel/reboot and display/HLK evidence are separate host/VM deployment tasks, not prerequisites for user-mode headless bring-up | W0(a), W0(f), W6–W7 | P0 |
 | Same in-process LLVM coexistence requirement as §1.9 (the adapter loads into processes that may already host DXC), plus an exported symbol set checked against the selected DDI contract | "Project and Binary Boundaries" | P0 |
 | Serialized root signatures of both versions, descriptor heaps and tables | W2 | P1 |
 | Device/queue/allocator/list/fence/heap/buffer/pipeline objects, device-removal propagation, indirect dispatch, copies, barriers, queries | W1–W2 | P1 |
@@ -2779,8 +2779,8 @@ and with §3.2 once their prerequisites land.
 
 | # | Milestone | Depends on |
 |---|---|---|
-| W0 | Integration feasibility prototype: SDK/WDK/DDI/OS version selection, proof that a software adapter can be installed and enumerated through DXGI or selection of the application-local compatibility-runtime boundary instead, and the signing/INF/CI/debugging story. Throwaway-capable, and gates every other W step | — |
-| W1 | Full-architecture objects and headless compute through existing stage APIs; device removal and truthful development capability inventory | W0, WS2; reuse R21, R22 |
+| W0 | Container-first user-mode integration prototype: verify reference/rejection probes, pin OS/SDK/WDK/runtime/WARP/DDI, and prove a distinct FeMe adapter bootstrap through stock D3D12/DXGI. Host measurements are complete as W0(e); W0(f) remains open. W0(b) is an explicit fallback decision; installed-adapter signing/INF/reboot evaluation is separate | — |
+| W1 | Full-architecture objects and headless compute through existing stage APIs; device removal and truthful development capability inventory | W0(f) selected-boundary proof (or approved W0(b) alternative), WS2; reuse R21, R22; not pending installed-driver/HLK evaluation |
 | W2 | Root signatures, descriptor heaps, general CBVs, buffers/images/samplers, committed/placed/reserved resources, copy footprints, residency, legacy synchronization, indirect commands and queries | W1, WS0–WS1; reuse R23, R25, R30 |
 | W3 | Conventional graphics over FeMeGraphics: raster/output merge, MSAA, stream output, tessellation/geometry, indirect draw, libraries/caches and cross-API differential tests | W2; reuse/complete R32–R34 |
 | W4 | FL 12_2 mesh/amplification and advanced raster/resource/binding requirements; generated normative capability gap report | W3; reuse/complete G6 |
@@ -2880,5 +2880,7 @@ what was decided, since the decisions are what the later steps build on:
   this effort; each now has its own breakdown row (H21 and H41-H47) instead.
 - Transparent substitution for Microsoft's WARP binary or
   `D3D_DRIVER_TYPE_WARP`/`EnumWarpAdapter` interception (FeMeWARPDesign.md
-  Status): those are Windows-owned selection paths, and a separately
-  installed, explicitly selected adapter is the first deployment target.
+  Status): those are Windows-owned selection paths. The selected first
+  direction is a container-developed application-local user-mode software
+  driver through stock D3D12/DXGI with explicit FeMe identity; it does not
+  imply transparent WARP interception or require installed-adapter bring-up.

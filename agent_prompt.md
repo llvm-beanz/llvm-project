@@ -68,22 +68,37 @@ mid-investigation to avoid losing documentation.
 
 Please begin work on the WARP roadmap.
 
+The selected direction is **container-first, application-local user-mode
+software-driver integration with stock Windows D3D12/DXGI**. This is not a
+request to implement a replacement COM runtime or install a kernel driver.
+Read `feme/docs/W0WindowsIntegrationProbe.md` and `feme/docs/WARPRoadmap.md`.
+Host reference-WARP results are recorded; container results and a working
+third-party FeMe adapter are not yet established.
+
 ## Suggested next steps (ranked)
 
-1. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus
-   (`C:\dev\Direct3D`, per the environment's own instructions: read its
-   `.github\copilot-instructions.md` first, it is a copy of the host's
-   checkout, not a push target) into public black-box/WARP-private
-   white-box/DXBC-DXIL-input/optional-preview-feature/display-HLK-
-   dependency categories, and add an explicit FeMe adapter-selection
-   assertion to a future runner -- a research/documentation task, no
-   Windows adapter install needed yet. With `WS0`-`WS3` all now fully
-   closed, this (or `W0(a)`/`W0(b)`) is the roadmap's own next
-   milestone in sequence, not a parallel-track item anymore.
-2. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
-   Windows host/VM outside this process-isolated container, per the
-   roadmap's own text ("kernel installation and reboot tests belong on
-   a suitable Windows host/VM, not this process-isolated container").
-3. Backlog carried from prior sessions, still untouched:
-   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
-   re-measure.
+1. **`W0(f)`**: build `feme/utils/windows-adapter-probe` in the Windows
+   container and run its four CTest cases first. Record the actual OS,
+   SDK/WDK, runtime/core/WARP paths and versions, HRESULTs and DDI counters.
+   Verify reference WARP before extending the FeMe adapter bootstrap to reach
+   `OpenAdapter12`, callback negotiation and teardown with a distinct identity.
+   Preserve caching, assertions and disabled PCH. Do not assume host success
+   proves container success, or wait for kernel installation to start.
+2. Re-examine whether any part of `W0(c)`'s DXBC/DXIL-input classification
+   can be sharpened without a host: the grep-confirmed candidate list in
+   `W0DirectXTestCorpusClassification.md` (`BasicAPI.cpp`,
+   `GBVExecuteIndirect.cpp`, `Library.cpp`, `MultiGPU.cpp`,
+   `PipelineStateObject.cpp`, `Raytracing.cpp`, `ResourceBinding.cpp`,
+   `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) was left as "needs
+   individual triage" rather than resolved one-by-one; a short, bounded
+   follow-up could read each file and record which actually consume DXBC
+   inputs versus merely reference DXBC-related constants/headers.
+3. Backlog carried from prior sessions, still untouched: `ENV6(c)(3)`/
+   `ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
+
+Keep driver installation/signing/reboot and display/HLK work as separate
+host/VM tasks if the selected deployment eventually requires them. Do not
+replace system DLLs, silently use private WARP ordinals, or switch to an
+installed miniport/COM-runtime architecture without an explicit design
+decision. If a container probe fails, record its exact failure and isolate
+the runtime/environment issue rather than declaring all W0 work host-blocked.

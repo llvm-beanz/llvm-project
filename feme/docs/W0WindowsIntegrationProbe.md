@@ -1,8 +1,9 @@
 # W0 Windows user-mode integration probe
 
-**Next step: establish a valid third-party adapter bootstrap before implementing
-the FeMe D3D12 device tables. Do not treat a new kernel driver as a proven
-prerequisite.**
+**Next step: run the standalone reference/rejection probes inside the Windows
+container, then establish a valid third-party adapter bootstrap before
+implementing FeMe's D3D12 device tables. The selected direction is a user-mode
+software driver through stock D3D12/DXGI, not kernel installation.**
 
 This is host evidence for [WARPRoadmap.md](WARPRoadmap.md), collected on
 2026-11-06. The user selected stock-runtime user-mode/software-adapter probing
@@ -97,23 +98,56 @@ probe. The design's prohibition on depending on private WARP ordinals remains.
 
 ## Remaining work and decision gate
 
-1. Identify the public, modern third-party software-adapter bootstrap contract
+**Direction selected after the host probe: develop the application-local
+user-mode software driver in the Windows container using stock D3D12/DXGI.**
+This selects implementation order and the first integration boundary to prove,
+not a claim that the third-party contract or container runtime already works.
+It does not select a replacement COM runtime or require a kernel installation.
+
+1. Build this probe and run all four CTest cases inside the Windows container.
+   Record OS/kit/runtime/core/WARP versions and loaded paths, identity/LUID,
+   HRESULTs and DDI counters. Verify reference WARP first; if it fails, record
+   and isolate the actual environment/runtime blocker rather than using the
+   host results as a substitute or assuming a kernel driver is required.
+2. Identify the public, modern third-party software-adapter bootstrap contract
    needed to provide valid identity/thunk services and reach `OpenAdapter12`.
-   Reproduce the current negative experiment in the Windows container if useful;
-   no kernel installation is needed for this stage.
-2. Extend an LLVM-owned prototype through open/callback negotiation/close with a
+   No kernel installation is needed to build or run the loading experiments.
+3. Extend an LLVM-owned prototype through open/callback negotiation/close with a
    distinct FeMe identity. Measure the chosen DDI version and teardown, including
    failure cleanup, rather than inferring support from the installed headers.
-3. If only WARP-private binary compatibility makes the application-local UMD
+4. If only WARP-private binary compatibility makes the application-local UMD
    route work, request an explicit product/design decision. Do not silently
    impersonate Microsoft's adapter, use ordinal 199, or declare an installed
    miniport mandatory. The alternatives are an approved compatibility project,
    the separately installed WDDM path, or the application-local COM runtime.
 
 W0(a), W0(b), and W0(d) remain incomplete: there is no FeMe D3D12 device, no
-installed-path test, and no final boundary choice. The reference-test portion
-of W0(d) now has executable evidence. Missing prototype/HLK infrastructure is
-still blocked, not Pass.
+container runtime proof or installed-path test. The user-mode stock-runtime
+direction is selected, but its feasibility remains open. The reference-test
+portion of W0(d) has host evidence only. Installed-driver, signing/reboot,
+display and HLK work are separate host/VM tasks if that deployment requires
+them; they do not block starting W0(f). Missing evidence is not Pass.
+
+### Container starting point
+
+Use the Windows tooling's x64 developer-shell setup and its existing sccache.
+Keep the container's actual kit selection; do not apply the host-only
+`CMAKE_MT` workaround unless the same failure is independently reproduced.
+
+```powershell
+cmake -S C:\dev\llvm-project\feme\utils\windows-adapter-probe `
+  -B C:\dev\adapter-probe -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+  -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
+cmake --build C:\dev\adapter-probe
+ctest --test-dir C:\dev\adapter-probe -V
+```
+
+The four cases are reference WARP, software-reference WARP, pre-DDI stub
+rejection, and explicit missing-module failure. Use existing container NuGet
+WARP/Agility binaries for additional matrix runs; inspect their locations and
+versions instead of reusing the host's user-profile paths. These commands are
+the next action, not recorded container test results.
 
 ## Reproduce without configuring the LLVM build
 

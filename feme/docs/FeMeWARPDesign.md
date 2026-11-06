@@ -23,9 +23,12 @@ This document uses "WARP replacement" as shorthand for that role. It does not
 assume that a third-party component can replace Microsoft's WARP binary or
 intercept `D3D_DRIVER_TYPE_WARP`/`IDXGIFactory4::EnumWarpAdapter`. Those are
 Windows-owned selection paths, not documented registration points for an
-arbitrary software renderer. The first deployment target is therefore a
-separately installed software adapter which applications enumerate through
-DXGI and select explicitly. Transparent substitution, if it is required, is a
+arbitrary software renderer. The selected first bring-up/deployment direction
+is an application-local user-mode software driver loaded by stock Windows
+D3D12/DXGI, developed and tested in a Windows container with explicit FeMe
+selection and identity. Its adapter/bootstrap contract remains to be proven.
+An installed adapter is a separate deployment alternative, not a prerequisite
+for that investigation. Transparent substitution, if it is required, is a
 separate deployment problem and may require an application-facing compatibility
 runtime rather than a display driver.
 
@@ -282,23 +285,29 @@ rather than a single "be conformant" bullet:
 
 ## Replacement and Deployment Model
 
-There are three materially different products that can be called a WARP
+There are four materially different products that can be called a WARP
 replacement:
 
-1. **An installed Direct3D software adapter.** Applications enumerate it with
-   DXGI and pass the selected adapter to `D3D12CreateDevice`. This is the target
-   of this design, subject to confirming the supported Windows driver/DDI path.
+1. **An application-local software driver using stock D3D12/DXGI.** This is
+   the selected container-first direction, not a working FeMe adapter today.
    `IDXGIFactory::CreateSoftwareAdapter` loads a DLL implementing a complete
    driver interface and emulating required kernel graphics behavior. Public
    documentation does not provide a supported modern D3D12 third-party
    software-adapter recipe, but W0 must test whether this path can satisfy the
-   selected runtime/DDI rather than dismissing it by assumption.
-2. **An application-local compatibility runtime.** A replacement or forwarding
+   selected runtime/DDI rather than dismissing it by assumption. First verify
+   reference WARP and the rejection stub inside the Windows container, then
+   implement a distinct FeMe adapter bootstrap and DDI prototype. Do not confuse
+   executable-local reference-WARP filename selection with a complete driver.
+2. **An installed Direct3D software adapter.** Applications enumerate it with
+   DXGI and pass the selected adapter to `D3D12CreateDevice`. Installation,
+   kernel/miniport, INF, signing and reboot requirements are a separate
+   host/VM deployment evaluation, not gates for user-mode container bring-up.
+3. **An application-local compatibility runtime.** A replacement or forwarding
    `d3d12.dll`/DXGI-facing layer can make unmodified application calls reach a
    FeMe implementation in controlled test environments. This has deployment,
    API-coverage, and system-DLL redirection constraints and is not the primary
    architecture.
-3. **Transparent replacement of system WARP.** The public API does not offer a
+4. **Transparent replacement of system WARP.** The public API does not offer a
    provider registration mechanism for the built-in WARP selector. This design
    does not rely on such a mechanism.
 
@@ -313,20 +322,24 @@ executable-local DLL loading, and WARP reference-device success are three
 different observations; none proves a third-party FeMe device. Determine
 whether required adapter/thunk services can be supplied under a supported
 public contract before requiring a new miniport or switching to a COM runtime.
-The installed-adapter product goal and the prohibition on undocumented WARP
-binary compatibility are unchanged by these experiments.
+The full-feature graphics/presentation product goal and the prohibition on
+undocumented WARP binary compatibility are unchanged. Container headless
+bring-up is not a presentation or installed-adapter qualification claim.
 
 The prototype should answer:
 
-- Whether a render-only or software display adapter can be installed and
-  enumerated on each target Windows version without a physical display device.
+- Whether the container's stock runtime opens reference WARP and can host a
+  distinct FeMe user-mode adapter through a public bootstrap and pinned DDI.
+  Record the container results independently of the host measurements.
 - Which driver model applies. Microsoft Compute Driver Model is useful only
   for a separate `D3D_FEATURE_LEVEL_1_0_CORE` compute prototype: it cannot host
   the graphics pipeline or presentation and therefore cannot be the foundation
-  of the product designed here. W0 must establish a WDDM graphics path before
-  product implementation proceeds.
-- Which kernel-mode/display-miniport component, INF metadata, and test-signing
-  workflow Windows requires even when all rendering occurs in user mode.
+  of the product designed here. The selected user-mode contract must preserve
+  the eventual graphics/presentation requirements; installed WDDM deployment
+  must be evaluated separately if that boundary is selected.
+- Whether an installed deployment is required for later product use cases;
+  if so, which kernel-mode/display-miniport component, INF metadata and signing
+  workflow Windows requires. These do not gate the container loading prototype.
   Attestation signing is suitable for testing under current policy; retail
   Windows certification and distribution require the applicable HLK/WHCP
   submission and signing path.
@@ -337,9 +350,11 @@ The prototype should answer:
 - Whether the adapter can be made available in CI and developer machines
   without test-signing the whole system.
 
-If that investigation shows that a generally installable adapter is not a
-viable developer workflow, the first frontend should be an application-local
-D3D12 compatibility runtime. The object model, shader compiler, command
+If the selected user-mode stock-runtime contract proves unavailable, stop at
+W0(b) for an explicit design decision between installed-adapter deployment,
+a separately approved compatibility scope, and an application-local D3D12
+COM runtime. Container installation limits alone do not select a fallback.
+The object model, shader compiler, command
 executor, and software graphics pipeline below remain reusable; only the
 Windows-facing boundary changes.
 
@@ -467,7 +482,8 @@ profile containing:
   plane-count results; and
 - queue, node, memory, residency, and GPU virtual-address limits.
 
-The installed adapter and compatibility-runtime frontend consume the same
+The selected user-mode driver and any approved installed-adapter or
+compatibility-runtime frontend consume the same
 profile. A profile is generated only from named tests and cannot contain
 hand-maintained optimistic overrides. An incomplete development harness does
 not report a lower feature level merely because compute works: every reported
@@ -853,10 +869,12 @@ core require reuse and Direct3D validation, not a second implementation.
 ### W0: Integration feasibility prototype
 
 - Select supported Windows SDK, WDK, DDI, and minimum OS versions.
-- Prove either that a software/render-only adapter can be installed and
-  enumerated by DXGI, or select the application-local compatibility-runtime
-  boundary instead.
-- Document signing, INF, CI, and debugging requirements.
+- Verify the standalone reference/rejection probes in the Windows container,
+  then prove a distinct user-mode FeMe adapter bootstrap, DDI negotiation and
+  teardown through stock D3D12/DXGI. Host WARP results are not container proof.
+- Document container runtime/CI/debugging requirements. Keep any installed
+  adapter signing/INF/reboot evaluation separate; choose a fallback explicitly
+  only if the selected user-mode boundary proves unavailable.
 - Expose one adapter with truthful identity and feature queries, but no shader
   execution.
 
@@ -963,9 +981,11 @@ would invalidate most object-layer work.
 The Direct3D counterpart of the Vulkan ICD's V9, and the milestone that
 makes the full-feature product contract measurable rather than aspirational.
 
-- Run the applicable Microsoft Direct3D 12 runtime conformance tests, graphics
-  driver HLK playlists, and this project's portable execution tests against
+- Run the applicable Microsoft Direct3D 12 runtime conformance tests and this
+  project's portable execution tests against
   the exact capability profile the adapter reports.
+  Graphics-driver HLK playlists additionally apply to an installed-adapter
+  deployment; they are not a prerequisite for container headless bring-up.
 - Reconcile every reported capability (feature level, tiers, format
   support table, shader model, runtime/DDI requirement, and optional feature)
   against what is actually implemented, the same way roadmap V9 reconciles the
@@ -1012,8 +1032,10 @@ release every object with allocation accounting balanced
 The release acceptance test is the generated feature level 12_2 capability
 profile: every required query has a passing focused test, every required
 command and shader stage has end-to-end coverage, the applicable Microsoft
-runtime conformance and HLK suites pass, and no unsupported optional feature is
-reported. Post-12_2 profiles add the corresponding enhanced-barrier, shader
+runtime conformance suites pass, and no unsupported optional feature is
+reported. An installed-adapter deployment additionally requires its applicable
+HLK/signing evidence; container results cannot supply that qualification.
+Post-12_2 profiles add the corresponding enhanced-barrier, shader
 model, Work Graphs, and later-options suites without weakening the 12_2
 baseline.
 
@@ -1023,8 +1045,10 @@ baseline.
 
 This avoids WDDM driver installation and is attractive for tests and controlled
 applications. It must reproduce a large COM surface, coexist with DXGI/system
-components, and solve DLL redirection. Keep it as the fallback frontend if W0
-shows that an installed software adapter is impractical.
+components, and solve DLL redirection. It is not the selected application-local
+UMD approach: it replaces the API runtime rather than supplying a driver to
+stock D3D12. Consider it at W0(b) only if the user-mode stock-runtime boundary
+proves unavailable and the alternative is explicitly approved.
 
 ### Implement D3D12 over the FeMe Vulkan ICD
 
@@ -1051,11 +1075,11 @@ lets D3D11-on-12 provide an eventual compatibility route.
 
 ## Open Questions
 
-1. Can a third-party software/render-only D3D12 adapter be installed and
-   enumerated on supported Windows releases with a practical signing and CI
-   workflow, and under which WDDM graphics model? Can
-   `CreateSoftwareAdapter` satisfy the selected D3D12 DDI, or is an installed
-   adapter required? W0 must answer this before the frontend boundary is fixed.
+1. Can the selected stock-runtime user-mode software-adapter bootstrap reach
+   DDI negotiation and create a distinct FeMe device in the Windows container?
+   W0(f) must record container-specific evidence. If it cannot, which
+   W0(b) alternative is approved? Installed signing/CI and WDDM-model questions
+   belong to that separate deployment evaluation, not an assumed prerequisite.
 2. Which D3D12 DDI, WDDM version, SDK/WDK pair, Agility SDK range, and minimum
    Windows release form the support matrix for the feature level 12_2 baseline
    and the separate enhanced-barrier/Work Graphs profiles?
