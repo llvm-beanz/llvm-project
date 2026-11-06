@@ -67,7 +67,21 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `ENV6(c)(5a)`: add a mask-merging phi at the shared tail block. Starting
-   points: `Linearize.cpp` `DiamondFlattener::validate`,
-   `canFlattenLoopBodyRegion` and `linearizeCycle`. Don't retry the
-   `validate()`-only relaxation.
+Next steps, ranked:
+1. Reduce `ENV6(e)(7)` (`cov-x86-isel-lowering-negative-left-shift`):
+   dump with `FEME_DUMP_IR_PRELINEARIZE=1`, find the call site building
+   `live.merge31`/`sideeffect.merge32`, and look at
+   `flattenKnownDivergentBranch` or the `HeaderDivergent` `BodyDF` path
+   (~line 9335) -- a sibling fix to this session's, not a retry of it.
+2. Re-measure the `ENV6(c)(5)`/`ENV6(c)(6)` roadmap cluster counts; only 2
+   corpus cases flipped this session, so those counts are still
+   unverified guesses from earlier sessions.
+3. Triage `cosh-return-inf-unused` as its own shape (two distinct "only a
+   uniform pass-through region" bail-outs plus a mask-affecting-op
+   diagnostic -- not this session's relay-block shape at all).
+4. None of the offload-test-suite patch set is at risk right now (0001-
+   0005 verified to reapply clean with `--keep-cr` from a fresh
+   cherry-pick), but keep an eye out if upstream `WaveActiveMax.test`
+   drifts again -- the content, not just the line endings, has already
+   diverged once (stale `XFAIL: Lavapipe && host-arm64`, old comment
+   text) and may again.
