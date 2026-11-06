@@ -107,6 +107,20 @@ python3 feme/utils/vk_gen_extension_inventory.py \
   -o <generated-table>
 ```
 
+WARP roadmap `WS3(b)`: rather than eyeballing that diff by hand, run
+`feme/utils/check-feme-capability-manifest.py --vk-xml
+/home/dev/dev/VK-GL-CTS/external/vulkan-docs/src/xml/vk.xml` from the
+repository root; it regenerates both this table and
+`Vulkan14FeatureInventory.md`'s and diffs each against what is actually
+committed here, naming the specific row(s) that drifted instead of only
+reporting that something changed. This script is covered by
+`check-feme` itself (see `feme/test/Vulkan/run-check-feme-capability-
+manifest.test`, which exercises its diff logic against a fake
+generator) but is not itself part of `check-feme`, since it needs a
+real VK-GL-CTS checkout's `vk.xml` that is not available in every build
+environment -- run it manually alongside the regenerate step above
+after any change that could affect either table.
+
 ## Inventory
 
 | Extension | Status | Note |

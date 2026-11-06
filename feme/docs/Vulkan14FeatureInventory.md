@@ -103,6 +103,16 @@ python3 feme/utils/vk_gen_feature_inventory.py \
   -o <generated-table>
 ```
 
+WARP roadmap `WS3(b)`: `feme/utils/check-feme-capability-manifest.py
+--vk-xml /home/dev/dev/VK-GL-CTS/external/vulkan-docs/src/xml/vk.xml`
+(from the repository root) automates the "reproduces this table
+exactly" check this file's own audit notes above have recorded by hand
+every session so far -- it regenerates this table and
+`VulkanExtensionInventory.md`'s and names the specific drifted row(s),
+if any, instead of only an aggregate "something changed". See that
+script's own module docstring and `feme/test/Vulkan/run-check-feme-
+capability-manifest.test` for how its diff logic is tested.
+
 ## Inventory
 
 | Category | Version | Name | Advertised | Note |
