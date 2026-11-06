@@ -1,5 +1,88 @@
 # Vulkan CTS status
 
+## Windows WARP roadmap WS2(a): QueueExecutor task-runner extraction (2026-11-06)
+
+Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
+Device` (confirmed at session start and again immediately before this CTS
+run). This session implements WARP roadmap `WS2(a)`: `feme::vulkan::
+QueueExecutor` (`feme/lib/Vulkan/Sync.h`) -- a `VkQueue`'s own dedicated
+background `std::thread` that runs every task `vkQueueSubmit`/
+`vkQueueSubmit2` enqueue for it strictly in FIFO order -- never depended
+on any Vulkan type: it is a plain `std::thread`/mutex/condition-variable/
+`std::deque<std::function<void()>>` task runner. That mechanism moves
+into a new, portable `feme::execution::TaskExecutor`
+(`feme/include/feme/Execution/TaskExecutor.h`,
+`feme/lib/Execution/TaskExecutor.cpp`), the first library under the
+roadmap's proposed `FeMeExecution` (see "Sharing contract"). `QueueExecutor`
+itself becomes a thin wrapper holding a `feme::execution::TaskExecutor
+Impl` member: `enqueue(...)` forwards directly, and `waitIdle()` forwards
+to `Impl.waitIdle(getQueueIdleSafetyNetTimeoutNs())` -- a composed member
+rather than a type alias, specifically so every existing caller's exact
+no-argument `waitIdle()` call (`Sync.cpp`, `Objects.h`'s
+`Device::waitIdle()`) keeps compiling unchanged. Unlike the original
+method, `TaskExecutor::waitIdle` takes its timeout as an explicit
+parameter rather than internally consulting the Vulkan-specific
+`getQueueIdleSafetyNetTimeoutNs()`, keeping the portable class free of any
+Vulkan-specific timeout policy.
+
+Scope decision this session had to make (the roadmap's `WS2` row covered
+more ground than one bounded slice should): `Fence`/`Event`/`Semaphore`
+state, and the actual `vkQueueSubmit`/`executeCommandBuffer` task-building
+logic, stay in `Sync.cpp`/`Objects.h`/`CommandBuffer.cpp` -- genuine
+Vulkan fence/semaphore/queue semantics and command-execution mechanics,
+not task-dispatch machinery. `feme::vulkan::PendingExecutionRefCounted`
+(`ExecutionLifetime.h`)'s retain/release-with-deferred-destroy pattern --
+the "execution-owned storage/retention" half of WS2's original text --
+was evaluated and found to be a second, independently portable extraction
+(it stores a `const VkAllocationCallbacks *` as its only Vulkan-specific
+detail, an otherwise type-agnostic payload), carried forward as `WS2(b)`
+in the roadmap rather than combined into this commit.
+
+`check-feme` rebuilt its prerequisites and passed: **3,948 Passed, 15
+Skipped, 10 Unsupported, zero failures** (3,973 discovered tests,
+3,967 prior + 6 new `FeMeExecutionTests` cases: non-blocking enqueue,
+FIFO task ordering, `waitIdle` draining all pending tasks, `waitIdle`
+genuinely timing out on a still-running task, destructor draining
+pending tasks before joining, and concurrent enqueue from multiple
+threads). `FeMeExecutionTests.exe` run directly also showed **6/6
+passed**. Cached (`sccache`), assertions enabled, no PCH.
+
+The local CTS checkout (unchanged) ran a bounded 490-case selection built
+from the local `vk-default` mustpass, chosen to exercise queue-submission
+and cross-thread wait/signal paths that actually run through
+`QueueExecutor`/`TaskExecutor`: `dEQP-VK.api.device_init.*` (253 cases,
+device/queue creation and submission setup), `dEQP-VK.api.smoke.*` (8
+cases), a 150-case sample of `dEQP-VK.synchronization.basic.*`, and
+100-case samples each of `dEQP-VK.synchronization2.timeline_semaphore.
+wait_before_signal.*` and `.one_to_n.*` (the exact dependent-submission-
+chain patterns `QueueExecutor`'s own file comment cites as requiring an
+asynchronous, per-queue worker thread in the first place). Total: **490
+Completed, 477 Pass, 12 NotSupported, zero unexpected failures, zero
+Unrun.** One unrelated `TimedOut` (`dEQP-VK.api.device_init.
+create_instance_device_intentional_alloc_fail.basic`, an allocation-
+failure-injection stress test with no dependency on queue task execution
+-- not treated as a regression). Artifacts are under
+`C:\dev\VK-GL-CTS\run\feme-20261105-ws2a`: `cases.txt`,
+`results\report.txt`. From the LLVM checkout:
+
+```powershell
+python feme\utils\run_vulkan_cts.py `
+  --deqp-vk C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan\deqp-vk.exe `
+  --cwd C:\dev\VK-GL-CTS\build\external\vulkancts\modules\vulkan `
+  --case-list C:\dev\VK-GL-CTS\run\feme-20261105-ws2a\cases.txt `
+  --output-dir C:\dev\VK-GL-CTS\run\feme-20261105-ws2a\results `
+  --workers 1 --batch-size 60 --batch-timeout 180 --final-timeout 60 `
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The ICD at commit `a446bc7e7c86` (this session's HEAD) has SHA-256
+`df5bf6ea214e33aaa2f854f1937495848632cb7cae23c54250c6c39d1799e5ba`
+(`libfeme_vulkan.dll`); `llvm-project` was at that same commit when this
+run completed. No full CTS sweep, Direct3D execution, display
+interoperability, or HLK qualification was run this session; both Vulkan
+inventories were not regenerated this entry (no format/extension
+advertisement changed by this pure code-motion commit).
+
 ## Windows WARP roadmap WS1(d): attachment-view layer-count extraction (2026-11-06)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan

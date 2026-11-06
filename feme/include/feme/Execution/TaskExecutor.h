@@ -16,8 +16,8 @@
 // general-purpose single-worker task queue: `std::function<void()>` in,
 // nothing Vulkan-specific out. This header promotes that task-runner
 // itself, renamed `TaskExecutor` to avoid the Vulkan-specific "queue"
-// name, into the proposed small `FeMeExecution` library (see "Shared
-// extraction opportunities" in FeMeWARPDesign.md) -- the same "task
+// name, into the proposed small `FeMeExecution` library (see "Sharing
+// contract" in WARPRoadmap.md) -- the same "task
 // dispatch/join" primitive a future Direct3D command-queue frontend would
 // also need, without requiring it to adopt Vulkan's own `VkQueue`/
 // `VkFence`/semaphore object model.
