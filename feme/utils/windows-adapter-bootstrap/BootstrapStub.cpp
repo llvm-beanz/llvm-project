@@ -11,11 +11,19 @@
 // windows-warp-interposition also builds it as a local d3d10warp.dll and
 // measures stock D3D12's adapter negotiation through Microsoft's WARP identity.
 // Neither experiment implements a real device, resource, or command contract:
-// capabilities and device creation deliberately return E_NOTIMPL. By default
-// no supported DDI versions are advertised. W0(g)'s audit variant defines
+// device creation deliberately returns E_NOTIMPL. By default no supported DDI
+// versions are advertised. W0(g)'s audit variant defines
 // FEME_BOOTSTRAP_PINNED_VERSION (one public D3D12DDI_SUPPORTED_00NN value) to
-// observe what the stock runtime asks for once negotiation can succeed,
-// still without fabricating a capability answer or a device.
+// observe what the stock runtime asks for once negotiation can succeed. The
+// two GetCaps queries that W0(g) observed happen unconditionally before
+// CreateDevice (D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 and the older
+// D3D12DDICAPS_TYPE_3DPIPELINESUPPORT) are answered truthfully and minimally:
+// the former simply echoes back the runtime's own requested feature level
+// (its pData struct carries it as an input field), and the latter reports the
+// lowest defined D3D12DDI_3DPIPELINELEVEL. Neither answer fabricates driver
+// capability beyond what the runtime already told us or the lowest possible
+// truthful claim; every other cap and createDevice itself still deliberately
+// fail, so this remains audit work, not a device contract.
 //
 //===----------------------------------------------------------------------===//
 
@@ -109,7 +117,34 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
   LONG Index = InterlockedIncrement(&GCapsTypeLogCount) - 1;
   if (Args && Index >= 0 && static_cast<UINT32>(Index) < MaxCapsTypeLog)
     GCapsTypeLog[Index] = static_cast<LONG>(Args->Type);
-  // No capability data is fabricated; this remains an audit, not a device.
+
+  if (!Args)
+    return E_NOTIMPL;
+
+  // W0(g): answer the two caps the stock runtime is observed to query before
+  // CreateDevice, truthfully and minimally. Every other cap still fails.
+  if (Args->Type == D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 &&
+      Args->pData && Args->DataSize >= sizeof(D3D12DDI_3DPIPELINESUPPORT1_DATA_0081)) {
+    auto *Data =
+        static_cast<D3D12DDI_3DPIPELINESUPPORT1_DATA_0081 *>(Args->pData);
+    // The runtime supplies its own requested level as input; echoing it back
+    // as the maximum driver-supported level is a true statement, not a
+    // fabricated capability claim.
+    Data->MaximumDriverSupportedFeatureLevel =
+        Data->HighestRuntimeSupportedFeatureLevel;
+    return S_OK;
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_3DPIPELINESUPPORT && Args->pData &&
+      Args->DataSize >= sizeof(D3D12DDI_3DPIPELINELEVEL)) {
+    // Report the lowest defined pipeline level: a truthful floor, not a
+    // fabricated claim of broader support.
+    *static_cast<D3D12DDI_3DPIPELINELEVEL *>(Args->pData) =
+        D3D12DDI_3DPIPELINELEVEL_1_0_GENERIC;
+    return S_OK;
+  }
+
+  // No capability data is fabricated for any other cap; this remains an
+  // audit, not a device.
   return E_NOTIMPL;
 }
 
