@@ -68,14 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `dEQP-VK.transform_feedback.fuzz.{2_level_struct_array,single_struct_array}.
-   {std_geometry,std_vertex}` (4 cases): triage the `spirv.GlobalVariable`
-   nested-struct-array-of-matrices XFB legalization failure as its own item
-   -- it is not the same bug class as `opunreachable.all`.
-2. `ENV6(c)(5)`-`(7)` graphicsfuzz (~90 cases): large `Linearize`/`SIMDize`
-   architecture cluster, needs its own dedicated multi-session slot (per
-   the roadmap row's own "likely needs one shared region" framing).
-3. Kick off a background full CTS re-measure once a session has enough
-   headroom to let it run unattended for its full duration; the current
-   146-failure list is stale.
-4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked, unchanged).
+1. `ENV6(c)(5)`-`(7)` graphicsfuzz (~90): needs its own multi-session slot.
+2. Background full CTS re-measure (failing list is stale).
+3. `image_query.samples_storage` (no error logged).
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
