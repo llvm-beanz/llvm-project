@@ -290,14 +290,14 @@ replacement:
 
 1. **An application-local software driver using stock D3D12/DXGI.** This is
    the selected container-first direction, not a working FeMe adapter today.
-   `IDXGIFactory::CreateSoftwareAdapter` loads a DLL implementing a complete
-   driver interface and emulating required kernel graphics behavior. Public
-   documentation does not provide a supported modern D3D12 third-party
-   software-adapter recipe, but W0 must test whether this path can satisfy the
-   selected runtime/DDI rather than dismissing it by assumption. First verify
-   reference WARP and the rejection stub inside the Windows container, then
-   implement a distinct FeMe adapter bootstrap and DDI prototype. Do not confuse
-   executable-local reference-WARP filename selection with a complete driver.
+   The generic `CreateSoftwareAdapter` experiment opens reference WARP but
+   rejects the owned stub before its DDI. The separately approved bounded-B
+   experiment instead selects Microsoft's existing WARP adapter and routes
+   stock D3D12 into an application-local owned `d3d10warp.dll`, including
+   public adapter queries/close in the Windows container. No ordinal 199 or
+   reference forwarding is needed for this stage. This is not a documented
+   general-provider recipe, distinct FeMe identity, supported DDI negotiation,
+   or complete driver; those remain W0 requirements.
 2. **An installed Direct3D software adapter.** Applications enumerate it with
    DXGI and pass the selected adapter to `D3D12CreateDevice`. Installation,
    kernel/miniport, INF, signing and reboot requirements are a separate
@@ -316,21 +316,26 @@ contract before runtime implementation begins. D3D12's device driver interface
 is versioned with Windows and the WDK; it is not equivalent to implementing the
 public `ID3D12*` interfaces.
 
-First investigate the user-mode software-adapter route using the
-[host probe](W0WindowsIntegrationProbe.md). `CreateSoftwareAdapter` success,
+Investigate the user-mode boundary using the
+[host/container probes](W0WindowsIntegrationProbe.md). `CreateSoftwareAdapter` success,
 executable-local DLL loading, and WARP reference-device success are three
 different observations; none proves a third-party FeMe device. Determine
 whether required adapter/thunk services can be supplied under a supported
 public contract before requiring a new miniport or switching to a COM runtime.
-The full-feature graphics/presentation product goal and the prohibition on
-undocumented WARP binary compatibility are unchanged. Container headless
-bring-up is not a presentation or installed-adapter qualification claim.
+The full-feature graphics/presentation product goal is unchanged. The user
+authorized bounded application-local B diagnostics under Microsoft's WARP
+identity; that is not permission to adopt that identity as FeMe's product,
+depend on private ABIs, or replace system DLLs. The prohibition on unapproved
+undocumented binary dependencies remains. Container headless bring-up is not
+a presentation or installed-adapter qualification claim.
 
 The prototype should answer:
 
-- Whether the container's stock runtime opens reference WARP and can host a
-  distinct FeMe user-mode adapter through a public bootstrap and pinned DDI.
-  Record the container results independently of the host measurements.
+- Whether the container's stock runtime opens reference WARP and reaches
+  owned DDI through the investigated boundary. B now proves owned adapter
+  queries/close on inbox and Agility 619; a pinned supported DDI, real FeMe
+  device and distinct product identity remain unproved. Record container
+  results independently of host measurements.
 - Which driver model applies. Microsoft Compute Driver Model is useful only
   for a separate `D3D_FEATURE_LEVEL_1_0_CORE` compute prototype: it cannot host
   the graphics pipeline or presentation and therefore cannot be the foundation
@@ -350,10 +355,12 @@ The prototype should answer:
 - Whether the adapter can be made available in CI and developer machines
   without test-signing the whole system.
 
-If the selected user-mode stock-runtime contract proves unavailable, stop at
-W0(b) for an explicit design decision between installed-adapter deployment,
-a separately approved compatibility scope, and an application-local D3D12
-COM runtime. Container installation limits alone do not select a fallback.
+If the selected boundary cannot satisfy the identity/deployment contract,
+stop at W0(b) for an explicit product decision between installed-adapter
+deployment, WARP-specific compatibility, and an application-local D3D12
+COM runtime. B's research approval and routing proof do not close that product
+decision; nor does the negative public-provider search block further public-DDI
+investigation. Container installation limits alone do not select a fallback.
 The object model, shader compiler, command
 executor, and software graphics pipeline below remain reusable; only the
 Windows-facing boundary changes.

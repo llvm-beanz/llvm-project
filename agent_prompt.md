@@ -69,23 +69,28 @@ mid-investigation to avoid losing documentation.
 Please begin work on the WARP roadmap. Suggested next steps:
 
 **Suggested next steps (ranked)**:
-1. **Make the `W0(b)` decision explicitly** (human/product call, not an
-   agent task): with cost/scope now documented for all three alternatives,
-   this is the single blocking item for all further `W0(g)`/`W1`
-   D3D12-adapter work. If alternative (a) is chosen, the next concrete step
-   would be provisioning a dedicated host/VM (not this container) with
-   Secure Boot disabled and test-signing enabled, then re-attempting
-   `W0(g)`'s `OpenAdapter12` prototype through that distinct FeMe identity.
-   If alternative (c) is chosen, the next step would be scoping a minimal
-   COM-activation/DXGI-equivalent surface as its own sub-milestone.
-2. **`W0(c)`'s DXBC/DXIL-input classification sharpening**: still carried
-   forward unchanged across many sessions -- resolve the "needs individual
-   triage" candidate file list (`BasicAPI.cpp`, `GBVExecuteIndirect.cpp`,
-   `Library.cpp`, `MultiGPU.cpp`, `PipelineStateObject.cpp`,
-   `Raytracing.cpp`, `ResourceBinding.cpp`, `ShaderRootSig.cpp`,
-   `util.{cpp,h}`, `pch.hpp`) one-by-one from `C:\dev\Direct3D` (read-only
-   reference checkout). Independent of the `W0(b)` decision, so a good
-   change of pace if that decision isn't ready yet.
+1. **Continue W0(g)'s container-first public-DDI investigation from the
+   completed W0(h) evidence.** The user authorized bounded investigation of B;
+   do not ask that research question again or treat all D3D12 work as blocked.
+   Read `feme/docs/W0WindowsIntegrationProbe.md`'s alternative-B section.
+   Source-built host/container inbox and Agility 619 tests route stock D3D12
+   into owned `OpenAdapter12`, query its public adapter table and close it
+   without ordinal 199, reference forwarding or a new/custom kernel driver.
+   Reproduce the six standalone interposition CTests, then audit the smallest
+   practical supported public DDI version and required adapter/device/thunk
+   services. Separate missing owned implementation from any genuinely required
+   private boundary. The current fixture advertises zero versions and creates
+   no device; Microsoft's WARP identity is a diagnostic limitation, not FeMe
+   selection or shipping approval. Stop for explicit W0(b) sign-off before
+   private ABI implementation or changing product identity/distribution.
+   Do not install drivers, alter system settings, or switch to a COM runtime.
+   Standalone diagnostics need targeted native tests; compiler/Vulkan changes
+   still need the existing check-feme/CTS gates.
+2. **W0(c)'s remaining legacy-shader-contract audit.** Candidate-file triage
+   is already complete: nine files are actual DXBC inputs and `pch.hpp` is
+   merely adjacent. Do not repeat it. Determine what the pinned stock-runtime
+   contract requires from FeMe's existing DXBC importer and later execution
+   path; do not treat classification or import support as passing shaders.
 3. Backlog carried from many prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
    re-measure.
