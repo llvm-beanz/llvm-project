@@ -132454,3 +132454,82 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 2. Full CTS re-measure in the background (safe, no code risk).
 3. `image_query.samples_storage`.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: `ENV5(d)` samples_storage fixed; `ENV6(c)(5a)` blocker confirmed deeper; full sweep launched
+
+**Next action for the next session**: check
+`/home/dev/dev/VK-GL-CTS/run/feme-20261106-full-sweep/report.txt` for
+completion (`ls` it first -- if absent, the sweep is still running or
+died; see step 3 below before trusting anything in there).
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What got done this session
+
+1. **Reverted** the uncommitted `ENV6(c)(5a)` `validate()` experiment
+   from last session. It let `canFlattenLoopBodyRegion` accept the
+   region but `flatten()` then emitted an invalid module (dominance
+   failure) -- the bug is one level deeper than `validate()`, in the
+   mask-merge logic itself. Documented precisely in `Roadmap.md` and
+   `VulkanCTSReport.md`. No code landed for this one; **do not re-attempt
+   the `validate()`-only relaxation again**, it's a dead end already
+   explored twice.
+2. **Fixed `ENV5(d)`: `image_query.samples_storage`.** One real bug,
+   small fix:
+   - `hasOnlySupportedStorageImageUses` (`SPIRVResourceLowering.cpp`)
+     was missing an `isQuerySamplesCall` case that its sampled-image
+     sibling `hasOnlySupportedImageUses` already had.
+   - `lowerImageAccesses` already lowered the call fine for either kind
+     (dispatches on `Shape` only) -- only the classifier rejected it.
+   - Found via `FEME_VULKAN_LOG_CREATION_ERRORS=1` in under 5 minutes;
+     several prior sessions had filed this as "no error logged, needs a
+     build+trace" without ever trying that flag on this specific case.
+   - Added storage-image counterparts to the existing
+     `spirv-resource-lowering-image-querysamples.ll` lit test.
+   - `check-feme`: 3903/3907 Passed, 4 Unsupported, 0 Failed.
+   - Real CTS: case now **Pass**; `*query*` batch (19 cases) 0 failures.
+   - Commit `c4d94f156eb5`.
+3. Launched a **detached** full `~3.25M`-case CTS re-measure
+   (`run_vulkan_cts.py`, `--workers 6 --batch-size 1800`) at
+   `feme-20261106-full-sweep/`. Confirmed running orphaned (`?` TTY).
+   This is a genuinely multi-day job per `.instructions.md` -- it will
+   not finish this session.
+4. Docs updated: `Roadmap.md` (`ENV5(d)` struck through, `ENV6(c)(5a)`
+   detail corrected), `VulkanCTSReport.md` (new `L533` section).
+
+## Next steps (ranked)
+
+1. **Check the sweep first.** `ls -la
+   /home/dev/dev/VK-GL-CTS/run/feme-20261106-full-sweep/report.txt`.
+   - If present: read it, diff against the stale 105-failure list, file
+     any *new* regressions as their own roadmap rows before triaging
+     anything else.
+   - If absent and no `deqp-vk`/`run_vulkan_cts.py` processes are running
+     (`ps aux | grep deqp`): it died mid-run. Follow
+     `.instructions.md`'s "no `--resume` flag" recipe -- union every
+     completed `CasePath` out of all `qpa/*.qpa` files, subtract from
+     `all-cases.txt`, launch a fresh detached sweep (new `--output-dir`)
+     against only the remainder.
+   - Either way, first compare the sweep's `deqp-vk` process start time
+     to `libfeme_vulkan.so`'s mtime -- if the `.so` is newer (it isn't,
+     as of this commit, but will be the moment any future session
+     rebuilds it), the in-flight run is stale; kill and relaunch.
+2. `ENV6(c)(5a)` real fix (flatten()-level, not validate()-level): needs
+   a mask-merging phi at the shared tail block (`Flow2` in the repro)
+   that combines the header-exit-relay path's own live/sideeffect value
+   with the body-diamond's per-arm merge selects, instead of reusing the
+   diamond's own selects unconditionally for every predecessor. This is
+   risky, core-linearizer surgery -- give it a dedicated session with
+   `DiamondFlattener`/`LoopLinearizer` unit tests, not a squeezed-in
+   attempt. Repro still at `/tmp/nl.ll` (regenerate from
+   `/tmp/pl-cov-function-infinite-loop-return-identical-condition.txt`
+   if lost) and the pinned-diagnostic lit test
+   `env6c5-outer-exit-after-inner-loop-unsupported.ll`.
+3. Check `cosh-return-inf-unused` -- its error is the *different*
+   "uniform pass-through region" diagnostic (~`Linearize.cpp` L9116),
+   likely not the same shape as `ENV6(c)(5a)`, not yet re-examined.
+4. `ENV6(c)(5)`-`(7)` graphicsfuzz (~90 cases, big `Linearize`/`SIMDize`
+   cluster): needs its own dedicated multi-session slot, unchanged.
+5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)` (hull lockstep barrier), offload
+   upstreaming: all still blocked/lower-priority, unchanged this
+   session.
