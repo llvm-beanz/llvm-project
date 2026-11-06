@@ -4572,14 +4572,19 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                       // interpolation at all.
                       Value = V0;
                     } else if (Perspective) {
-                      float InvW = B0 * Tri.InvW[0] + B1 * Tri.InvW[1] +
-                                   B2 * Tri.InvW[2];
-                      float Numerator = B0 * Tri.InvW[0] * V0 +
-                                        B1 * Tri.InvW[1] * V1 +
-                                        B2 * Tri.InvW[2] * V2;
-                      Value = Numerator / InvW;
+                      // Accumulate in double: float rounding here shows up
+                      // as multi-ULP derivative error on large-magnitude
+                      // varyings (`glsl.derivate.fwidth.fbo_float`).
+                      double InvW = (double)B0 * Tri.InvW[0] +
+                                    (double)B1 * Tri.InvW[1] +
+                                    (double)B2 * Tri.InvW[2];
+                      double Numerator = (double)B0 * Tri.InvW[0] * V0 +
+                                         (double)B1 * Tri.InvW[1] * V1 +
+                                         (double)B2 * Tri.InvW[2] * V2;
+                      Value = (float)(Numerator / InvW);
                     } else {
-                      Value = B0 * V0 + B1 * V1 + B2 * V2;
+                      Value = (float)((double)B0 * V0 + (double)B1 * V1 +
+                                      (double)B2 * V2);
                     }
                     // A covered sample's barycentrics are a convex
                     // combination, so only rounding can push `Value`
