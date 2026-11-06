@@ -3,11 +3,14 @@
 **Next implementation step: W0(a), prove the Windows integration boundary.**
 `WS0` (image block-geometry + subresource-layout extraction) and `WS1`
 (BC decode, view materialization, copy-region-walk, and attachment-view
-layer-count extraction into `FeMeImage`) are both done; `WS2(a)` (the
-`QueueExecutor` FIFO task-runner extraction) and `WS2(b)` (the
-`PendingExecutionRefCounted` retained-work-storage extraction) into
-`FeMeExecution` are both done too. `WS3` can continue the shared core's
-regression-gate work without committing to a Windows deployment model.
+layer-count extraction into `FeMeImage`) are both done; `WS2` (the
+`QueueExecutor` FIFO task-runner extraction and the
+`PendingExecutionRefCounted` retained-work-storage extraction into
+`FeMeExecution`, `WS2(a)`/`WS2(b)`) is fully done and closed -- its third
+original piece, command execution/CPU-draw-worker paths, was evaluated
+and found to have no portable kernel left to extract. `WS3` can continue
+the shared core's regression-gate work without committing to a Windows
+deployment model.
 
 This is the implementation checklist for [FeMeWARPDesign.md](FeMeWARPDesign.md),
 not a claim that FeMe is a Direct3D adapter today. The product remains a
@@ -112,6 +115,22 @@ for the other's semantics.
 | ~~WS2(a)~~ | Move the FIFO single-worker task-runner mechanics underlying `feme::vulkan::QueueExecutor` (`Sync.h`) -- its `std::thread`/mutex/condition-variable/`std::deque<std::function<void()>>` enqueue/drain/join loop -- into a new, API-neutral `FeMeExecution` library (`feme/include/feme/Execution/TaskExecutor.h`, `feme/lib/Execution/TaskExecutor.cpp`); none of it ever depended on any Vulkan type. `QueueExecutor` becomes a thin composed wrapper around `feme::execution::TaskExecutor`, supplying only this queue's own Vulkan-specific idle-wait timeout policy (`getQueueIdleSafetyNetTimeoutNs()`); every existing Vulkan caller's `enqueue(...)`/no-argument `waitIdle()` call sites are unchanged. `Fence`/`Event`/`Semaphore` and the actual `vkQueueSubmit`/`vkQueueSubmit2` task-building logic stay in `Sync.cpp`/`Objects.h` -- they are genuinely Vulkan fence/semaphore/queue semantics, not task-dispatch mechanics, and the retained-work-storage half of WS2's original scope (`ExecutionLifetime.h`'s `PendingExecutionRefCounted`, and the actual command-execution/CPU-draw-worker paths) is carried forward as `WS2(b)` below. | `FeMeExecutionTests` (6 cases: non-blocking enqueue, FIFO task ordering, `waitIdle` draining all pending tasks, `waitIdle` genuinely timing out on a still-running task, destructor draining pending tasks before joining, concurrent enqueue from multiple threads); `check-feme` 3,973 discovered/3,948 Passed/15 Skipped/10 Unsupported, zero failures; bounded 490-case CTS run (`dEQP-VK.api.device_init.*`/`api.smoke.*` plus `synchronization.basic.*`/`synchronization2.timeline_semaphore.{wait_before_signal,one_to_n}.*` samples), 490/490 completed, 477 Pass/12 NotSupported/zero unexpected failures (one unrelated `TimedOut` on `create_instance_device_intentional_alloc_fail`, an allocation-failure-injection test with no dependency on queue task execution). See `VulkanCTSReport.md`. |
 | ~~WS2(b)~~ | Generalize `feme::vulkan::PendingExecutionRefCounted` (`ExecutionLifetime.h`)'s retain/release-with-deferred-destroy pattern -- presently storing a `const VkAllocationCallbacks *` as its opaque deferred-destroy payload, the only Vulkan-specific detail in an otherwise type-agnostic counter/mutex class -- into `FeMeExecution` (`feme/include/feme/Execution/DeferredDestroyRefCounted.h`, `feme/lib/Execution/DeferredDestroyRefCounted.cpp`), parameterized on the payload type (`DeferredDestroyRefCounted<PayloadT>`). `PendingExecutionRefCounted` becomes a plain type alias instantiating it on `const VkAllocationCallbacks *` -- not a wrapper like `WS2(a)`'s `QueueExecutor`, since no Vulkan-specific policy sits on top of this class's behavior for any of its twelve consumers. This is WS2's "execution-owned storage/retention" half; `Fence`/`Event`/`Semaphore` state and the actual `vkQueueSubmit`/`executeCommandBuffer` task-building logic (command execution/CPU-draw-worker paths) stay Vulkan-specific and are not in scope here. | `FeMeExecutionTests` gains 5 cases (immediate destroy with no pending tasks, deferred destroy released by one/two retains, release-without-a-destroy-request, and a non-Vulkan `int`/pointer payload type) -- 11/11 total; every existing `ExecutionLifetime.h` consumer (`Pipeline`/`RenderPass`/`Framebuffer`/`Buffer`/`Image`/`ImageView`/`DescriptorSet`/`BufferView`/`Sampler`/`Event`/`QueryPool`/`DeviceMemory`/`CommandBuffer`) recompiles with zero source changes; the existing Vulkan-level `ExecutionLifetimeTest` suite (`SyncTest.cpp`, unchanged) continues to pass unmodified; `check-feme` 3,978 discovered/3,953 Passed/15 Skipped/10 Unsupported, zero failures; bounded 490-case CTS run (same case list as `WS2(a)`), 490/490 completed, 477 Pass/12 NotSupported/zero unexpected failures (same one unrelated `TimedOut`). See `VulkanCTSReport.md`. |
 | WS3 | Establish shared-core regression gates before WS0, and apply them to every following commit. Move portable tests with their helpers, retaining loader-level tests in Vulkan. | `check-feme`, affected CTS groups, byte/image comparisons and unchanged capability manifests; compare named failures, not only pass totals. |
+
+`WS2` is now **closed** with no further lettered rows: its third original
+piece, command execution/CPU-draw-worker paths (`makeSubmissionTask`'s
+wait/execute/signal closure and `Fence`-signal closure in `Sync.cpp`, and
+`executeCommandBuffer`'s dispatch loop in `CommandBuffer.cpp`), was
+re-examined directly (not just by inference from `WS2(a)`/`WS2(b)`'s own
+scope notes) and found to have no portable kernel left to extract after
+`WS2(a)`'s task-runner and `WS2(b)`'s retained-work-storage pieces are
+both already out: `makeSubmissionTask`'s closure body is built entirely
+from Vulkan-specific types (`Device`, `CommandBuffer`, `SemaphoreOp`,
+`Fence`, `VkResult`) with no generic task-dispatch mechanics left inside
+it, and `executeCommandBuffer`'s dispatch loop is inseparable from bound
+pipeline/descriptor-set/push-constant/graphics state -- genuine command
+execution semantics, not task-dispatch machinery `FeMeExecution` should
+own. This closes the open question `WS2(a)`/`WS2(b)`'s own exit-evidence
+notes both carried forward.
 
 Separate mechanical extraction from new behavior. First preserve the Vulkan
 callers and test results, then add a small D3D consumer. Do not combine a file
