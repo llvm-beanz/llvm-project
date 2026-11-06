@@ -251,6 +251,12 @@ Failing total is now 144 (stale list, other regressions unmeasured).
 
 - `ENV6(e)(1)`: `VK_FORMAT_X8_D24_UNORM_PACK32` (resolve-compatible format of D24S8) now maps to a new `X8_D24_UNORM`; the 4 depth_stencil_resolve cases (8 with `_separate_layouts`) Pass; 59 related cases Pass, 0 Fail.
 
+### L546: `opunreachable.all`'s phi-of-constants branch condition (ENV5(b))
+
+`spirv_assembly.instruction.compute.opunreachable.all` now Pass. `modulo4()`'s switch, lowered by `LowerSwitch` into a tree of icmp-chain diamonds merged via flow blocks, feeds a branch whose condition is only transitively constant (a phi of literals, not a literal `ConstantInt` itself) and has an `unreachable` arm; `foldConstantConditionBranches` previously only folded a branch whose condition was *already* a literal. Now iterates instruction simplification and branch folding/dead-block elimination to a fixed point whenever some branch has a bare `unreachable` arm. Guarded to never re-fold a genuine loop's own backedge condition past the first iteration (computed via `CycleInfo` on the function's original cycles) -- `EliminateUnreachableBlocks` can collapse a loop header's multi-incoming phi down to one literal incoming value, and re-folding that would erase the loop's CFG backedge before `LoopLinearizer` ever runs; new regression test `constant-condition-fold-preserves-loop-backedge.ll` confirms a `feme.cpu.mask.any` lowering still results. `check-feme`: 3899/3903 (4 Unsupported, 0 Failed). Regression batch `spirv_assembly.instruction.*` (partial, timed out after ~75% at 590s with no crash): 0 new Fail; the 3 pre-existing `barrier.{in_if,in_switch,in_loop}` failures (`ENV5(c)(7)(b)`, structural lockstep-barrier gap) are unaffected.
+
+Of the other 6 `spirv_assembly.instruction` failures in the original 7-case cluster: `opptrequal`/`opptrnotequal`'s `wg_comparisons_*` (`ENV5(a)`) and `image_query.samples_storage` (`ENV5(d)`) are already-documented, separate structural/untriaged gaps, not touched this session.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
