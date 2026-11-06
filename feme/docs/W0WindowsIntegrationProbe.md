@@ -279,6 +279,109 @@ does not select an alternative; it records that the gate is now reached and
 recommends evaluating option (a) first, since it is the only one not already
 flagged as requiring a separate design exception.
 
+### `W0(b)` alternative cost/scope evaluation (not a selection)
+
+Collected 2026-11-07, from Microsoft's public driver-signing documentation
+and the WARP architecture documented by Microsoft's own public articles. This
+section only documents cost/scope for each alternative so a future session or
+maintainer can make the `W0(b)` decision with concrete information; it does
+**not** select an alternative.
+
+**(a) Installed-adapter (kernel-mode driver), signing cost.** Microsoft's
+[Driver Signing offerings](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/driver-signing-offerings)
+page documents three signing tiers and a per-OS acceptance table:
+
+- *Attestation signing* ("testing scenarios"): no HLK test required, only an
+  EV code-signing certificate and a dashboard submission, but the same page's
+  acceptance table states attestation-signed drivers are **not accepted on
+  Windows Server >= 2016** (the row reads "No"; only Windows 10/11 Desktop and
+  Windows IoT Enterprise accept it). The page's "Windows Server signed
+  drivers" section makes this explicit: *"Windows Server 2016 and greater
+  doesn't accept attested device and filter driver signing submissions...
+  Windows Server 2016 and greater only loads dashboard signed drivers that
+  successfully pass the HLK tests."* Since this container's measured OS is
+  Windows Server 2025 Datacenter 24H2 (see the Environment and limits table
+  above), attestation signing is **not available for this container's own OS
+  family** regardless of host/VM choice, though it would remain available on
+  a Windows 11 desktop host.
+- *HLK-tested, dashboard-signed*: works on Windows Vista and later including
+  all Windows Server editions, but requires passing Microsoft's full Hardware
+  Lab Kit test suite (reliability, security, power efficiency, serviceability,
+  performance, industry-standard compliance) and a Partner Center dashboard
+  submission -- a substantial, open-ended engineering and process investment
+  disproportionate to a research/compiler project, and the only signing tier
+  Windows Server will load outside test-signing mode.
+- *Preproduction signing*: a third tier for partners validating early driver
+  builds with Secure Boot still enabled; requires explicitly provisioning
+  target devices to trust the preproduction signature via Hardware Dev Center
+  APIs (see
+  [Manage preproduction signing submissions](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/manage-preprod-submissions)).
+  This still requires a partner-level Hardware Dev Center relationship and
+  per-device provisioning; it is not a zero-setup local option.
+- *Test signing* (`bcdedit /set testsigning on`, per Microsoft's
+  [Loading Test Signed Code](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option)
+  page): the lightest-weight option, loads self-signed/test-certificate
+  drivers with no Partner Center submission, but secondary sources
+  consistently report that enabling it on a Secure-Boot-enabled system fails
+  (*"The value is protected by Secure Boot policy and cannot be modified or
+  deleted"*) until Secure Boot is disabled in firmware, after which Windows
+  shows a persistent "Test Mode" desktop watermark. This requires a dedicated
+  development host or VM with firmware-level access to toggle Secure Boot and
+  a reboot -- **not possible from inside this process-isolated container**,
+  consistent with prior sessions' conclusion that kernel-driver work needs a
+  separate host/VM. Realistically, alternative (a) for a research project
+  like FeMe means a dedicated test-signed development VM, not an HLK-certified
+  production driver; the HLK path's cost should only be paid if a signed,
+  shippable driver is later a hard requirement.
+- Unverified secondary-source claims (an EV certificate requiring a hardware
+  token, a specific "April 2026" cross-signing trust removal date, and a
+  "March 2027" SBOM/VEX documentation requirement for Windows Server driver
+  submissions) could not be confirmed against the primary Microsoft pages
+  fetched this session and are recorded here only as items needing
+  verification before being relied upon, not as established fact.
+
+**(b) Private-compatibility scope change, cost.** This means depending on
+WARP's own undocumented loading path -- consistent with the reference WARP
+module's private ordinal-199 `WarpPrivateApi` export noted in the host
+measurements above -- rather than any publicly documented contract. Its cost
+is not engineering effort but risk and process: the design document already
+prohibits relying on undocumented Microsoft internals without a separate
+design exception, because (1) private ordinals carry no compatibility
+guarantee and can change or disappear in any Windows/Agility SDK update with
+no notice, (2) reverse-engineering a private Microsoft API surface raises
+legal/compliance questions distinct from the purely public-API-based
+engineering work done so far in this probe, and (3) FeMe's own measurements
+already show the DXGI/D3D12 runtime special-cases WARP's enumeration
+(`IDXGIFactory4::EnumWarpAdapter`, per Microsoft's public
+[WARP guide](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/directx-warp))
+rather than routing it through the generic third-party adapter path explored
+in `W0(g)` -- so this alternative would mean impersonating or hooking that
+WARP-specific special case, not extending a general-purpose contract. This
+alternative's cost cannot be bounded by further research alone; it requires
+the separate design sign-off the existing prohibition already calls for.
+
+**(c) Application-local COM runtime, cost.** This means FeMe owning its own
+D3D12/DXGI-shaped API surface entirely outside the real Microsoft runtime
+(own `IUnknown`/COM activation, own adapter/factory/device interface
+implementations binary-compatible with `d3d12.h`/`dxgi.h` signatures, so
+existing D3D12 application code can link/call it unmodified), rather than
+being reached through the real `d3d12.dll`/`dxgi.dll`/DXGI adapter
+enumeration at all. Concretely this adds: (1) COM activation/lifetime
+plumbing (`IUnknown::QueryInterface`/`AddRef`/`Release`, interface GUID
+tables) for every public interface FeMe exposes; (2) a DXGI-equivalent
+factory/adapter/swap-chain surface, since real DXGI enumeration would not
+list this adapter at all; (3) debug-layer and DRED (Device Removed Extended
+Data) equivalents, both already real D3D12 application-facing features that
+existing test content may depend on; (4) a distribution/injection story,
+since applications must be redirected to the FeMe-local runtime instead of
+the system `d3d12.dll`/`dxgi.dll` (e.g. via an application-local DLL next to
+the executable, as many non-redistributable game-engine or test-harness
+DLLs already do) rather than any system-wide registration. Unlike (a) and (b),
+this alternative needs no OS-level signing or private-API dependency and
+remains fully buildable/testable inside this container, at the cost of
+reimplementing a second, parallel public-API surface rather than plugging
+into the real one.
+
 ### Container starting point
 
 Use the Windows tooling's x64 developer-shell setup and its existing sccache.
