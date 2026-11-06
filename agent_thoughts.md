@@ -132639,3 +132639,16 @@ Next steps, ranked:
 1. Read the sweep report; diff against `feme-20261106b-full-sweep/verified-failures.txt` (sort first, then `comm`).
 2. `ENV6(c)(5a)` flatten-level fix (also unblocks negative-left-shift, ~75 graphicsfuzz). Needs a rebuild, so only after the sweep.
 3. cosh-return-inf-unused; offload (blocked).
+
+# Session: sweep results
+
+**Next action:** `ENV6(c)(5a)` flatten()-level fix (library may now be rebuilt; no sweep running).
+
+1. Device confirmed.
+2. Sweep 20261106c done: 101 Fail, 0 new vs 20261106b, 303 fixed. Recorded in VulkanCTSReport L538.
+3. Gotcha: `comm` needs `LC_ALL=C sort` on both inputs, else it reports unsorted.
+
+Next steps, ranked:
+1. `ENV6(c)(5a)` (75 graphicsfuzz + left-shift).
+2. The 3 misc failures (`info`, `api.driver_properties`, `tessellation.shader_input_output`) are unexamined.
+3. cosh-return-inf-unused; offload (blocked).

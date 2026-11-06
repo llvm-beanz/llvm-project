@@ -11940,3 +11940,13 @@ The snap now also requires non-negative barycentrics. `glsl.derivate.*vec4_highp
 ## L537: Double-precision varying interpolation
 
 `glsl.derivate.*`: 1368 Pass / 0 Fail (all 102 `vec4_highp` failures fixed). `bind_buffers_2.*` and `multisample_interpolation.*`: 0 failures. `check-feme`: 3905 passed.
+
+## L538: Full sweep `feme-20261106c-full-sweep`
+
+3,244,369 cases: 731,795 Pass / 2,512,427 NotSupported / 101 Fail / 46
+QualityWarning / 0 Unrun. Versus the 20261106b sweep (404 failures): 0 new
+failures, 303 fixed (X8_D24, derivate, `image_query.samples_storage`).
+Remaining 101: graphicsfuzz 75 (`ENV6(c)(5)`-`(7)`, incl. negative-left-shift),
+`image.store.without_format` 14 (waived), `spirv_assembly.instruction` 5,
+`tessellation.invariance` 2, `line_continuity` 2, and 3 misc
+(`tessellation.shader_input_output`, `info`, `api.driver_properties`).
