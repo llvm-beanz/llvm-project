@@ -70,25 +70,22 @@ Please begin work on the WARP roadmap.
 
 ## Suggested next steps (ranked)
 
-1. **`WS1(d)`**: the carved-out `effectiveViewLayerCount`/attachment-view
-   2D-view-of-3D-image special case, building on `WS1(b)`'s
-   `resolveImageViewExtent`. Smaller and more self-contained than `WS1(c)`
-   was -- a good next bounded step, and the last piece of `WS1`'s
-   original three-row breakdown still open.
-2. **`WS2`**: extract task execution/retained work storage from `Sync.*`
-   incrementally -- independent of `WS1` entirely, could run in parallel
-   in a separate session if `WS1(d)` is deferred.
-3. **`WS3`**: establish shared-core regression gates -- still worth a
-   brief look at whether its gates would have caught anything `WS0`/
-   `WS1(a)`/`WS1(b)`/`WS1(c)`'s manual check-feme/CTS verification did
-   not, before treating it as moot; with `WS1` nearly fully broken down
-   and executed, this may be a natural point to actually do that review
-   rather than deferring it again.
-4. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add an
-   explicit FeMe adapter-selection assertion -- a research/documentation
-   task, no Windows adapter install needed yet.
-5. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+1. **`WS2`**: extract task execution/retained work storage from `Sync.*`
+   incrementally. With `WS1`'s entire breakdown now done, this is the
+   natural next shared-core extraction target per the roadmap's own
+   `WS0 -> WS1 -> ...` sequencing, and is independent of the image-
+   focused `WS0`/`WS1` work this and the last several sessions did.
+2. **`WS3`**: establish shared-core regression gates -- still worth the
+   brief review flagged in the last two sessions (whether its gates
+   would have caught anything `WS0`/`WS1`'s manual check-feme/CTS
+   verification did not) now that `WS1` is fully done and there is a
+   complete, closed body of extraction work to evaluate the question
+   against, rather than an open-ended one.
+3. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
+   an explicit FeMe adapter-selection assertion -- a research/
+   documentation task, no Windows adapter install needed yet.
+4. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
    Windows host/VM outside this process-isolated container.
-6. Backlog carried from prior sessions, still untouched:
+5. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
