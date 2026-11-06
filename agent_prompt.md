@@ -68,8 +68,8 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. Implement `ENV6(c)(5a)`: treat a post-child-cycle exit guard as the outer
-   loop's exit check in the loop lowering (see the precheck near
-   Linearize.cpp ~8770, `canFlattenLoopBodyRegion`).
-2. Full CTS re-measure in the background.
-3. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
+1. In `DiamondFlattener::validate`, tolerate a merge whose extra predecessor
+   is the header's exit relay (or exclude that relay when the header exit is folded).
+2. Check `cosh-return-inf-unused` for the same shape.
+3. Full CTS re-measure in the background.
+4. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
