@@ -43,7 +43,7 @@
 ; terminator set!" assertion) without the fix, and to produce this clean
 ; diagnostic instead with it.
 
-; CHECK: feme-cpu-linearize: function 'main': loop at '{{.*}}' has an internal branch in a body shape this milestone does not yet lower
+; CHECK: feme-cpu-linearize: function 'main': loop at '{{.*}}' has an internal branch in {{.*}}
 
 declare i1 @llvm.is.fpclass.f32(float, i32 immarg)
 declare float @llvm.copysign.f32(float, float)

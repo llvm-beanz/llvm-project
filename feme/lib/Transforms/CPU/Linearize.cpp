@@ -2278,6 +2278,23 @@ public:
   /// validate) -- the caller is expected to diagnose that itself.
   std::optional<BasicBlock *> flattenKnownDivergentBranch(BasicBlock *Start,
                                                            MaskPair Masks);
+  /// Roadmap ENV6(e)(4a): whether the cycle-boundary block \p BB is the
+  /// loop's own real per-iteration exit check sitting at the tail of a
+  /// `[Start, End)` region: a two-way branch with one successor being \p
+  /// End itself, or a block reached only from \p BB that falls straight through to it.
+  bool isTolerableTailExitCheck(BasicBlock *BB, BasicBlock *End) {
+    auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
+    if (!Br || CycleBoundaryEnd.lookup(BB) != End)
+      return false;
+    auto ReachesEnd = [&](BasicBlock *S) {
+      if (S == End)
+        return true;
+      auto *U = dyn_cast<UncondBrInst>(S->getTerminator());
+      return U && U->getSuccessor(0) == End && S->getSinglePredecessor() == BB;
+    };
+    return ReachesEnd(Br->getSuccessor(0)) || ReachesEnd(Br->getSuccessor(1));
+  }
+
   /// Roadmap L292: a read-only, structure-only pre-check for whether a
   /// later `flattenLoopBodyRegion(Start, End, ...)` call will succeed --
   /// mirrors that method's own `validate` precondition exactly, without
@@ -2295,7 +2312,14 @@ public:
   /// that branch actually get exercised).
   bool canFlattenLoopBodyRegion(BasicBlock *Start, BasicBlock *End) {
     CycleBoundaryBlocks.clear();
-    return validate(Start, End, /*Quiet=*/true) && CycleBoundaryBlocks.empty();
+    if (!validate(Start, End, /*Quiet=*/true))
+      return false;
+    // Mirrors `flattenLoopBodyRegion`'s own tolerance for the loop's real
+    // exit check sitting directly before `End`.
+    return llvm::all_of(CycleBoundaryBlocks, [&](BasicBlock *BB) {
+      auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
+      return isTolerableTailExitCheck(BB, End);
+    });
   }
 
   /// Roadmap L452(h): a read-only `validate` probe for a caller that, unlike
@@ -3290,10 +3314,7 @@ DiamondFlattener::flattenLoopBodyRegion(BasicBlock *Start, BasicBlock *End,
   if (!validate(Start, End, /*Quiet=*/true))
     return std::nullopt;
   for (BasicBlock *BB : CycleBoundaryBlocks) {
-    auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
-    bool Tolerable = Br && CycleBoundaryEnd.lookup(BB) == End &&
-                      (Br->getSuccessor(0) == End || Br->getSuccessor(1) == End);
-    if (!Tolerable)
+    if (!isTolerableTailExitCheck(BB, End))
       return std::nullopt;
   }
   // Roadmap L425: see `ResolvedBlocks`'s own comment -- this region is now
