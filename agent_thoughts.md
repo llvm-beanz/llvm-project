@@ -132626,3 +132626,16 @@ Next steps, ranked:
 1. `ENV6(c)(5a)` (also unblocks negative-left-shift, ~75 graphicsfuzz).
 2. Full sweep rerun (library changed; run detached).
 3. cosh-return-inf-unused; offload (blocked).
+
+# Session: relaunch full sweep
+
+**Next action:** wait for `/home/dev/dev/VK-GL-CTS/run/feme-20261106c-full-sweep/report.txt` (~4h; started 15:20). Do NOT rebuild `libfeme_vulkan.so` until it finishes.
+
+1. Device confirmed.
+2. Library (15:08) includes the derivate/x8_d24 fixes, so I launched a detached full sweep (orphaned `?` TTY verified).
+3. No code changes this session.
+
+Next steps, ranked:
+1. Read the sweep report; diff against `feme-20261106b-full-sweep/verified-failures.txt` (sort first, then `comm`).
+2. `ENV6(c)(5a)` flatten-level fix (also unblocks negative-left-shift, ~75 graphicsfuzz). Needs a rebuild, so only after the sweep.
+3. cosh-return-inf-unused; offload (blocked).
