@@ -134733,3 +134733,205 @@ same oversized fixup-commit surprise.
 6. Backlog carried from prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
    re-measure.
+
+# 2026-11-06: WS2(b) PendingExecutionRefCounted retained-work-storage extraction (this session)
+
+**Next action:** `WS2`'s undecided third piece (command-execution/CPU-
+draw-worker paths) -- decide whether it needs its own lettered row or is
+out of scope entirely -- or, if that's deferred again, `WS3` (shared-core
+regression gates), now with `WS1` and all of `WS2` done as evaluation
+material.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName`: `FeMe CPU Vulkan Device`
+(confirmed at session start and again immediately before the CTS run,
+per standing instructions -- same two harmless `nv-vk64.json` loader
+warnings as every prior session).
+
+## What I did
+
+Picked up the prior session's ranked suggestion #1 (`WS2(b)`), the
+retained-work-storage half of `WS2`'s original scope the prior session
+carried forward rather than combining into `WS2(a)`.
+
+1. Re-read `feme/lib/Vulkan/ExecutionLifetime.h` in full. Confirmed
+   `PendingExecutionRefCounted` is a plain retain-count/mutex class with
+   exactly one Vulkan-specific detail: it stores a
+   `const VkAllocationCallbacks *` as its opaque deferred-destroy
+   payload, but never itself dereferences it -- purely a pass-through
+   value remembered between a deferred `requestDestroy` call and the
+   later `releaseAndTakeDeferredDestroy` that actually permits the free.
+2. Grepped every consumer (`PendingExecutionRefCounted`/
+   `requestDestroy`/`releaseAndTakeDeferredDestroy`/
+   `retainForExecution`) across the Vulkan tree: all twelve documented
+   consumers (`Pipeline`, `RenderPass`, `Framebuffer`, `Buffer`, `Image`,
+   `ImageView`, `DescriptorSet`, `BufferView`, `Sampler`, `Event`,
+   `QueryPool`, `DeviceMemory`, `CommandBuffer`) use the exact same
+   payload type with the exact same three-method call pattern
+   (`requestDestroy(pAllocator)` then `Allocator(pAllocator).destroy(...)`
+   for the immediate-free path; `retainForExecution`/
+   `releaseAndTakeDeferredDestroy` in `Sync.cpp`'s
+   `retainExecutionRefs`/`releaseExecutionRefs` for the task-lifetime
+   path). This confirmed a template parameterized on the payload type is
+   safe and that -- unlike `WS2(a)`'s `QueueExecutor`, which needed a
+   composed wrapper because `waitIdle`'s signature genuinely differs --
+   a **plain type alias** is the right shape here: no Vulkan-specific
+   policy sits on top of this class's behavior for any consumer, so
+   there is nothing for a wrapper to add.
+3. Created `feme::execution::DeferredDestroyRefCounted<PayloadT>`
+   (`feme/include/feme/Execution/DeferredDestroyRefCounted.h`,
+   `feme/lib/Execution/DeferredDestroyRefCounted.cpp`), a direct
+   template generalization of the original class's three methods
+   (`retainForExecution`, `releaseAndTakeDeferredDestroy`,
+   `requestDestroy`), with the payload type templated out and the
+   counter/mutex logic otherwise byte-for-byte identical. Added
+   `DeferredDestroyRefCounted.cpp` to `FeMeExecution`'s existing
+   `CMakeLists.txt` (no new library target needed -- it already existed
+   from `WS2(a)`).
+4. Converted `feme::vulkan::PendingExecutionRefCounted`
+   (`ExecutionLifetime.h`) into a plain type alias:
+   `using PendingExecutionRefCounted =
+   feme::execution::DeferredDestroyRefCounted<const VkAllocationCallbacks *>;`
+   -- not a rename, not a wrapper, a pure alias. This meant **zero
+   source changes** to any of the twelve consumer files: every one of
+   them recompiled unmodified once `ExecutionLifetime.h` itself changed.
+5. Added 5 new tests directly exercising the portable template with a
+   non-Vulkan payload type (`feme/unittests/Execution/
+   DeferredDestroyRefCountedTest.cpp`, added to `FeMeExecutionTests`'
+   existing `CMakeLists.txt`): immediate destroy with zero pending
+   tasks, deferred destroy released once a single retain releases,
+   deferred destroy released only once *both* of two retains release
+   (not the first), release-without-any-destroy-request not freeing,
+   and both a plain `int` payload and a pointer payload (`int *`) to
+   prove genuine parameterization rather than a disguised rename of the
+   original `VkAllocationCallbacks`-specific class.
+6. Three commits, the same established small-commit pattern: (1) new
+   portable `DeferredDestroyRefCounted` template, build-verify in
+   isolation; (2) convert `PendingExecutionRefCounted` into the alias,
+   build `FeMeVulkanCore` -> `feme_vulkan` to confirm all twelve
+   consumers still compile untouched; (3) new
+   `DeferredDestroyRefCountedTest.cpp`, build-and-run-verify (this
+   commit's message also records the `check-feme`/CTS numbers since no
+   further code changes followed it before the doc-update commit).
+7. Struck `WS2(b)` on `WARPRoadmap.md` with exit evidence, and updated
+   the roadmap's opening summary line to mention both `WS2(a)` and
+   `WS2(b)` are now done.
+
+## Verification
+
+- `check-feme`: 3,953 Passed / 15 Skipped / 10 Unsupported, zero
+  failures (3,978 discovered) -- exactly 5 more than the prior session's
+  3,973, matching the 5 new `DeferredDestroyRefCountedTest` cases, zero
+  regressions.
+- `FeMeExecutionTests.exe` direct run: 11/11 Pass (6 pre-existing
+  `TaskExecutor` cases + 5 new).
+- `FeMeVulkanTests.exe` direct run: 892 passed / 15 skipped / zero
+  failed (907 total) -- including the pre-existing
+  `ExecutionLifetimeTest` suite (`SyncTest.cpp`, unmodified by this
+  extraction) passing exactly as before, direct confirmation the alias
+  conversion changed no consumer-visible behavior.
+- Bounded CTS: reused the identical 490-case selection from `WS2(a)`'s
+  own run (`dEQP-VK.api.device_init.*`, `api.smoke.*`, a
+  `synchronization.basic.*` sample, and `synchronization2.
+  timeline_semaphore.{wait_before_signal,one_to_n}.*` samples), since
+  `PendingExecutionRefCounted` guards the exact same destroy-while-
+  in-flight races those paths exercise. Result: 490 Completed, 477
+  Pass, 12 NotSupported, zero unexpected failures, zero Unrun --
+  **identical result counts to `WS2(a)`'s own run**, exactly as expected
+  for a pure internal extraction with no behavior change. The same one
+  unrelated `TimedOut`
+  (`create_instance_device_intentional_alloc_fail.basic`) recurred.
+- Did not regenerate either Vulkan inventory file -- added a "rechecked,
+  not regenerated, no advertisement changed" note to both, matching
+  every prior session's own precedent.
+- No new CRLF-on-new-files issue this session: ran `clang-format -i`
+  immediately after creating each new `.h`/`.cpp`/test file (per the
+  process note codified last session) and confirmed no CRLF before
+  building or committing any of them -- the documented mitigation
+  worked cleanly this time.
+
+## Decision record
+
+1. **Type alias, not a composed wrapper**: unlike `WS2(a)`'s
+   `QueueExecutor`, there is no Vulkan-specific policy layered on top of
+   `PendingExecutionRefCounted`'s behavior -- every method's semantics
+   are identical for every payload type, so a plain
+   `using PendingExecutionRefCounted = DeferredDestroyRefCounted<...>;`
+   is the minimal, correct shape. This is the key design choice this
+   session had to make before implementing anything, and it's the
+   reason this extraction needed **zero consumer-file changes** at all
+   (the widest blast radius of any `WS` extraction so far, at zero
+   actual edit cost).
+2. **Method names kept execution-flavored, not generalized further**:
+   `retainForExecution`/`releaseAndTakeDeferredDestroy`/`requestDestroy`
+   keep their exact current names in the portable class too, rather than
+   renaming to something more generic like `retain`/`release`/
+   `destroy`. These names already describe exactly what `FeMeExecution`
+   as a whole is for (keeping an object alive opposite an in-flight
+   task), so there was no naming mismatch to resolve by moving the class
+   -- unlike `TaskExecutor` needing to drop "queue" from its name.
+3. **`WS2`'s still-undecided third piece, revisited but not resolved**:
+   command-execution/CPU-draw-worker paths (the actual
+   `vkQueueSubmit`/`executeCommandBuffer` task-building logic in
+   `Sync.cpp`/`CommandBuffer.cpp`) remain flagged, not actioned, for a
+   third session running. Having now done both `WS2(a)` and `WS2(b)`,
+   my view is this third piece is probably **out of scope** for
+   `FeMeExecution` as the roadmap's "Sharing contract" describes it --
+   building a `VkSubmitInfo`'s worth of waits/signals/command buffers
+   into a closure is genuinely Vulkan submission semantics, not
+   task-dispatch mechanics, and there is no obvious portable
+   abstraction left after `TaskExecutor` (the runner) and
+   `DeferredDestroyRefCounted` (the retained-storage) are both already
+   extracted. I did not update the roadmap to say so definitively this
+   session, since this is an argument, not a verified finding -- a
+   future session should either write this conclusion into the roadmap
+   explicitly (closing `WS2` without a third lettered row) or spend a
+   short, dedicated look disproving it.
+
+## Process note
+
+No new environment/process issue to codify in `.instructions.md` this
+session -- the CRLF-on-new-files mitigation documented last session
+worked exactly as described, with no new wrinkles. Re-skimmed the
+instructions file's tail (~last 60 lines) per standing practice; found
+nothing relevant to this session's work that wasn't already followed.
+
+## State restated
+
+- Commits this session (newest last): `eb39e8d83def` (portable
+  `DeferredDestroyRefCounted` template), `8d4e0746e6e1` (alias
+  conversion), `3989e3647830` (new unit tests), `293e3584adf1` (roadmap/
+  CTS-report/inventory doc updates).
+- `WS2` is now fully done: `WS2(a)` (task dispatch) and `WS2(b)`
+  (retained-work storage) both struck, with the third original piece
+  (command-execution/CPU-draw-worker paths) left as an open question
+  per the decision record above, not a lettered roadmap row.
+- Git working tree is clean as of this entry (verified before writing
+  it); this file and its own commit are the only remaining uncommitted
+  change.
+
+## Suggested next steps (ranked)
+
+1. **Resolve `WS2`'s undecided third piece**: either write the "probably
+   out of scope" conclusion from this session's decision record #3
+   explicitly into `WARPRoadmap.md` (closing `WS2` with no further
+   lettered rows), or spend a short, dedicated look actually trying to
+   find a portable kernel in `Sync.cpp`'s submission-building closure/
+   `CommandBuffer.cpp`'s execution loop before accepting that
+   conclusion. Cheap, bounded, and overdue -- flagged by name three
+   sessions running now.
+2. **`WS3`**: establish shared-core regression gates. With `WS1` and all
+   of `WS2` now fully done, this is the natural point to actually ask
+   whether gates like this would have caught anything manual
+   `check-feme`/CTS verification did not, rather than deferring the
+   question again -- there is now a complete, closed body of extraction
+   work (`WS0`/`WS1(a-d)`/`WS2(a-b)`) to evaluate it against.
+3. **`W0(c)`/`W0(d)`**: classify the local Direct3D test corpus and add
+   an explicit FeMe adapter-selection assertion -- a research/
+   documentation task, no Windows adapter install needed yet.
+4. **`W0(a)`/`W0(b)`** (Direct3D sense): still blocked on a suitable
+   Windows host/VM outside this process-isolated container.
+5. Backlog carried from prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS
+   re-measure.
