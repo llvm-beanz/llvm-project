@@ -137,6 +137,7 @@ add_feme_library(FeMeVulkanCore STATIC
   LINK_LIBS PUBLIC
   Vulkan::Headers
   FeMeCore
+  FeMeExecution
   FeMeGraphics
   FeMeImage
   FeMeImportSPIRV

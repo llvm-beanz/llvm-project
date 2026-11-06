@@ -66,6 +66,7 @@
 #define FEME_LIB_VULKAN_SYNC_H
 
 #include "ExecutionLifetime.h"
+#include "feme/Execution/TaskExecutor.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -414,54 +415,34 @@ private:
 /// `QueueExecutor`s must not interfere with each other, and
 /// `waitIdle`/`Device::waitIdle` may legitimately run on a different
 /// thread than the one doing the submitting).
+///
+/// (WARP roadmap WS2(a)) The actual FIFO worker-thread mechanics never
+/// depended on any Vulkan type, so they now live in the portable
+/// `feme::execution::TaskExecutor` (`feme/include/feme/Execution/
+/// TaskExecutor.h`). `QueueExecutor` itself is just a thin wrapper that
+/// supplies this queue's own Vulkan-specific idle-wait timeout policy
+/// (`getQueueIdleSafetyNetTimeoutNs()`) to it -- a composed member
+/// (rather than a type alias), so every existing caller's own
+/// no-argument `waitIdle()` call keeps working unchanged. See
+/// `TaskExecutor.h`'s own file comment, and the former `QueueExecutor`
+/// use-after-free note this class's own comment used to carry: that
+/// note now lives on `feme::vulkan::PendingExecutionRefCounted`
+/// (`ExecutionLifetime.h`), the layer that actually addresses it.
 class QueueExecutor {
 public:
   /// Each enqueued task is itself responsible for latching device loss
   /// (`Device::markLost`, `Objects.h`) if it fails -- `QueueExecutor`
   /// itself is device-agnostic, just a FIFO task runner.
-  QueueExecutor() {
-    Worker = std::thread([this] { run(); });
-  }
+  QueueExecutor() = default;
 
   QueueExecutor(const QueueExecutor &) = delete;
   QueueExecutor &operator=(const QueueExecutor &) = delete;
-
-  /// Drains every task already enqueued (matching real Vulkan usage,
-  /// which must not destroy a *device* with work still pending), signals
-  /// the worker thread to stop once its queue is empty, and joins it.
-  ///
-  /// NOTE: this only protects the device-teardown case. It does NOT
-  /// protect individual resources (pipelines, render passes,
-  /// framebuffers, ...) referenced by an already-enqueued-but-not-yet-
-  /// executed task: `vkCmd*` recording captures those as raw pointers
-  /// with no keep-alive reference, and the corresponding `vkDestroy*`
-  /// entry points free them immediately with no synchronization against
-  /// this worker thread. This is a real, reproduced use-after-free --
-  /// see roadmap item `L409` (`docs/Roadmap.md`) for the root-cause
-  /// analysis, a standalone reproducer, and the recommended fix
-  /// (generalizing `Fence`'s existing retain/release pattern, `L398`,
-  /// to every bound-resource object type).
-  ~QueueExecutor() {
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      ShuttingDown = true;
-    }
-    CV.notify_all();
-    Worker.join();
-  }
 
   /// Enqueues \p Task to run on this queue's own worker thread after
   /// every task already enqueued for this queue, and returns immediately
   /// without waiting for it to run (`vkQueueSubmit`'s new, roadmap
   /// L228(h)/(i) behavior).
-  void enqueue(std::function<void()> Task) {
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      Tasks.push_back(std::move(Task));
-      ++Pending;
-    }
-    CV.notify_all();
-  }
+  void enqueue(std::function<void()> Task) { Impl.enqueue(std::move(Task)); }
 
   /// Blocks the calling thread until every task enqueued so far has
   /// completed (`vkQueueWaitIdle`/`vkDeviceWaitIdle`), or
@@ -476,42 +457,12 @@ public:
   /// wait at all (a FeMe bug either way). Returns whether the queue was
   /// actually drained (false only on a genuine timeout).
   bool waitIdle() {
-    std::unique_lock<std::mutex> Lock(Mutex);
-    return CV.wait_for(
-        Lock, std::chrono::nanoseconds(getQueueIdleSafetyNetTimeoutNs()),
-        [this] { return Pending == 0; });
+    return Impl.waitIdle(
+        std::chrono::nanoseconds(getQueueIdleSafetyNetTimeoutNs()));
   }
 
 private:
-  void run() {
-    while (true) {
-      std::function<void()> Task;
-      {
-        std::unique_lock<std::mutex> Lock(Mutex);
-        CV.wait(Lock, [this] { return !Tasks.empty() || ShuttingDown; });
-        if (Tasks.empty())
-          return; // ShuttingDown, and every task already drained.
-        Task = std::move(Tasks.front());
-        Tasks.pop_front();
-      }
-      Task();
-      {
-        std::lock_guard<std::mutex> Lock(Mutex);
-        --Pending;
-      }
-      CV.notify_all();
-    }
-  }
-
-  std::mutex Mutex;
-  std::condition_variable CV;
-  std::deque<std::function<void()>> Tasks;
-  size_t Pending = 0; // Tasks enqueued but not yet finished running.
-  bool ShuttingDown = false;
-  // Must be declared (and therefore constructed) last: `run` touches
-  // every member above as soon as the thread starts, so they must all
-  // already be alive first.
-  std::thread Worker;
+  feme::execution::TaskExecutor Impl;
 };
 
 } // namespace feme::vulkan
