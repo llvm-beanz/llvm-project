@@ -1,12 +1,13 @@
 # W0 Windows user-mode integration probe
 
-**Next step: run the standalone reference/rejection probes inside the Windows
-container, then establish a valid third-party adapter bootstrap before
-implementing FeMe's D3D12 device tables. The selected direction is a user-mode
-software driver through stock D3D12/DXGI, not kernel installation.**
+**Next step: identify a public third-party adapter identity/thunk bootstrap
+and extend an LLVM-owned prototype through `OpenAdapter12`, callback
+negotiation, and teardown with a distinct FeMe identity. The container
+measurement step below is now complete; the selected direction remains a
+user-mode software driver through stock D3D12/DXGI, not kernel installation.**
 
-This is host evidence for [WARPRoadmap.md](WARPRoadmap.md), collected on
-2026-11-06. The user selected stock-runtime user-mode/software-adapter probing
+This is host and container evidence for [WARPRoadmap.md](WARPRoadmap.md),
+collected on 2026-11-06. The user selected stock-runtime user-mode/software-adapter probing
 first, with no system changes. The LLVM-owned
 [standalone probe](../utils/windows-adapter-probe/CMakeLists.txt) uses public
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
@@ -104,11 +105,14 @@ This selects implementation order and the first integration boundary to prove,
 not a claim that the third-party contract or container runtime already works.
 It does not select a replacement COM runtime or require a kernel installation.
 
-1. Build this probe and run all four CTest cases inside the Windows container.
-   Record OS/kit/runtime/core/WARP versions and loaded paths, identity/LUID,
-   HRESULTs and DDI counters. Verify reference WARP first; if it fails, record
-   and isolate the actual environment/runtime blocker rather than using the
-   host results as a substitute or assuming a kernel driver is required.
+1. ~~Build this probe and run all four CTest cases inside the Windows
+   container. Record OS/kit/runtime/core/WARP versions and loaded paths,
+   identity/LUID, HRESULTs and DDI counters. Verify reference WARP first; if
+   it fails, record and isolate the actual environment/runtime blocker rather
+   than using the host results as a substitute or assuming a kernel driver is
+   required.~~ Completed 2026-11-06; see
+   [Container measurements](#container-measurements) below. All four cases
+   passed, with an extended NuGet-WARP/Agility-core matrix also passing.
 2. Identify the public, modern third-party software-adapter bootstrap contract
    needed to provide valid identity/thunk services and reach `OpenAdapter12`.
    No kernel installation is needed to build or run the loading experiments.
@@ -121,18 +125,68 @@ It does not select a replacement COM runtime or require a kernel installation.
    miniport mandatory. The alternatives are an approved compatibility project,
    the separately installed WDDM path, or the application-local COM runtime.
 
-W0(a), W0(b), and W0(d) remain incomplete: there is no FeMe D3D12 device, no
-container runtime proof or installed-path test. The user-mode stock-runtime
-direction is selected, but its feasibility remains open. The reference-test
-portion of W0(d) has host evidence only. Installed-driver, signing/reboot,
-display and HLK work are separate host/VM tasks if that deployment requires
-them; they do not block starting W0(f). Missing evidence is not Pass.
+W0(a), W0(b), and W0(d) remain incomplete: there is no FeMe D3D12 device, and
+no installed-path test. The user-mode stock-runtime direction is selected and
+now container-verified at the measurement level, but DDI-negotiation
+feasibility remains open. The reference-test portion of W0(d) has host and
+now container evidence only. Installed-driver, signing/reboot, display and
+HLK work are separate host/VM tasks if that deployment requires them; they do
+not block continuing W0(f)'s bootstrap step (tracked as `W0(g)` in
+`WARPRoadmap.md`). Missing evidence is not Pass.
+
+## Container measurements
+
+Collected 2026-11-06 in this process-isolated Windows container, using the
+same LLVM-owned standalone probe as the host measurements above (no changes
+to `AdapterProbe.cpp`/`RejectionStub.cpp` were needed to build or run here).
+
+| Component | Measured configuration |
+|---|---|
+| Container OS | Windows Server 2025 Datacenter 24H2, OS build 26100.33650, x64 |
+| Compiler | MSVC 19.51.36260.0 (`C:\BuildTools` VS 2026 Build Tools) |
+| SDK/WDK kit selection | `10.0.28000.0` (`WINDOWS_KIT_VERSION`); no `CMAKE_MT` workaround needed -- the container's `mt.exe` launches cleanly, unlike the host's SDK 28000 `mt.exe` failure |
+| Compiler cache / build | sccache 0.18.0, Ninja, Debug, assertions enabled (container default), PCH disabled |
+| Inbox `d3d12.dll` / `D3D12Core.dll` / `d3d10warp.dll` | all `10.0.26100.33648` |
+| Container NuGet WARP (via `DirectXShaderCompiler/build-rel`) | package `1.0.21`; file `1.0.21.0.20260922.2` |
+| Container NuGet WARP (via `llvm-project/build/bin`, from the OffloadTest D3D12 test-infrastructure restore) | package `1.0.19`; file `1.0.19.0.20260422.1` |
+| Container Agility SDK core (via `llvm-project/build/tools/OffloadTest/agility-sdk`) | file `1.619.5.0.20260730.3`; exported SDK version 619, matching the host's package |
+| Reference adapter | Microsoft Basic Render Driver, vendor `0x1414`, device `0x008c`, software flag; LUID `00000000:0001283b` in this container boot |
+| FeMe D3D12 DDI negotiation | Not reached in this container either; no negotiated FeMe DDI version or valid device tables |
+
+Configured and built with the exact commands from the "Container starting
+point" section below; all four CTest cases passed, with identical pass/fail
+shape to the host measurements:
+
+| Runtime / entry path | Container result |
+|---|---|
+| Inbox core, `EnumWarpAdapter`, inbox WARP | Device, queue and fence test succeeds; `d3d12.dll`/`D3D12Core.dll`/`d3d10warp.dll` all load from `System32` |
+| Inbox core, `CreateSoftwareAdapter`, inbox WARP | Same test succeeds |
+| Inbox core, `CreateSoftwareAdapter`, container NuGet WARP 1.0.19 (`llvm-project\build\bin\d3d10warp.dll`) | Same test succeeds; requested WARP module is loaded from the supplied path |
+| Inbox core, `CreateSoftwareAdapter`, container NuGet WARP 1.0.21 (`DirectXShaderCompiler\build-rel\...\bin\x64\d3d10warp.dll`) | Same test succeeds |
+| Agility 619 core (rebuilt against `llvm-project\build\tools\OffloadTest\agility-sdk\...\D3D12Core.dll`), `EnumWarpAdapter`, inbox WARP | Same test succeeds; application-local Agility core is loaded from `AgilitySDK\D3D12Core.dll` |
+| Agility 619 core, `CreateSoftwareAdapter`, inbox WARP | Same test succeeds |
+| Agility 619 core, `CreateSoftwareAdapter`, container NuGet WARP 1.0.19 | Same test succeeds |
+| Agility 619 core, `CreateSoftwareAdapter`, rejection stub | Adapter creation and `IDXGIAdapter1` query succeed; empty description, zero IDs/flags/LUID; `D3D12CreateDevice` returns `0x887a0004` (`DXGI_ERROR_UNSUPPORTED`); stub counters `OpenAdapter10=0 OpenAdapter10_2=0 OpenAdapter12=0` |
+| Inbox core, `CreateSoftwareAdapter`, rejection stub (CTest `rejection-stub`) | Identical to the Agility-core row above |
+| Inbox core, missing software module (CTest `missing-module`) | `LoadLibraryExW` fails with `0x8007007e`, nonzero exit, as expected |
+
+This closes the measurement half of `W0(f)` with no discrepancy from the host
+results: the container's own inbox D3D12/WARP stack, and every container-local
+NuGet WARP/Agility SDK package already present from unrelated FeMe/DXC/
+OffloadTest build restores, all pass the same reference, software-adapter,
+and rejection-stub experiments as the host did. No driver registration,
+signing changes, registry changes, system-DLL replacement, or reboot
+occurred in the container either. This is still not FeMe DDI negotiation --
+the rejection stub's `OpenAdapter12` counter stays at zero in every run,
+confirming the stub (and, by the same loader mechanics, any future FeMe
+module without a real DDI implementation) is rejected before reaching that
+negotiation, not evidence that negotiation itself would succeed.
 
 ### Container starting point
 
 Use the Windows tooling's x64 developer-shell setup and its existing sccache.
-Keep the container's actual kit selection; do not apply the host-only
-`CMAKE_MT` workaround unless the same failure is independently reproduced.
+The container's actual kit selection needs no `CMAKE_MT` workaround (see the
+measurements above); this differs from the host's SDK 28000 `mt.exe` failure.
 
 ```powershell
 cmake -S C:\dev\llvm-project\feme\utils\windows-adapter-probe `
@@ -144,10 +198,13 @@ ctest --test-dir C:\dev\adapter-probe -V
 ```
 
 The four cases are reference WARP, software-reference WARP, pre-DDI stub
-rejection, and explicit missing-module failure. Use existing container NuGet
-WARP/Agility binaries for additional matrix runs; inspect their locations and
-versions instead of reusing the host's user-profile paths. These commands are
-the next action, not recorded container test results.
+rejection, and explicit missing-module failure; all four passed as recorded
+above. For the Agility-core matrix rows, reconfigure into a second build
+directory with `-DFEME_PROBE_AGILITY_VERSION=619` and
+`-DFEME_PROBE_AGILITY_CORE=<path to a container-local D3D12Core.dll>`, then
+run `feme-windows-adapter-probe.exe` directly (not via `ctest`, which only
+exercises the inbox-core build) with no arguments, `--software <WARP path>`,
+or `--stub <path to feme-adapter-rejection-stub.dll>`.
 
 ## Reproduce without configuring the LLVM build
 
