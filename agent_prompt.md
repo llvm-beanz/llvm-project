@@ -68,6 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
+Next steps, ranked:
 1. `ENV6(c)(5a)` (75 graphicsfuzz + left-shift).
-2. The 3 misc failures (`info`, `api.driver_properties`, `tessellation.shader_input_output`) are unexamined.
+2. `ENV5(c)(7)(b)` multi-barrier hull (1 case).
 3. cosh-return-inf-unused; offload (blocked).
