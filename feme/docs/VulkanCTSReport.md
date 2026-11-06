@@ -11859,3 +11859,59 @@ unchanged from the prior session's writeup: `ENV6(c)(3)` (83 cases) /
 `ENV6(d)` (132 cases, own multi-session architecture efforts);
 `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases, lowest priority);
 offload-test-suite upstreaming (3 patches, blocked on push access).
+
+## L533: `ENV6(c)(5a)` flatten-level blocker identified and reverted; `ENV5(d)` `image_query.samples_storage` fixed; full `~3.25M`-case re-measure launched detached
+
+**`ENV6(c)(5a)` (inner loop whose header exit and latch exit check share
+one `Flow` merge block)**: relaxing `DiamondFlattener::validate`'s
+shared-merge-point check (to tolerate a successor that is the cycle's own
+tail exit check) makes `canFlattenLoopBodyRegion` accept the region, but
+the subsequent `flatten()` call then emits an invalid module (`Instruction
+does not dominate all uses`): the shared block's own diamond-merge masks
+are defined only on the "entered via the body" arm and get reused
+unconditionally as the header's loop-carried phi value for *every* path
+into that block, including the direct header-exit-relay path that never
+runs the body diamond at all. Forcing `FoldHeaderExitIntoMask`
+unconditionally does not sidestep this -- same verifier failure. This is
+a `flatten()`-level gap (the mask-merge bookkeeping itself), not just a
+`validate()` scoping gap; reverted entirely, nothing landed in
+`Linearize.cpp` this session. `cosh-return-inf-unused` still fails
+separately via the "only a uniform pass-through region" diagnostic, a
+different code path -- not yet re-examined under this corrected model.
+See `Roadmap.md`'s `ENV6(c)(5a)` row for the full writeup.
+
+**`ENV5(d)`: `image_query.samples_storage` fixed.** Root cause was a
+classifier gap, not a runtime/numeric gap as earlier sessions assumed --
+`hasOnlySupportedStorageImageUses` (`SPIRVResourceLowering.cpp`) had no
+`isQuerySamplesCall` case, unlike its sampled-image counterpart
+`hasOnlySupportedImageUses`, so a multisampled *storage* image's
+`OpImageQuerySamples` use left the whole handle un-normalizable.
+`lowerImageAccesses` already lowered the call generically via
+`createQuerySamples` (dispatched purely on `Shape`, not sampled-vs-storage);
+only the classifier needed the new case. `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+(an existing, previously-undocumented-for-this-case env var) surfaced the
+real `vkCreateComputePipelines` diagnostic directly -- no build+trace was
+actually needed, contrary to the "no error logged, needs a build+trace"
+note carried over from several prior sessions. Fixed, lit test
+`spirv-resource-lowering-image-querysamples.ll` extended with storage-image
+counterparts. `check-feme`: 3903/3907 Passed, 4 Unsupported, 0 Failed.
+Real CTS: `dEQP-VK.spirv_assembly.instruction.image_query.samples_storage`
+now **Pass**; a `spirv_assembly.instruction.*query*` batch (19 cases) shows
+0 failures. Commit `c4d94f156eb5`.
+
+**Full re-measure**: launched a detached `run_vulkan_cts.py` sweep over
+the full `all-cases.txt` (~3.25M cases, `--workers 6 --batch-size 1800`)
+at `/home/dev/dev/VK-GL-CTS/run/feme-20261106-full-sweep/`, confirmed
+running fully orphaned (`?` controlling TTY) so it survives past this
+session's end. No results yet -- per `.instructions.md`'s own "multi-day
+background CTS sweeps" guidance, this genuinely spans multiple sessions.
+A future session should check the sweep's own `deqp-vk` process start
+time against `libfeme_vulkan.so`'s mtime before trusting any results (the
+library is unchanged since this sweep's launch, so it is valid as of this
+writing, but any further fix landed in a future session invalidates it).
+
+Open items unchanged: `ENV6(c)(3)` (83 cases) / `ENV6(d)` (132 cases, own
+multi-session architecture efforts); `ENV6(c)(5)`-`(7)` graphicsfuzz (~90
+cases, large `Linearize`/`SIMDize` cluster); `ENV5(c)(7)(b)` (hull
+lockstep barrier, 3 cases, lowest priority); offload-test-suite
+upstreaming (3 patches, blocked on push access).
