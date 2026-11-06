@@ -11950,3 +11950,70 @@ Remaining 101: graphicsfuzz 75 (`ENV6(c)(5)`-`(7)`, incl. negative-left-shift),
 `image.store.without_format` 14 (waived), `spirv_assembly.instruction` 5,
 `tessellation.invariance` 2, `line_continuity` 2, and 3 misc
 (`tessellation.shader_input_output`, `info`, `api.driver_properties`).
+
+## L539: ENV6(c)(5a) mask-merging phi at the shared tail block
+
+**Done.** Fixed the `Flow2`-style shared-merge-block shape `ENV6(c)(5a)`
+(and all 4 prior sessions) diagnosed but could not land: an inner loop's
+own header exit-relay edge (`.Flow2_crit_edge`) and its body diamond's own
+fallthrough (`Flow3`) both reconverge at the same block (`Flow2`, which
+`ExitCheck::RelayBlock`'s own relay-chain recovery also resolves to, since
+it is literally the relay chain's last hop -- the loop's real tail
+exit/continue check lives there too). A `validate()`-only relaxation
+(tried and reverted twice in earlier sessions) is not enough: `flatten()`
+was still reusing the body diamond's own per-arm merge masks
+(`live.mergeN`/`sideeffect.mergeN`, defined only on the `Flow3` arm)
+unconditionally as the value feeding *every* predecessor into `Flow2`,
+including the relay predecessor that never executes the diamond at all --
+an `Instruction does not dominate all uses` verifier failure.
+
+Fixed by adding a new, narrowly-scoped `DiamondFlattener` constructor
+parameter, `RelayBypassBlock` (wired from `linearizeCycle` as
+`HeaderExit->RelayBlock`, only for its two `flattenLoopBodyRegion` call
+sites), a new `isRelayBypassMergeBlock(Succ)` helper (exact block-identity
+match against `RelayBypassBlock`, not a generic "extra predecessor is
+fine" relaxation), and a real two-incoming `PHINode` pair built at the
+shared block in `flatten()`'s `UncondBr` case merging the diamond arm's
+own masks with `RelayBypassMasks` -- the region's own *entry* masks,
+captured once at the top of `flattenLoopBodyRegion`, which remain valid
+for the relay predecessor (a lane that takes the relay never executes any
+masked op in this region) regardless of whether `FoldHeaderExitIntoMask`
+later makes that relay predecessor unreachable (LLVM's verifier does not
+enforce dominance for phi incoming values from blocks unreachable from the
+entry).
+
+`env6c5-outer-exit-after-inner-loop-unsupported.ll` (a real pre-linearize
+capture of `cov-function-infinite-loop-return-identical-condition`)
+flipped from a pinned-diagnostic negative test to a positive test
+asserting the new mask-merge phi's exact shape, and renamed to
+`env6c5-outer-exit-after-inner-loop.ll`. `check-feme`: 3905/3909 Passed, 4
+Unsupported, 0 regressions (the +1 Passed/Discovered vs. `L538`'s baseline
+is this one test's RUN-line flip, no new test added). Verified the
+generated IR with `opt -passes=verify` directly as well.
+
+**Real `deqp-vk` re-run**: the originally-targeted
+`cov-function-infinite-loop-return-identical-condition` now **Pass**es
+(previously the compiler aborted outright). Full 756-case graphicsfuzz
+corpus re-run with a proper before/after baseline diff (`git stash` vs.
+fix applied, both through the real `feme_vulkan` ICD, excluding the
+known-hanging `cov-two-nested-loops-switch-case-matrix-array-increment`,
+756 of 757 total): baseline 681 Pass / 75 Fail, post-fix **683 Pass / 73
+Fail**. Zero regressions (all 681 baseline-`Pass` cases remain `Pass`).
+Two cases newly flip to `Pass`: the originally-targeted case, plus one
+more, previously-unrelated case, **`cov-function-multiple-loops-compare-
+integer-return`**, incidentally also resolved by this fix.
+
+Checked the two cases the roadmap flagged as sharing this shape:
+`ENV6(e)(7)`'s `cov-x86-isel-lowering-negative-left-shift` is **not**
+fixed by this change -- it fails with a structurally similar but distinct
+verifier error (`select`-built `live.merge31`/`sideeffect.merge32` values,
+not a `flattenLoopBodyRegion`-style phi, failing to dominate
+`active.header.live`/`active.header.sideeffect` fed from
+`Flow9._crit_edge`), meaning it goes through `flattenKnownDivergentBranch`
+or a sibling `HeaderDivergent` merge path, not the `flattenLoopBodyRegion`
+code path this session fixed; needs its own separate triage. `cosh-
+return-inf-unused` is also unaffected -- it fails with unrelated
+diagnostics (two distinct "only a uniform pass-through region" bail-outs
+plus a mask-affecting-op diagnostic), not this shape at all. Roadmap
+updated: `ENV6(c)(5a)` struck through; `ENV6(e)(7)` corrected to note it
+needs independent investigation, not "blocked on `ENV6(c)(5a)`".
