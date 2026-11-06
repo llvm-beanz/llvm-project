@@ -135932,3 +135932,86 @@ closed.
 3. Backlog carried from many prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
    re-measure.
+
+## 2026-11-06: W0(c) DXBC/DXIL-input candidate-file triage session
+
+**Next action taken**: Ranked next step #1 (`W0(b)`'s decision) is an
+explicit human/product call, not an agent task, so this session proceeded
+with ranked next step #2: resolving `W0(c)`'s long-carried-forward "needs
+individual triage" DXBC/DXIL-input candidate file list one-by-one.
+
+**Device check**: `vulkaninfo --summary | Select-String deviceName` ->
+`FeMe CPU Vulkan Device`. Confirmed first, as required every session.
+
+**What I did**:
+1. Confirmed a clean git tree matching the end of the prior session (`W0(b)`
+   alternative cost/scope research committed).
+2. Read each of the ten candidate files from the read-only `C:\dev\Direct3D`
+   reference checkout (`BasicAPI.cpp`, `GBVExecuteIndirect.cpp`,
+   `Library.cpp`, `MultiGPU.cpp`, `PipelineStateObject.cpp`, `Raytracing.cpp`,
+   `ResourceBinding.cpp`, `ShaderRootSig.cpp`, `util.{cpp,h}`, `pch.hpp`) via
+   targeted grep for DXBC-related symbols, `D3DCompile`/`CompileShader`
+   calls, and their shader-profile strings.
+3. Confirmed `util.cpp`'s `GetDefaultVS()`/`GetDefaultPS()`/`GetDefaultCS()`
+   return hardcoded byte arrays beginning with the literal `"DXBC"` FourCC
+   (`68, 88, 66, 67`) -- precompiled blobs baked into source, not compiled at
+   test time at all -- and that its shared `CompileShader()` helper always
+   calls `D3DCompile` (fxc) with legacy `vs_4_0`/`vs_5_0`/`vs_5_1`/`ps_5_0`/
+   `ps_5_1` profiles, which `D3DCompile` always emits as DXBC (it has no
+   SM6.x/DXIL mode).
+4. Traced every caller across the remaining eight `.cpp` files: nine of the
+   ten files confirmed as genuine DXBC-input (via the hardcoded blobs above,
+   direct `D3DCompile` calls with legacy profiles, or direct DXBC-container
+   parsing in `ShaderRootSig.cpp`'s `CDXBCParser`/`DXBCGetRootSignature`
+   calls). `ResourceBinding.cpp` stood out: it explicitly branches on a
+   `bTestDXBCShaders` flag to select between the hardcoded DXBC shaders and
+   separate `DefaultVSDXIL`/`DefaultPSDXIL`/`DefaultCSDXIL` DXIL variants,
+   deliberately dual-testing both input kinds side by side in the same test
+   -- strong evidence legacy DXBC shader-model support is a first-class,
+   intentionally-verified compatibility surface in WARP's own suite, not an
+   incidental byproduct. Only `pch.hpp` resolved as merely DXBC-adjacent (it
+   only `#include`s `DXBCUtils.h`, with no blob or parsing logic of its own).
+5. Wrote the full per-file breakdown into
+   `W0DirectXTestCorpusClassification.md`, replacing the old "needs
+   individual triage" bullet.
+6. Updated `WARPRoadmap.md`'s `W0(c)` narrative paragraph to record the
+   completed triage, without striking `W0(c)` itself (the remaining
+   legacy-shader-support audit against the selected stock-runtime contract
+   is still open and still blocked on `W0(b)`'s pending decision).
+7. Committed the classification-doc and roadmap updates together in one
+   commit (both touch the same DXBC-triage topic).
+
+**Verification**: Both edits are documentation only; no FeMe production or
+test source was touched, so per established precedent no `check-feme` build
+or Vulkan CTS re-run was performed this session.
+
+**Decision record**: No alternative was selected for `W0(b)`; that remains
+an explicit pending human decision, unchanged this session. This session's
+work is independent of that decision, as the user's own ranked list noted.
+
+**Process note**: None new this session -- no environment or process issue
+was found requiring a `feme/.instructions.md` update.
+
+**State**: Git tree clean after this session's two commits. `W0(c)`'s
+DXBC/DXIL-input classification category is now fully triaged (9 of 10
+candidate files confirmed DXBC-input, 1 DXBC-adjacent-only); `W0(c)` itself
+remains unstruck/partially done pending the legacy-shader audit against a
+selected contract. `W0(b)` remains "Triggered", awaiting an explicit human
+decision. `WS0`-`WS3` remain fully closed.
+
+**Suggested next steps (ranked)**:
+1. **Make the `W0(b)` decision explicitly** (human/product call, not an
+   agent task): this remains the single blocking item for all further
+   `W0(g)`/`W1` D3D12-adapter work. Cost/scope for all three alternatives is
+   now documented in `W0WindowsIntegrationProbe.md`.
+2. **`W0(c)`'s remaining legacy-shader-support audit**: now that the
+   candidate-file triage is complete and confirms DXBC support is a
+   first-class, deliberately-tested WARP compatibility surface (not
+   incidental), a future session could scope what "legacy shader
+   compatibility" would concretely require of FeMe (e.g. whether FeMe's
+   existing DXBC import path, noted in the roadmap's evaluation table, needs
+   anything beyond what it already has) -- though this still likely depends
+   on `W0(b)`'s resolution to know which runtime contract is being targeted.
+3. Backlog carried from many prior sessions, still untouched:
+   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
+   re-measure.
