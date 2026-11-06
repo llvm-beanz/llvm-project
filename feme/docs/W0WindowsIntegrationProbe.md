@@ -394,6 +394,7 @@ their build directories as `feme_warp_reference.dll`. CMake verifies SHA256
 | `private-ordinal` / `private-ordinal-interception` | Same owned open plus ordinal-199 forwarder | Same owned `OpenAdapter12=1`; ordinal forwarding is unnecessary for this stage |
 | `bare` / `bare-interception` | Only owned open/counter exports; no forwarding or reference DLL | Owned `OpenAdapter12=1`; unsupported by design; reference DLL not loaded |
 | `negotiation` / `os-routed-negotiation` | Owned `OpenAdapter12` fills the public adapter table; no forwarding/reference DLL | Windows queries supported versions/caps and closes the adapter; no device |
+| `pinned-version` / `os-routed-pinned-version` | Same as `negotiation`, but pins one public `D3D12DDI_SUPPORTED_0010` version and logs `GetCaps` types/`CreateDevice` thunk-pointer presence | Identical call counters to `negotiation`; `CreateDevice` still unreached -- see [W0(g) pinned-DDI/thunk-service audit](#w0g-pinned-ddithunk-service-audit) |
 | `bare` / `generic-software-rejection` | Same DLL, but selected through `CreateSoftwareAdapter` instead of `EnumWarpAdapter` | Zero adapter identity and `OpenAdapter12=0`; unsupported before owned DDI |
 
 The owned WARP cases retain an explicit absolute-path `LoadLibraryExW`
@@ -471,6 +472,66 @@ implementation from any genuinely required private boundary. Seek approval
 before expanding into private ABI implementation or changing the product's
 identity/distribution contract. Do not return to driver installation merely
 because the public general-provider search was negative.
+
+### W0(g) pinned-DDI/thunk-service audit
+
+Collected 2026-11-06, extending `negotiation` with a seventh `pinned-version`
+variant and `os-routed-pinned-version` CTest. `BootstrapStub.cpp`'s
+`getSupportedVersions` still advertises zero versions by default; the
+`pinned-version` build instead defines `FEME_BOOTSTRAP_PINNED_VERSION` to
+`D3D12DDI_SUPPORTED_0010` (Interface Version R1, Build 10 -- the earliest
+public D3D12 UMD DDI baseline in `d3d12umddi.h`), the lowest-surface value to
+audit first. `getCaps` now also logs the public `D3D12DDICAPS_TYPE` value of
+every query (`FeMeBootstrapGetAudit`/`FeMeBootstrapGetAuditCapacity`), and
+`createDevice` records whether its publicly documented thunk-service pointers
+(`pKTCallbacks`: kernel-routed `D3DDDI_DEVICECALLBACKS`;
+`p12UMCallbacks`: user-mode-only `D3D12DDI_CORELAYER_DEVICECALLBACKS_0003`)
+are non-null, without implementing any capability or device contract.
+
+Measured result, container inbox runtime, repeated 3 times
+(`ctest --repeat until-fail:3`; 7/7 passed per run across all seven
+interposition CTests, including the new `os-routed-pinned-version`):
+
+```text
+Bootstrap calls: Open=1 Size=0 Versions=2 Caps=2 Optional=0 Fill=0 Create=0 Close=1 Destroy=0
+GetCaps Type values queried (2 total): 1074 1007
+CreateDevice args: Interface=0 Version=0 pKTCallbacks=null p12UMCallbacks=null
+```
+
+This is identical to the zero-advertised-version baseline's counters: pinning
+one supported interface version does not by itself change how many times
+`GetSupportedVersions`/`GetCaps` are called, and `CreateDevice` is still never
+reached (`Create=0`). The two logged `D3D12DDICAPS_TYPE` values are
+`D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1` (1074) and
+`D3D12DDICAPS_TYPE_3DPIPELINESUPPORT` (1007): the runtime queries the newer,
+input/output `D3D12DDI_3DPIPELINESUPPORT1_DATA_0081` cap first (it carries the
+runtime's own requested `HighestRuntimeSupportedFeatureLevel`, matching the
+probe's `D3D12CreateDevice(..., D3D_FEATURE_LEVEL_11_0, ...)` call), then
+falls back to the older enum-only `D3D12DDICAPS_TYPE_3DPIPELINESUPPORT` when
+the first attempt fails. Both are answered with `E_NOTIMPL` here, and no
+later cap (shader model, options, architecture info, ...) is ever reached.
+
+**This sharpens, not resolves, the open boundary.** Both caps types, their
+exact structs, and `D3D12DDIARG_CREATEDEVICE_0003`'s thunk-service pointer
+types are fully public, documented in `d3d12umddi.h` -- no private ordinal,
+undocumented struct, or guessed signature is involved. The reason
+`CreateDevice` is never reached is that this experiment deliberately never
+answers a capability query with success; that is **missing owned
+implementation, not a demonstrated private boundary**. The genuinely private
+question -- whether an owned user-mode driver can actually be bound to a
+kernel-mode WDDM adapter object without installing one, i.e. how an
+existing-identity UMD like WARP's satisfies `pKTCallbacks`'s kernel-routed
+thunks -- remains unanswered, because negotiation never reaches the point
+where those pointers would be populated (`pKTCallbacks`/`p12UMCallbacks` are
+both still logged `null`, since `createDevice` itself is never invoked).
+
+The next bounded step is to answer `D3D12DDICAPS_TYPE_3DPIPELINESUPPORT` and
+`_0081_3DPIPELINESUPPORT1` truthfully and minimally (e.g. echoing back the
+runtime's own requested feature level rather than fabricating a larger one),
+while continuing to fail every other cap and still returning `E_NOTIMPL` from
+`createDevice`, to determine whether capability negotiation alone is
+sufficient to reach `CreateDevice` with this pinned version, or whether the
+version itself (`D3D12DDI_SUPPORTED_0010`) is rejected independently of caps.
 
 ### Reproduce the B investigation
 
