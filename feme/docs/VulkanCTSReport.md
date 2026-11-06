@@ -12105,3 +12105,80 @@ post-fix **685 Pass / 72 Fail**. A direct per-case diff of the two runs
 confirms exactly one case flips (the targeted one) and zero regressions.
 
 Roadmap updated: `ENV6(e)(7)` struck through.
+
+## L541: `ENV6(c)(5)`/`ENV6(c)(6)` cluster counts re-measured (no code change)
+
+**Starting point**: ranked next step #1 from the `L540` session -- the
+`ENV6(c)(5)`/`ENV6(c)(6)` roadmap rows' own cluster counts (37 and 29
+cases respectively) predate even `ENV6(c)(5a)`'s fix and had never been
+directly re-verified against the current compiler; both `ENV6(c)(5a)`
+and `ENV6(e)(7)` flipped cases that plausibly originated in these
+clusters.
+
+**Method**: fresh full `vk-default/graphicsfuzz.txt` mustpass sweep (757
+cases) via `run_vulkan_cts.py --batch-size 20 --workers 6
+--batch-timeout 300 --final-timeout 60`, against a clean rebuild of
+`libfeme_vulkan.so` at current `HEAD` (confirmed `FeMe CPU Vulkan
+Device`; `check-feme` 3906/3910 Passed, 4 Unsupported, 0 Failed).
+Result: **685 Pass / 72 Fail**, matching `L540`'s own post-fix count
+exactly (no drift since that session). Re-ran `L507`'s own log-clustering
+method (first `error:` line per case, normalized) over the 72 solo-
+verified `verify-*.log` failure records.
+
+**Current cluster breakdown (72 cases)**:
+- `feme-cpu-linearize`, unsupported body shape, 39 cases (was 53):
+  - 11 "empty diamond arm or own-cycle-boundary-crossing" (was 21)
+  - 10 "only a uniform pass-through region to/from the exit check" (was 5)
+  - 8 "only a uniform pass-through region from header's exit check to latch" (was 11)
+  - 5 "mask-dependent after masking but not a flattenable shape" (was 3)
+  - 4 "mask-affecting op with no recognized uniform exit check" (was 4, unchanged)
+  - 1 "more than one divergent exit check" (was 2)
+  - 0 "branch's own check is not the sole entry into its continuation" (was 7, now fully resolved -- no case in the current 72 exercises this diagnostic at all)
+- `feme-cpu-linearize` "no reconvergence point": 10 cases (was 10, unchanged)
+- `feme-cpu-simdize` "did not remove / cannot widen": 15 cases (was 18)
+- `feme-cpu-simdize` "divergent aggregate value, unsupported use-pattern": 1 case (was 1, unchanged)
+- `feme-cpu-wrap-entry` "barrier inside non-linear control flow": 4 cases (was 4, unchanged -- `ENV6(c)(7)`)
+- 3 cases with **no compiler diagnostic at all** (a new bucket, not
+  present in `L507`'s original clustering; likely silent
+  rendering-correctness failures surfaced by an intervening fix rather
+  than compiler aborts): `cov-do-while-negative-iterator-nested-loops-
+  increment-array-element`, `cov-function-always-return-negative-
+  bitfield-extract`, `cov-nested-loop-not-greater-than-increment-array-
+  element`. Not triaged further this session -- out of scope for a
+  counts-only re-measurement; flagged as a new untriaged item.
+
+**`ENV6(c)(3)` total**: 69 cases (39 + 10 + 15 + 1 + 4), down from the
+stale 83 (which was itself already inconsistent with `L507`'s own
+53+10+18+1+4=86 arithmetic -- the 83 figure was never literally
+recomputed after `L507`, only carried forward).
+
+**`ENV6(c)(5)` total** (empty-diamond-arm + both uniform-pass-through
+variants): 11 + 10 + 8 = **29 cases**, down from 37.
+
+**`ENV6(c)(6)` total** (no-reconvergence-point + both simdize
+bail-outs): 10 + 15 + 1 = **26 cases**, down from 29.
+
+No code change this session -- a pure re-measurement. `Roadmap.md`'s
+`ENV6(c)(3)`/`(5)`/`(6)` rows updated with the current counts and
+breakdowns above.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no
+update needed -- no feature or extension status changed.
+
+**`ENV4` status check** (standing per-session requirement):
+`vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at the start
+of this session and again before the re-measurement sweep.
+
+**Commits**: this docs update (`Roadmap.md` + `VulkanCTSReport.md`
+together, since they record the same single measurement) in its own
+commit; `agent_thoughts.md` in a final commit.
+
+**Next steps**: the new 3-case no-diagnostic bucket is unexplored. The
+`cosh-return-inf-unused` triage (ranked #2 last session, still a
+distinct shape per two prior sessions' confirmation) and the
+`GetAlreadyLinearizedCycleExit` mechanism audit against the untriaged
+`(3)`/`(5)`/`(6)` cluster case lists (ranked #3) remain open; this
+session's measurement gives those audits a fresh, accurate case list to
+check against. offload-test-suite patch set re-verified again this
+session (ranked #4) -- see the `agent_thoughts.md` entry for this
+session.
