@@ -173,11 +173,14 @@ int wmain(int Argc, wchar_t **Argv) {
       LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *);
   using GetAuditCapacity = UINT32(APIENTRY *)();
   using GetAudit = void(APIENTRY *)(LONG *, LONG *, UINT *, UINT *, LONG *,
-                                     LONG *);
+                                     LONG *, LONG *, LONG *, LONG *);
+  using GetCallbackProbe =
+      void(APIENTRY *)(LONG *, LONG *, LONG *, DWORD *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
   GetAudit ReadAudit = nullptr;
+  GetCallbackProbe ReadCallbackProbe = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -209,6 +212,9 @@ int wmain(int Argc, wchar_t **Argv) {
       FreeLibrary(Module);
       return 1;
     }
+    // W0(g) follow-up: optional, since older-shaped shims may not export it.
+    ReadCallbackProbe = reinterpret_cast<GetCallbackProbe>(
+        GetProcAddress(Module, "FeMeBootstrapGetCallbackProbe"));
   }
   ComPtr<IDXGIAdapter> SoftwareAdapter;
   HRESULT Result =
@@ -278,8 +284,12 @@ int wmain(int Argc, wchar_t **Argv) {
     LONG CapsTypeCount = 0;
     UINT CreateInterface = 0, CreateVersion = 0;
     LONG CreateHasKTCallbacks = 0, CreateHasUMCallbacks = 0;
+    LONG CreateHasKTAllocateCb = 0, CreateHasKTDeallocateCb = 0,
+         CreateHasUMSetErrorCb = 0;
     ReadAudit(&CapsTypeCount, CapsTypes.data(), &CreateInterface,
-              &CreateVersion, &CreateHasKTCallbacks, &CreateHasUMCallbacks);
+              &CreateVersion, &CreateHasKTCallbacks, &CreateHasUMCallbacks,
+              &CreateHasKTAllocateCb, &CreateHasKTDeallocateCb,
+              &CreateHasUMSetErrorCb);
     std::wprintf(L"GetCaps Type values queried (%ld total):", CapsTypeCount);
     UINT32 Logged = CapsTypeCount < 0
                         ? 0
@@ -294,6 +304,31 @@ int wmain(int Argc, wchar_t **Argv) {
                  CreateInterface, CreateVersion,
                  CreateHasKTCallbacks ? L"non-null" : L"null",
                  CreateHasUMCallbacks ? L"non-null" : L"null");
+    std::wprintf(L"CreateDevice inner callback pointers (read-only, never "
+                 L"invoked unless noted): pKTCallbacks->pfnAllocateCb=%ls "
+                 L"pKTCallbacks->pfnDeallocateCb=%ls "
+                 L"p12UMCallbacks->pfnSetErrorCb=%ls\n",
+                 CreateHasKTAllocateCb ? L"non-null" : L"null",
+                 CreateHasKTDeallocateCb ? L"non-null" : L"null",
+                 CreateHasUMSetErrorCb ? L"non-null" : L"null");
+    if (ReadCallbackProbe) {
+      LONG Attempted = 0, Completed = 0, ExceptionCaught = 0;
+      DWORD ExceptionCode = 0;
+      ReadCallbackProbe(&Attempted, &Completed, &ExceptionCaught,
+                         &ExceptionCode);
+      std::wprintf(L"Callback probe (p12UMCallbacks->pfnSetErrorCb): "
+                   L"Attempted=%ld Completed=%ld ExceptionCaught=%ld "
+                   L"ExceptionCode=0x%08lx\n",
+                   Attempted, Completed, ExceptionCaught,
+                   static_cast<unsigned long>(ExceptionCode));
+      // Only a consistency check: if the probe ran, it must have either
+      // completed or been caught by SEH, never neither (which would mean
+      // the harness process itself did not survive to report this).
+      if (Attempted && !Completed && !ExceptionCaught) {
+        report(L"Callback probe ran but reported neither outcome", E_FAIL);
+        ExpectedDDICalls = false;
+      }
+    }
   }
   bool Released = FreeLibrary(Module) != FALSE;
   if (!Released)

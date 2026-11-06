@@ -37,29 +37,47 @@ set(REFERENCE_EXPORTS
   QueryMuxDListForApplication)
 enable_testing()
 foreach(VARIANT reference public-exports private-ordinal bare negotiation
-                pinned-version)
+                pinned-version pinned-version-newer callback-probe)
   set(OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/${VARIANT}")
   file(MAKE_DIRECTORY "${OUTPUT_DIR}")
   if(NOT VARIANT STREQUAL bare AND NOT VARIANT STREQUAL negotiation AND
-     NOT VARIANT STREQUAL pinned-version)
+     NOT VARIANT STREQUAL pinned-version AND
+     NOT VARIANT STREQUAL pinned-version-newer AND
+     NOT VARIANT STREQUAL callback-probe)
     configure_file("${FEME_WARP_REFERENCE}"
       "${OUTPUT_DIR}/feme_warp_reference.dll" COPYONLY)
   endif()
-  if(VARIANT STREQUAL negotiation OR VARIANT STREQUAL pinned-version)
+  if(VARIANT STREQUAL negotiation OR VARIANT STREQUAL pinned-version OR
+     VARIANT STREQUAL pinned-version-newer OR VARIANT STREQUAL callback-probe)
     add_library(${VARIANT}-shim SHARED
       ../windows-adapter-bootstrap/BootstrapStub.cpp)
   else()
     add_library(${VARIANT}-shim SHARED Intercept.cpp)
   endif()
-  if(VARIANT STREQUAL pinned-version)
+  if(VARIANT STREQUAL pinned-version OR VARIANT STREQUAL callback-probe)
     # W0(g)'s audit: pin the earliest public D3D12 UMD DDI baseline
     # (Interface Version R1, Build 10) to keep the negotiated device-funcs
     # surface minimal while observing what the stock runtime asks for.
     target_compile_definitions(${VARIANT}-shim PRIVATE
       FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0010)
+  elseif(VARIANT STREQUAL pinned-version-newer)
+    # W0(g) control: pin the newest public D3D12 UMD DDI baseline in this
+    # WDK to check whether reaching CreateDevice (once the two observed
+    # caps are answered) is specific to the oldest version or general.
+    target_compile_definitions(${VARIANT}-shim PRIVATE
+      FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0119)
+  endif()
+  if(VARIANT STREQUAL callback-probe)
+    # W0(g) follow-up: actually invoke the one pure user-mode, non-allocation
+    # thunk callback (pfnSetErrorCb) observed to be non-null, wrapped in SEH
+    # so a fault is observed rather than silently tearing down the process.
+    target_compile_definitions(${VARIANT}-shim PRIVATE
+      FEME_BOOTSTRAP_PROBE_CALLBACK=1)
   endif()
   if(NOT VARIANT STREQUAL bare AND NOT VARIANT STREQUAL negotiation AND
-     NOT VARIANT STREQUAL pinned-version)
+     NOT VARIANT STREQUAL pinned-version AND
+     NOT VARIANT STREQUAL pinned-version-newer AND
+     NOT VARIANT STREQUAL callback-probe)
     foreach(EXPORT IN LISTS REFERENCE_EXPORTS)
       target_link_options(${VARIANT}-shim PRIVATE
         "/EXPORT:${EXPORT}=feme_warp_reference.${EXPORT}")
@@ -68,7 +86,10 @@ foreach(VARIANT reference public-exports private-ordinal bare negotiation
   if(VARIANT STREQUAL reference)
     target_link_options(${VARIANT}-shim PRIVATE
       "/EXPORT:OpenAdapter12=feme_warp_reference.OpenAdapter12")
-  elseif(NOT VARIANT STREQUAL negotiation AND NOT VARIANT STREQUAL pinned-version)
+  elseif(NOT VARIANT STREQUAL negotiation AND
+         NOT VARIANT STREQUAL pinned-version AND
+         NOT VARIANT STREQUAL pinned-version-newer AND
+         NOT VARIANT STREQUAL callback-probe)
     target_link_options(${VARIANT}-shim PRIVATE
       "/EXPORT:OpenAdapter12=FeMeInterceptOpenAdapter12")
   endif()
@@ -96,6 +117,12 @@ foreach(VARIANT reference public-exports private-ordinal bare negotiation
   elseif(VARIANT STREQUAL pinned-version)
     add_test(NAME os-routed-pinned-version COMMAND ${VARIANT}-harness
       --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
+  elseif(VARIANT STREQUAL pinned-version-newer)
+    add_test(NAME os-routed-pinned-version-newer COMMAND ${VARIANT}-harness
+      --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
+  elseif(VARIANT STREQUAL callback-probe)
+    add_test(NAME os-routed-callback-probe COMMAND ${VARIANT}-harness
+      --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
   else()
     add_test(NAME ${VARIANT}-interception COMMAND ${VARIANT}-harness
       --warp-shim $<TARGET_FILE:${VARIANT}-shim>)
@@ -105,5 +132,6 @@ add_test(NAME generic-software-rejection COMMAND bare-harness
   --stub $<TARGET_FILE:bare-shim>)
 set_tests_properties(reference-forwarding public-exports-interception
   private-ordinal-interception bare-interception os-routed-negotiation
-  os-routed-pinned-version generic-software-rejection
+  os-routed-pinned-version os-routed-pinned-version-newer
+  os-routed-callback-probe generic-software-rejection
   PROPERTIES TIMEOUT 30)

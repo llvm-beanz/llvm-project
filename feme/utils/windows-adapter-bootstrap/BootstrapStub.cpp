@@ -25,6 +25,20 @@
 // truthful claim; every other cap and createDevice itself still deliberately
 // fail, so this remains audit work, not a device contract.
 //
+// A further W0(g) follow-up audits CreateDevice's thunk-service pointers one
+// level deeper: individual function-pointer fields inside pKTCallbacks
+// (D3DDDI_DEVICECALLBACKS, kernel-routed) and p12UMCallbacks
+// (D3D12DDI_CORELAYER_DEVICECALLBACKS_0003, user-mode-only) are checked for
+// non-null-ness without ever being invoked -- pKTCallbacks's fields are all
+// allocation/residency operations, out of scope for a read-only audit.
+// FEME_BOOTSTRAP_PROBE_CALLBACK additionally invokes exactly one pure
+// user-mode, non-allocation callback (pfnSetErrorCb, the documented
+// mechanism for a driver to report a device error to the runtime) with a
+// truthful E_NOTIMPL, wrapped in SEH (__try/__except) so an unexpected fault
+// is observed rather than silently tearing down the whole process. This is
+// still audit work: no capability or device contract is implemented, and no
+// allocation/resource callback is ever called.
+//
 //===----------------------------------------------------------------------===//
 
 #include <windows.h>
@@ -62,8 +76,47 @@ struct CreateDeviceAudit {
   UINT Version = 0;
   LONG HasKTCallbacks = 0;
   LONG HasUMCallbacks = 0;
+  // W0(g) follow-up: individual pointer null-checks, read-only, one level
+  // deeper than the outer table pointers above.
+  LONG HasKTAllocateCb = 0;
+  LONG HasKTDeallocateCb = 0;
+  LONG HasUMSetErrorCb = 0;
 };
 CreateDeviceAudit GCreateDeviceAudit;
+
+#ifdef FEME_BOOTSTRAP_PROBE_CALLBACK
+// W0(g) follow-up: evidence from actually invoking pfnSetErrorCb once. This
+// struct has no non-POD members so the function that uses it below can mix
+// SEH with no object-unwinding conflict.
+struct CallbackProbe {
+  LONG Attempted = 0;
+  LONG Completed = 0;
+  LONG ExceptionCaught = 0;
+  DWORD ExceptionCode = 0;
+};
+CallbackProbe GCallbackProbe;
+
+// No local C++ objects requiring unwinding live in this function, so
+// __try/__except (SEH) can wrap the call and observe -- not merely assume --
+// whether invoking a real user-mode-only thunk callback the stock runtime
+// supplied is safe, rather than letting an unexpected fault silently tear
+// down the whole harness process.
+void probeSetErrorCb(D3D12DDI_HRTDEVICE RTDevice,
+                      PFND3D12DDI_SETERROR_CB Callback) {
+  InterlockedExchange(&GCallbackProbe.Attempted, 1);
+  DWORD Code = 0;
+  __try {
+    // A truthful diagnostic report, not a fabricated success: this
+    // experiment genuinely has not implemented a device. No allocation or
+    // resource callback is attempted.
+    Callback(RTDevice, E_NOTIMPL);
+    InterlockedExchange(&GCallbackProbe.Completed, 1);
+  } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    InterlockedExchange(&GCallbackProbe.ExceptionCaught, 1);
+    GCallbackProbe.ExceptionCode = Code;
+  }
+}
+#endif
 
 SIZE_T APIENTRY
 calcPrivateDeviceSize(D3D12DDI_HADAPTER, CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE *) {
@@ -80,7 +133,24 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
     GCreateDeviceAudit.Version = Args->Version;
     GCreateDeviceAudit.HasKTCallbacks = Args->pKTCallbacks != nullptr;
     GCreateDeviceAudit.HasUMCallbacks = Args->p12UMCallbacks != nullptr;
+    // Read-only: check individual callback-table fields without invoking
+    // any of them. pKTCallbacks's fields are all allocation/residency
+    // operations (pfnAllocateCb, pfnDeallocateCb, ...), out of scope for a
+    // read-only audit or a non-allocation invocation probe.
+    if (Args->pKTCallbacks) {
+      GCreateDeviceAudit.HasKTAllocateCb =
+          Args->pKTCallbacks->pfnAllocateCb != nullptr;
+      GCreateDeviceAudit.HasKTDeallocateCb =
+          Args->pKTCallbacks->pfnDeallocateCb != nullptr;
+    }
+    if (Args->p12UMCallbacks)
+      GCreateDeviceAudit.HasUMSetErrorCb =
+          Args->p12UMCallbacks->pfnSetErrorCb != nullptr;
   }
+#ifdef FEME_BOOTSTRAP_PROBE_CALLBACK
+  if (Args && Args->p12UMCallbacks && Args->p12UMCallbacks->pfnSetErrorCb)
+    probeSetErrorCb(Args->hRTDevice, Args->p12UMCallbacks->pfnSetErrorCb);
+#endif
   // A real device table is out of scope for this experiment; fail loudly and
   // distinctly so a caller cannot mistake this for the generic rejection
   // windows-adapter-probe's RejectionStub already measures.
@@ -225,7 +295,10 @@ FeMeBootstrapGetAudit(LONG *CapsTypeCount,
                       LONG CapsTypes[/* FeMeBootstrapGetAuditCapacity() */],
                       UINT *CreateDeviceInterface, UINT *CreateDeviceVersion,
                       LONG *CreateDeviceHasKTCallbacks,
-                      LONG *CreateDeviceHasUMCallbacks) {
+                      LONG *CreateDeviceHasUMCallbacks,
+                      LONG *CreateDeviceHasKTAllocateCb,
+                      LONG *CreateDeviceHasKTDeallocateCb,
+                      LONG *CreateDeviceHasUMSetErrorCb) {
   LONG Count = InterlockedCompareExchange(&GCapsTypeLogCount, 0, 0);
   *CapsTypeCount = Count;
   UINT32 Fill = Count <= 0 ? 0
@@ -240,4 +313,30 @@ FeMeBootstrapGetAudit(LONG *CapsTypeCount,
       InterlockedCompareExchange(&GCreateDeviceAudit.HasKTCallbacks, 0, 0);
   *CreateDeviceHasUMCallbacks =
       InterlockedCompareExchange(&GCreateDeviceAudit.HasUMCallbacks, 0, 0);
+  *CreateDeviceHasKTAllocateCb =
+      InterlockedCompareExchange(&GCreateDeviceAudit.HasKTAllocateCb, 0, 0);
+  *CreateDeviceHasKTDeallocateCb =
+      InterlockedCompareExchange(&GCreateDeviceAudit.HasKTDeallocateCb, 0, 0);
+  *CreateDeviceHasUMSetErrorCb =
+      InterlockedCompareExchange(&GCreateDeviceAudit.HasUMSetErrorCb, 0, 0);
+}
+
+// W0(g) follow-up: evidence from actually invoking pfnSetErrorCb once (only
+// populated when built with FEME_BOOTSTRAP_PROBE_CALLBACK; otherwise this
+// truthfully reports that no invocation was attempted).
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetCallbackProbe(LONG *Attempted, LONG *Completed,
+                              LONG *ExceptionCaught, DWORD *ExceptionCode) {
+#ifdef FEME_BOOTSTRAP_PROBE_CALLBACK
+  *Attempted = InterlockedCompareExchange(&GCallbackProbe.Attempted, 0, 0);
+  *Completed = InterlockedCompareExchange(&GCallbackProbe.Completed, 0, 0);
+  *ExceptionCaught =
+      InterlockedCompareExchange(&GCallbackProbe.ExceptionCaught, 0, 0);
+  *ExceptionCode = GCallbackProbe.ExceptionCode;
+#else
+  *Attempted = 0;
+  *Completed = 0;
+  *ExceptionCaught = 0;
+  *ExceptionCode = 0;
+#endif
 }
