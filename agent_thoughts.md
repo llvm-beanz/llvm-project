@@ -132322,3 +132322,20 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 2. Background full CTS re-measure (failing list is stale).
 3. `image_query.samples_storage` (no error logged).
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: failing-list re-measure
+
+Confirmed device: `FeMe CPU Vulkan Device`.
+
+## What I did
+- Re-ran the stale 146-case failing list: 37 pass, 4 NotSupported, 105 fail.
+- Bucketed 40 graphicsfuzz errors: mostly linearize "loop has an internal
+  branch in a body shape this milestone does not support" (14), simdize
+  "divergent branch" (6), uniform-pass-through (~12).
+- No compiler changes; graphicsfuzz is still the multi-session ENV6(c)(5).
+
+## Next steps (ranked)
+1. ENV6(c)(5): reduce 2-3 of the 14 "body shape" loop cases first.
+2. Full CTS re-measure beyond the failing list (new regressions unmeasured).
+3. `image_query.samples_storage`.
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
