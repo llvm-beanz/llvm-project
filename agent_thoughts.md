@@ -132058,3 +132058,20 @@ Committed. Failing total at most 146 (stale list had 255).
 2. `ENV6(c)(5)` representatives.
 3. `mesh_shader` (10), `renderpass2` (6), `demote` (5).
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: failing-list refresh
+
+## Next action
+Triage `mesh_shader.ext` (10) one case alone.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. A full run is ~3.27M cases: too big. Re-ran the 255 stale failures instead: 146 Fail, 109 Pass. List saved as `verified-failures-146.txt`.
+3. Docs only (report L539). `check-feme` 3891 passed.
+
+## Next steps (ranked)
+1. `mesh_shader.ext` (10), `renderpass2` (6), `demote` (5).
+2. `ENV6(c)(5)` representatives (graphicsfuzz, ~90).
+3. `spirv_assembly.instruction` (7), `transform_feedback.fuzz` (4).
+4. A full re-measure in a long background run (new regressions outside the list are unchecked).
+5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
