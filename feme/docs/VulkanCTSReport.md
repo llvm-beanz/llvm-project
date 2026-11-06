@@ -12182,3 +12182,132 @@ session's measurement gives those audits a fresh, accurate case list to
 check against. offload-test-suite patch set re-verified again this
 session (ranked #4) -- see the `agent_thoughts.md` entry for this
 session.
+
+## L542: `cosh-return-inf-unused` triaged -- root-caused, fix attempted and reverted (confirmed regression)
+
+Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` at session
+start, per standing instructions.
+
+Followed ranked next step #1 from `L541`: triage `cosh-return-inf-unused`
+as its own shape, carried forward unstarted for three sessions.
+
+**Reproduction**: found a leftover `FEME_DUMP_IR_PRELINEARIZE=1` dump at
+`/tmp/pl-cosh-return-inf-unused.txt` from a prior session, extracted the
+fragment-shader module, and confirmed `feme-opt --llvm
+-passes=feme-cpu-linearize,verify` reproduces the exact 3 diagnostics
+standalone (two "only a uniform pass-through region" + one "mask-affecting
+feme.stage.* operation"). Used `llvm-reduce` (an interestingness test
+grepping for the "pass-through region" diagnostic) to shrink it to 36
+lines.
+
+**Root cause**: the real shader is a 4-level nested-cycle shape -- two
+near-duplicate inner self-loops (mirror copies, likely from a duplicated
+inlined GLSL function call), each feeding a divergent discard-guard,
+nested inside a middle loop, nested inside an outermost loop; both middle
+and outer loops are `HeaderDivergent=1`. `DiamondFlattener::validate`/
+`flatten` already have a `GetAlreadyLinearizedCycleExitFn` exemption
+(landed in `ENV6(e)(7)`) that lets an enclosing cycle's walk shortcut past
+an already-fully-processed child cycle's own header, but two other call
+sites have no such exemption: `LoopLinearizer::collectUniformPassThroughRegion`
+(a separate, earlier-running region-collection walk) and the `Pre`
+`DiamondFlattener` feasibility probe (hardcoded to a nullptr-returning
+lambda). Both independently reject the child cycle's own
+(by-then-already-narrowed) divergent terminator as "a further, genuinely
+divergent branch" the moment they walk into it.
+
+**Fix attempted**: hoisted the existing `GetAlreadyLinearizedCycleExitForBody`
+lambda to before the `collectUniformPassThroughRegion` call site so it
+could be shared; added a new optional `GetAlreadyLinearizedCycleExitFn`
+parameter to `collectUniformPassThroughRegion` (defaulting to `nullptr`,
+so the other 6 existing call sites are unaffected); wired the shared
+lambda into both the `collectUniformPassThroughRegion` call and the `Pre`
+probe (replacing its old nullptr lambda). Inside
+`collectUniformPassThroughRegion`'s worklist loop, deliberately kept the
+child header itself in `Visited` (unlike `DiamondFlattener::flatten`'s own
+pattern, which never adds it) rather than skip it entirely, relying on
+the caller's existing post-loop `rethreadNestedEntryMasks`/
+`applyStageMasks` to re-narrow its entry mask -- `collectUniformPassThroughRegion`'s
+contract (return a block set the caller later uniformly applies masking
+to) differs from `flatten`'s own incremental mask-building model, so a
+literal copy of `flatten`'s pattern did not fit.
+
+**Verification -- partial success, then a real regression found**:
+- Built `feme-opt` cleanly; the full repro's **middle**-loop diagnostic
+  layer was eliminated (confirmed via `FEME_DEBUG_LINEARIZE_TRACE=1`).
+  The **outer** layer still failed, now against a different pair of
+  obstacle blocks (a post-child-cycle relay/guard block, not a cycle
+  header) -- recognizing that class of edge needs `DiamondFlattener`'s
+  own private `isLoopControlOrHeaderRelayEdge`-style relay-chase logic,
+  tightly coupled to its member state (`PDT`/`DT`/`CI`), not trivially
+  reusable from `LoopLinearizer` without refactoring. Judged a separate,
+  larger-scope follow-up.
+- `check-feme`: 3906/3910 Passed, 4 Unsupported, 0 Failed -- identical to
+  the `L541` baseline, no regressions in the lit suite.
+- Ran a full 757-case graphicsfuzz corpus sweep both with and without the
+  fix (`git stash`/`git stash pop` around a `ninja feme_vulkan` rebuild
+  each time) via `run_vulkan_cts.py`, and diffed the two `report.txt`
+  fail lists with `LC_ALL=C sort` + `comm`. Before: 685 Pass / 72 Fail
+  (matches the established baseline). After: 688 Pass / 69 Fail. The
+  diff showed **4 cases newly `Pass`** (`cov-integer-minus-one-increased-before-indexing-array`,
+  `cov-loop-struct-array-field-set-value-self-dependency`,
+  `cov-loops-and-conditions-fragcoord-always-false-floats-one`,
+  `cov-nested-loops-sample-opposite-corners`) but also **1 case newly
+  `Fail`**: `cov-nested-loops-array-choose-red-last-iteration`. Confirmed
+  this is a real regression, not run-to-run flakiness, by re-running the
+  single case standalone against both builds: consistently `Pass` on the
+  unfixed build, consistently `Fail` (3/3) on the fixed build. The
+  targeted case itself, `cosh-return-inf-unused`, remained `Fail` in both
+  runs, as expected (the outer-loop layer is still unfixed).
+
+**Decision: reverted the fix.** A net gain of 3 cases (4 up, 1 down) that
+includes an unexplained *silent* behavioral regression (not caught by
+`check-feme`'s lit suite, which has no coverage of that shape) is not
+safe to land speculatively, especially given this is a rendering
+correctness pass, not merely a diagnostic. Rather than guess which half
+of the two changed call sites is responsible, left the code at the
+pre-session baseline (`git checkout --` on `Linearize.cpp`) and instead
+landed a pinned regression/triage lit test capturing the still-unsupported
+shape: `Linearize/unsupported-nested-loop-divergent-inner-exit-guards-discard.ll`
+(the machine-`llvm-reduce`d 36-line repro, block names kept exactly as
+reduced since hand-simplifying the relay shape changed which diagnostic
+fires). `check-feme` with just the new test added: 3907/3911 Passed, 4
+Unsupported, 0 Failed.
+
+**Vulkan14FeatureInventory.md / VulkanExtensionInventory.md**: no update
+needed -- this is an internal compiler-correctness investigation, not a
+feature/extension status change.
+
+**offload-test-suite**: re-verified the patch set this session per
+standing instructions -- `llvm-beanz/feme` branch tip (`0cc94c2`)
+cherry-picks cleanly, and all 5 stored patches in
+`feme/offload-test-suite-patches/` apply cleanly with `git am --keep-cr`,
+in order, with no conflicts. Nothing to update there.
+
+**Commits**: the new lit test in its own commit; `Roadmap.md` +
+`VulkanCTSReport.md` together in a docs commit; `agent_thoughts.md` in a
+final commit. No `Linearize.cpp` commit, since the fix was reverted.
+
+**Next steps, ranked**:
+1. Before re-attempting `ENV6(c)(5b)`, reduce
+   `cov-nested-loops-array-choose-red-last-iteration` itself (the newly
+   regressed case) the same way this session reduced
+   `cosh-return-inf-unused`, to determine precisely which of the fix's
+   two changed call sites (the `collectUniformPassThroughRegion`
+   shortcut, or the `Pre`-probe lambda swap) is responsible -- landing
+   only the safe half, if one exists, may still unlock the 4 newly-passing
+   cases without the regression.
+2. The 3-case no-diagnostic bucket from `L541` (`cov-do-while-negative-iterator-nested-loops-increment-array-element`,
+   `cov-function-always-return-negative-bitfield-extract`,
+   `cov-nested-loop-not-greater-than-increment-array-element`) remains
+   completely unexplored -- first step is `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+   re-runs per `L508`'s own method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, flagged
+   in `L541`) is still unconfirmed as a real regression-vs-progress
+   artifact; not touched this session.
+4. `GetAlreadyLinearizedCycleExit`'s general-mechanism audit (carried
+   from `L540`) remains open; this session adds one more confirmed data
+   point (it is evidently *not* a safe drop-in generalization to every
+   call site without also handling the regressed shape) but the broader
+   audit itself is still not done.
+5. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (re-verified clean again this session).
