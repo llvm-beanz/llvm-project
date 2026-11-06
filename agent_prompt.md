@@ -68,7 +68,7 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. `ENV6(e)(4a)` remaining 3 demote cases.
+1. `ENV6(e)(4b)` (3 cases).
 2. `ENV6(e)(2)` mesh attrs/clip (6), `ENV6(e)(3)` mesh output size (4).
 3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
 4. Full CTS re-measure in the background.
