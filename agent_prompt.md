@@ -68,7 +68,8 @@ mid-investigation to avoid losing documentation.
 
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
-1. Dump `FEME_DUMP_IR_PRELINEARIZE` for those 3, reduce with feme-opt, look for a shared shape.
-2. Full CTS re-measure in the background.
-3. `image_query.samples_storage`.
-4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+1. Reduce the nested-loop case above into a `feme-opt` lit repro
+   (outer loop whose latch branch is an inner loop's `loop.exit.guard`).
+2. Inspect `cosh-return-inf-unused` for a shared shape.
+3. Full CTS re-measure in the background.
+4. `image_query.samples_storage`; `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
