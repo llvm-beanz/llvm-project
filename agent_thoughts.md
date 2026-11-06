@@ -132206,3 +132206,16 @@ Bisecting a pass/fail shader by editing the CTS source is cheap here. Do it earl
 2. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
 3. Full CTS re-measure in the background.
 4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: X8_D24 format (ENV6(e)(1))
+
+- The 4 "D24S8" failures were really `X8_D24_UNORM_PACK32` being unmapped.
+- Added `ResourceFormat::X8_D24_UNORM`, same word layout as D24S8.
+- Gotcha: I first put the enum mid-list. 49 tests failed because tests hardcode numeric values. Append at the tail.
+- `check-feme`: 3897 passed. 59 related CTS cases Pass.
+
+## Next steps (ranked)
+1. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+2. `transform_feedback.fuzz` (4).
+3. Full CTS re-measure in the background.
+4. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
