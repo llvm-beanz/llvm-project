@@ -4591,7 +4591,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                     float Lo = std::min({V0, V1, V2});
                     float Hi = std::max({V0, V1, V2});
                     float Tol = 1e-5f * std::max(std::fabs(Lo), std::fabs(Hi));
-                    if (Quad.SampleMask[Lane] != 0) {
+                    if (Quad.SampleMask[Lane] != 0 && B0 >= 0.0f && B1 >= 0.0f &&
+                        B2 >= 0.0f) {
                       if (Value < Lo && Value >= Lo - Tol)
                         Value = Lo;
                       else if (Value > Hi && Value <= Hi + Tol)
