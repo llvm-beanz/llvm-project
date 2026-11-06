@@ -11936,3 +11936,7 @@ in `pipeline.monolithic.bind_buffers_2.*` (0 fail) or `glsl.builtin_var.*`
 ## L536: MSAA helper-lane snap gating
 
 The snap now also requires non-negative barycentrics. `glsl.derivate.*vec4_highp`: 150 Pass / 3 Fail (the 3 `fwidth*.fbo_float` rounding cases); the 18 `fbo_msaa{2,4}` cases pass. `check-feme`: 3905 passed.
+
+## L537: Double-precision varying interpolation
+
+`glsl.derivate.*`: 1368 Pass / 0 Fail (all 102 `vec4_highp` failures fixed). `bind_buffers_2.*` and `multisample_interpolation.*`: 0 failures. `check-feme`: 3905 passed.

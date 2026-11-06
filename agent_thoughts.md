@@ -132614,3 +132614,15 @@ Next steps, ranked:
 2. `ENV6(c)(5a)` flatten-level fix (unblocks negative-left-shift).
 3. Full sweep rerun (library changed).
 4. cosh-return-inf-unused; offload (blocked).
+
+# Session: derivate cluster closed
+
+**Next action:** start the `ENV6(c)(5a)` flatten()-level fix (dedicated session).
+
+1. Device confirmed.
+2. fwidth fbo_float was 4.5 ULP interpolation error at values near 75. Accumulating in double fixed it. All `glsl.derivate.*` pass; `ENV6(e)(6)` struck through.
+
+Next steps, ranked:
+1. `ENV6(c)(5a)` (also unblocks negative-left-shift, ~75 graphicsfuzz).
+2. Full sweep rerun (library changed; run detached).
+3. cosh-return-inf-unused; offload (blocked).
