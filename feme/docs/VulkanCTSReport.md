@@ -261,6 +261,10 @@ Of the other 6 `spirv_assembly.instruction` failures in the original 7-case clus
 
 `transform_feedback.fuzz.{2_level_struct_array,single_struct_array}.{std_geometry,std_vertex}` (4 cases) now Pass. Three independent bugs: (1) `SPIRVToLLVM` did not tighten an array of offset-less structs (with matrix-array members) inside an offset-decorated block; (2) the executor packed every instance's rows contiguously, so signature ABI v9 adds `XfbInstanceRows`/`XfbInstanceStride` and capture steps between struct instances by the stride; (3) `resolveNestedStageIOField` scaled the instance index in raw rows while the downstream store addresses multi-row values (a `mat2`) in value units, which overran the element's rows (`double free`). The non-fuzz `transform_feedback` group (131,575 cases) re-ran with 0 failures (5,984 Pass, rest NotSupported). `check-feme` 3902 passed, 4 unsupported.
 
+### L548: Failing-list refresh -- 105 of the stale 146 still `Fail`
+
+The 146-case `verified-failures-146.txt` re-ran via the batch runner: 37 `Pass`, 4 `NotSupported`, 105 `Fail` (saved as `verified-failures-105.txt`). Clusters: `graphicsfuzz` 74 (dominant error: 14+ "loop has an internal branch in a body shape this milestone does not support", 6 simdize "divergent branch", ~12 "only a uniform pass-through region"/"mask-affecting operation", 3 "no reconvergence point"), `image.store` 14 (waived), `spirv_assembly.instruction` 6, `tessellation.invariance` 2, `line_continuity` 2, singletons. No inventory change.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
