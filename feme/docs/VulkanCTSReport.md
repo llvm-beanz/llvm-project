@@ -219,6 +219,16 @@ are `graphicsfuzz` linearize/simdize cases (`ENV6(c)(5)`-`(7)`) and singletons.
 Failing total is 146 (new failures outside the old list were not re-measured).
 No inventory change.
 
+### L540: `renderpass2.*.attachment_allocation.input_output.88` (2) now `Pass` -- signed subpass-load handle
+
+A module reading an `isubpassInput` and a `usubpassInput` shared one
+`feme.stage.subpass.load.i32` declaration although the handle types differ
+(`spirv.SignedImage` vs `spirv.Image`), failing MLIR verification. The
+signed variant is now `feme.stage.subpass.load.i32.signed`. Triage of the
+rest of `mesh_shader`/`renderpass2`/`demote` is in Roadmap `ENV6(e)(1)`-`(4)`.
+Failing total is now 144 (stale list, other regressions unmeasured).
+`check-feme` 3891/3895, 4 unsupported. No inventory change.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under

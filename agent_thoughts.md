@@ -132075,3 +132075,20 @@ Triage `mesh_shader.ext` (10) one case alone.
 3. `spirv_assembly.instruction` (7), `transform_feedback.fuzz` (4).
 4. A full re-measure in a long background run (new regressions outside the list are unchecked).
 5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: renderpass2 / mesh_shader / demote triage
+
+## Next action
+Reduce `glsl.demote.dynamic_loop_always` (compiles, wrong image) to an `.ll` repro (`ENV6(e)(4)`).
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Ran one case per cluster alone. Four distinct causes (see roadmap `ENV6(e)(1)`-`(4)`).
+3. Fixed the cheap one: `renderpass2 input_output.88` (2 cases). Signed and unsigned subpass inputs shared one callee declaration. Now `.i32.signed`. Lit test added, old CHECK updated. `check-feme` 3891 passed.
+
+## Next steps (ranked)
+1. `ENV6(e)(4)` demote (5), `ENV6(e)(2)` mesh attrs/clip (6).
+2. `ENV6(e)(3)` mesh output size (4).
+3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+4. Full CTS re-measure in the background.
+5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
