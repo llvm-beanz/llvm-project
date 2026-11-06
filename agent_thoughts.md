@@ -132682,3 +132682,96 @@ Next steps, ranked:
 2. `ENV5(c)(7)(b)` multi-barrier hull (1 case).
 3. `cosh-return-inf-unused` shape check.
 4. Add the `LC_ALL=C sort` before `comm` note to `.instructions.md`.
+
+# Session: ENV6(c)(5a) landed
+
+**Done:** `ENV6(c)(5a)` is fixed, tested, and struck through on the roadmap.
+
+1. Device confirmed: `FeMe CPU Vulkan Device`.
+2. Root-caused the real shape: the inner loop's own header relay edge
+   (`.Flow2_crit_edge`) and its body diamond's fallthrough (`Flow3`) both
+   reconverge at `Flow2`. Earlier sessions' assumption that the relay
+   target was `.Flow2_crit_edge` was wrong -- `ExitCheck::RelayBlock` is the
+   relay chain's *last hop*, i.e. `Flow2` itself. `flatten()` was reusing
+   the diamond's own per-arm merge masks unconditionally for every
+   predecessor into `Flow2`, including the relay predecessor that never
+   runs the diamond -- an "Instruction does not dominate all uses"
+   verifier failure.
+3. Fix: new `DiamondFlattener` ctor param `RelayBypassBlock` (wired from
+   `linearizeCycle` as `HeaderExit->RelayBlock`), a new
+   `isRelayBypassMergeBlock(Succ)` exact-identity check, and a real
+   two-incoming `PHINode` pair built in `flatten()`'s `UncondBr` case that
+   merges the diamond arm's masks with the region's own *entry* masks
+   (dominance-safe for the relay predecessor either way). Did **not**
+   retry the `validate()`-only relaxation, per the instruction.
+4. Verification, in order:
+   - `opt -passes=verify` clean on the repro.
+   - `check-feme`: 3905/3909 Passed, 4 Unsupported, 0 failures.
+   - Real `deqp-vk`: the targeted case
+     (`cov-function-infinite-loop-return-identical-condition`) now
+     **Pass**es (previously aborted the compiler).
+   - Full 756-case graphicsfuzz corpus, baseline vs. fix via `git stash`:
+     681/75 before, **683/73 after**. Zero regressions, two new passes
+     (the targeted case plus `cov-function-multiple-loops-compare-
+     integer-return`, fixed incidentally).
+   - `ENV6(e)(7)` (`cov-x86-isel-lowering-negative-left-shift`) is
+     **not** fixed by this change -- different code path
+     (`flattenKnownDivergentBranch`/`HeaderDivergent`, not
+     `flattenLoopBodyRegion`). Roadmap corrected to say so instead of
+     "blocked on `ENV6(c)(5a)`". `cosh-return-inf-unused` also unaffected
+     (unrelated "uniform pass-through region" bail-outs).
+5. Test: `env6c5-outer-exit-after-inner-loop-unsupported.ll` renamed to
+   `env6c5-outer-exit-after-inner-loop.ll` and flipped from a pinned
+   negative diagnostic to a positive test asserting the new phi shape.
+6. Docs updated: `Roadmap.md` (`ENV6(c)(5a)` struck through, `ENV6(e)(7)`
+   corrected), `VulkanCTSReport.md` (new `## L539` section). No feature or
+   extension changed, so the two inventory docs and `Design.md` were left
+   alone (nothing in them documents this internal shape).
+7. **Unrelated find while validating `check-hlsl-feme-vk`:** patch 0004
+   in `feme/offload-test-suite-patches/` (`WaveActiveMax.test`) failed to
+   `git am` against a freshly re-cherry-picked `offload-test-suite`.
+   Root cause: that test file has genuine upstream CRLF line endings
+   (confirmed via `git show origin/main:<path> | file -`, true since at
+   least commit `1bd90cd`, not a local artifact), and plain `git am`
+   silently strips the trailing `\r` from unchanged context lines while
+   reading the patch (a `git-mailinfo` email-transport behavior), making
+   the patch look like it doesn't apply even though its content is
+   correct byte-for-byte. Fixed by using `git am --keep-cr` and
+   regenerating the stored patch from a clean `--keep-cr` apply so it no
+   longer depends on a workaround flag being remembered by accident.
+   Also found (and fixed) that the `llvm-beanz` git remote itself, not
+   just the branch, is wiped every session and needs re-adding before the
+   fetch. Both codified in `feme/.instructions.md` and the patches
+   `README.md`. This is outside FeMe's own code, so it's committed
+   separately and touches only `feme/offload-test-suite-patches/*` and
+   `feme/.instructions.md` (both of which are process/doc files that ship
+   with this repo, not `offload-test-suite` itself -- there is no push
+   access there, so the real fix lives in the regenerated patch).
+8. Post-fix re-validation: `check-hlsl-feme-vk` 505 Passed / 27 Expectedly
+   Failed / 275 Unsupported / 0 unexpected failures (807 total).
+   `check-feme` re-confirmed clean at 3905/3909 Passed, 4 Unsupported, 0
+   failures.
+
+Commits this session (in order): core `Linearize.cpp` fix; test
+rename+flip; roadmap/CTS-report docs; offload-test-suite `.instructions.md`
++ patch README + regenerated 0004 patch; CTS-report follow-up addendum;
+this thoughts entry.
+
+Next steps, ranked:
+1. Reduce `ENV6(e)(7)` (`cov-x86-isel-lowering-negative-left-shift`):
+   dump with `FEME_DUMP_IR_PRELINEARIZE=1`, find the call site building
+   `live.merge31`/`sideeffect.merge32`, and look at
+   `flattenKnownDivergentBranch` or the `HeaderDivergent` `BodyDF` path
+   (~line 9335) -- a sibling fix to this session's, not a retry of it.
+2. Re-measure the `ENV6(c)(5)`/`ENV6(c)(6)` roadmap cluster counts; only 2
+   corpus cases flipped this session, so those counts are still
+   unverified guesses from earlier sessions.
+3. Triage `cosh-return-inf-unused` as its own shape (two distinct "only a
+   uniform pass-through region" bail-outs plus a mask-affecting-op
+   diagnostic -- not this session's relay-block shape at all).
+4. None of the offload-test-suite patch set is at risk right now (0001-
+   0005 verified to reapply clean with `--keep-cr` from a fresh
+   cherry-pick), but keep an eye out if upstream `WaveActiveMax.test`
+   drifts again -- the content, not just the line endings, has already
+   diverged once (stale `XFAIL: Lavapipe && host-arm64`, old comment
+   text) and may again.
