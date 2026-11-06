@@ -249,6 +249,8 @@ Failing total is now 144 (stale list, other regressions unmeasured).
 
 `mesh_shader.ext.properties.max_mesh_output_size_*_no_view_index` (4 cases) now Pass. `getDynamicRowIndexedAccess` did not unwrap a struct-typed single-member interface block. Regression batch `mesh_shader.ext`, `glsl.linkage`, `multisample_interpolation`: 1053 Pass, 0 Fail (rest NotSupported).
 
+- `ENV6(e)(1)`: `VK_FORMAT_X8_D24_UNORM_PACK32` (resolve-compatible format of D24S8) now maps to a new `X8_D24_UNORM`; the 4 depth_stencil_resolve cases (8 with `_separate_layouts`) Pass; 59 related cases Pass, 0 Fail.
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under
