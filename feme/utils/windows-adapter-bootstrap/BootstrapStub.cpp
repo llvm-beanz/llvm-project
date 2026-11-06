@@ -6,18 +6,13 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Unlike windows-adapter-probe's RejectionStub, which exists to show that
-// DXGI/D3D12 never call OpenAdapter10/10_2/12 for a CreateSoftwareAdapter-
-// origin module, this stub implements a real (if minimal) OpenAdapter12 that
-// fills in a public D3D12DDI_ADAPTERFUNCS table. It exists to be called
-// *directly* by DirectHarness.cpp, bypassing DXGI/D3D12CreateDevice entirely,
-// to measure whether the public DDI entry points and table-filling mechanics
-// are self-consistently invokable without any kernel-mode driver mediation.
-// This does not prove, or attempt to prove, that DXGI will ever route to this
-// module -- see windows-adapter-probe's rejection-stub result for that
-// (separate) question. Every DDI function here deliberately returns a loud,
-// distinguishable failure (E_NOTIMPL) past the open/negotiate boundary; none
-// of them implement a real device, resource, or command contract.
+// This minimal OpenAdapter12 fills a public D3D12DDI_ADAPTERFUNCS table.
+// DirectHarness.cpp invokes it by hand, independently of Windows routing.
+// windows-warp-interposition also builds it as a local d3d10warp.dll and
+// measures stock D3D12's adapter negotiation through Microsoft's WARP identity.
+// Neither experiment implements a real device, resource, or command contract:
+// no supported DDI versions are advertised, and capabilities/device creation
+// deliberately return E_NOTIMPL.
 //
 //===----------------------------------------------------------------------===//
 

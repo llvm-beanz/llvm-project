@@ -46,6 +46,17 @@ static void reportModule(const wchar_t *Name) {
   std::wprintf(L"Module %ls: %ls\n", Name, Path);
 }
 
+static HRESULT checkWarpIdentity(IDXGIAdapter1 *Adapter) {
+  DXGI_ADAPTER_DESC1 Desc{};
+  HRESULT Result = report(L"WARP GetDesc1", Adapter->GetDesc1(&Desc));
+  if (FAILED(Result))
+    return Result;
+  if (Desc.VendorId != 0x1414 || Desc.DeviceId != 0x008c ||
+      !(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+    return report(L"Microsoft WARP identity mismatch", E_FAIL);
+  return S_OK;
+}
+
 static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter) {
   DXGI_ADAPTER_DESC1 Desc{};
   HRESULT Result = report(L"GetDesc1", Adapter->GetDesc1(&Desc));
@@ -105,9 +116,15 @@ static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter) {
 int wmain(int Argc, wchar_t **Argv) {
   bool Stub = Argc == 3 && std::wcscmp(Argv[1], L"--stub") == 0;
   bool Software = Argc == 3 && std::wcscmp(Argv[1], L"--software") == 0;
-  if (Argc != 1 && !Stub && !Software) {
-    std::fwprintf(stderr, L"Usage: %ls [--software DLL | --stub DLL]\n",
-                  Argv[0]);
+  bool WarpShim = Argc == 3 && std::wcscmp(Argv[1], L"--warp-shim") == 0;
+  bool WarpBootstrap =
+      Argc == 3 && std::wcscmp(Argv[1], L"--warp-bootstrap") == 0;
+  if (Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap) {
+    std::fwprintf(
+        stderr,
+        L"Usage: %ls [--software DLL | --stub DLL | --warp-shim DLL | "
+        L"--warp-bootstrap DLL]\n",
+        Argv[0]);
     return 1;
   }
   ComPtr<IDXGIFactory4> Factory;
@@ -119,13 +136,8 @@ int wmain(int Argc, wchar_t **Argv) {
     if (FAILED(report(L"EnumWarpAdapter",
                       Factory->EnumWarpAdapter(IID_PPV_ARGS(&Adapter)))))
       return 1;
-    DXGI_ADAPTER_DESC1 Desc{};
-    if (FAILED(report(L"Reference GetDesc1", Adapter->GetDesc1(&Desc))) ||
-        Desc.VendorId != 0x1414 || Desc.DeviceId != 0x008c ||
-        !(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
-      report(L"Reference WARP identity mismatch", E_FAIL);
+    if (FAILED(checkWarpIdentity(Adapter.Get())))
       return 1;
-    }
     HRESULT Result = exerciseAdapter(Adapter.Get());
     Adapter.Reset();
     Factory.Reset();
@@ -153,8 +165,11 @@ int wmain(int Argc, wchar_t **Argv) {
     return 1;
   }
   using GetCalls = void(APIENTRY *)(LONG *, LONG *, LONG *);
+  using GetBootstrapCalls = void(APIENTRY *)(
+      LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *);
   GetCalls ReadCalls = nullptr;
-  if (Stub) {
+  GetBootstrapCalls ReadBootstrapCalls = nullptr;
+  if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
     if (!ReadCalls) {
@@ -164,40 +179,78 @@ int wmain(int Argc, wchar_t **Argv) {
       return 1;
     }
   }
+  if (WarpBootstrap) {
+    ReadBootstrapCalls = reinterpret_cast<GetBootstrapCalls>(
+        GetProcAddress(Module, "FeMeBootstrapGetCalls"));
+    if (!ReadBootstrapCalls) {
+      report(L"GetProcAddress(FeMeBootstrapGetCalls)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
+  }
   ComPtr<IDXGIAdapter> SoftwareAdapter;
   HRESULT Result =
-      report(L"CreateSoftwareAdapter",
-             Factory->CreateSoftwareAdapter(Module, &SoftwareAdapter));
+      WarpShim || WarpBootstrap
+          ? report(L"EnumWarpAdapter(shim)",
+                   Factory->EnumWarpAdapter(IID_PPV_ARGS(&SoftwareAdapter)))
+          : report(L"CreateSoftwareAdapter",
+                   Factory->CreateSoftwareAdapter(Module, &SoftwareAdapter));
   bool Opened = false;
   if (SUCCEEDED(Result)) {
     Result =
         report(L"QueryInterface(IDXGIAdapter1)", SoftwareAdapter.As(&Adapter));
+    if (SUCCEEDED(Result) && (WarpShim || WarpBootstrap))
+      Result = checkWarpIdentity(Adapter.Get());
     if (SUCCEEDED(Result)) {
       Opened = true;
       Result = exerciseAdapter(Adapter.Get());
     }
   }
+  if (WarpShim || WarpBootstrap)
+    reportModule(L"feme_warp_reference.dll");
   Adapter.Reset();
   SoftwareAdapter.Reset();
   Factory.Reset();
-  bool RejectedBeforeDDI = true;
+  bool ExpectedDDICalls = true;
   if (ReadCalls) {
     LONG Count10, Count10_2, Count12;
     ReadCalls(&Count10, &Count10_2, &Count12);
     std::wprintf(L"Stub calls: OpenAdapter10=%ld OpenAdapter10_2=%ld "
                  L"OpenAdapter12=%ld\n",
                  Count10, Count10_2, Count12);
-    RejectedBeforeDDI = Count10 == 0 && Count10_2 == 0 && Count12 == 0;
-    if (!RejectedBeforeDDI)
+    ExpectedDDICalls = Count10 == 0 && Count10_2 == 0 &&
+                       (WarpShim ? Count12 == 1 : Count12 == 0);
+    if (!ExpectedDDICalls)
       report(L"Stub rejection stage changed", E_FAIL);
+  }
+  if (ReadBootstrapCalls) {
+    LONG Open, Size, Versions, Caps, Optional, Fill, Create, Close, Destroy;
+    ReadBootstrapCalls(&Open, &Size, &Versions, &Caps, &Optional, &Fill,
+                       &Create, &Close, &Destroy);
+    std::wprintf(L"Bootstrap calls: Open=%ld Size=%ld Versions=%ld Caps=%ld "
+                 L"Optional=%ld Fill=%ld Create=%ld Close=%ld Destroy=%ld\n",
+                 Open, Size, Versions, Caps, Optional, Fill, Create, Close,
+                 Destroy);
+    ExpectedDDICalls = Open == 1 && Versions > 0 && Caps > 0 && Close == 1 &&
+                       Size == 0 && Optional == 0 && Fill == 0 && Create == 0 &&
+                       Destroy == 0;
+    if (GetModuleHandleW(L"feme_warp_reference.dll")) {
+      report(L"Unexpected reference WARP dependency", E_FAIL);
+      ExpectedDDICalls = false;
+    }
+    if (!ExpectedDDICalls)
+      report(L"Bootstrap negotiation/cleanup mismatch", E_FAIL);
   }
   bool Released = FreeLibrary(Module) != FALSE;
   if (!Released)
     report(L"FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
   std::wprintf(L"Software adapter objects released. Stub rejection is an "
                L"experiment, not a working FeMe adapter.\n");
-  return Released && Opened && RejectedBeforeDDI &&
-                 (Stub ? Result == DXGI_ERROR_UNSUPPORTED : SUCCEEDED(Result))
+  return Released && Opened && ExpectedDDICalls &&
+                 (Stub || WarpShim || WarpBootstrap
+                      ? Result == DXGI_ERROR_UNSUPPORTED
+                      : SUCCEEDED(Result))
              ? 0
              : 1;
 }

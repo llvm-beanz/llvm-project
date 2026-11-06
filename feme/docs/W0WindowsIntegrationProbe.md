@@ -1,11 +1,15 @@
 # W0 Windows user-mode integration probe
 
-**Next step: `W0(b)`'s decision gate is now triggered. No public, no-install,
-third-party route to `OpenAdapter12` was found -- see
-[Decision: no public third-party route to `OpenAdapter12` was found](#decision-no-public-third-party-route-to-openadapter12-was-found).
-An explicit approval is needed among an installed-adapter (kernel-mode
-driver) alternative, a private-compatibility scope change, or an
-application-local COM runtime before further `W0(g)` prototype work.**
+**Bounded alternative-B investigation authorized and routing proved.**
+Stock D3D12 reaches LLVM-owned `OpenAdapter12`, queries its public adapter
+callbacks, and closes it on both the host and Windows container. The owned
+cases need neither ordinal 199 nor reference-WARP forwarding. This uses
+Microsoft's existing WARP adapter identity, not a distinct FeMe adapter;
+no supported DDI version or FeMe device exists yet. See
+[Alternative B: application-local WARP DDI routing](#alternative-b-application-local-warp-ddi-routing).
+The public general-provider search remains negative, but that is not a
+runtime-routing impossibility result. `W0(b)` remains a product/compatibility
+decision, not a reason to repeat the already-authorized research question.
 
 This is host and container evidence for [WARPRoadmap.md](WARPRoadmap.md),
 collected on 2026-11-06. The user selected stock-runtime user-mode/software-adapter probing
@@ -28,7 +32,7 @@ invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 | Existing NuGet WARP | Package 1.0.19; file `1.0.19.0.20260422.1` |
 | Existing Agility SDK | Package 1.619.5; core file `1.619.5.0.20260730.3`; exported SDK version 619 |
 | Reference adapter | Microsoft Basic Render Driver, vendor `0x1414`, device `0x008c`, software flag; LUID `00000000:0001283b` in this boot |
-| FeMe D3D12 DDI negotiation | Not reached; no negotiated FeMe DDI version or valid device tables |
+| FeMe D3D12 DDI negotiation | Original generic probe: not reached. Alternative B below reaches owned adapter callbacks, but advertises no supported DDI version and supplies no device tables |
 | FeMe Vulkan ICD | Not installed on this host; `vulkaninfo --summary` reports NVIDIA and Dozen adapters, not FeMe |
 
 The probe prints the loaded D3D12 runtime/core/WARP module paths. Agility
@@ -124,23 +128,24 @@ It does not select a replacement COM runtime or require a kernel installation.
    distinct FeMe identity. Measure the chosen DDI version and teardown, including
    failure cleanup, rather than inferring support from the installed headers.
    The [direct-call experiment](#direct-openadapter12-invocation-bypassing-dxgi)
-   shows the entry point's own mechanics are callable; item 2's negative
-   result means this step cannot proceed through a third-party, no-install
-   `OpenAdapter12` route without first resolving item 4.
+   proves the entry point's mechanics; alternative B below now proves
+   stock-runtime routing and adapter queries/close without a new kernel driver.
+   Supported-version negotiation, device creation and distinct identity remain
+   separate unfinished requirements.
 4. If only WARP-private binary compatibility makes the application-local UMD
    route work, request an explicit product/design decision. Do not silently
    impersonate Microsoft's adapter, use ordinal 199, or declare an installed
    miniport mandatory. The alternatives are an approved compatibility project,
    the separately installed WDDM path, or the application-local COM runtime.
-   **This item is now reached**: no public contract was found (item 2), so an
-   explicit decision among these alternatives is needed before further
-   prototype work.
+   The user explicitly authorized the bounded B investigation recorded below.
+   That permits controlled WARP-identity diagnostics, not private-ABI guessing,
+   product identity changes, or automatic adoption of a shipping architecture.
 
 W0(a), W0(b), and W0(d) remain incomplete: there is no FeMe D3D12 device, and
 no installed-path test. The user-mode stock-runtime direction is selected and
-now container-verified at the measurement level, but no public bootstrap
-route to `OpenAdapter12` was found, so `W0(b)`'s decision gate is now
-triggered rather than closed. The reference-test portion of W0(d) has host and
+now container-verified through owned adapter queries/close in alternative B.
+No public general-provider bootstrap was found and `W0(b)`'s shipping boundary
+is not closed, but the research routing blocker is resolved. W0(d) has host and
 now container evidence only. Installed-driver, signing/reboot, display and
 HLK work are separate host/VM tasks if that deployment requires them; they do
 not block continuing W0(f)'s bootstrap step (tracked as `W0(g)` in
@@ -163,7 +168,7 @@ to `AdapterProbe.cpp`/`RejectionStub.cpp` were needed to build or run here).
 | Container NuGet WARP (via `llvm-project/build/bin`, from the OffloadTest D3D12 test-infrastructure restore) | package `1.0.19`; file `1.0.19.0.20260422.1` |
 | Container Agility SDK core (via `llvm-project/build/tools/OffloadTest/agility-sdk`) | file `1.619.5.0.20260730.3`; exported SDK version 619, matching the host's package |
 | Reference adapter | Microsoft Basic Render Driver, vendor `0x1414`, device `0x008c`, software flag; LUID `00000000:0001283b` in this container boot |
-| FeMe D3D12 DDI negotiation | Not reached in this container either; no negotiated FeMe DDI version or valid device tables |
+| FeMe D3D12 DDI negotiation | Original generic probe: not reached. Alternative B below reaches owned adapter callbacks in this container; no supported DDI version/device tables |
 
 Configured and built with the exact commands from the "Container starting
 point" section below; all four CTest cases passed, with identical pass/fail
@@ -188,11 +193,10 @@ NuGet WARP/Agility SDK package already present from unrelated FeMe/DXC/
 OffloadTest build restores, all pass the same reference, software-adapter,
 and rejection-stub experiments as the host did. No driver registration,
 signing changes, registry changes, system-DLL replacement, or reboot
-occurred in the container either. This is still not FeMe DDI negotiation --
-the rejection stub's `OpenAdapter12` counter stays at zero in every run,
-confirming the stub (and, by the same loader mechanics, any future FeMe
-module without a real DDI implementation) is rejected before reaching that
-negotiation, not evidence that negotiation itself would succeed.
+occurred in the container either. In these generic `CreateSoftwareAdapter`
+runs the rejection stub's `OpenAdapter12` counter stays at zero. This
+does not generalize to every loader path: alternative B below routes even
+the original rejection stub through `EnumWarpAdapter` to its owned DDI.
 
 ## Direct `OpenAdapter12` invocation (bypassing DXGI)
 
@@ -229,8 +233,8 @@ OS-routed adapter; it is not evidence that DXGI/D3D12CreateDevice can reach
 this module.** It does establish that the public `OpenAdapter12`/
 `D3D12DDI_ADAPTERFUNCS` contract, as declared in the WDK's `d3d12umddi.h`, is
 self-consistently implementable and callable in user mode with no kernel
-involvement -- the missing piece is exclusively the OS-side routing from a
-third-party module to that entry point, not the entry point's own mechanics.
+involvement in this direct-call fixture. At that point OS-side routing was
+unproved; alternative B below subsequently proves routing to the same fixture.
 
 ### Decision: no public third-party route to `OpenAdapter12` was found
 
@@ -254,30 +258,21 @@ result and public documentation research:
 3. This session's direct-call experiment above shows the entry point and
    table-filling mechanics are not themselves the obstacle -- a correctly
    shaped `OpenAdapter12` is trivially callable by hand. The obstacle is
-   specifically that nothing in the public DXGI/D3D12/DXCore surface routes a
-   third-party module's `OpenAdapter12` the way `CreateSoftwareAdapter`
-   routes to `OpenAdapter10`/`OpenAdapter10_2`.
+   specifically the absence of a documented general-provider bootstrap,
+   not evidence that stock Windows can never load an owned `OpenAdapter12`.
 4. The reference WARP export table's private ordinal-199 `WarpPrivateApi`
-   (noted in the host measurements above) is consistent with Microsoft's own
-   WARP being loaded through an internal path specific to WARP's identity,
-   not through the public `CreateSoftwareAdapter` contract either -- further
-   evidence (not proof, since no Windows source was read) that no general
-   public bootstrap contract for third-party D3D12 software adapters exists
-   today.
+   (noted in the host measurements above) is an observed compatibility surface,
+   not proof it is required for loading an owned DDI. Alternative B below
+   reaches owned adapter callbacks without this export.
 
 **No public, third-party, no-install bootstrap contract to `OpenAdapter12`
 was found.** This answers `W0(g)`'s "identify a public third-party adapter
 identity/thunk bootstrap" step with a negative result rather than a positive
-one. Per the remaining-work list above, this **triggers `W0(b)`'s decision
-gate**: an explicit approval is needed among (a) an installed-adapter
-alternative (kernel-mode driver, even a minimal/stub one, per this session's
-web research), (b) a private-compatibility scope change (depending on WARP's
-own private loading path, which the design document already prohibits
-without separate approval), or (c) an application-local COM runtime (with its
-own documented added DXGI/debug-layer/DRED/distribution cost). This document
-does not select an alternative; it records that the gate is now reached and
-recommends evaluating option (a) first, since it is the only one not already
-flagged as requiring a separate design exception.
+one. This originally triggered `W0(b)`'s decision gate among (a) an installed
+adapter, (b) WARP-specific compatibility, or (c) an application-local COM
+runtime. The user subsequently authorized investigation of B. Its successful
+result below supersedes the blanket prototype-routing blocker and the earlier
+recommendation to evaluate A first; it does not select B for distribution.
 
 ### `W0(b)` alternative cost/scope evaluation (not a selection)
 
@@ -340,25 +335,17 @@ page documents three signing tiers and a per-OS acceptance table:
   fetched this session and are recorded here only as items needing
   verification before being relied upon, not as established fact.
 
-**(b) Private-compatibility scope change, cost.** This means depending on
-WARP's own undocumented loading path -- consistent with the reference WARP
-module's private ordinal-199 `WarpPrivateApi` export noted in the host
-measurements above -- rather than any publicly documented contract. Its cost
-is not engineering effort but risk and process: the design document already
-prohibits relying on undocumented Microsoft internals without a separate
-design exception, because (1) private ordinals carry no compatibility
-guarantee and can change or disappear in any Windows/Agility SDK update with
-no notice, (2) reverse-engineering a private Microsoft API surface raises
-legal/compliance questions distinct from the purely public-API-based
-engineering work done so far in this probe, and (3) FeMe's own measurements
-already show the DXGI/D3D12 runtime special-cases WARP's enumeration
-(`IDXGIFactory4::EnumWarpAdapter`, per Microsoft's public
-[WARP guide](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/directx-warp))
-rather than routing it through the generic third-party adapter path explored
-in `W0(g)` -- so this alternative would mean impersonating or hooking that
-WARP-specific special case, not extending a general-purpose contract. This
-alternative's cost cannot be bounded by further research alone; it requires
-the separate design sign-off the existing prohibition already calls for.
+**(b) WARP-specific compatibility, cost.** Separate two risks: relying on
+application-local WARP filename/identity selection as a provider boundary,
+and depending on actual private binary APIs. The bounded investigation below
+uses the first but does not need the second to enter owned adapter callbacks.
+It uses the public `EnumWarpAdapter` API and public WDK DDI signatures; it
+does not hook APIs or guess ordinal-199 signatures. The filename/identity
+route is still not a documented general third-party registration contract,
+and the resulting Microsoft adapter identity is unsuitable as a truthful
+FeMe product identity. Any later private-API requirement adds compatibility
+and licensing-review costs; ordinals can change without a compatibility
+guarantee. Shipping adoption therefore still needs a separate design decision.
 
 **(c) Application-local COM runtime, cost.** This means FeMe owning its own
 D3D12/DXGI-shaped API surface entirely outside the real Microsoft runtime
@@ -382,6 +369,141 @@ remains fully buildable/testable inside this container, at the cost of
 reimplementing a second, parallel public-API surface rather than plugging
 into the real one.
 
+## Alternative B: application-local WARP DDI routing
+
+Collected 2026-11-06 after the user explicitly requested investigation of B.
+The approval covers bounded, application-local diagnostics, not installation,
+system hooks, guessed private ABIs, or adoption as FeMe's shipping boundary.
+The new LLVM-owned
+[windows-warp-interposition](../utils/windows-warp-interposition/CMakeLists.txt)
+project reuses the probe harness and public adapter-table fixture. No
+Microsoft source/test implementation was copied.
+
+### Controlled export matrix
+
+Each case has its own executable directory and DLL named `d3d10warp.dll`.
+The forwarding controls copy only the explicitly supplied reference DLL into
+their build directories as `feme_warp_reference.dll`. CMake verifies SHA256
+`1fd2f9d991f00d890d06c00f791a756446f5f29da508b12fdeb8ffd1b5696add`
+(the existing x64 NuGet WARP 1.0.19 binary) before copying it.
+
+| Variant / CTest case | Export policy | Measured result |
+|---|---|---|
+| `reference` / `reference-forwarding` | Known named exports, `OpenAdapter12`, and ordinal 199 forwarded to reference WARP | Microsoft device/queue/fence control succeeds; not FeMe coverage |
+| `public-exports` / `public-exports-interception` | Other named exports forwarded; owned rejecting `OpenAdapter12`; no ordinal 199 | Owned `OpenAdapter12=1`; unsupported by design |
+| `private-ordinal` / `private-ordinal-interception` | Same owned open plus ordinal-199 forwarder | Same owned `OpenAdapter12=1`; ordinal forwarding is unnecessary for this stage |
+| `bare` / `bare-interception` | Only owned open/counter exports; no forwarding or reference DLL | Owned `OpenAdapter12=1`; unsupported by design; reference DLL not loaded |
+| `negotiation` / `os-routed-negotiation` | Owned `OpenAdapter12` fills the public adapter table; no forwarding/reference DLL | Windows queries supported versions/caps and closes the adapter; no device |
+| `bare` / `generic-software-rejection` | Same DLL, but selected through `CreateSoftwareAdapter` instead of `EnumWarpAdapter` | Zero adapter identity and `OpenAdapter12=0`; unsupported before owned DDI |
+
+The owned WARP cases retain an explicit absolute-path `LoadLibraryExW`
+reference, call `EnumWarpAdapter`, and pass that adapter to the real
+`D3D12CreateDevice`. Microsoft Basic Render Driver remains enumerated:
+vendor `1414`, device `008c`, software flag, LUID `00000000:0001283b`
+in this boot. The harness asserts that identity as a diagnostic limitation,
+not a FeMe-selection check. D3D12 ultimately returns `0x887a0004` deliberately:
+the bare entry rejects opening; the table fixture advertises zero versions
+and rejects capabilities. These are routing tests, not working devices.
+
+Exact table-fixture counters on host inbox, host Agility 619, container inbox
+and container Agility 619:
+
+```text
+Open=1 Size=0 Versions=2 Caps=2 Optional=0 Fill=0 Create=0 Close=1 Destroy=0
+```
+
+The test requires one open/close, both kinds of query, and zero device/table
+creation callbacks. It does not assume a universal exact query count across
+future runtimes. The independent owned cases have no PE forwarders and never
+load `feme_warp_reference.dll`; the negotiation harness rejects such a dependency.
+
+### Loader contrast and corrected interpretation
+
+A debugger breakpoint in the bare DLL conclusively records stock
+`D3D12Core!NDXGI::CUMDAdapter::OpenAdapter<0>` calling the owned entry point.
+The same entry is also reached **without explicit preloading**, when the DLL
+is executable-local and named `d3d10warp.dll`. The runtime calls
+`LoadLibraryExW("d3d10warp.dll", ..., 0x8)` on the measured host
+(`LOAD_WITH_ALTERED_SEARCH_PATH`). The DLL is released after its deliberate
+failure, so a module report after `D3D12CreateDevice` says "not loaded".
+That report is not evidence that its entry point was never called. Explicit
+preloading is useful here to retain counters through failure cleanup, not a
+proven routing prerequisite.
+
+The original rejection stub, renamed locally and retained by `--warp-shim`,
+also records `OpenAdapter12=1`. Conversely, the same bare DLL through
+`--stub`/`CreateSoftwareAdapter` records zero open calls. The original generic
+negative result is valid; extending it to WARP-specific selection was not.
+Ordinal 199 appears in reference-runtime lookup traces, but neither its
+presence nor that lookup establishes a requirement for this owned bootstrap.
+
+### Verification and remaining boundary
+
+Both projects were built with x64 MSVC, SDK/WDK 28000, Debug `/Z7`, sccache,
+assertions enabled and PCH disabled. The interposition project explicitly
+selects CMake's `Embedded` debug-information format so `/Zi` does not override
+`/Z7`. Container cases were built from staged LLVM-owned sources with the
+container's compiler and inbox binaries, not just host-built DLLs:
+Windows Server 2025 build `26100.33650`; `dxgi.dll`/`d3d12.dll`/
+`D3D12Core.dll`/inbox WARP `10.0.26100.33648`;
+`dxcore.dll` `10.0.26100.32995`. Host pins are listed above.
+Both Agility runs loaded local core `1.619.5.0.20260730.3`, SDK version 619.
+
+| Repeated validation | Result |
+|---|---|
+| Six interposition CTests, host inbox, each repeated 3 times | 18/18 |
+| Six interposition CTests, container inbox, each repeated 3 times | 18/18 |
+| Original four probe CTests, host inbox and host Agility, each repeated 3 times | 24/24 |
+| Original four probe CTests, source-built container Agility, each repeated 3 times | 12/12 |
+| Bare/negotiation/generic-negative controls, host and container Agility, each repeated 3 times | 18/18 |
+
+**Conclusion:** no new/custom kernel driver, installation, reference forwarding,
+or ordinal 199 is needed to route stock Windows into owned adapter callbacks
+on these measured runtimes. This still uses the existing OS WARP adapter
+infrastructure; it does not prove zero kernel involvement. No distinct FeMe
+identity, supported DDI version, actual FeMe D3D12 device, feature level,
+shader execution, presentation, or shipping compatibility is established.
+Private dependencies later in device creation remain unknown.
+
+The next bounded technical step is to audit a pinned public DDI version and
+the adapter/device/thunk services it requires, separating missing owned
+implementation from any genuinely required private boundary. Seek approval
+before expanding into private ABI implementation or changing the product's
+identity/distribution contract. Do not return to driver installation merely
+because the public general-provider search was negative.
+
+### Reproduce the B investigation
+
+In the container's x64 developer shell with SDK/WDK 28000, use CMake >= 3.29
+and the existing `lld-link` on PATH. The tested forwarding build uses
+`CMAKE_LINKER_TYPE=LLD`; setting `CMAKE_LINKER` alone did not select it here.
+MSVC-link forwarding attempts failed with unresolved exports; their exact
+cause was not established.
+
+```powershell
+cmake -S C:\dev\llvm-project\feme\utils\windows-warp-interposition `
+  -B C:\dev\warp-interposition -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_LINKER_TYPE=LLD `
+  "-DCMAKE_CXX_FLAGS_DEBUG=/Z7 /Ob0 /Od /RTC1" `
+  -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+  -DFEME_WARP_REFERENCE=C:\dev\llvm-project\build\bin\d3d10warp.dll
+cmake --build C:\dev\warp-interposition
+ctest --test-dir C:\dev\warp-interposition -V --repeat until-fail:3
+```
+
+On the host, use the same flags with host paths and the typed manifest-tool
+override `-DCMAKE_MT:FILEPATH=...` described below. Explicitly select the
+MSVC compiler when prepending LLVM's directory to PATH, so CMake does not
+accidentally choose GNU-style clang with MSVC-only flags.
+
+For Agility, build `windows-adapter-probe` separately with the existing
+`FEME_PROBE_AGILITY_CORE`/`FEME_PROBE_AGILITY_VERSION=619` options below,
+then run that executable with `--warp-shim <bare DLL>`,
+`--warp-bootstrap <negotiation DLL>` and `--stub <bare DLL>`.
+The harness's explicit load permits those DLLs to reside in the other build's
+directories. Check the reported AgilitySDK core path and reference-module
+absence; an Agility build option alone is not runtime-selection evidence.
+
 ### Container starting point
 
 Use the Windows tooling's x64 developer-shell setup and its existing sccache.
@@ -402,8 +524,8 @@ rejection, and explicit missing-module failure; all four passed as recorded
 above. For the Agility-core matrix rows, reconfigure into a second build
 directory with `-DFEME_PROBE_AGILITY_VERSION=619` and
 `-DFEME_PROBE_AGILITY_CORE=<path to a container-local D3D12Core.dll>`, then
-run `feme-windows-adapter-probe.exe` directly (not via `ctest`, which only
-exercises the inbox-core build) with no arguments, `--software <WARP path>`,
+run that build's four CTests and `feme-windows-adapter-probe.exe` directly
+with no arguments, `--software <WARP path>`,
 or `--stub <path to feme-adapter-rejection-stub.dll>`.
 
 ## Reproduce without configuring the LLVM build
