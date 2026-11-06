@@ -132554,3 +132554,20 @@ Confirmed device: `FeMe CPU Vulkan Device`.
 2. `ENV6(c)(5a)` flatten()-level fix (dedicated session).
 3. `cosh-return-inf-unused` shape check.
 4. `ENV6(c)(5)`-`(7)`, `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload (blocked).
+
+# Session: full-sweep triage (X8_D24 fix)
+
+**Next action:** triage `glsl.derivate.*.vec4_highp` (102 cases).
+
+1. Device confirmed: FeMe CPU Vulkan Device.
+2. Sweep `feme-20261106b-full-sweep` finished: 731,492 Pass / 2,512,427 NotSupported / 404 Fail / 46 QualityWarning.
+3. 302 failures were never measured before (no baseline). Clusters:
+   - x8_d24 (~199): FIXED. The C runtime had no case 133 (`X8_D24_UNORM`) in the element-size/unpack tables. 18/18 sampled pass. `check-feme` 3904 pass.
+   - derivate vec4_highp (102): open. Measured dFdx ~0.8498 vs expected 0.846; the accurate-bounds stage is ~half the range.
+   - graphicsfuzz negative-left-shift (1): open.
+
+Next steps, ranked:
+1. Derivate vec4_highp (why only vec4 highp; z/w non-planarity?).
+2. negative-left-shift.
+3. Rerun the remaining x8_d24 cases from `/tmp/newfail.txt` and record in VulkanCTSReport.md.
+4. ENV6(c)(5a) flatten-level fix; cosh-return-inf-unused; offload (blocked).
