@@ -533,6 +533,77 @@ while continuing to fail every other cap and still returning `E_NOTIMPL` from
 sufficient to reach `CreateDevice` with this pinned version, or whether the
 version itself (`D3D12DDI_SUPPORTED_0010`) is rejected independently of caps.
 
+### W0(g) follow-up: `CreateDevice` is reached, both thunk-service pointer
+### families are non-null
+
+Collected 2026-11-06 (same day, follow-up measurement). `getCaps` in
+`BootstrapStub.cpp` now answers the two previously-logged caps truthfully and
+minimally, still without fabricating any other capability:
+
+- `D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1`: echoes the runtime's own
+  `HighestRuntimeSupportedFeatureLevel` input field back as
+  `MaximumDriverSupportedFeatureLevel` -- a true statement, not a larger
+  fabricated claim, since the data the UMD "discovers" is exactly what the
+  runtime already told it.
+- `D3D12DDICAPS_TYPE_3DPIPELINESUPPORT`: reports
+  `D3D12DDI_3DPIPELINELEVEL_1_0_GENERIC`, the lowest defined level -- a
+  truthful floor, not a fabricated higher tier.
+
+Every other cap, and `createDevice` itself, are still left returning
+`E_NOTIMPL`/deliberately failing exactly as before; only the two already-
+observed cap queries gained a real (if minimal) answer.
+
+Measured result, container inbox runtime, repeated 3 times
+(`ctest --repeat until-fail:3`; 7/7 passed per run):
+
+```text
+Bootstrap calls: Open=1 Size=0 Versions=2 Caps=1 Optional=0 Fill=0 Create=1 Close=1 Destroy=0
+GetCaps Type values queried (1 total): 1074
+CreateDevice args: Interface=786442 Version=0 pKTCallbacks=non-null p12UMCallbacks=non-null
+```
+
+Three findings here:
+
+1. **`CreateDevice` is reached (`Create=1`).** Answering the first cap
+   (`D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1`, 1074) truthfully was
+   sufficient; the runtime never falls back to the older
+   `D3D12DDICAPS_TYPE_3DPIPELINESUPPORT` query at all once the newer one
+   succeeds (`Caps=1`, not `2`), confirming the earlier hypothesis that 1007
+   is a fallback for runtimes/drivers that don't answer 1074. This resolves
+   the "missing owned implementation, not a demonstrated private boundary"
+   framing from the prior measurement in the affirmative: it genuinely was
+   just missing implementation. No private ordinal, undocumented struct, or
+   guessed signature was needed to get this far.
+2. **`Interface=786442` (`0x000C000A`) decodes exactly to the pinned
+   version.** `D3D12DDI_MAJOR_VERSION` is `12` (`0x0C`), and
+   `D3D12DDI_SUPPORTED_0010`'s `D3D12DDI_INTERFACE_VERSION_R1` component is
+   `0x000A` (minor version `10`); `Version=0` matches
+   `D3D12DDI_BUILD_VERSION_0010`'s value of `0`. The runtime negotiated
+   precisely the one interface version this experiment advertised -- not a
+   different or higher one it silently substituted.
+3. **Both thunk-service pointer families are non-null.** `pKTCallbacks`
+   (the kernel-routed `D3DDDI_DEVICECALLBACKS*`) and `p12UMCallbacks` (the
+   user-mode-only `D3D12DDI_CORELAYER_DEVICECALLBACKS_0003*`) are both
+   populated by the stock runtime when it calls `createDevice` on this
+   LLVM-owned, non-installed `d3d10warp.dll`. This is the first direct
+   evidence bearing on the "genuinely private question" from the prior
+   measurement: the runtime supplies a real, usable kernel-routed callback
+   table to an owned UMD identity reached purely through `EnumWarpAdapter`'s
+   existing-identity substitution, with **no kernel-mode driver installed by
+   this experiment**. This does not yet prove those kernel-routed callbacks
+   can be *invoked* successfully (no resource/allocation call has been
+   attempted against them) -- only that the pointer itself is real and
+   non-null at this stage, routed through whatever KM adapter object already
+   backs the system's WARP/Microsoft Basic Render Driver identity. The next
+   bounded step is to dereference and call one read-only-feeling entry (e.g.
+   a diagnostic/logging-style callback, not an allocation) to see whether it
+   is actually live, before considering any real resource contract.
+
+This measurement still implements no capability beyond the two caps above and
+no device contract; `createDevice` still returns `E_NOTIMPL` after capturing
+the audit evidence, so the probe's overall `FAILED(Result)` expectation is
+unchanged and no new CTest assertion needed loosening.
+
 ### Reproduce the B investigation
 
 In the container's x64 developer shell with SDK/WDK 28000, use CMake >= 3.29
