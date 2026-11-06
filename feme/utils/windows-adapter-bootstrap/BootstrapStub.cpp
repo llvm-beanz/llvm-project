@@ -11,8 +11,11 @@
 // windows-warp-interposition also builds it as a local d3d10warp.dll and
 // measures stock D3D12's adapter negotiation through Microsoft's WARP identity.
 // Neither experiment implements a real device, resource, or command contract:
-// no supported DDI versions are advertised, and capabilities/device creation
-// deliberately return E_NOTIMPL.
+// capabilities and device creation deliberately return E_NOTIMPL. By default
+// no supported DDI versions are advertised. W0(g)'s audit variant defines
+// FEME_BOOTSTRAP_PINNED_VERSION (one public D3D12DDI_SUPPORTED_00NN value) to
+// observe what the stock runtime asks for once negotiation can succeed,
+// still without fabricating a capability answer or a device.
 //
 //===----------------------------------------------------------------------===//
 
@@ -37,6 +40,23 @@ struct Counters {
 };
 Counters GCalls;
 
+// W0(g)'s audit evidence: which public D3D12DDICAPS_TYPE values GetCaps is
+// queried with, and whether CreateDevice's publicly documented thunk-service
+// pointers (pKTCallbacks/p12UMCallbacks) are populated. Logging this does not
+// implement any capability or device contract.
+constexpr UINT32 MaxCapsTypeLog = 32;
+LONG GCapsTypeLog[MaxCapsTypeLog] = {};
+LONG GCapsTypeLogCount = 0; // Total GetCaps calls observed, unclamped.
+
+struct CreateDeviceAudit {
+  LONG Captured = 0;
+  UINT Interface = 0;
+  UINT Version = 0;
+  LONG HasKTCallbacks = 0;
+  LONG HasUMCallbacks = 0;
+};
+CreateDeviceAudit GCreateDeviceAudit;
+
 SIZE_T APIENTRY
 calcPrivateDeviceSize(D3D12DDI_HADAPTER, CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE *) {
   InterlockedIncrement(&GCalls.CalcPrivateDeviceSize);
@@ -44,8 +64,15 @@ calcPrivateDeviceSize(D3D12DDI_HADAPTER, CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE
   return 64;
 }
 
-HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER, CONST D3D12DDIARG_CREATEDEVICE_0003 *) {
+HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
+                              CONST D3D12DDIARG_CREATEDEVICE_0003 *Args) {
   InterlockedIncrement(&GCalls.CreateDevice);
+  if (Args && !InterlockedCompareExchange(&GCreateDeviceAudit.Captured, 1, 0)) {
+    GCreateDeviceAudit.Interface = Args->Interface;
+    GCreateDeviceAudit.Version = Args->Version;
+    GCreateDeviceAudit.HasKTCallbacks = Args->pKTCallbacks != nullptr;
+    GCreateDeviceAudit.HasUMCallbacks = Args->p12UMCallbacks != nullptr;
+  }
   // A real device table is out of scope for this experiment; fail loudly and
   // distinctly so a caller cannot mistake this for the generic rejection
   // windows-adapter-probe's RejectionStub already measures.
@@ -58,15 +85,31 @@ HRESULT APIENTRY closeAdapter(D3D12DDI_HADAPTER) {
 }
 
 HRESULT APIENTRY getSupportedVersions(D3D12DDI_HADAPTER, UINT32 *EntryCount,
-                                       UINT64 *) {
+                                       UINT64 *Versions) {
   InterlockedIncrement(&GCalls.GetSupportedVersions);
+#ifndef FEME_BOOTSTRAP_PINNED_VERSION
+  (void)Versions;
+#endif
+#ifdef FEME_BOOTSTRAP_PINNED_VERSION
+  // W0(g)'s audit pins exactly one publicly documented interface version so
+  // the stock runtime can proceed past negotiation; this still implements no
+  // real capability or device contract, and no private version is guessed.
+  if (Versions && *EntryCount >= 1)
+    Versions[0] = FEME_BOOTSTRAP_PINNED_VERSION;
+  *EntryCount = 1;
+#else
   // No interface version is actually supported by this experiment.
   *EntryCount = 0;
+#endif
   return S_OK;
 }
 
-HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *) {
+HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
   InterlockedIncrement(&GCalls.GetCaps);
+  LONG Index = InterlockedIncrement(&GCapsTypeLogCount) - 1;
+  if (Args && Index >= 0 && static_cast<UINT32>(Index) < MaxCapsTypeLog)
+    GCapsTypeLog[Index] = static_cast<LONG>(Args->Type);
+  // No capability data is fabricated; this remains an audit, not a device.
   return E_NOTIMPL;
 }
 
@@ -133,4 +176,33 @@ FeMeBootstrapGetCalls(LONG *OpenAdapter12Count, LONG *CalcPrivateDeviceSizeCount
   *CreateDeviceCount = InterlockedCompareExchange(&GCalls.CreateDevice, 0, 0);
   *CloseAdapterCount = InterlockedCompareExchange(&GCalls.CloseAdapter, 0, 0);
   *DestroyDeviceCount = InterlockedCompareExchange(&GCalls.DestroyDevice, 0, 0);
+}
+
+// The fixed capacity backing FeMeBootstrapGetAudit's CapsTypes buffer; callers
+// should size their buffer to this value rather than hardcoding MaxCapsTypeLog.
+extern "C" __declspec(dllexport) UINT32 APIENTRY
+FeMeBootstrapGetAuditCapacity() {
+  return MaxCapsTypeLog;
+}
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetAudit(LONG *CapsTypeCount,
+                      LONG CapsTypes[/* FeMeBootstrapGetAuditCapacity() */],
+                      UINT *CreateDeviceInterface, UINT *CreateDeviceVersion,
+                      LONG *CreateDeviceHasKTCallbacks,
+                      LONG *CreateDeviceHasUMCallbacks) {
+  LONG Count = InterlockedCompareExchange(&GCapsTypeLogCount, 0, 0);
+  *CapsTypeCount = Count;
+  UINT32 Fill = Count <= 0 ? 0
+                : static_cast<UINT32>(Count) < MaxCapsTypeLog
+                      ? static_cast<UINT32>(Count)
+                      : MaxCapsTypeLog;
+  for (UINT32 I = 0; I < Fill; ++I)
+    CapsTypes[I] = GCapsTypeLog[I];
+  *CreateDeviceInterface = GCreateDeviceAudit.Interface;
+  *CreateDeviceVersion = GCreateDeviceAudit.Version;
+  *CreateDeviceHasKTCallbacks =
+      InterlockedCompareExchange(&GCreateDeviceAudit.HasKTCallbacks, 0, 0);
+  *CreateDeviceHasUMCallbacks =
+      InterlockedCompareExchange(&GCreateDeviceAudit.HasUMCallbacks, 0, 0);
 }

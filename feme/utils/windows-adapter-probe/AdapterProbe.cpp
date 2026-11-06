@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <cwchar>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -119,11 +120,14 @@ int wmain(int Argc, wchar_t **Argv) {
   bool WarpShim = Argc == 3 && std::wcscmp(Argv[1], L"--warp-shim") == 0;
   bool WarpBootstrap =
       Argc == 3 && std::wcscmp(Argv[1], L"--warp-bootstrap") == 0;
-  if (Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap) {
+  bool WarpBootstrapAudit =
+      Argc == 3 && std::wcscmp(Argv[1], L"--warp-bootstrap-audit") == 0;
+  if (Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
+      !WarpBootstrapAudit) {
     std::fwprintf(
         stderr,
         L"Usage: %ls [--software DLL | --stub DLL | --warp-shim DLL | "
-        L"--warp-bootstrap DLL]\n",
+        L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL]\n",
         Argv[0]);
     return 1;
   }
@@ -167,8 +171,13 @@ int wmain(int Argc, wchar_t **Argv) {
   using GetCalls = void(APIENTRY *)(LONG *, LONG *, LONG *);
   using GetBootstrapCalls = void(APIENTRY *)(
       LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *);
+  using GetAuditCapacity = UINT32(APIENTRY *)();
+  using GetAudit = void(APIENTRY *)(LONG *, LONG *, UINT *, UINT *, LONG *,
+                                     LONG *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
+  GetAuditCapacity ReadAuditCapacity = nullptr;
+  GetAudit ReadAudit = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -179,7 +188,7 @@ int wmain(int Argc, wchar_t **Argv) {
       return 1;
     }
   }
-  if (WarpBootstrap) {
+  if (WarpBootstrap || WarpBootstrapAudit) {
     ReadBootstrapCalls = reinterpret_cast<GetBootstrapCalls>(
         GetProcAddress(Module, "FeMeBootstrapGetCalls"));
     if (!ReadBootstrapCalls) {
@@ -189,9 +198,21 @@ int wmain(int Argc, wchar_t **Argv) {
       return 1;
     }
   }
+  if (WarpBootstrapAudit) {
+    ReadAuditCapacity = reinterpret_cast<GetAuditCapacity>(
+        GetProcAddress(Module, "FeMeBootstrapGetAuditCapacity"));
+    ReadAudit = reinterpret_cast<GetAudit>(
+        GetProcAddress(Module, "FeMeBootstrapGetAudit"));
+    if (!ReadAuditCapacity || !ReadAudit) {
+      report(L"GetProcAddress(FeMeBootstrapGetAudit)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
+  }
   ComPtr<IDXGIAdapter> SoftwareAdapter;
   HRESULT Result =
-      WarpShim || WarpBootstrap
+      WarpShim || WarpBootstrap || WarpBootstrapAudit
           ? report(L"EnumWarpAdapter(shim)",
                    Factory->EnumWarpAdapter(IID_PPV_ARGS(&SoftwareAdapter)))
           : report(L"CreateSoftwareAdapter",
@@ -200,14 +221,14 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result)) {
     Result =
         report(L"QueryInterface(IDXGIAdapter1)", SoftwareAdapter.As(&Adapter));
-    if (SUCCEEDED(Result) && (WarpShim || WarpBootstrap))
+    if (SUCCEEDED(Result) && (WarpShim || WarpBootstrap || WarpBootstrapAudit))
       Result = checkWarpIdentity(Adapter.Get());
     if (SUCCEEDED(Result)) {
       Opened = true;
       Result = exerciseAdapter(Adapter.Get());
     }
   }
-  if (WarpShim || WarpBootstrap)
+  if (WarpShim || WarpBootstrap || WarpBootstrapAudit)
     reportModule(L"feme_warp_reference.dll");
   Adapter.Reset();
   SoftwareAdapter.Reset();
@@ -232,9 +253,18 @@ int wmain(int Argc, wchar_t **Argv) {
                  L"Optional=%ld Fill=%ld Create=%ld Close=%ld Destroy=%ld\n",
                  Open, Size, Versions, Caps, Optional, Fill, Create, Close,
                  Destroy);
-    ExpectedDDICalls = Open == 1 && Versions > 0 && Caps > 0 && Close == 1 &&
-                       Size == 0 && Optional == 0 && Fill == 0 && Create == 0 &&
-                       Destroy == 0;
+    if (WarpBootstrapAudit) {
+      // A pinned version is advertised, so the runtime may or may not reach
+      // CreateDevice; that count is audit evidence here, not an assumption.
+      // Destroy should still never fire, since createDevice deliberately
+      // fails and no device handle is ever produced to destroy.
+      ExpectedDDICalls = Open == 1 && Versions > 0 && Caps > 0 &&
+                         Close == 1 && Destroy == 0;
+    } else {
+      ExpectedDDICalls = Open == 1 && Versions > 0 && Caps > 0 && Close == 1 &&
+                         Size == 0 && Optional == 0 && Fill == 0 &&
+                         Create == 0 && Destroy == 0;
+    }
     if (GetModuleHandleW(L"feme_warp_reference.dll")) {
       report(L"Unexpected reference WARP dependency", E_FAIL);
       ExpectedDDICalls = false;
@@ -242,15 +272,40 @@ int wmain(int Argc, wchar_t **Argv) {
     if (!ExpectedDDICalls)
       report(L"Bootstrap negotiation/cleanup mismatch", E_FAIL);
   }
+  if (ReadAudit) {
+    UINT32 Capacity = ReadAuditCapacity();
+    std::vector<LONG> CapsTypes(Capacity);
+    LONG CapsTypeCount = 0;
+    UINT CreateInterface = 0, CreateVersion = 0;
+    LONG CreateHasKTCallbacks = 0, CreateHasUMCallbacks = 0;
+    ReadAudit(&CapsTypeCount, CapsTypes.data(), &CreateInterface,
+              &CreateVersion, &CreateHasKTCallbacks, &CreateHasUMCallbacks);
+    std::wprintf(L"GetCaps Type values queried (%ld total):", CapsTypeCount);
+    UINT32 Logged = CapsTypeCount < 0
+                        ? 0
+                        : (static_cast<UINT32>(CapsTypeCount) < Capacity
+                               ? static_cast<UINT32>(CapsTypeCount)
+                               : Capacity);
+    for (UINT32 I = 0; I < Logged; ++I)
+      std::wprintf(L" %ld", CapsTypes[I]);
+    std::wprintf(L"\n");
+    std::wprintf(L"CreateDevice args: Interface=%u Version=%u "
+                 L"pKTCallbacks=%ls p12UMCallbacks=%ls\n",
+                 CreateInterface, CreateVersion,
+                 CreateHasKTCallbacks ? L"non-null" : L"null",
+                 CreateHasUMCallbacks ? L"non-null" : L"null");
+  }
   bool Released = FreeLibrary(Module) != FALSE;
   if (!Released)
     report(L"FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
   std::wprintf(L"Software adapter objects released. Stub rejection is an "
                L"experiment, not a working FeMe adapter.\n");
   return Released && Opened && ExpectedDDICalls &&
-                 (Stub || WarpShim || WarpBootstrap
-                      ? Result == DXGI_ERROR_UNSUPPORTED
-                      : SUCCEEDED(Result))
+                 (WarpBootstrapAudit
+                      ? FAILED(Result)
+                      : (Stub || WarpShim || WarpBootstrap
+                             ? Result == DXGI_ERROR_UNSUPPORTED
+                             : SUCCEEDED(Result)))
              ? 0
              : 1;
 }

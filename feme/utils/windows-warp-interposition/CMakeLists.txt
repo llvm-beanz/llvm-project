@@ -36,20 +36,30 @@ set(REFERENCE_EXPORTS
   OpenDisplayAdapter1 QueryDListForApplication1 QueryDListForApplication2
   QueryMuxDListForApplication)
 enable_testing()
-foreach(VARIANT reference public-exports private-ordinal bare negotiation)
+foreach(VARIANT reference public-exports private-ordinal bare negotiation
+                pinned-version)
   set(OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/${VARIANT}")
   file(MAKE_DIRECTORY "${OUTPUT_DIR}")
-  if(NOT VARIANT STREQUAL bare AND NOT VARIANT STREQUAL negotiation)
+  if(NOT VARIANT STREQUAL bare AND NOT VARIANT STREQUAL negotiation AND
+     NOT VARIANT STREQUAL pinned-version)
     configure_file("${FEME_WARP_REFERENCE}"
       "${OUTPUT_DIR}/feme_warp_reference.dll" COPYONLY)
   endif()
-  if(VARIANT STREQUAL negotiation)
+  if(VARIANT STREQUAL negotiation OR VARIANT STREQUAL pinned-version)
     add_library(${VARIANT}-shim SHARED
       ../windows-adapter-bootstrap/BootstrapStub.cpp)
   else()
     add_library(${VARIANT}-shim SHARED Intercept.cpp)
   endif()
-  if(NOT VARIANT STREQUAL bare AND NOT VARIANT STREQUAL negotiation)
+  if(VARIANT STREQUAL pinned-version)
+    # W0(g)'s audit: pin the earliest public D3D12 UMD DDI baseline
+    # (Interface Version R1, Build 10) to keep the negotiated device-funcs
+    # surface minimal while observing what the stock runtime asks for.
+    target_compile_definitions(${VARIANT}-shim PRIVATE
+      FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0010)
+  endif()
+  if(NOT VARIANT STREQUAL bare AND NOT VARIANT STREQUAL negotiation AND
+     NOT VARIANT STREQUAL pinned-version)
     foreach(EXPORT IN LISTS REFERENCE_EXPORTS)
       target_link_options(${VARIANT}-shim PRIVATE
         "/EXPORT:${EXPORT}=feme_warp_reference.${EXPORT}")
@@ -58,7 +68,7 @@ foreach(VARIANT reference public-exports private-ordinal bare negotiation)
   if(VARIANT STREQUAL reference)
     target_link_options(${VARIANT}-shim PRIVATE
       "/EXPORT:OpenAdapter12=feme_warp_reference.OpenAdapter12")
-  elseif(NOT VARIANT STREQUAL negotiation)
+  elseif(NOT VARIANT STREQUAL negotiation AND NOT VARIANT STREQUAL pinned-version)
     target_link_options(${VARIANT}-shim PRIVATE
       "/EXPORT:OpenAdapter12=FeMeInterceptOpenAdapter12")
   endif()
@@ -83,6 +93,9 @@ foreach(VARIANT reference public-exports private-ordinal bare negotiation)
   elseif(VARIANT STREQUAL negotiation)
     add_test(NAME os-routed-negotiation COMMAND ${VARIANT}-harness
       --warp-bootstrap $<TARGET_FILE:${VARIANT}-shim>)
+  elseif(VARIANT STREQUAL pinned-version)
+    add_test(NAME os-routed-pinned-version COMMAND ${VARIANT}-harness
+      --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
   else()
     add_test(NAME ${VARIANT}-interception COMMAND ${VARIANT}-harness
       --warp-shim $<TARGET_FILE:${VARIANT}-shim>)
@@ -92,5 +105,5 @@ add_test(NAME generic-software-rejection COMMAND bare-harness
   --stub $<TARGET_FILE:bare-shim>)
 set_tests_properties(reference-forwarding public-exports-interception
   private-ordinal-interception bare-interception os-routed-negotiation
-  generic-software-rejection
+  os-routed-pinned-version generic-software-rejection
   PROPERTIES TIMEOUT 30)
