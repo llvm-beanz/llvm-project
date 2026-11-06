@@ -214,7 +214,7 @@ A full re-run of all ~3.27M cases is not feasible in one session, so the 255
 146 `Fail` (list saved as `verified-failures-146.txt` next to it). Largest
 clusters: `image.store` 14 (waived CTS quirk, `ENV6(d)(3)`), `mesh_shader.ext`
 10, `spirv_assembly.instruction` 7, `renderpass2` 6, `demote` 5,
-`transform_feedback.fuzz` 4, `wsi.xcb` 4, `glsl.derivate` 3; the remaining ~93
+`transform_feedback.fuzz` 4 (fixed in L547), `wsi.xcb` 4, `glsl.derivate` 3; the remaining ~93
 are `graphicsfuzz` linearize/simdize cases (`ENV6(c)(5)`-`(7)`) and singletons.
 Failing total is 146 (new failures outside the old list were not re-measured).
 No inventory change.
@@ -256,6 +256,10 @@ Failing total is now 144 (stale list, other regressions unmeasured).
 `spirv_assembly.instruction.compute.opunreachable.all` now Pass. `modulo4()`'s switch, lowered by `LowerSwitch` into a tree of icmp-chain diamonds merged via flow blocks, feeds a branch whose condition is only transitively constant (a phi of literals, not a literal `ConstantInt` itself) and has an `unreachable` arm; `foldConstantConditionBranches` previously only folded a branch whose condition was *already* a literal. Now iterates instruction simplification and branch folding/dead-block elimination to a fixed point whenever some branch has a bare `unreachable` arm. Guarded to never re-fold a genuine loop's own backedge condition past the first iteration (computed via `CycleInfo` on the function's original cycles) -- `EliminateUnreachableBlocks` can collapse a loop header's multi-incoming phi down to one literal incoming value, and re-folding that would erase the loop's CFG backedge before `LoopLinearizer` ever runs; new regression test `constant-condition-fold-preserves-loop-backedge.ll` confirms a `feme.cpu.mask.any` lowering still results. `check-feme`: 3899/3903 (4 Unsupported, 0 Failed). Regression batch `spirv_assembly.instruction.*` (partial, timed out after ~75% at 590s with no crash): 0 new Fail; the 3 pre-existing `barrier.{in_if,in_switch,in_loop}` failures (`ENV5(c)(7)(b)`, structural lockstep-barrier gap) are unaffected.
 
 Of the other 6 `spirv_assembly.instruction` failures in the original 7-case cluster: `opptrequal`/`opptrnotequal`'s `wg_comparisons_*` (`ENV5(a)`) and `image_query.samples_storage` (`ENV5(d)`) are already-documented, separate structural/untriaged gaps, not touched this session.
+
+### L547: XFB blocks holding arrays of structs (ENV6(c)(8))
+
+`transform_feedback.fuzz.{2_level_struct_array,single_struct_array}.{std_geometry,std_vertex}` (4 cases) now Pass. Three independent bugs: (1) `SPIRVToLLVM` did not tighten an array of offset-less structs (with matrix-array members) inside an offset-decorated block; (2) the executor packed every instance's rows contiguously, so signature ABI v9 adds `XfbInstanceRows`/`XfbInstanceStride` and capture steps between struct instances by the stride; (3) `resolveNestedStageIOField` scaled the instance index in raw rows while the downstream store addresses multi-row values (a `mat2`) in value units, which overran the element's rows (`double free`). The non-fuzz `transform_feedback` group (131,575 cases) re-ran with 0 failures (5,984 Pass, rest NotSupported). `check-feme` 3902 passed, 4 unsupported.
 
 ### Full-run artifacts and incomplete cases
 

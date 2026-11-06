@@ -376,6 +376,7 @@ linkage:
 | Frequency | Per-vertex, per-primitive, per-patch, or per-sample |
 | Stream | Geometry output stream, reserved until that stage is implemented |
 | Transform-feedback capture | `VK_EXT_transform_feedback` buffer/offset/stride an output element captures to, if any (roadmap H21a) |
+| Transform-feedback instance layout | Rows per struct instance and the struct's byte stride for a leaf of an array-of-structs block member, so capture steps between instances by the stride (signature ABI v9) |
 
 The core representation should use stable numeric element IDs within one
 entry point. Canonical stage operations refer to those IDs; import metadata
