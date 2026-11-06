@@ -135376,3 +135376,80 @@ final commit below.
    inputs versus merely reference DXBC-related constants/headers.
 3. Backlog carried from prior sessions, still untouched: `ENV6(c)(3)`/
    `ENV6(d)` CTS triage, `ENV7(g)` audit, full CTS re-measure.
+
+## 2026-11-06: W0 Windows host user-mode integration probes
+
+**Next action**: Start W0(f) using
+`feme/docs/W0WindowsIntegrationProbe.md`: identify the valid adapter bootstrap
+needed to reach D3D12 DDI open/callback negotiation. Do not assume that a new
+kernel driver is required or that renaming a DLL is sufficient.
+
+### Completed work
+
+1. Read the prompt, WARP design/roadmap, latest handoff, FeMe process guidance,
+   and the local Direct3D checkout's instructions. Preserved the user's
+   modified prompt and unrelated untracked files. No Microsoft source/test
+   content was copied into LLVM.
+2. Confirmed the host differs from the container: Windows 11 Enterprise
+   26H2 build 26300.9711, SDK/WDK headers 28000, VS 2022/MSVC 19.44.
+   `vulkaninfo --summary` reports NVIDIA/Dozen, not FeMe. No ICD was installed
+   or replaced to satisfy a D3D-only probe.
+3. The user explicitly selected stock-runtime user-mode/WARP-compatible
+   loading experiments first, with no system changes. Added an LLVM-owned
+   standalone CMake diagnostic and intentionally rejecting DDI stub under
+   `feme/utils/windows-adapter-probe`.
+4. Opened reference WARP through `EnumWarpAdapter` and
+   `CreateSoftwareAdapter` with inbox and Agility 619 D3D12 cores. Inbox
+   and existing NuGet WARP 1.0.19 both pass the public queue/fence test.
+   The diagnostic checks reference identity, device/adapter LUID agreement,
+   event completion within 10 seconds, exact fence value and teardown.
+   Application-local Agility selection was verified from the loaded core path.
+5. Recorded measurements, reproduction instructions and remaining proof in
+   `W0WindowsIntegrationProbe.md`. Closed only W0(e)'s host measurement
+   substep, added W0(f)'s remaining bootstrap work, and clarified the design
+   and process guidance. W0(a), W0(b), W0(d) and FeMe device creation remain
+   incomplete. No kernel registration, signing changes, system DLL replacement
+   or reboot occurred.
+
+### Measured blocker
+
+- `CreateSoftwareAdapter` accepts the rejection DLL and supplies an
+  `IDXGIAdapter1`, but description/IDs/flags/LUID are all empty or zero.
+  Both D3D12 cores return `0x887a0004` (`DXGI_ERROR_UNSUPPORTED`) before
+  `OpenAdapter10`, `OpenAdapter10_2` or `OpenAdapter12` is called; all counters
+  stay zero. The negative test specifically checks this rejection stage.
+- Executable-local `d3d10warp.dll` substitution is honored for the real NuGet
+  WARP control. Renaming the incomplete stub does not work: reference WARP
+  identity is enumerated, then device creation fails. CDB observes the stub
+  load; it is no longer loaded when the failure returns.
+- The private ordinal-199 export exists in the reference WARP binaries.
+  Debugger lookup experiments did not establish that it causes the stub
+  rejection. No private signature or invocation was implemented. Keep the
+  design's no-private-WARP-dependency rule; any change requires an explicit
+  product decision.
+
+### Validation and build issue
+
+- Four CTest cases pass on each core: reference WARP, software-reference WARP,
+  rejection stub, missing module. Final validation repeats every case three
+  times on both cores: 24/24 executions pass.
+- Built Debug with sccache 0.3.1, assertions enabled, disabled PCH, MSVC
+  `/W4 /WX`, and clang-format. The WDK headers require Windows/NTSTATUS types
+  before DDI includes and use anonymous structs/unions.
+- SDK 28000 `mt.exe` fails during CMake's compiler check with `0xc0000135`.
+  Its import table includes `MidlrtMd.dll`, absent from the checked 28000
+  x64/x86 tool directories. Using existing SDK 26100 `mt.exe` through
+  `CMAKE_MT` fixes this diagnostic build without changing 28000 headers/libs.
+  Selecting SDK 26100 wholesale fails because its DDI headers are absent
+  here. This is not a production kit-pairing change.
+- FeMe production/compiler code and Vulkan capability advertisements are
+  unchanged. No `check-feme` or Vulkan CTS run was claimed; existing CTS and
+  feature/extension inventories remain unchanged. Deleted the temporary
+  filename-substitution copies, including the copied Microsoft DLL.
+
+**Handoff**: The host measurements are no longer blocked. The implementation
+still needs a supported adapter/bootstrap contract and a distinct FeMe
+prototype. A deliberately incomplete DLL's rejection is not evidence that
+user-mode integration is impossible. Read the new report and begin W0(f);
+consider the installed WDDM or COM-runtime alternatives only at the explicit
+boundary decision gate.
