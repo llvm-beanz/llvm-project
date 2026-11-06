@@ -68,29 +68,13 @@ mid-investigation to avoid losing documentation.
 
 Please begin work on the WARP roadmap. Suggested next steps:
 
-**Suggested next steps (ranked)**:
-1. **Continue W0(g)'s container-first public-DDI investigation from the
-   completed W0(h) evidence.** The user authorized bounded investigation of B;
-   do not ask that research question again or treat all D3D12 work as blocked.
-   Read `feme/docs/W0WindowsIntegrationProbe.md`'s alternative-B section.
-   Source-built host/container inbox and Agility 619 tests route stock D3D12
-   into owned `OpenAdapter12`, query its public adapter table and close it
-   without ordinal 199, reference forwarding or a new/custom kernel driver.
-   Reproduce the six standalone interposition CTests, then audit the smallest
-   practical supported public DDI version and required adapter/device/thunk
-   services. Separate missing owned implementation from any genuinely required
-   private boundary. The current fixture advertises zero versions and creates
-   no device; Microsoft's WARP identity is a diagnostic limitation, not FeMe
-   selection or shipping approval. Stop for explicit W0(b) sign-off before
-   private ABI implementation or changing product identity/distribution.
-   Do not install drivers, alter system settings, or switch to a COM runtime.
-   Standalone diagnostics need targeted native tests; compiler/Vulkan changes
-   still need the existing check-feme/CTS gates.
-2. **W0(c)'s remaining legacy-shader-contract audit.** Candidate-file triage
-   is already complete: nine files are actual DXBC inputs and `pch.hpp` is
-   merely adjacent. Do not repeat it. Determine what the pinned stock-runtime
-   contract requires from FeMe's existing DXBC importer and later execution
-   path; do not treat classification or import support as passing shaders.
-3. Backlog carried from many prior sessions, still untouched:
-   `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
-   re-measure.
+1. Audit a pinned public DDI version and required adapter/device/thunk services
+   inside the container. Separate missing owned implementation from any
+   genuinely required private boundary; do not start with driver installation.
+2. Supported DDI negotiation, actual FeMe device/queue/shaders, distinct
+   identity, presentation and shipping compatibility are still unproved.
+   W0(b) sign-off remains necessary before private ABI implementation or
+   changing the product identity/distribution contract. Research approval is
+   not automatic product adoption.
+3. W0(c)'s candidate-file triage is already complete; its remaining work is
+   the legacy-shader-contract audit, not another classification pass.
