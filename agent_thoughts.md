@@ -136015,3 +136015,70 @@ decision. `WS0`-`WS3` remain fully closed.
 3. Backlog carried from many prior sessions, still untouched:
    `ENV6(c)(3)`/`ENV6(d)` CTS triage, `ENV7(g)` audit, full Vulkan CTS
    re-measure.
+
+# W0(h): bounded B investigation -- stock runtime reaches owned WARP DDI (2026-11-06)
+
+## Outcome and approval
+
+- The user explicitly requested investigation of alternative B. This
+  authorizes bounded application-local research, not a shipping architecture,
+  private-ABI implementation, driver installation or product identity change.
+- The routing blocker is resolved: stock D3D12 calls owned `OpenAdapter12`,
+  queries the public adapter table and closes it on host/container inbox and
+  Agility 619 runtimes. No ordinal 199, reference forwarding or new/custom
+  kernel driver is needed for this stage.
+- Microsoft Basic Render Driver remains the selected adapter, `1414:008c`,
+  software flag, LUID `00000000:0001283b` in this boot. This is not FeMe
+  identity or execution evidence.
+
+## Changes and evidence
+
+- Added `feme/utils/windows-warp-interposition`: isolated reference,
+  named-export, ordinal-199, bare-owned and owned-table DLL/harness variants.
+  Microsoft binaries are copied only into explicitly requested local
+  forwarding controls, with a pinned WARP 1.0.19 SHA256. No Microsoft
+  source/test implementation was copied.
+- Extended the original probe with `--warp-shim` and `--warp-bootstrap`,
+  identity checks and measured callback/cleanup assertions; retained its four
+  original modes/tests. Added a same-DLL generic-versus-WARP routing control.
+- Exact owned-table counters on all four runtime/environment combinations:
+  `Open=1 Size=0 Versions=2 Caps=2 Optional=0 Fill=0 Create=0 Close=1 Destroy=0`.
+  The fixture advertises zero supported versions and no actual device.
+- A debugger proves entry even without preloading an executable-local owned
+  `d3d10warp.dll`. Explicit loading retains counters after deliberate rejection;
+  "not loaded" at return is not proof the entry point was never called.
+  The original renamed rejection stub also reaches its open through WARP.
+  Generic `CreateSoftwareAdapter` still yields zero identity and zero DDI calls.
+- Built the new sources inside isolated container scratch space with the
+  container's MSVC/SDK/WDK/sccache, not just host-built binaries. Confirmed
+  FeMe CPU Vulkan Device separately; no production compiler/Vulkan code changed.
+- Repeated validation: host/container interposition 18/18 each; original
+  host inbox/Agility regressions 24/24; container Agility regressions 12/12;
+  host/container Agility owned-DDI controls 18/18 combined: **90/90**.
+  Runtime paths and reference-DLL absence were observed, not inferred.
+- Updated integration report, design, both roadmaps, instructions and prompt.
+  W0(h) is closed; W0(g) remains partial. The public general-provider search
+  remains negative, but the blanket routing-impossibility interpretation and
+  repeated request for B research approval are superseded.
+- Used CMake >= 3.29 with `CMAKE_LINKER_TYPE=LLD` for PE forwarding.
+  `CMAKE_LINKER` alone did not select it here. MSVC forwarding failures'
+  exact cause is unresolved. Host manifest-tool workaround remains local.
+- Explicitly selected CMake's `Embedded` debug-information format: a final
+  rebuild exposed default `/Zi` overriding a flags-only `/Z7` request.
+  This keeps the new diagnostic's object-file caching configuration truthful.
+
+## Remaining work and next action
+
+1. Audit a pinned public DDI version and required adapter/device/thunk services
+   inside the container. Separate missing owned implementation from any
+   genuinely required private boundary; do not start with driver installation.
+2. Supported DDI negotiation, actual FeMe device/queue/shaders, distinct
+   identity, presentation and shipping compatibility are still unproved.
+   W0(b) sign-off remains necessary before private ABI implementation or
+   changing the product identity/distribution contract. Research approval is
+   not automatic product adoption.
+3. W0(c)'s candidate-file triage is already complete; its remaining work is
+   the legacy-shader-contract audit, not another classification pass.
+
+No `check-feme` or Vulkan CTS run is claimed: these changes are standalone
+Windows diagnostics and directly related documentation only.
