@@ -229,6 +229,10 @@ rest of `mesh_shader`/`renderpass2`/`demote` is in Roadmap `ENV6(e)(1)`-`(4)`.
 Failing total is now 144 (stale list, other regressions unmeasured).
 `check-feme` 3891/3895, 4 unsupported. No inventory change.
 
+### L541: demote/discard exit masks out of loops (ENV6(e)(4))
+
+`glsl.demote.dynamic_loop_{always,uniform}` now Pass. A 679-case `glsl.{demote,discard,loops}` batch run shows only 5 failures, all previously known (3 `demote.dynamic_loop_*`, 2 `discard.*static_loop_uniform`).
+
 ### Full-run artifacts and incomplete cases
 
 Artifacts are retained under

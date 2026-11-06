@@ -132092,3 +132092,22 @@ Reduce `glsl.demote.dynamic_loop_always` (compiles, wrong image) to an `.ll` rep
 3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
 4. Full CTS re-measure in the background.
 5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
+
+# Session: demote exit masks
+
+## Next action
+Reduce `glsl.demote.dynamic_loop_{deriv,dynamic,texture}` (`ENV6(e)(4a)`): the linearize "mask-affecting op" diagnostic.
+
+## What I did
+1. Confirmed `FeMe CPU Vulkan Device`.
+2. Dumped IR for `dynamic_loop_always`. The exit block had `return.masks(true, true)`, taken before the loop was linearized.
+3. Added `accumulateExitMasks`: accumulator phis hold each lane's last live/side-effect state; applied to the exit block. Only on the `HeaderDivergent` path.
+4. Lit test `loop-demote-exit-masks.ll`. `check-feme`: no regressions. 2 CTS cases now Pass; 679-case glsl regression run showed no new failures.
+5. The fold-header path (`FoldHeaderExitIntoMask`) may need the same call; not hit by any case yet.
+
+## Next steps (ranked)
+1. `ENV6(e)(4a)` (3 demote + 2 discard cases).
+2. `ENV6(e)(2)` mesh attrs/clip (6), `ENV6(e)(3)` mesh output size (4).
+3. `ENV6(c)(5)` graphicsfuzz, `spirv_assembly.instruction` (7).
+4. Full CTS re-measure in the background.
+5. `ENV6(d)(5b)`, `ENV5(c)(7)(b)`, offload upstreaming (blocked).
