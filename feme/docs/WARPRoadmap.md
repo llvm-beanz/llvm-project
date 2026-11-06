@@ -9,7 +9,12 @@ layer-count extraction into `FeMeImage`) are both done; `WS2` (the
 `FeMeExecution`, `WS2(a)`/`WS2(b)`) is fully done and closed -- its third
 original piece, command execution/CPU-draw-worker paths, was evaluated
 and found to have no portable kernel left to extract. `WS3` (shared-core
-regression gates, `WS3(a)`/`WS3(b)`) is also fully done and closed.
+regression gates, `WS3(a)`/`WS3(b)`) is also fully done and closed. `W0(c)`
+(classify the local Direct3D test corpus) is partially done -- its
+classification and redistribution-review pieces are recorded in
+[W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md),
+but its legacy-shader and test-authoring pieces are blocked on `W0(a)`/
+`W0(b)`'s boundary decision and a future FeMe runner, respectively.
 
 This is the implementation checklist for [FeMeWARPDesign.md](FeMeWARPDesign.md),
 not a claim that FeMe is a Direct3D adapter today. The product remains a
@@ -158,6 +163,24 @@ throwaway-capable prototype, not an adapter compliance claim.
 | W0(b) | If the installed path is not viable, explicitly choose the application-local compatibility boundary and document the added COM, DXGI, debug-layer/DRED, and distribution work. A custom runtime harness can test a backend but does not prove stock Windows adapter installation. Neither path patches system WARP or relies on private WARP ordinals. |
 | W0(c) | Classify the local test corpus: public black-box tests, WARP-private/white-box tests, DXBC/DXIL inputs, optional/preview features, display/HLK dependencies. Determine required legacy shader support from the selected contract. Review source/test redistribution permissions before reuse; author LLVM-owned focused tests from public contracts. |
 | W0(d) | Add an explicit FeMe adapter selection/identity assertion to the future runner. List and execute one applicable test on reference WARP, then demonstrate selection of the prototype through the chosen boundary. Record unavailable infrastructure as blocked, not Pass. WARP-only white-box tests remain oracle tests, never generic FeMe coverage. |
+
+`W0(c)` is **partially done**, recorded in
+[W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md):
+the local test corpus is classified into the five named categories (public
+black-box, WARP-private/white-box, DXBC/DXIL-input, optional/preview-feature,
+display/HLK-dependency), and source/test redistribution permissions are
+reviewed and recorded there. Its remaining two pieces are genuinely blocked,
+not merely deferred by choice: "determine required legacy shader support from
+the selected contract" needs `W0(a)`/`W0(b)`'s application-local-vs-installed
+boundary decision made first, and "author LLVM-owned focused tests from
+public contracts" needs a FeMe D3D12 runner to author tests against, which
+does not exist before `W0(a)`/`W1(a)`. `W0(c)` is left unstruck rather than
+split into further lettered rows -- both blockers are existing upstream `W0`/
+`W1` milestones, not new work needing its own breakdown.
+
+`W0(d)`'s own future-runner adapter-selection/identity-assertion design (not
+an implementation, since the same future-runner dependency applies) is also
+recorded in that document, so it is available once `W0(a)`/`W1(a)` exist.
 
 ### W1: Objects and first headless compute
 
