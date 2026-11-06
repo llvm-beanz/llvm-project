@@ -1,10 +1,14 @@
-From cdec5de3038e264b51d9695d49452ac619560ff9 Mon Sep 17 00:00:00 2001
+From d25dc0576b0e7d7c98015b026d36ca0cbaa8cb51 Mon Sep 17 00:00:00 2001
 From: Copilot <223556219+Copilot@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 02:25:27 +0000
+Date: Fri, 6 Nov 2026 21:11:30 +0000
 Subject: [PATCH] Keep WaveActiveMax accesses in bounds and check Vulkan
  negative infinity
 
-The isolated test dispatches 32 threads with eight indices into four-element buffers and races on output elements. Use four unique in-bounds invocations and expect the specified -INF reduction identity on Vulkan while preserving other API expectations. DXC and Clang pass on both FeMe and lavapipe; remove the now-stale arm64 lavapipe XFAIL.
+The isolated test dispatches 32 threads with eight indices into
+four-element buffers and races on output elements. Use four unique
+in-bounds invocations and expect the specified -INF reduction identity on
+Vulkan while preserving other API expectations. DXC and Clang pass on
+both FeMe and lavapipe; remove the now-stale arm64 lavapipe XFAIL.
 
 Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 ---

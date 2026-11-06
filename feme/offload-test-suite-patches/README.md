@@ -15,9 +15,16 @@ in order, until they are upstreamed to `llvm-beanz/offload-test-suite`:
 
 ```sh
 cd /home/dev/dev/offload-test-suite
+git remote add llvm-beanz https://github.com/llvm-beanz/offload-test-suite.git  # no-op if present
 git fetch llvm-beanz feme && git cherry-pick llvm-beanz/feme
-git am /home/dev/dev/llvm-project/feme/offload-test-suite-patches/*.patch
+git am --keep-cr /home/dev/dev/llvm-project/feme/offload-test-suite-patches/*.patch
 ```
+
+Use `--keep-cr`, not plain `git am`: `test/WaveOps/WaveActiveMax.test` has
+upstream CRLF line endings, and plain `git am` strips the trailing `\r` from
+unchanged context lines while reading the patch, which makes patch 0004 fail
+to apply with a misleading "patch does not apply" even though its content is
+correct.
 
 Then re-run `cmake .` in the `llvm-project` build directory so the new
 `unittests/Image/ImageTranslateTests.cpp` source file and the `ImageTests`/
