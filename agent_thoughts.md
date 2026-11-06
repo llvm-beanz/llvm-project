@@ -136082,3 +136082,107 @@ decision. `WS0`-`WS3` remain fully closed.
 
 No `check-feme` or Vulkan CTS run is claimed: these changes are standalone
 Windows diagnostics and directly related documentation only.
+
+# 2026-11-06: W0(g) pinned-DDI/thunk-service audit -- missing implementation, not a private boundary
+
+## TL;DR
+
+- Pinned one public `D3D12DDI_SUPPORTED_0010` DDI version in the owned
+  `OpenAdapter12` bootstrap. **`CreateDevice` is still never reached.**
+- The blocker so far is **not private**: the runtime calls `GetCaps` exactly
+  twice, for two fully public, documented `D3D12DDICAPS_TYPE` values, before
+  anything device-related. This experiment always fails both with
+  `E_NOTIMPL`, which is why negotiation stops -- that's missing owned
+  implementation, not a proven ABI wall.
+- `pKTCallbacks`/`p12UMCallbacks` (the kernel/user-mode thunk-service
+  pointers `D3D12DDIARG_CREATEDEVICE_0003` would carry) are still unobserved
+  (`createDevice` never runs), so the "does a third-party UMD need a real
+  WDDM KM adapter" question from the task is **still open**, not answered.
+
+## What I did
+
+1. Confirmed `vulkaninfo --summary` -> `FeMe CPU Vulkan Device` (mandatory,
+   every session).
+2. Read the human maintainer's prior commits (`6e1b66b`, `19f35f0`, `8f2e976`)
+   in full to pick up the Alternative-B baseline: stock D3D12 already reaches
+   owned `OpenAdapter12` via `EnumWarpAdapter`, no ordinal/forwarding/kernel
+   driver needed, but zero DDI versions are advertised and `CreateDevice` is
+   never called. Read the updated `.instructions.md`, `WARPRoadmap.md`.
+3. Read `d3d12umddi.h` (WDK 10.0.28000.0) to find the actual public structs:
+   `D3D12DDI_SUPPORTED_00NN` version macros, `D3D12DDICAPS_TYPE` enum,
+   `D3D12DDIARG_GETCAPS`, `D3D12DDIARG_CREATEDEVICE_0003` (with its
+   `pKTCallbacks`/`p12UMCallbacks` union). All public, nothing undocumented.
+4. Extended `BootstrapStub.cpp`:
+   - `getSupportedVersions` can now advertise exactly one pinned version via
+     a compile-time `FEME_BOOTSTRAP_PINNED_VERSION` define (still zero by
+     default, so the existing `os-routed-negotiation` test is unchanged).
+   - `getCaps` now logs every queried `D3D12DDICAPS_TYPE` value.
+   - `createDevice` now logs `Interface`/`Version` and whether
+     `pKTCallbacks`/`p12UMCallbacks` are non-null, still returning `E_NOTIMPL`
+     -- no capability or device contract is implemented.
+   - New exports: `FeMeBootstrapGetAuditCapacity`/`FeMeBootstrapGetAudit`.
+5. Added a `pinned-version` variant + `os-routed-pinned-version` CTest to
+   `windows-warp-interposition`, pinning `D3D12DDI_SUPPORTED_0010` (the
+   earliest public baseline -- smallest device-funcs surface to audit first).
+6. Extended `AdapterProbe.cpp` with `--warp-bootstrap-audit` to read/print
+   the new evidence, with its own (looser) pass/fail assertions since this
+   experiment's point is to *observe* `CreateDevice` reachability, not assume
+   a fixed count the way the existing zero-version baseline does.
+7. Built with x64 MSVC/SDK 28000, `CMAKE_LINKER_TYPE=LLD`, sccache,
+   `/Z7` assertions-enabled Debug, PCH disabled (`CMAKE_DISABLE_PRECOMPILE_HEADERS=ON`
+   set by the project already). Hit one build break: an unused-parameter
+   `/WX` failure in the non-pinned branch of `getSupportedVersions` (the
+   `Versions` out-parameter is unused when `FEME_BOOTSTRAP_PINNED_VERSION`
+   isn't defined) -- fixed with an explicit `(void)Versions;`.
+8. Ran `ctest --repeat until-fail:3`: **7/7 passed, 3 repeats, no flakes**
+   (all six prior CTests plus the new `os-routed-pinned-version`).
+9. Decoded the two logged `GetCaps` types (`1074`, `1007`) against the WDK
+   header: `D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1` (an input/output
+   struct that actually carries the runtime's own requested feature level!)
+   then the older `D3D12DDICAPS_TYPE_3DPIPELINESUPPORT` fallback. Both are
+   fully public, small, and legitimately answerable without fabricating
+   private data -- I did *not* implement answering them yet (kept that as
+   the explicit next step, to stay bounded this session).
+10. Wrote up findings in `W0WindowsIntegrationProbe.md` (new `### W0(g)
+    pinned-DDI/thunk-service audit` section), updated `WARPRoadmap.md`'s
+    `W0(g)` row/narrative (still open, not struck -- device creation and
+    W0(b) remain unresolved), and added a knowledge bullet to
+    `.instructions.md` so a future session doesn't have to re-derive the
+    "GetCaps happens before CreateDevice regardless of advertised versions"
+    finding.
+11. Committed in two steps: code (`fa0cf5e47bce`), then docs (`db73b9a59f53`).
+
+## Why no `check-feme`/Vulkan CTS this session
+
+Every file touched is under `feme/utils/windows-*` (standalone CMake
+projects with no FeMe/LLVM library dependency) or documentation. No
+`feme/lib`, `feme/include`, or shared-core production code changed, so
+there is nothing for `check-feme` or the Vulkan CTS to regress-test. This
+matches the precedent set by the human maintainer's own Alternative-B
+commits, which also didn't touch `check-feme`-covered code.
+
+## Next steps (ranked)
+
+1. **Answer the two observed `GetCaps` queries truthfully and minimally.**
+   `D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1`'s data struct
+   (`D3D12DDI_3DPIPELINESUPPORT1_DATA_0081`) literally carries the runtime's
+   own requested `HighestRuntimeSupportedFeatureLevel` as input -- echoing
+   that back as `MaximumDriverSupportedFeatureLevel` is a true, non-fabricated
+   answer, not a guess. See if `CreateDevice` gets reached once both caps
+   succeed, or whether `D3D12DDI_SUPPORTED_0010` itself is independently too
+   old for this runtime (try a newer pinned version too, if so). This is the
+   most direct continuation of this session's audit and stays within the
+   "no real device contract" boundary as long as every *other* cap and
+   `createDevice` keep failing deliberately.
+2. If `CreateDevice` is reached: record whether `pKTCallbacks`/
+   `p12UMCallbacks` are non-null (this session still saw both `null`, because
+   `createDevice` never ran) -- that's the evidence needed to finally
+   characterize whether a real WDDM kernel-mode adapter object is required
+   underneath an owned UMD, or whether Windows tolerates a device-less
+   UMD-only path for some subset of operations. Still do not attempt a real
+   device implementation without separate approval; this remains audit work.
+3. `W0(b)`'s product/compatibility decision is still the single blocking
+   item for anything beyond audit -- unchanged from every prior session,
+   not re-litigated here.
+4. Backlog, untouched again this session: `ENV6(c)(3)`/`ENV6(d)` CTS triage,
+   `ENV7(g)` audit, full Vulkan CTS re-measure.
