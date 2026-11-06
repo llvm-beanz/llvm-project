@@ -2027,6 +2027,36 @@ TEST(ExecutorTest, FlatShadesTriangleStripWithCorrectProvokingVertex) {
   EXPECT_EQ(P1[2], 0);
 }
 
+/// A triangle whose first (provoking) vertex lies outside the clip volume
+/// makes Sutherland-Hodgman emit a clip-introduced vertex first; a `Flat`
+/// varying must still read the original first vertex's value.
+TEST(ExecutorTest, FlatVaryingKeepsProvokingVertexWhenFirstVertexIsClipped) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildFlatColorPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0: red, clipped away
+      -1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v1: green
+      -1.0f, 3.0f,  0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // v2: blue
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t Y = 0; Y != 4; ++Y) {
+    for (uint32_t X = 0; X != 4; ++X) {
+      const uint8_t *T = Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+      EXPECT_EQ(T[0], 255) << X << "," << Y;
+      EXPECT_EQ(T[1], 0) << X << "," << Y;
+      EXPECT_EQ(T[2], 0) << X << "," << Y;
+    }
+  }
+}
+
 /// (Roadmap L334) Per the Vulkan spec's own "Triangle Fans" equation
 /// (`p_i = {v_{i+1}, v_{i+2}, v_0}`), the pivot `v0` is the *last*
 /// assembled vertex of every triangle, not the first -- the provoking

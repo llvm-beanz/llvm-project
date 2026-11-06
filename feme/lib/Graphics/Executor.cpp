@@ -697,6 +697,19 @@ std::vector<RasterVertex> clipTriangle(std::array<RasterVertex, 3> Tri,
     if (Poly.size() < 3)
       return {};
   }
+  // A `Flat` varying takes the original primitive's provoking vertex's
+  // value, but the polygon's first vertex may be a clip-introduced one whose
+  // lerped value (and the fan triangulation reading `Poly[0]`) would
+  // otherwise leak into the flat input.
+  size_t Idx = 0;
+  for (const LinkedVarying &V : Varyings) {
+    size_t Count = size_t(V.RowCount) * V.ComponentCount;
+    if (V.Interpolation == SignatureInterpolationMode::Flat)
+      for (RasterVertex &Out : Poly)
+        std::copy_n(Tri[0].Varyings.begin() + Idx, Count,
+                    Out.Varyings.begin() + Idx);
+    Idx += Count;
+  }
   return Poly;
 }
 
@@ -4558,6 +4571,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                     } else {
                       Value = B0 * V0 + B1 * V1 + B2 * V2;
                     }
+                    // A covered sample's barycentrics are a convex
+                    // combination, so only rounding can push `Value`
+                    // outside its vertices' range (e.g. 20.000002 for
+                    // vertex values <= 20.0); snap such noise back.
+                    float Lo = std::min({V0, V1, V2});
+                    float Hi = std::max({V0, V1, V2});
+                    float Tol = 1e-5f * std::max(std::fabs(Lo), std::fabs(Hi));
+                    if (Value < Lo && Value >= Lo - Tol)
+                      Value = Lo;
+                    else if (Value > Hi && Value <= Hi + Tol)
+                      Value = Hi;
                     memcpy(&Bits, &Value, 4);
                   } else {
                     Bits = Tri.Varyings[0][Idx];
