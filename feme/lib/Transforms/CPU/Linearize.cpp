@@ -1982,7 +1982,11 @@ bool hasStageMaskOps(Function &F) {
 
 /// Roadmap L440(c): folds every `br i1 <literal ConstantInt>, label A,
 /// label B` in \p F into an unconditional branch to the live successor,
-/// then deletes any block this leaves truly unreachable.
+/// then deletes any block this leaves truly unreachable. Also folds a
+/// conditional branch whose two successors are the exact same block
+/// (`br i1 %cond, label %Dest, label %Dest`) the same way, regardless of
+/// whether `%cond` is itself a literal constant -- see Roadmap
+/// `ENV6(c)(10)`'s own comment just below for why.
 ///
 /// This is a narrow, purely syntactic cleanup -- deliberately *not* a
 /// general `SimplifyCFGPass` (roadmap H19k already tried that broadly and
@@ -1990,7 +1994,9 @@ bool hasStageMaskOps(Function &F) {
 /// `tailMergeBlocksWithSimilarFunctionTerminators`, so this file always
 /// prefers small, targeted folds over reintroducing it). It can never
 /// misfire on a genuinely divergent branch, whose condition is always a
-/// real runtime value, never a literal constant.
+/// real runtime value, never a literal constant -- and the identical-
+/// successor case folds regardless of the condition's value in the first
+/// place, so it cannot misfire on a genuinely divergent one either.
 ///
 /// Needed because a conditional branch with a literal-constant condition
 /// and one `unreachable` arm is valid, conformant SPIR-V on its own (DXC's
@@ -2005,6 +2011,26 @@ bool hasStageMaskOps(Function &F) {
 /// own), so it is misdiagnosed as a real "divergent branch ... has no
 /// reconvergence point" error despite the branch being trivially,
 /// statically resolvable.
+///
+/// Roadmap ENV6(c)(10): `StructurizeCFG` can also emit a conditional
+/// branch whose two successors both happen to be the same block even
+/// though its own condition is a genuine, non-constant runtime value (not
+/// the "literal constant" case above) -- found reducing
+/// `loop-divergent-forward-relayed-header-exit-check.ll`'s own shape,
+/// where such a branch sits directly in a loop body between an earlier
+/// Roadmap `ENV6(c)(4)` header split and the loop's own real, uniform
+/// exit check: both successors (reached via a one-hop relay for one arm)
+/// land on the same latch, so the branch decides nothing at all, but
+/// `LoopLinearizer`'s own structural recognizers (`matchExitCheck`/
+/// `recoverRelayExitCheck`/`uniformRelayChain`) all require either a
+/// direct, single successor match or a side-effect-free pure relay
+/// chain -- neither tolerates a `CondBr` sitting in the middle of the
+/// chain at all, genuinely unconditional or not. `llvm::
+/// ConstantFoldTerminator` itself already recognizes and folds the
+/// identical-successor shape unconditionally (see its own "Conditional
+/// branch to same location?" case), independent of whether the
+/// condition is a `ConstantInt` -- this helper only needed to stop
+/// gating its own call to it on that unrelated check.
 static bool foldConstantConditionBranches(Function &F) {
   bool Changed = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
@@ -2070,7 +2096,13 @@ static bool foldConstantConditionBranches(Function &F) {
       if (!FirstIteration && LoopBlocks.contains(&BB))
         continue;
       auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
-      if (!Br || !isa<ConstantInt>(Br->getCondition()))
+      // Roadmap ENV6(c)(10): also fold an identical-successor branch
+      // (`Br->getSuccessor(0) == Br->getSuccessor(1)`) even when its own
+      // condition is not a literal constant -- see this function's own
+      // comment above for why that shape is always safe to fold here too.
+      if (!Br ||
+          (!isa<ConstantInt>(Br->getCondition()) &&
+           Br->getSuccessor(0) != Br->getSuccessor(1)))
         continue;
       Folded |= ConstantFoldTerminator(&BB, /*DeleteDeadConditions=*/true);
     }
@@ -6379,9 +6411,12 @@ LoopLinearizer::collectUniformPassThroughRegion(
     // same way it does everywhere else in this pass (see
     // `linearizeCycle`'s own comment).
     if (!PeeledFrom.contains(Cur) && isDivergentBranch(CBr)) {
-      if (Trace)
+      if (Trace) {
         errs() << "PTRACE: reject (divergent CondBr) " << PName(Cur)
                << "\n";
+        if (::getenv("FEME_DEBUG_PASSTHROUGH_DUMP_BLOCK"))
+          Cur->dump();
+      }
       return std::nullopt;
     }
     if (Trace)
@@ -7306,6 +7341,28 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // it. The uniform case this helper actually exists for (see its own
   // comment) never has a genuinely divergent forward match in the first
   // place, so this restriction costs it nothing.
+  //
+  // Roadmap ENV6(c)(10): a first attempt this milestone tried lifting
+  // this restriction (accepting any forward match, then pruning the
+  // claimed block back out of `OtherCondBrBlocks`/`DivergentCandidates`
+  // to avoid the double-claim crash structurally instead of by refusing
+  // the match) to handle `loop-divergent-forward-relayed-header-exit-
+  // check.ll` (Roadmap ENV6(c)(9a)). That regressed both
+  // `loop-check-separate-carried-value.ll` and the
+  // `DoesNotDoubleClaimSoleConditionalBranchAsBothHeaderAndCheckExit`
+  // unit test this guard's own comment already named -- the pruning
+  // alone was not sufficient to fully prevent the double-claim this
+  // guard exists to avoid, reverted. The actual blocking problem for
+  // the `ENV6(c)(9a)` repro turned out to be unrelated to this guard at
+  // all: `findForwardExitCheckBlock` never even finds a match for that
+  // shape in the first place (its own forward chase bails out on an
+  // unrelated, `llvm-reduce`-introduced degenerate `br i1 %cond, label
+  // %X, label %X` artifact elsewhere in the loop) -- see
+  // `foldConstantConditionBranches`'s own comment (above,
+  // `hasStageMaskOps`'s neighbor in this file) for the real fix, which
+  // folds that artifact away before any of this function's own analysis
+  // ever runs, letting the forward chase succeed cleanly without this
+  // guard needing to change at all.
   // Roadmap L462: `isDivergentBranch` alone is not enough here -- it only
   // sees `UniformityInfo`'s one-time, pre-masking snapshot (see the
   // `dependsOnResourceOrImageLoadInCycle`/"Roadmap L419(y)" comment
