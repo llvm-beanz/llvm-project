@@ -68,17 +68,29 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
 **Next steps, ranked**:
-1. `ENV6(c)(9a)`: trace which of `cosh-return-inf-unused`'s 4 nested
-   cycles still rejects it -- `FEME_DUMP_IR_PRELINEARIZE=1` +
-   `FEME_DEBUG_LINEARIZE_TRACE=1` (the `L542` method), then reduce that
-   one layer alone before touching any code. Est. 30-60 min just to
-   find the layer; fixing it is unknown until then.
-2. The 3-case no-diagnostic bucket from `L541`, still unexplored --
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method. Est.
-   20-30 min to re-run and categorize.
+1. `ENV6(c)(10)`: the actual fix for `cosh-return-inf-unused` -- teach
+   `CheckBlock`'s widening logic to recognize a block already claimed as
+   a recovered `HeaderExit` and skip re-mutating it, so `linearizeCycle`'s
+   forward-match guard ("Roadmap L462") can safely accept a genuinely-
+   divergent match for the split-header shape this session isolated,
+   without reintroducing the double-mutation crash that guard's comment
+   documents. The pinned
+   `loop-divergent-forward-relayed-header-exit-check.ll` repro is a
+   ready-made, already-minimal anchor -- no further reduction needed
+   before attempting this. Est. 1-2 hours given the repro is already in
+   hand; the actual fix design is still unknown.
+2. The 3-case no-diagnostic bucket from `L541`, still unexplored across
+   four sessions now -- `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per
+   `L508`'s method. Est. 20-30 min.
 3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
    `L541`) is still unconfirmed as regression-vs-progress. Needs a
    before/after diagnostic-text diff against an older build, not just a
    count.
-4. Keep re-checking the offload-test-suite patch set each session
+4. Consider whether the interestingness-test-then-manually-restore-
+   dropped-stage-op-argument workflow (hit 3 times now: `L542`, `L544`,
+   this session) is worth automating -- e.g. an interestingness test
+   that also re-verifies argument counts/types on stage ops before
+   accepting a reduction -- rather than continuing to re-fix it by hand
+   each time.
+5. Keep re-checking the offload-test-suite patch set each session
    (clean again this session, no action needed).
