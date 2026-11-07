@@ -25,6 +25,17 @@
 ; and `%6`'s branches belong to an already-linearized *child* cycle rather
 ; than a second, unsupported divergent branch of the outer loop's own body;
 ; both reject the shape as soon as they walk into it.
+;
+; Roadmap ENV6(c)(9): `%6`'s `feme.stage.discard` call is given an explicit
+; `i1 true` condition argument (hand-restored after `llvm-reduce` dropped
+; it, since the shape it reduced away never reaches `applyStageMasks` --
+; the real calling convention, confirmed against every other
+; `feme.stage.discard` lit test in this directory, always takes one) so
+; that any future fix which gets far enough to actually flatten/mask this
+; region (rather than rejecting it up front, as today) does not immediately
+; hit an unrelated `CallBase::getArgOperand` out-of-bounds assertion in
+; `applyStageMasks`'s own `Discard` case purely from this test's own
+; otherwise-untested, reduced-away argument list.
 
 ; CHECK: feme-cpu-linearize: function 'main': loop at '' has an internal branch in a body shape this milestone does not yet lower; only a uniform pass-through region from the header's own exit check to the latch is supported yet (roadmap milestone 6 deviation)
 ; CHECK: feme-cpu-linearize: function 'main': calls a mask-affecting feme.stage.* operation ('discard'/'demote'/'is_helper') in a shape this milestone does not lower (e.g. inside an otherwise uniform loop)
@@ -33,7 +44,7 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i6
 
 declare float @feme.stage.input.load.f32()
 
-declare void @feme.stage.discard()
+declare void @feme.stage.discard(i1)
 
 define void @main(i1 %0) #0 {
 Flow19:
@@ -58,7 +69,7 @@ Flow12:                                           ; preds = %Flow12, %1
   br i1 %5, label %loop.exit.guard5, label %Flow12
 
 6:                                                ; preds = %loop.exit.guard5
-  call void @feme.stage.discard()
+  call void @feme.stage.discard(i1 true)
   br label %Flow11
 
 loop.exit.guard5:                                 ; preds = %Flow12
