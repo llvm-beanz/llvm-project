@@ -12633,3 +12633,145 @@ its own final commit.
    `L541`) is still unconfirmed as regression-vs-progress.
 4. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (clean again this session).
+
+## L546: `ENV6(c)(10)` landed -- pinned repro fixed by an upstream-of-cycle-analysis IR fold; `cosh-return-inf-unused` itself needs a further, deeper fix (`ENV6(c)(11)`)
+
+Mandatory start-of-session check: `vulkaninfo --summary | grep deviceName`
+confirms `FeMe CPU Vulkan Device`.
+
+Picked up `L545`'s ranked next step #1: the actual fix for
+`ENV6(c)(10)`.
+
+1. First attempt, following `L545`'s own framing literally: loosened
+   `linearizeCycle`'s forward-match divergence guard (Roadmap
+   `L432(c)`/`L462`) to accept any divergent forward match, then prune
+   the claimed block back out of `OtherCondBrBlocks`/`DivergentCandidates`
+   to avoid the known double-mutation crash structurally instead of by
+   refusing the match outright. Built cleanly, but the pinned repro
+   **still failed with the identical original diagnostic** -- the guard
+   was never actually the obstacle for this shape in the first place.
+2. Traced with `FEME_DEBUG_LINEARIZE_TRACE=1`/`FEME_DEBUG_PASSTHROUGH=1`:
+   `findForwardExitCheckBlock` does find the forward `.body` candidate,
+   but neither `matchExitCheck` nor `recoverRelayExitCheck` can match it
+   as an exit check *at all* -- `HeaderExit` stays null regardless of
+   divergence. `recoverRelayExitCheck`'s `isPureRelayBlock` requirement
+   fails because the intervening hop (`Flow18._crit_edge`) has real
+   instructions (a `discard` call and a resource load), and the more
+   general `uniformRelayChain`/`matchExitCheckWithRelay` also fails: its
+   reachable-set walk has no notion of "stop once a real exit is found"
+   and unconditionally bails the moment it re-encounters *any* divergent
+   `CondBr`, including the loop's own backedge structure.
+3. Found via experiment that prepending `opt -passes=simplifycfg` folds
+   away a degenerate `br i1 %0, label %Flow22, label %Flow22` (identical
+   successors, trivially an `llvm-reduce` artifact -- confirmed by
+   checking the real, non-reduced shape later in step 7) sitting in
+   `Flow18._crit_edge`, after which the shape becomes ordinary and
+   lowers cleanly. This pinned down the real root cause but raised a new
+   question: does the real production pipeline already run something
+   equivalent upstream of `feme-cpu-linearize` (making the pinned test
+   itself unrepresentative), or does `Linearize.cpp` need its own
+   defensive fold?
+4. Checked `Pipeline.cpp`: no `SimplifyCFGPass` runs anywhere in the
+   real pipeline (confirmed by grep; `Linearize.cpp`'s own
+   `foldConstantConditionBranches` comment already documents *why*,
+   `H19k`'s prior broad-`SimplifyCFGPass` regression). So the fix
+   belongs in `Linearize.cpp` itself, as a narrow, targeted extension of
+   the existing `foldConstantConditionBranches` helper (which already
+   folds a `CondBr` whose condition is a literal `ConstantInt`) rather
+   than a new general pass.
+5. Real fix: extended `foldConstantConditionBranches`'s fold condition
+   to also cover an identical-successor `CondBr` regardless of whether
+   its own condition is constant -- `llvm::ConstantFoldTerminator` (an
+   existing LLVM utility this helper already calls) already recognizes
+   and folds that exact shape unconditionally on its own ("Conditional
+   branch to same location?"), so this only needed removing an
+   unnecessarily narrow gate on the call to it, not new fold logic.
+   Verified the pinned repro now lowers and verifies cleanly with *no*
+   extra pre-pass needed -- the fold runs as part of
+   `LinearizePass::run`'s own existing up-front call, before any
+   cycle/divergence analysis.
+6. Ran full `check-feme` with this fix plus the still-present first
+   attempt (step 1) left in: **7 regressions** (5 `Linearize` lit tests,
+   1 other `Transforms/CPU` lit test, 2 unit tests, including exactly
+   `DoesNotDoubleClaimSoleConditionalBranchAsBothHeaderAndCheckExit` --
+   the unit test `L432(c)`'s own guard comment already named as the
+   reason that guard exists). Confirmed the regressions were from step
+   1, not step 5, by reverting step 1 alone and re-running: **0
+   regressions**, pinned repro still passes. The pruning in step 1 was
+   insufficient to fully prevent the double-claim it was meant to avoid;
+   reverted in favor of the narrower, already-sufficient fix.
+7. Verified the fix also resolves the real, non-reduced CTS shape, not
+   just the pinned reduction: captured the real pre-linearize IR via
+   `FEME_DUMP_IR_PRELINEARIZE=1` directly from `deqp-vk` running the
+   actual `cosh-return-inf-unused` case (not a hand-reconstructed
+   approximation -- `.instructions.md`'s own `L200` lesson). The real
+   shape still hits the **identical diagnostic**, this fix notwithstanding.
+   Traced with `FEME_DEBUG_LINEARIZE_TRACE=1`: all 4 nested cycles now
+   correctly find `HeaderExit` (no `HeaderExit=0` anywhere) -- the
+   `ENV6(c)(10)` obstacle is gone. The real blocker is one layer
+   further in: `collectUniformPassThroughRegion` rejects
+   `loop.exit.guard5`/`loop.exit.guard3` (the two inner child cycles'
+   own post-linearize relay blocks) because each has a **second,
+   genuinely divergent** `CondBr` -- `%Guard.N.inv`, derived from a
+   3-predecessor phi merging `true`/`false` literals from different
+   control paths (the standard SPIR-V-structurizer "did an earlier `if`
+   execute" `Guard` variable pattern), not a resource-load
+   false-positive like `ENV6(c)(9)`'s own shape. Added a small,
+   purpose-built `FEME_DEBUG_PASSTHROUGH_DUMP_BLOCK=1` debug aid (dumps
+   the rejecting block's own instructions) to confirm this without
+   hand-deriving it. This is the documented, never-supported "two
+   divergent checks in one pass-through region" limitation --
+   structurally a bigger fix than `ENV6(c)(10)`'s narrow IR-fold, broken
+   out fresh as `ENV6(c)(11)`.
+8. Full `check-feme` with the final, minimal fix: **3908/3912 Passed, 4
+   Unsupported, 0 Failed** -- identical pass count to `L545`'s own
+   baseline, confirming zero regressions.
+9. Full 757-case `graphicsfuzz` CTS corpus (`run_vulkan_cts.py
+   --batch-size 20 --workers 6 --recovery-batch-sizes 20,1
+   --final-timeout 60`): **689 Pass / 68 Fail**, byte-identical to the
+   most recent known-good baseline on disk
+   (`/home/dev/dev/VK-GL-CTS/run/feme-env6c5c6-remeasure/`, which
+   already included `ENV6(c)(5b)`'s own 4-case win) -- zero regressions,
+   zero new passes in this corpus (the pinned repro's exact shape
+   doesn't independently recur elsewhere in these 757 cases).
+   `cosh-return-inf-unused` itself remains `Fail`, consistent with step
+   7's finding that a further, separate fix (`ENV6(c)(11)`) is still
+   needed.
+10. Re-verified the offload-test-suite patch set (standing instruction):
+    fetched `llvm-beanz/feme` fresh -- its tip is still exactly the
+    merge-base of the local `feme-verify` branch (no upstream drift), so
+    all 5 locally-stacked patches remain trivially conflict-free. No
+    action needed.
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no
+update -- internal compiler-correctness investigation only, no
+feature/extension status change.
+
+**Commits** (3, in order): the `foldConstantConditionBranches` fix in
+`Linearize.cpp` (plus the new `FEME_DEBUG_PASSTHROUGH_DUMP_BLOCK` debug
+aid); the pinned test update (now expects clean linearization); docs
+(`Roadmap.md`'s `ENV6(c)(10)` struck through as done, new `ENV6(c)(11)`
+row, plus this `VulkanCTSReport.md` entry). `agent_thoughts.md` to
+follow as its own final commit, plus `.instructions.md`'s own two new
+lessons from this session (the `feme-opt -passes=` nesting syntax, and
+"confirm which code path actually produced an observed rejection before
+changing a guard that looks superficially related").
+
+**Next steps, ranked**:
+1. `ENV6(c)(11)`: the real remaining fix for `cosh-return-inf-unused` --
+   teach `collectUniformPassThroughRegion`/`DiamondFlattener` to flatten
+   a *second*, genuinely divergent diamond (the `Guard`-variable
+   reconvergence phi this session found) within an otherwise-uniform
+   pass-through region, rather than rejecting outright the moment a
+   second `CondBr` is found. Start by pinning a reduced, minimal repro
+   of this exact shape via `llvm-reduce` (same interestingness-test
+   caution as `ENV6(c)(9a)`'s own write-up -- match the exact diagnostic
+   text, not a generic substring) before attempting a fix design. This
+   is a structurally bigger change than `ENV6(c)(10)`'s narrow IR fold;
+   likely multi-session.
+2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress.
+4. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (clean again this session).
