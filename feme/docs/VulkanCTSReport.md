@@ -12775,3 +12775,106 @@ changing a guard that looks superficially related").
    `L541`) is still unconfirmed as regression-vs-progress.
 4. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (clean again this session).
+
+## L547: `ENV6(c)(11)` reduced and pinned -- no fix attempted, per `L546`'s own estimate
+
+Mandatory start-of-session check: `vulkaninfo --summary | grep deviceName`
+confirms `FeMe CPU Vulkan Device`.
+
+Picked up `L546`'s ranked next step #1, as scoped: reduce and pin a
+repro of the `Guard`-variable reconvergence-phi shape, no fix design
+attempted this session (`L546` itself estimated this as multi-session,
+first session reduce-only).
+
+1. Re-dumped the real, non-reduced `cosh-return-inf-unused` shader's
+   pre-linearize IR via `FEME_DUMP_IR_PRELINEARIZE=1` from
+   `build/external/vulkancts/modules/vulkan/` (the `L542`/`L545` method),
+   extracted the module text, and confirmed `feme-opt --llvm
+   -passes=feme-cpu-linearize` alone reproduces both diagnostics
+   standalone, matching the real `deqp-vk` run exactly.
+2. Re-traced with `FEME_DEBUG_PASSTHROUGH=1`
+   `FEME_DEBUG_PASSTHROUGH_DUMP_BLOCK=1` (the latter added last session):
+   confirmed the rejected block is `loop.exit.guard3`, whose
+   `%Guard.4.inv = xor i1 %96, true` branch condition comes from a
+   3-predecessor phi of literal `true`/`false`/`false` values -- the
+   standard SPIR-V-structurizer "did an earlier `if` execute" pattern,
+   exactly as `L546` described, not a resource-load false positive like
+   `ENV6(c)(9)`'s shape.
+3. Wrote an `llvm-reduce` interestingness test requiring the *exact*
+   rejected-block dump to show a terminator branching on a
+   `Guard.N.inv`-named value, not merely the shared "has an internal
+   branch in a body shape" diagnostic text or a `Guard.N.inv` definition
+   present anywhere in the function. First attempt at this test was too
+   loose (only required the `xor ..., true` line and some `phi i1`
+   literal somewhere in the dumped text) and converged to a 51-line file
+   where the actual branch used a raw phi-of-constants-false value
+   directly, with the `Guard.4.inv` xor left dead and unused -- an
+   independent reconfirmation of the exact `ENV6(c)(9a)`/`L545`
+   generic-diagnostic-substring gotcha, this time self-inflicted by an
+   insufficiently specific *custom* interestingness test rather than a
+   shared diagnostic string. Tightened the test to require the
+   terminator line itself to read `br i1 %Guard.N.inv, label ...`,
+   re-ran: converged to 47 lines with the real dependency intact.
+4. Restored a dropped `feme.stage.discard()` argument back to
+   `feme.stage.discard(i1 true)` (the `llvm-reduce`-drops-stage-op-
+   arguments gotcha, now hit a fourth time across sessions) and
+   confirmed the argument-restored file still reproduces both
+   diagnostics identically and passes `feme-opt
+   --llvm -passes=feme-cpu-linearize,verify` (i.e. the restored call
+   doesn't introduce any new, unrelated verifier failure).
+5. Pinned the result as
+   `loop-guard-reconvergence-phi-second-divergent-check.ll`, following
+   `unsupported-stage-op-in-uniform-loop.ll`'s `not feme-opt ... | not
+   FileCheck` diagnostic-pinning style (this shape has no fix yet, so
+   the test pins the current diagnostics, not a passing lowering).
+   `check-feme`: 3909/3913 Passed, 4 Unsupported, 0 Failed -- new test
+   counted, zero regressions.
+6. Did not attempt a fix design this session, per `L546`'s own explicit
+   estimate ("don't expect a fix landed same session"). The repro is now
+   in hand as a ready-made anchor for the next session's design attempt.
+7. Did not re-run the full 757-case `graphicsfuzz` CTS corpus this
+   session -- no code change landed, so no corpus-level delta is
+   possible; re-running would only reconfirm the existing baseline.
+8. Re-verified the offload-test-suite patch set (standing instruction):
+   `llvm-beanz/feme` tip unchanged, all 5 local patches still apply
+   clean via `git am --keep-cr` in a scratch worktree. No action.
+9. Did not touch the `L541` next-step #2 (3-case no-diagnostic bucket)
+   or #3 (pass-through bucket growth) this session -- stayed on the one
+   ranked item. Both still open, carried forward below.
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no
+update -- internal compiler-correctness investigation only, no feature/
+extension status change.
+
+**Commits** (in order): the pinned repro test; `Roadmap.md` +
+`VulkanCTSReport.md` together (one measurement, one commit); a new
+`.instructions.md` lesson (the self-inflicted loose-custom-
+interestingness-test gotcha from step 3); this `agent_thoughts.md` entry
+last.
+
+**Next steps, ranked**:
+1. `ENV6(c)(11)`: design and land the actual fix -- teach
+   `collectUniformPassThroughRegion`/`DiamondFlattener` to flatten a
+   *second*, genuinely divergent diamond (the pinned
+   `loop-guard-reconvergence-phi-second-divergent-check.ll` repro) within
+   an otherwise-uniform pass-through region, instead of rejecting
+   outright on the second `CondBr`. The repro is already minimal (47
+   lines); no further reduction needed before attempting a design. Est.
+   multi-session; likely needs its own sub-design before any code is
+   written.
+2. The 3-case no-diagnostic bucket from `L541`, still unexplored across
+   six sessions now -- `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per
+   `L508`'s method. Est. 20-30 min.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress. Needs a
+   before/after diagnostic-text diff against an older build, not just a
+   count.
+4. Consider whether the interestingness-test-then-manually-restore-
+   dropped-stage-op-argument workflow (hit 4 times across sessions now)
+   is worth automating. Still open, still low-priority relative to
+   `ENV6(c)(11)`.
+5. Consider whether older commits further back in history should ever
+   get trailers retroactively -- still flagged, still not acted on,
+   still needs an explicit decision from whoever owns this branch.
+6. Keep re-checking the offload-test-suite patch set each session
+   (clean again this session, no action needed).
