@@ -133362,3 +133362,109 @@ extension status change.
    each time.
 5. Keep re-checking the offload-test-suite patch set each session
    (clean again this session, no action needed).
+
+# Session: `ENV6(c)(10)` landed -- real fix was an IR fold, not the guard; `cosh-return-inf-unused` needs a further fix (`ENV6(c)(11)`) (L546)
+
+**TL;DR**: `ENV6(c)(10)` is fixed and committed. `cosh-return-inf-unused`
+itself is still `Fail` -- a second, deeper obstacle, scoped fresh as
+`ENV6(c)(11)`. Confirmed `FeMe CPU Vulkan Device` (standing check).
+
+**What happened, in order**:
+1. Picked up `L545`'s ranked next step #1, as given: "loosen
+   `CheckBlock`'s widening logic / the forward-match guard." Tried it
+   literally first. Built, ran the pinned repro: **still failed,
+   identical diagnostic**. The guard was never the real obstacle for
+   this shape -- wrong assumption carried over from `L545`'s own
+   writeup.
+2. Traced with `FEME_DEBUG_LINEARIZE_TRACE=1`/`FEME_DEBUG_PASSTHROUGH=1`:
+   the forward match never even recognized the candidate as an exit
+   check (`HeaderExit` stayed null before divergence was ever checked).
+   `uniformRelayChain`'s relay chase bails the moment it re-encounters
+   *any* `CondBr` in its walk -- found a degenerate `br i1 %cond, label
+   %X, label %X` (identical successors, an `llvm-reduce` artifact)
+   sitting in the loop body, tripping that bail-out for no real reason.
+3. Real fix: extended the existing `foldConstantConditionBranches`
+   helper to fold that identical-successor shape unconditionally
+   (matching `llvm::ConstantFoldTerminator`'s own built-in handling of
+   it), instead of only folding a literal-constant condition. One
+   function, no new pass, no guard touched. Confirmed the pinned repro
+   now lowers clean standalone.
+4. Ran `check-feme` with both changes (1) and (3) still in: **7
+   regressions**, including the unit test literally named
+   `DoesNotDoubleClaimSoleConditionalBranchAsBothHeaderAndCheckExit` --
+   step 1's own "safe" pruning wasn't actually safe. Reverted step 1
+   alone, re-ran: **0 regressions**. The narrow fold from step 3 was
+   sufficient by itself.
+5. Verified against the real, non-reduced shader (not just the pinned
+   reduction): `FEME_DUMP_IR_PRELINEARIZE=1` from the actual `deqp-vk`
+   case. Still `Fail`, identical diagnostic. Traced it: `ENV6(c)(10)`'s
+   own obstacle is gone (no more `HeaderExit=0`), but
+   `collectUniformPassThroughRegion` now rejects a **second**,
+   genuinely divergent branch one layer further in -- a `Guard`-variable
+   reconvergence phi (the standard SPIR-V-structurizer "did an earlier
+   `if` execute" pattern) sitting inside the same pass-through region.
+   This is a documented, never-supported limitation
+   ("two divergent checks in one pass-through region"), not a bug in
+   this session's fix. Scoped fresh as `ENV6(c)(11)`.
+6. `check-feme`: 3908/3912 Passed, 4 Unsupported, 0 Failed -- matches
+   `L545`'s own baseline exactly, zero regressions.
+7. Full 757-case `graphicsfuzz` CTS corpus: **689 Pass / 68 Fail**,
+   byte-identical to the last known-good baseline on disk (which already
+   included `ENV6(c)(5b)`'s wins) -- zero regressions, zero new passes
+   in this corpus (confirmed by diffing sorted verified-failures lists
+   with `comm`). The pinned repro's shape doesn't recur elsewhere in
+   these 757 cases on its own, so no corpus-level win was expected here
+   beyond the pinned test itself -- consistent with what happened.
+8. Re-verified the offload-test-suite patch set (standing instruction):
+   `llvm-beanz/feme` tip unchanged, all 5 local patches still apply
+   clean. No action.
+9. **Process fix, this session**: caught that my first 3 commits were
+   missing the required `Co-authored-by`/`Copilot-Session` trailers
+   (checked via `git log --format=fuller`, per the standing
+   instruction's own explicit ask to verify this). Branch has no
+   upstream configured (confirmed via `git status`/`git branch -vv`
+   before touching history), so amended all 3 via a scoped
+   `git filter-branch --msg-filter` limited to exactly those 3 commits
+   -- confirmed tree/diff identical before and after, trailers now
+   present. Did **not** touch any older commit further back in history
+   (many also likely lack trailers) -- out of scope and too invasive to
+   rewrite retroactively across many sessions' worth of shared history;
+   flagging as a known gap rather than silently leaving it undocumented.
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no
+update -- internal compiler-correctness investigation only, no feature/
+extension status change.
+
+**Commits** (3, in order): the `Linearize.cpp` fix +
+`FEME_DEBUG_PASSTHROUGH_DUMP_BLOCK` debug aid; the pinned test update;
+`Roadmap.md` + `VulkanCTSReport.md` + two new `.instructions.md` lessons
+together. This `agent_thoughts.md` entry to follow as its own commit.
+
+**Next steps, ranked**:
+1. `ENV6(c)(11)`: the real remaining fix for `cosh-return-inf-unused` --
+   teach `collectUniformPassThroughRegion`/`DiamondFlattener` to flatten
+   a *second*, genuinely divergent diamond (the `Guard`-variable
+   reconvergence phi found this session) inside an otherwise-uniform
+   pass-through region, instead of rejecting outright on the second
+   `CondBr`. Start by pinning a reduced repro via `llvm-reduce` (exact
+   diagnostic-text interestingness test, not a substring -- `L545`'s own
+   gotcha) before designing a fix. Structurally bigger than
+   `ENV6(c)(10)`'s IR fold; likely multi-session. Est. first session:
+   reduce + pin a repro only, don't expect a fix landed same session.
+2. The 3-case no-diagnostic bucket from `L541`, still unexplored across
+   five sessions now -- `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per
+   `L508`'s method. Est. 20-30 min.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress. Needs a
+   before/after diagnostic-text diff against an older build, not just a
+   count.
+4. Consider whether the interestingness-test-then-manually-restore-
+   dropped-stage-op-argument workflow (hit 3 times across sessions now)
+   is worth automating. Still open, still low-priority relative to
+   `ENV6(c)(11)`.
+5. Consider whether older commits further back in history should ever
+   get trailers retroactively -- flagged this session (point 9 above)
+   but deliberately not acted on; needs an explicit decision from
+   whoever owns this branch before any such rewrite, given its size.
+6. Keep re-checking the offload-test-suite patch set each session
+   (clean again this session, no action needed).
