@@ -68,29 +68,30 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
 **Next steps, ranked**:
-1. `ENV6(c)(10)`: the actual fix for `cosh-return-inf-unused` -- teach
-   `CheckBlock`'s widening logic to recognize a block already claimed as
-   a recovered `HeaderExit` and skip re-mutating it, so `linearizeCycle`'s
-   forward-match guard ("Roadmap L462") can safely accept a genuinely-
-   divergent match for the split-header shape this session isolated,
-   without reintroducing the double-mutation crash that guard's comment
-   documents. The pinned
-   `loop-divergent-forward-relayed-header-exit-check.ll` repro is a
-   ready-made, already-minimal anchor -- no further reduction needed
-   before attempting this. Est. 1-2 hours given the repro is already in
-   hand; the actual fix design is still unknown.
+1. `ENV6(c)(11)`: the real remaining fix for `cosh-return-inf-unused` --
+   teach `collectUniformPassThroughRegion`/`DiamondFlattener` to flatten
+   a *second*, genuinely divergent diamond (the `Guard`-variable
+   reconvergence phi found this session) inside an otherwise-uniform
+   pass-through region, instead of rejecting outright on the second
+   `CondBr`. Start by pinning a reduced repro via `llvm-reduce` (exact
+   diagnostic-text interestingness test, not a substring -- `L545`'s own
+   gotcha) before designing a fix. Structurally bigger than
+   `ENV6(c)(10)`'s IR fold; likely multi-session. Est. first session:
+   reduce + pin a repro only, don't expect a fix landed same session.
 2. The 3-case no-diagnostic bucket from `L541`, still unexplored across
-   four sessions now -- `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per
+   five sessions now -- `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per
    `L508`'s method. Est. 20-30 min.
 3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
    `L541`) is still unconfirmed as regression-vs-progress. Needs a
    before/after diagnostic-text diff against an older build, not just a
    count.
 4. Consider whether the interestingness-test-then-manually-restore-
-   dropped-stage-op-argument workflow (hit 3 times now: `L542`, `L544`,
-   this session) is worth automating -- e.g. an interestingness test
-   that also re-verifies argument counts/types on stage ops before
-   accepting a reduction -- rather than continuing to re-fix it by hand
-   each time.
-5. Keep re-checking the offload-test-suite patch set each session
+   dropped-stage-op-argument workflow (hit 3 times across sessions now)
+   is worth automating. Still open, still low-priority relative to
+   `ENV6(c)(11)`.
+5. Consider whether older commits further back in history should ever
+   get trailers retroactively -- flagged this session (point 9 above)
+   but deliberately not acted on; needs an explicit decision from
+   whoever owns this branch before any such rewrite, given its size.
+6. Keep re-checking the offload-test-suite patch set each session
    (clean again this session, no action needed).
