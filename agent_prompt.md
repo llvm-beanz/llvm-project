@@ -68,22 +68,21 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
 **Next steps, ranked**:
-1. Before re-attempting `ENV6(c)(5b)`, reduce the newly-regressed
-   `cov-nested-loops-array-choose-red-last-iteration` the same way this
-   session reduced `cosh-return-inf-unused`, to isolate whether the
-   `collectUniformPassThroughRegion` shortcut or the `Pre`-probe lambda
-   swap (the fix's two independent changed call sites) is responsible --
-   landing only the safe half may unlock the 4 newly-passing cases
-   without the regression. Est. 1-2 hours (repro + `llvm-reduce` +
-   trace, same workflow as this session).
+1. `ENV6(c)(9)`: generalize `collectUniformPassThroughRegion`'s
+   already-linearized-child-cycle exemption to also recognize a
+   post-child-cycle relay/guard block (`loop.exit.guard5` in the pinned
+   repro), not just the child's own header -- the pinned
+   `unsupported-nested-loop-divergent-inner-exit-guards-discard.ll` repro
+   from `L542` is a ready-made trace anchor (`FEME_DEBUG_PASSTHROUGH=1`
+   already shows exactly where it gets stuck: transparent through
+   `%Flow12`, then correctly-for-now rejected at `%loop.exit.guard5`).
+   Likely needs `DiamondFlattener`'s own private
+   `isLoopControlOrHeaderRelayEdge`-style logic. This is also the path to
+   actually fixing `cosh-return-inf-unused` itself (still `Fail`).
 2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
    `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
 3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
-   `L541`) is still unconfirmed as regression-vs-progress; not touched
-   this session.
-4. `GetAlreadyLinearizedCycleExit`'s general-mechanism audit (carried
-   from `L540`) gains one more data point this session (it is evidently
-   *not* a safe drop-in generalization everywhere) but the broader audit
-   itself is still not done.
-5. Keep re-checking the offload-test-suite patch set each session per
-   standing instructions (re-verified clean again this session).
+   `L541`) is still unconfirmed as regression-vs-progress.
+4. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (clean again this session; see the stray-branch
+   note in step 7 above if it recurs).
