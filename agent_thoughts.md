@@ -133200,3 +133200,165 @@ deep, the pinned repro is 2, and a different layer still rejects it.
    count.
 4. Keep re-checking the offload-test-suite patch set each session
    (clean again this session, no action needed).
+
+# Session: `ENV6(c)(9a)` root-caused -- the "4 nested cycles" framing was wrong, real fix still blocked by a documented crash risk (L545)
+
+**TL;DR**: Confirmed `FeMe CPU Vulkan Device` (standing check). Picked up
+ranked next step #1 from `L544`. Found the real obstacle blocking
+`cosh-return-inf-unused`, and it's *not* actually about 4-deep loop
+nesting at all -- that was a red herring from how the real shader
+happens to be structured. Reduced to a 34-line, single-loop, pinned
+repro. No fix landed (the obvious one is explicitly flagged elsewhere in
+the pass as having caused a real crash before); a new pinned regression
+test did.
+
+**What happened, in order**:
+1. Ran the real case standalone with `FEME_DUMP_IR_PRELINEARIZE=1` +
+   `FEME_DEBUG_LINEARIZE_TRACE=1` (`L542`'s method, from the correct CWD
+   -- `build/external/vulkancts/modules/vulkan/`, where the `vulkan`
+   data symlink lives -- `deqp-vk` otherwise fails immediately with
+   `Failed to open file: './vulkan/amber/graphicsfuzz/index.txt'`).
+   Confirmed the 4-cycle trace from `L542`: two structurally identical
+   inner/outer pairs, one of which (`Flow12._crit_edge`/
+   `Flow14._crit_edge`) is exactly `ENV6(c)(9)`'s already-fixed shape.
+2. Extracted the fragment module, confirmed `feme-opt --llvm
+   -passes=feme-cpu-linearize,verify` alone reproduces the exact two
+   diagnostics standalone.
+3. First `llvm-reduce` pass used a generic `"internal branch in a body
+   shape"` interestingness predicate -- converged fast (24 lines) but to
+   a *different* diagnosed variant (the `DiamondFlattener` "empty diamond
+   arm" message, not the real case's `collectUniformPassThroughRegion`
+   "uniform pass-through region ... to the latch" message). This is the
+   exact generic-substring gotcha already documented in
+   `.instructions.md` (from `ENV6(c)(2)(r)`) -- now independently
+   reconfirmed on a second, unrelated bug. Lesson holds up well; worth
+   trusting the documented gotchas even when a reduction looks like it
+   "worked" (it compiled, it errored, the error even sounded plausible).
+4. Tightened the interestingness test to the *exact* diagnostic string
+   plus the mask-op message, re-ran: converged to 34 lines, matching the
+   real diagnostics exactly. Had to restore a dropped
+   `feme.stage.discard(i1)` argument -- the `llvm-reduce`-drops-stage-op-
+   arguments gotcha from `L544`, now hit a *third* time across sessions.
+   (Worth considering, as a future process improvement: could the
+   interestingness test itself just re-run the reduced file and check it
+   still parses/verifies with the right argument counts, instead of this
+   being a manual fix-up every time? Didn't do this -- out of scope for
+   a root-causing session -- but flagging it since three repeats of the
+   same manual step is a real pattern now.)
+5. Traced the 34-line repro: **it's a single, non-nested loop.** None of
+   the real case's 4-deep nesting survived reduction or was ever actually
+   load-bearing for this specific diagnostic -- the earlier `ENV6(c)(9)`
+   work's "2 cycles deep" framing and this session's own "4 cycles deep"
+   framing were both describing the real shader's incidental structure,
+   not the minimal shape of the actual bug. Good reminder that a real
+   case's trace depth isn't the same thing as a bug's minimal
+   reproduction depth -- worth reducing before investing in a "layer by
+   layer" trace strategy next time, not after.
+6. Root cause: an earlier `ENV6(c)(4)` transform (from a much older
+   session) splits a loop's own `Header` into a trivial phi-only block
+   plus a fresh `.body` holding `Header`'s real, genuinely-divergent exit
+   check, whenever that check depends on a resource load (which this
+   pass's `UniformityInfo` already marks divergent directly). After the
+   split, `.body` is no longer `Header`'s own terminator, so
+   `matchExitCheck`/`recoverRelayExitCheck` stop recognizing it as the
+   loop's exit check at all. `findForwardExitCheckBlock`'s caller *does*
+   find `.body` as a forward candidate -- but deliberately refuses it
+   because the match is genuinely divergent, per `linearizeCycle`'s own
+   "Roadmap L462" comment, which documents this exact restriction
+   existing to avoid a real, previously-hit crash (`CheckBlock`'s
+   widening logic double-mutating the same recovered block). With no
+   recognized `HeaderExit`, `collectUniformPassThroughRegion` walks into
+   `.body` as an ordinary, unrecognized divergent branch in the loop
+   body and rejects it -- the right diagnostic, for the wrong structural
+   reason.
+7. Explored one candidate fix: treat a `CondBr` whose two successors are
+   literally the same block as a trivial, always-safe pass-through,
+   independent of its divergence (semantically sound -- such a branch
+   cannot actually diverge control flow, since every lane ends up at the
+   same place regardless of its own condition value). Implemented it,
+   rebuilt, and confirmed with `FEME_DEBUG_PASSTHROUGH=1` it's **never
+   actually reached** on this repro: the walk rejects at `.body` (two
+   genuinely *different* successors) before ever reaching the
+   identical-successor block elsewhere in the reduced IR that originally
+   made me think this was the fix. Tried twice to hand-write a minimal
+   case that would actually exercise this code path (needed a resource-
+   load-derived condition *and* the right `feme.shader.stage` function
+   attribute for this pass's divergence analysis to treat it as
+   genuinely divergent at all -- my first two attempts lacked the
+   attribute and silently had nothing divergent in them, so they
+   "passed" both with and without the candidate fix, proving nothing).
+   Ran out of budget to get a convincing test working, so reverted the
+   change rather than land logically-sound-but-unverified code. This
+   project's own stated standard is every non-refactoring change is
+   individually tested -- "I'm fairly confident this is correct" isn't
+   enough on its own when a quick test attempt is cheap and available;
+   better to bank the finding as a documented next step than guess.
+8. Did not attempt the real fix (teaching the forward-match recovery to
+   recognize this specific split-header shape, rather than just
+   dropping `L462`'s guard) this session. That guard's own comment
+   documents a genuine prior crash from essentially that naive change,
+   so it deserves its own focused session rather than a speculative
+   last-hour attempt bolted onto an already-long investigation.
+9. Added the 34-line repro as a pinned regression anchor,
+   `loop-divergent-forward-relayed-header-exit-check.ll`, with a comment
+   explaining the full root-cause chain so the next session doesn't have
+   to re-derive it from scratch. `check-feme`: 3908/3912 Passed, 4
+   Unsupported, 0 Failed -- new test passes, nothing regressed.
+10. Updated `Roadmap.md` (`ENV6(c)(9a)` struck through as done -- it was
+    itself just "find the layer," which is now complete and documented
+    even though the underlying bug isn't fixed yet; new `ENV6(c)(10)` row
+    added as a fresh top-level number, per this session's own standing
+    instruction against further lowercase-letter nesting) and
+    `VulkanCTSReport.md` (`L545`).
+11. Re-verified the offload-test-suite patch set (standing instruction):
+    fresh clone, `llvm-beanz/feme` tip unchanged (`0cc94c2`), all 5
+    stored patches apply cleanly via `git am --keep-cr`, no conflicts.
+12. Did not touch the `L541` next-step #2 (3-case no-diagnostic bucket)
+    or #3 (pass-through bucket growth) this session -- stayed focused on
+    the one ranked item to avoid spreading an already-long investigation
+    thin. Both are still open; carried forward below.
+
+**Mistake caught and fixed this session**: at one point I appended a
+throwaway test line to `agent_thoughts.md` with a bash heredoc instead of
+the `edit` tool, then immediately caught it and reverted with `git
+checkout --` before it was ever committed. Same category of mistake
+`L543` flagged for `VulkanCTSReport.md` ("no 'it's just markdown'
+exception") -- worth noting it can still happen even when the rule is
+already written down; the `edit`/`create`-only policy needs to stay a
+reflex, not just a remembered rule.
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no update
+-- internal compiler-correctness investigation only, no feature/
+extension status change.
+
+**Commits** (3, in order): the new pinned test; `Roadmap.md` +
+`VulkanCTSReport.md` together (one measurement, one commit); this
+`agent_thoughts.md` entry.
+
+**Next steps, ranked**:
+1. `ENV6(c)(10)`: the actual fix for `cosh-return-inf-unused` -- teach
+   `CheckBlock`'s widening logic to recognize a block already claimed as
+   a recovered `HeaderExit` and skip re-mutating it, so `linearizeCycle`'s
+   forward-match guard ("Roadmap L462") can safely accept a genuinely-
+   divergent match for the split-header shape this session isolated,
+   without reintroducing the double-mutation crash that guard's comment
+   documents. The pinned
+   `loop-divergent-forward-relayed-header-exit-check.ll` repro is a
+   ready-made, already-minimal anchor -- no further reduction needed
+   before attempting this. Est. 1-2 hours given the repro is already in
+   hand; the actual fix design is still unknown.
+2. The 3-case no-diagnostic bucket from `L541`, still unexplored across
+   four sessions now -- `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per
+   `L508`'s method. Est. 20-30 min.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress. Needs a
+   before/after diagnostic-text diff against an older build, not just a
+   count.
+4. Consider whether the interestingness-test-then-manually-restore-
+   dropped-stage-op-argument workflow (hit 3 times now: `L542`, `L544`,
+   this session) is worth automating -- e.g. an interestingness test
+   that also re-verifies argument counts/types on stage ops before
+   accepting a reduction -- rather than continuing to re-fix it by hand
+   each time.
+5. Keep re-checking the offload-test-suite patch set each session
+   (clean again this session, no action needed).
