@@ -68,21 +68,17 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. Suggested next steps:
 
 **Next steps, ranked**:
-1. `ENV6(c)(9)`: generalize `collectUniformPassThroughRegion`'s
-   already-linearized-child-cycle exemption to also recognize a
-   post-child-cycle relay/guard block (`loop.exit.guard5` in the pinned
-   repro), not just the child's own header -- the pinned
-   `unsupported-nested-loop-divergent-inner-exit-guards-discard.ll` repro
-   from `L542` is a ready-made trace anchor (`FEME_DEBUG_PASSTHROUGH=1`
-   already shows exactly where it gets stuck: transparent through
-   `%Flow12`, then correctly-for-now rejected at `%loop.exit.guard5`).
-   Likely needs `DiamondFlattener`'s own private
-   `isLoopControlOrHeaderRelayEdge`-style logic. This is also the path to
-   actually fixing `cosh-return-inf-unused` itself (still `Fail`).
-2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+1. `ENV6(c)(9a)`: trace which of `cosh-return-inf-unused`'s 4 nested
+   cycles still rejects it -- `FEME_DUMP_IR_PRELINEARIZE=1` +
+   `FEME_DEBUG_LINEARIZE_TRACE=1` (the `L542` method), then reduce that
+   one layer alone before touching any code. Est. 30-60 min just to
+   find the layer; fixing it is unknown until then.
+2. The 3-case no-diagnostic bucket from `L541`, still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method. Est.
+   20-30 min to re-run and categorize.
 3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
-   `L541`) is still unconfirmed as regression-vs-progress.
-4. Keep re-checking the offload-test-suite patch set each session per
-   standing instructions (clean again this session; see the stray-branch
-   note in step 7 above if it recurs).
+   `L541`) is still unconfirmed as regression-vs-progress. Needs a
+   before/after diagnostic-text diff against an older build, not just a
+   count.
+4. Keep re-checking the offload-test-suite patch set each session
+   (clean again this session, no action needed).
