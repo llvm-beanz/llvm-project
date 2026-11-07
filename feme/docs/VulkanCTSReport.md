@@ -12527,3 +12527,109 @@ entry together. `agent_thoughts.md` to follow as its own final commit.
    `L541`) is still unconfirmed as regression-vs-progress.
 4. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (re-verified clean again this session).
+
+## L545: `ENV6(c)(9a)` root-caused -- none of the 4-deep nesting is actually load-bearing; no safe fix yet
+
+**Done**: ranked next step #1 from `L544`. Found the real obstacle
+blocking `cosh-return-inf-unused`, reduced it to a minimal, non-nested,
+pinned standalone repro, and confirmed a genuinely safe fix is not yet
+in reach (the obvious one is explicitly documented elsewhere in the pass
+as having caused a real crash once before). No code fix landed; a new
+pinned regression-anchor test did.
+
+1. Confirmed `FeMe CPU Vulkan Device` (standing per-session check).
+2. Ran `dEQP-VK.graphicsfuzz.cosh-return-inf-unused` standalone with
+   `FEME_DUMP_IR_PRELINEARIZE=1`/`FEME_DEBUG_LINEARIZE_TRACE=1` (the
+   `L542` method). The trace confirms 4 distinct cycles print, in two
+   independent pairs (an inner/outer pair around `Flow12._crit_edge`/
+   `Flow14._crit_edge`, matching `ENV6(c)(9)`'s already-fixed shape
+   exactly, and a second, structurally identical inner/outer pair around
+   `Flow18._crit_edge`/`Flow22._crit_edge`). ~20 min.
+3. Extracted the fragment module from the dump, confirmed `feme-opt
+   --llvm -passes=feme-cpu-linearize,verify` alone reproduces the exact
+   two diagnostics standalone. ~5 min.
+4. `llvm-reduce`d with an interestingness test initially checking only
+   the generic `"internal branch in a body shape"` substring -- this
+   converged to a 24-line file in under a minute, but it reproduced a
+   *different* diagnosed message variant (the `DiamondFlattener`
+   "empty diamond arm" path, not the `collectUniformPassThroughRegion`
+   "uniform pass-through region ... to the latch" path the real case
+   actually hits) -- exactly the generic-substring gotcha already
+   documented in `.instructions.md`'s `ENV6(c)(2)(r)` entry, now
+   reconfirmed on a second, independent bug. Tightened the
+   interestingness test to require the *exact* "only a uniform
+   pass-through region from the header's own exit check to the latch"
+   string, plus the mask-affecting-op message, and re-ran: converged to
+   a 34-line file (after restoring a dropped `feme.stage.discard(i1)`
+   argument -- the same `llvm-reduce`-drops-stage-op-arguments gotcha
+   from `L544`, now hit a third time) that matches the real diagnostics
+   exactly. ~40 min (two reduction passes plus the arg-drop re-fix).
+5. Traced the 34-line repro with `FEME_DEBUG_PASSTHROUGH=1`/
+   `FEME_DEBUG_LINEARIZE_TRACE=1`: it is a **single, non-nested** loop --
+   none of the real case's 4-deep nesting survived reduction, meaning the
+   nesting was never actually load-bearing for this diagnostic. The
+   walk rejects at a block named `.body`, which an earlier `ENV6(c)(4)`
+   transform had split out of this loop's own `Header` (moving `Header`'s
+   real, genuinely-divergent exit check into it). `HeaderExit` is null
+   (neither `matchExitCheck`/`recoverRelayExitCheck` match `.body` as
+   `Header`'s own check anymore, since it is no longer `Header`'s own
+   terminator) -- `findForwardExitCheckBlock`'s own caller does find
+   `.body` as a forward candidate, but deliberately refuses it because
+   its own match is genuinely divergent (see `linearizeCycle`'s own
+   "Roadmap L462" comment, which documents this restriction existing
+   specifically to avoid a previously-real crash from `CheckBlock`'s
+   widening logic double-mutating the same recovered block).
+   `collectUniformPassThroughRegion` then walks into `.body` as an
+   ordinary, unrecognized divergent `CondBr` in the body, and correctly
+   -- but for the wrong structural reason -- rejects it. ~30 min.
+6. Explored one candidate fix (treating a `CondBr` whose two successors
+   are the literal same block as a trivial pass-through, independent of
+   `isDivergentBranch`) -- logically sound, but confirmed with
+   `FEME_DEBUG_PASSTHROUGH=1` that it is never actually reached on this
+   repro (the walk rejects at `.body` first, which has two *different*
+   successors). Could not construct any test (hand-written or reduced)
+   that exercised this candidate fix meaningfully within the session's
+   time budget, so reverted it rather than land untested, logically-only
+   code. ~45 min (including the failed hand-written repro attempts and
+   the `git stash`/rebuild cycles to confirm each one's baseline
+   behavior).
+7. Did not attempt the real fix (recognizing the split-header shape
+   specifically rather than relaxing `L462`'s guard wholesale) this
+   session -- the guard's own comment documents a genuine prior crash
+   from the naive version of this exact change, so it needs its own
+   careful, isolated investigation rather than a speculative attempt
+   layered on top of an already-long session. Broken out as a fresh
+   `ENV6(c)(10)`.
+8. Added the 34-line reduction as a pinned regression anchor,
+   `loop-divergent-forward-relayed-header-exit-check.ll`. `check-feme`:
+   3908/3912 Passed, 4 Unsupported, 0 Failed (the new test passes; no
+   existing test regressed).
+9. Re-verified the offload-test-suite patch set (standing instruction):
+   `llvm-beanz/feme` tip unchanged, all 5 stored patches apply cleanly
+   via `git am --keep-cr` in a scratch worktree, no conflicts.
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no
+update -- internal compiler-correctness investigation only, no
+feature/extension status change.
+
+**Commits** (2, in order): the new pinned test; `Roadmap.md` (new
+`ENV6(c)(10)` row, `ENV6(c)(9a)` struck through as done) + this
+`VulkanCTSReport.md` entry together. `agent_thoughts.md` to follow as
+its own final commit.
+
+**Next steps, ranked**:
+1. `ENV6(c)(10)`: the actual fix for `cosh-return-inf-unused` -- teach
+   `CheckBlock`'s widening logic to recognize a block already claimed as
+   a recovered `HeaderExit` and skip re-mutating it, so the forward-match
+   guard in `linearizeCycle` ("Roadmap L462") can safely accept a
+   genuinely-divergent match for the specific split-header shape this
+   session isolated, without reintroducing the double-mutation crash
+   that guard's own comment documents. The pinned
+   `loop-divergent-forward-relayed-header-exit-check.ll` repro is a
+   ready-made anchor.
+2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress.
+4. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (clean again this session).
