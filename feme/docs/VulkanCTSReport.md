@@ -12425,3 +12425,105 @@ cherry-picks cleanly, all 5 stored patches apply cleanly with `git am
    `L541`) is still unconfirmed as regression-vs-progress.
 4. Keep re-checking the offload-test-suite patch set each session per
    standing instructions (re-verified clean again this session).
+
+## L544: `ENV6(c)(9)` partial -- safer fallback-gate fix lands the pinned repro, `cosh-return-inf-unused` still `Fail` (different layer)
+
+**Partial**: took ranked next step #1 from `L543`, but found a simpler and
+safer fix than the one `L543` scoped out, rather than the planned
+`collectUniformPassThroughRegion`/`DiamondFlattener` relay-chase.
+
+1. Confirmed `FeMe CPU Vulkan Device` (standing per-session check).
+2. `FEME_DEBUG_PASSTHROUGH=1` on the pinned
+   `unsupported-nested-loop-divergent-inner-exit-guards-discard.ll` repro
+   confirmed `L542`/`L543`'s own trace: passes through `%Flow12`
+   (non-divergent per `UniformityInfo`), then rejects at
+   `%loop.exit.guard5` as a divergent `CondBr` (temporal divergence via a
+   loop-carried phi).
+3. Before attempting the planned `DiamondFlattener`-relay-chase fix,
+   traced *why* `collectUniformPassThroughRegion`'s rejection at
+   `%loop.exit.guard5` doesn't itself get a second chance at being
+   flattened some other way, and found `LoopLinearizer::linearizeCycle`'s
+   own `BodyRegion` fallback (~line 9259: re-tries the rejected region as
+   a `DiamondFlattener`-flattenable body) was gated on `HeaderDivergent`
+   (whether the *outer* loop's own header exit check is divergent) --
+   but nothing in `DiamondFlattener::canFlattenLoopBodyRegion`/
+   `flattenLoopBodyRegion` depends on that; both operate purely on the
+   region's own internal structure. The repro's outer loop header is
+   itself uniform, so the fallback was never attempted at all, and the
+   code fell straight through to the "unsupported" diagnostic.
+4. Dropped the `HeaderDivergent` gate (`if (!BodyRegion &&
+   HeaderDivergent)` -> `if (!BodyRegion)`) and re-ran the repro:
+   `feme-opt --llvm -passes=feme-cpu-linearize,verify` now lowers it
+   cleanly, masking the discard via `live.f`/`sideeffect.f` at
+   `loop.exit.guard5` as expected.
+5. First attempt crashed in `applyStageMasks` (`Call->getArgOperand(0)`
+   on a zero-argument `Discard`) -- root-caused to the pinned repro's own
+   `llvm-reduce`d `declare void @feme.stage.discard()` having dropped its
+   required `i1` argument (the real convention, used by every other test
+   in the directory, is `declare void @feme.stage.discard(i1)` / `call
+   ... (i1 true)`). This was a test bug predating this session's own
+   change, not a bug in the fix. Reverted the code change, fixed the
+   test's `declare`/`call` first (committed separately, see below), then
+   reapplied the gate removal -- it built and passed clean against the
+   corrected test.
+6. Ran the full 757-case graphicsfuzz corpus (`run_vulkan_cts.py`, 6
+   workers, ~1 minute) both with and without the fix, sorted both `Fail`
+   lists (`LC_ALL=C sort`) and diffed them: **byte-identical, 689 Pass /
+   68 Fail both ways** -- this exact 2-deep-cycle shape does not
+   otherwise occur anywhere in the 757-case corpus, so the fix is a pure
+   net addition with no regression risk measurable by this corpus.
+7. Checked the actual targeted case,
+   `dEQP-VK.graphicsfuzz.cosh-return-inf-unused`, directly: **still
+   `Fail`**, with the same two diagnostics as before this session. The
+   real shader's cycle nest is 4 deep (vs. the pinned repro's 2), and a
+   different, as-yet-unidentified earlier/outer layer still rejects it
+   before linearization ever reaches the code path this fix touches.
+   Broken down as new follow-up `ENV6(c)(9a)` in `Roadmap.md` rather than
+   investigated further this session, to keep this change small and
+   separately committed per standing instructions.
+8. `check-feme`: 3907/3911 Passed, 4 Unsupported, 0 Failed -- identical
+   to baseline, confirmed both right after the arg-fix-only commit and
+   again with the final fix + rewritten test together.
+9. Rewrote the pinned repro from a negative test (`not feme-opt ... 2>&1
+   | FileCheck`, diagnostic-text check) to a positive one now that it
+   lowers successfully (`feme-opt ... | FileCheck`, checking the discard
+   is masked away via `CHECK-NOT: call void @feme.stage.discard` plus the
+   `loop.exit.guard5:` block's own masking instructions), and renamed it
+   from `unsupported-nested-loop-divergent-inner-exit-guards-discard.ll`
+   to `nested-loop-divergent-inner-exit-guards-discard.ll` to match (the
+   `L542`/`L543` historical entries above still reference the old name,
+   left as-is since they describe the state at that time).
+10. Updated `Roadmap.md`: kept `ENV6(c)(9)` itself un-struck (the
+    originally-planned fix for it wasn't what landed, and the targeted
+    `cosh-return-inf-unused` case is still `Fail`), rewrote its
+    description to record what *did* land and why, and added
+    `ENV6(c)(9a)` (one new lowercase letter under `(9)`, per the standing
+    nesting-depth instruction) for tracing the real case's remaining
+    outer layer.
+
+**Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no update
+-- internal compiler-correctness fix only, no feature/extension status
+change.
+
+**offload-test-suite**: re-verified the patch set this session per
+standing instructions -- `llvm-beanz/feme` branch tip still `0cc94c2`
+(unchanged from `L543`), all 5 stored patches apply cleanly with `git am
+--keep-cr` in a scratch worktree, in order, no conflicts. Nothing to
+update there.
+
+**Commits** (3, in order): the reduced-test `i1`-argument fix (test-only,
+landed first to isolate it from the real fix); the `Linearize.cpp` fix +
+test rewrite/rename together; `Roadmap.md` + this `VulkanCTSReport.md`
+entry together. `agent_thoughts.md` to follow as its own final commit.
+
+**Next steps, ranked**:
+1. `ENV6(c)(9a)`: trace which of `cosh-return-inf-unused`'s 4 nested
+   cycles still rejects it, using `FEME_DUMP_IR_PRELINEARIZE=1` +
+   `FEME_DEBUG_LINEARIZE_TRACE=1` (the `L542` method), then reduce that
+   layer alone to a standalone repro before attempting a fix.
+2. The 3-case no-diagnostic bucket from `L541` is still unexplored --
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`'s method.
+3. The "pass-through to/from exit check" bucket growth (5 -> 10, from
+   `L541`) is still unconfirmed as regression-vs-progress.
+4. Keep re-checking the offload-test-suite patch set each session per
+   standing instructions (re-verified clean again this session).
