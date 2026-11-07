@@ -9256,7 +9256,27 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // guarded by a per-lane condition) is not a uniform pass-through region,
   // but `DiamondFlattener` below can still flatten it. Defer to it.
   bool BodyFlattenOnly = false;
-  if (!BodyRegion && HeaderDivergent) {
+  // Roadmap ENV6(c)(9): this fallback used to require `HeaderDivergent`
+  // (the outer loop's own exit check being divergent), but nothing in
+  // `DiamondFlattener::canFlattenLoopBodyRegion`/`flattenLoopBodyRegion`
+  // actually depends on that -- both operate purely on the
+  // `BodyRegionStart`..`Latch` region's own internal structure. Gating
+  // on it wrongly left a *uniform*-header outer loop whose body contains
+  // a genuinely divergent diamond (reached, in the pinned
+  // `nested-loop-divergent-inner-exit-guards-discard.ll`
+  // repro, via an already-linearized child cycle's own `loop.exit.guard`
+  // relay) with no fallback at all once `collectUniformPassThroughRegion`
+  // rejected it, immediately diagnosing "unsupported" instead of ever
+  // trying the exact same `DiamondFlattener`-based masking the
+  // `HeaderDivergent` case already relies on. Verified via the pinned
+  // repro (now correctly lowered and masked, matching
+  // `feme-opt --llvm -passes=feme-cpu-linearize,verify`), a full
+  // `check-feme` run (no other regression), and a full 757-case
+  // graphicsfuzz CTS sweep (byte-identical Pass/Fail lists before and
+  // after -- this specific 2-deep shape does not otherwise occur in that
+  // corpus; the real 4-deep `cosh-return-inf-unused` repro still fails,
+  // against an earlier/different cycle layer, same as before).
+  if (!BodyRegion) {
     SmallPtrSet<BasicBlock *, 16> PreMerge, PreResolved;
     // Roadmap ENV6(c)(5b): mirrors `GetAlreadyLinearizedCycleExitForBody`
     // just below -- lets this feasibility probe's own `validate` walk
