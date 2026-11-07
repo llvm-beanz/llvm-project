@@ -133468,3 +133468,78 @@ together. This `agent_thoughts.md` entry to follow as its own commit.
    whoever owns this branch before any such rewrite, given its size.
 6. Keep re-checking the offload-test-suite patch set each session
    (clean again this session, no action needed).
+
+# Session: `ENV6(c)(11)` reduced and pinned (L547) -- no fix, as scoped
+
+**Confirmed `FeMe CPU Vulkan Device`** (standing check, every session).
+
+**Next action for whoever picks this up**: open
+`feme/test/Transforms/CPU/Linearize/loop-guard-reconvergence-phi-second-divergent-check.ll`
+and design the `collectUniformPassThroughRegion`/`DiamondFlattener`
+flattening fix for `ENV6(c)(12)`. The repro is already minimal (47
+lines) -- no reduction work needed first.
+
+**What got done** (ranked next step #1 from `L546`, taken literally:
+reduce + pin only, no fix attempt):
+
+1. Re-dumped the real `cosh-return-inf-unused` shader's pre-linearize IR
+   (`FEME_DUMP_IR_PRELINEARIZE=1` from `deqp-vk`, the `L542`/`L545`
+   method) and confirmed it reproduces standalone through `feme-opt`.
+2. Re-traced the rejection with `FEME_DEBUG_PASSTHROUGH=1`
+   `FEME_DEBUG_PASSTHROUGH_DUMP_BLOCK=1`: it's `loop.exit.guard3`'s
+   `%Guard.4.inv = xor i1 %96, true`, fed by a 3-predecessor
+   true/false/false phi -- the SPIR-V-structurizer "did an earlier `if`
+   execute" pattern `L546` predicted, not a resource-load false
+   positive.
+3. Wrote an `llvm-reduce` interestingness test. **First attempt was too
+   loose** -- it only checked that a `Guard.N.inv` definition and some
+   `phi i1` literal existed somewhere in the dump text, not that the
+   branch actually used it. Converged to 51 lines where the real
+   terminator used a different, raw phi-of-constants value instead,
+   leaving `Guard.4.inv` dead. Same `ENV6(c)(9a)`/`L545` gotcha,
+   self-inflicted this time. Tightened the test to require
+   `br i1 %Guard.N.inv, label ...` as the literal terminator text;
+   re-ran, got 47 lines with the real dependency intact.
+4. Restored a dropped `feme.stage.discard()` argument back to
+   `feme.stage.discard(i1 true)` by hand -- 4th time this exact
+   `llvm-reduce` gotcha has hit across sessions.
+5. Pinned the repro, following `unsupported-stage-op-in-uniform-loop.ll`'s
+   diagnostic-pinning style (`not feme-opt ... | FileCheck`, no fix
+   exists yet so the test pins the current error text).
+6. `check-feme`: 3909/3913 Passed, 4 Unsupported, 0 Failed -- new test
+   counted, zero regressions. Did not re-run the 757-case graphicsfuzz
+   CTS corpus (no code changed, so no delta is possible).
+7. Re-verified the offload-test-suite patch set: `llvm-beanz/feme` tip
+   still `0cc94c2`, all 5 patches apply clean in a scratch clone.
+
+**Mistake caught**: step 3's first interestingness test "passed" while
+pinning the wrong thing. Caught by manually tracing the 51-line
+reduction before trusting it, not by the test itself. Wrote this up as a
+new `.instructions.md` lesson so the next session checks the *use* of a
+named value, not just its *existence*, when writing a debug-dump-based
+interestingness test.
+
+**Commits** (4, in order): the pinned test; `Roadmap.md` +
+`VulkanCTSReport.md` together; the `.instructions.md` lesson; this
+`agent_thoughts.md` entry.
+
+**Next steps, ranked**:
+1. `ENV6(c)(12)`: design and land the actual fix. Teach
+   `collectUniformPassThroughRegion`/`DiamondFlattener` to flatten the
+   *second* divergent diamond inside an otherwise-uniform pass-through
+   region, instead of rejecting the whole region. Repro is ready; no
+   reduction needed first. Est. multi-session -- expect a design
+   sketch/prototype first session, not a landed fix.
+2. 3-case no-diagnostic bucket from `L541`, unexplored across six
+   sessions now. `FEME_VULKAN_LOG_CREATION_ERRORS=1` re-runs per `L508`.
+   Est. 20-30 min.
+3. "Pass-through to/from exit check" bucket growth (5 -> 10, `L541`)
+   still unconfirmed as regression-vs-progress. Needs a before/after
+   diagnostic-text diff against an older build.
+4. Consider automating the interestingness-test-then-manually-restore-
+   dropped-stage-op-argument workflow (hit 4 times now). Still
+   low-priority next to `ENV6(c)(12)`.
+5. Retroactive trailers on older commits -- still flagged, still not
+   acted on, still needs an explicit owner decision.
+6. Keep re-checking the offload-test-suite patch set each session
+   (clean again this session).
