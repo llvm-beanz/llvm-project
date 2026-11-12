@@ -47,6 +47,13 @@ TEST(BlockGeometryTest, OrdinaryFormatElementSizes) {
   EXPECT_EQ(formatElementSize(ResourceFormat::R16_FLOAT), 2u);
 }
 
+TEST(BlockGeometryTest, DepthOnly24BitFormatUsesFourByteTexels) {
+  EXPECT_EQ(formatElementSize(ResourceFormat::X8_D24_UNORM), 4u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::X8_D24_UNORM), 4u);
+  EXPECT_EQ(blockWidth(ResourceFormat::X8_D24_UNORM), 1u);
+  EXPECT_EQ(blockHeight(ResourceFormat::X8_D24_UNORM), 1u);
+}
+
 TEST(BlockGeometryTest, OrdinaryFormatBlockShapeIsOneByOne) {
   EXPECT_EQ(blockWidth(ResourceFormat::R8G8B8A8_UNORM), 1u);
   EXPECT_EQ(blockHeight(ResourceFormat::R8G8B8A8_UNORM), 1u);
