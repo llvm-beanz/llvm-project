@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,59 @@ import run_vulkan_cts
 
 
 class VerificationIsolationTest(unittest.TestCase):
+    def test_timeout_before_qpa_creation_is_recovered(self):
+        case = "dEQP-VK.x.hang"
+        with tempfile.TemporaryDirectory() as directory:
+            case_list = Path(directory) / "cases.txt"
+            case_list.write_text(case, encoding="utf-8")
+            with mock.patch.object(
+                run_vulkan_cts.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired("deqp-vk", 10),
+            ) as processes:
+                self.assertEqual(run_vulkan_cts.main([
+                    "--deqp-vk", "unused", "--case-list", str(case_list),
+                    "--cwd", directory, "--output-dir", directory,
+                    "--batch-size", "1", "--recovery-batch-sizes", "1",
+                    "--batch-timeout", "10", "--final-timeout", "10",
+                ]), 0)
+            self.assertEqual(processes.call_count, 2)
+            report = (Path(directory) / "report.txt").read_text(encoding="utf-8")
+            self.assertIn("Unrun cases: 0\n", report)
+            self.assertIn("  TimedOut: 1\n", report)
+            log = Path(directory) / "logs/recovery-1-00000.log"
+            self.assertIn("timed out", log.read_text(encoding="utf-8"))
+
+    def test_timeout_preserves_completed_qpa_records(self):
+        cases = ["dEQP-VK.x.pass", "dEQP-VK.x.hang"]
+
+        def partial_result(args, **kwargs):
+            qpa = next(arg.split("=", 1)[1] for arg in args
+                       if arg.startswith("--deqp-log-filename="))
+            Path(qpa).write_text(
+                "#beginTestCaseResult " + cases[0] + "\n"
+                '<TestCaseResult><Result StatusCode="Pass"/></TestCaseResult>\n'
+                "#endTestCaseResult\n", encoding="utf-8")
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(
+                run_vulkan_cts.subprocess, "run", side_effect=partial_result,
+            ):
+                results, unrun, timed_out = run_vulkan_cts.run_round(
+                    "unused", [cases], directory, "initial", 1, [], directory,
+                    timeout=10)
+            self.assertEqual(results, {cases[0]: "Pass"})
+            self.assertEqual(unrun, [cases[1]])
+            self.assertEqual(timed_out, [])
+
+    def test_missing_qpa_without_timeout_is_an_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(run_vulkan_cts.subprocess, "run"):
+                with self.assertRaises(FileNotFoundError):
+                    run_vulkan_cts.run_round(
+                        "unused", [["dEQP-VK.x.pass"]], directory, "initial",
+                        1, [], directory, timeout=10)
+
     def test_initial_single_case_timeout_is_retried_with_final_budget(self):
         case = "dEQP-VK.x.slow"
         with tempfile.TemporaryDirectory() as directory:

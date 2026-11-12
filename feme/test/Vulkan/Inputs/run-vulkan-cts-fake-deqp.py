@@ -10,7 +10,7 @@
 #   *.devicelost_persistent
 #                          DeviceLost every time (simulates a real,
 #                          reproducible device loss).
-#   *.hangs                sleeps past any reasonable timeout and writes no
+#   *.hangs                waits until killed and writes no
 #                          record at all (simulates a stuck case).
 #
 # Per-case call counts are persisted as files under $FAKE_DEQP_STATE_DIR so
@@ -50,8 +50,8 @@ def status_for(case_name):
         call_count(case_name)
         return "DeviceLost"
     if case_name.endswith(".hangs"):
-        time.sleep(5)
-        return None
+        while True:
+            time.sleep(60)
     raise ValueError("unrecognized fake case name: %s" % case_name)
 
 

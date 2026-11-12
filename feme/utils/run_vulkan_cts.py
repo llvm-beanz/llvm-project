@@ -146,6 +146,8 @@ def run_one_batch(deqp_vk, case_list_path, qpa_path, log_path, extra_args,
             subprocess.run(args, cwd=cwd, stdout=log_file,
                            stderr=subprocess.STDOUT, timeout=timeout)
         except subprocess.TimeoutExpired:
+            log_file.write("\nrun_vulkan_cts: %s timed out after %s seconds\n"
+                           % (deqp_vk, timeout))
             return True
         except OSError as error:
             log_file.write("\nrun_vulkan_cts: failed to start %s: %s\n"
@@ -195,7 +197,11 @@ def run_round(deqp_vk, batches, output_dir, tag, workers, extra_args, cwd,
                                        extra_args, cwd, timeout))
         batch_timed_out = [future.result() for future in futures]
 
-    results = reconcile.merge_results(qpa_paths, "round %s" % tag)
+    # A timeout during startup can leave no QPA file at all.
+    result_paths = [
+        path for path, did_time_out in zip(qpa_paths, batch_timed_out)
+        if not did_time_out or os.path.exists(path)]
+    results = reconcile.merge_results(result_paths, "round %s" % tag)
     requested = [case_name for batch in batches for case_name in batch]
     unrun = [case_name for case_name in requested if case_name not in results]
     timed_out = [

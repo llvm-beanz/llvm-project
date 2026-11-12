@@ -15,7 +15,7 @@
 // RUN:   --deqp-vk %S/Inputs/run-vulkan-cts-fake-deqp.py \
 // RUN:   --case-list %S/Inputs/run-vulkan-cts-devicelost-timedout-cases.txt \
 // RUN:   --cwd %t.cwd --output-dir %t.out --batch-size 1 --workers 2 \
-// RUN:   --recovery-batch-sizes 1 --final-timeout 0.5 --batch-timeout 0.5 \
+// RUN:   --recovery-batch-sizes 1 --final-timeout 10 --batch-timeout 10 \
 // RUN:   --report %t.report
 // RUN: FileCheck %s < %t.report
 //
@@ -23,6 +23,8 @@
 // stand-in (`#!/usr/bin/env python3` shebang); `run_one_batch` invokes
 // `--deqp-vk` positionally as argv[0], so no separate Python interpreter
 // wrapper is needed here.
+// Allow time for Python startup under parallel test load; the fake hangs
+// indefinitely, so it cannot finish before either timeout.
 //
 // CHECK: Total cases: 4
 // CHECK: Completed cases: 4
