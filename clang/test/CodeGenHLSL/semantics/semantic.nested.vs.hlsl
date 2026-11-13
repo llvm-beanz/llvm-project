@@ -18,7 +18,7 @@ struct VSOutput {
 
 // CHECK: @POSITION0 = external hidden thread_local addrspace(7) externally_initialized constant <4 x float>, !spirv.Decorations ![[#MD_0:]]
 // CHECK: @SV_POSITION = external hidden thread_local addrspace(8) global <4 x float>, !spirv.Decorations ![[#MD_2:]]
-// CHECK: @A0 = external hidden thread_local addrspace(8) global i32, !spirv.Decorations ![[#MD_A:]]
+// CHECK: @A0 = external hidden thread_local addrspace(8) global i32, !spirv.Decorations ![[#OUTPUT0_MD:]]
 // CHECK: @B0 = external hidden thread_local addrspace(8) global i32, !spirv.Decorations ![[#MD_4:]]
 // CHECK: @C0 = external hidden thread_local addrspace(8) global i32, !spirv.Decorations ![[#MD_6:]]
 
@@ -41,8 +41,8 @@ VSOutput main(VSInput input) {
 //                            |       `-> BuiltIn 'Position'
 //                            `-> SPIR-V decoration 'BuiltIn'
 
-// Integer vertex outputs carry Flat, matching the fragment inputs.
-// CHECK: ![[#MD_A]] = !{![[#MD_1]], ![[#FLAT:]]}
+// Integer vertex outputs carry Flat, matching integer fragment inputs.
+// CHECK: ![[#OUTPUT0_MD]] = !{![[#MD_1]], ![[#FLAT:]]}
 // CHECK: ![[#FLAT]] = !{i32 14}
 
 // CHECK: ![[#MD_4]] = !{![[#MD_5:]], ![[#FLAT]]}

@@ -11,17 +11,17 @@
 
 ; CHECK-LABEL: define internal void @main(
 ; CHECK-SAME: ptr %barrier_spill)
-; CHECK: %sum.reload.slot = getelementptr %main.barrier_spill, ptr %barrier_spill, i32 %wave_index
-; CHECK: %sum.reload = getelementptr inbounds nuw %main.barrier_spill, ptr %sum.reload.slot, i32 0, i32 0
-; CHECK: %sum.reload.val = load i32, ptr %sum.reload
+; CHECK: %[[RELOADINDEX:.*]] = sext i32 %wave_index to i64
+; CHECK: %sum.reload.slot = getelementptr [4 x i8], ptr %barrier_spill, i64 %[[RELOADINDEX]]
+; CHECK: %sum.reload.val = load i32, ptr %sum.reload.slot
 ; CHECK: %doubled = mul i32 %sum.reload.val, 2
 ; CHECK: ret void
 
 ; CHECK-LABEL: define internal void @main.region0(
 ; CHECK-SAME: ptr %barrier_spill)
-; CHECK: %sum.spill.slot = getelementptr %main.barrier_spill, ptr %barrier_spill, i32 %wave_index
-; CHECK: %sum.spill = getelementptr inbounds nuw %main.barrier_spill, ptr %sum.spill.slot, i32 0, i32 0
-; CHECK: store i32 %sum, ptr %sum.spill
+; CHECK: %[[SPILLINDEX:.*]] = sext i32 %wave_index to i64
+; CHECK: %sum.spill.slot = getelementptr [4 x i8], ptr %barrier_spill, i64 %[[SPILLINDEX]]
+; CHECK: store i32 %sum, ptr %sum.spill.slot
 ; CHECK: ret void
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {

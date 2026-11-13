@@ -22,14 +22,15 @@
 ; CHECK: store <16 x i32> %tid1, ptr %[[SRCA]]
 ; CHECK: %[[IDX0:.*]] = extractelement <16 x i32> %rev.wide, i32 0
 ; CHECK: %[[WRAP0:.*]] = and i32 %[[IDX0]], 15
-; CHECK: %[[MP0:.*]] = getelementptr inbounds i8, ptr %[[MASKA]], i32 %[[WRAP0]]
+; CHECK: %[[MASKIDX0:.*]] = sext i32 %[[WRAP0]] to i64
+; CHECK: %[[MP0:.*]] = getelementptr inbounds i8, ptr %[[MASKA]], i64 %[[MASKIDX0]]
 ; CHECK: %[[MB0:.*]] = load i8, ptr %[[MP0]]
 ; CHECK: %[[ACT0:.*]] = trunc i8 %[[MB0]] to i1
-; CHECK: %[[SP0:.*]] = getelementptr inbounds i32, ptr %[[SRCA]], i32 %[[WRAP0]]
+; CHECK: %[[SRCIDX0:.*]] = sext i32 %[[WRAP0]] to i64
+; CHECK: %[[SP0:.*]] = getelementptr inbounds [4 x i8], ptr %[[SRCA]], i64 %[[SRCIDX0]]
 ; CHECK: %[[V0:.*]] = load i32, ptr %[[SP0]]
 ; CHECK: %[[SEL0:.*]] = select i1 %[[ACT0]], i32 %[[V0]], i32 0
-; CHECK: %[[DP0:.*]] = getelementptr inbounds i32, ptr %[[DSTA]], i32 0
-; CHECK: store i32 %[[SEL0]], ptr %[[DP0]]
+; CHECK: store i32 %[[SEL0]], ptr %[[DSTA]]
 ; CHECK: load <16 x i32>, ptr %[[DSTA]]
 
 ; NARROW-LABEL: define void @main(

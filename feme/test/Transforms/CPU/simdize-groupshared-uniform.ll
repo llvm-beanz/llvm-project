@@ -12,8 +12,7 @@
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK-NEXT: %{{.*}} = getelementptr inbounds [4 x i32], ptr %shared.flat, i32 0, i32 0
-; CHECK-NEXT: %val = load i32, ptr %{{.*}}, align 4
+; CHECK-NEXT: %val = load i32, ptr %shared.flat, align 4
 define void @main() #0 {
   %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 0
   %val = load i32, ptr addrspace(3) %ptr

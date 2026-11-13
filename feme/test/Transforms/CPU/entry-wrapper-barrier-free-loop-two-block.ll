@@ -22,7 +22,7 @@
 ; CHECK-NEXT: ret void
 
 ; CHECK-LABEL: define internal void @main.region0(
-; CHECK: store i32 %wave_group_id_x, ptr %ptr0
+; CHECK: store i32 %wave_group_id_x, ptr %shared.flat
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {
 ; CHECK: wave.loop.header.0:

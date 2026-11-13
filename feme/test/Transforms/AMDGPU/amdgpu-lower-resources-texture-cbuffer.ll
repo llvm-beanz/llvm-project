@@ -24,13 +24,15 @@ target triple = "amdgcn-amd-amdhsa"
 ; CHECK-NEXT: [[Y:%.*]] = extractelement <2 x i32> %coord, i32 1
 ; CHECK-NEXT: [[YSTRIDE:%.*]] = mul i32 [[Y]], [[INSTRIDE]]
 ; CHECK-NEXT: [[IDX:%.*]] = add i32 [[X]], [[YSTRIDE]]
-; CHECK-NEXT: [[ELEM:%.*]] = getelementptr <4 x half>, ptr addrspace(1) [[IN]], i32 [[IDX]]
+; CHECK-NEXT: [[INDEX:%.*]] = sext i32 [[IDX]] to i64
+; CHECK-NEXT: [[ELEM:%.*]] = getelementptr [8 x i8], ptr addrspace(1) [[IN]], i64 [[INDEX]]
 ; CHECK-NEXT: [[VAL:%.*]] = load <4 x half>, ptr addrspace(1) [[ELEM]], align 8
 ; CHECK-NEXT: [[X2:%.*]] = extractelement <2 x i32> %coord, i32 0
 ; CHECK-NEXT: [[Y2:%.*]] = extractelement <2 x i32> %coord, i32 1
 ; CHECK-NEXT: [[YSTRIDE2:%.*]] = mul i32 [[Y2]], [[OUTSTRIDE]]
 ; CHECK-NEXT: [[IDX2:%.*]] = add i32 [[X2]], [[YSTRIDE2]]
-; CHECK-NEXT: [[ELEM2:%.*]] = getelementptr <4 x half>, ptr addrspace(1) [[OUT]], i32 [[IDX2]]
+; CHECK-NEXT: [[INDEX2:%.*]] = sext i32 [[IDX2]] to i64
+; CHECK-NEXT: [[ELEM2:%.*]] = getelementptr [8 x i8], ptr addrspace(1) [[OUT]], i64 [[INDEX2]]
 ; CHECK-NEXT: store <4 x half> %val, ptr addrspace(1) [[ELEM2]], align 8
 ; CHECK-NEXT: ret <4 x half> [[VAL]]
 define <4 x half> @texture_load_store(<2 x i32> %coord, <4 x half> %val) #0 {
@@ -47,8 +49,9 @@ define <4 x half> @texture_load_store(<2 x i32> %coord, <4 x half> %val) #0 {
 
 ; CHECK: define half @cbuffer_row(i32 %idx, ptr addrspace(1) [[CB:%.*]])
 ; CHECK-NEXT: [[BYTES:%.*]] = mul i32 %idx, 16
-; CHECK-NEXT: [[ROW:%.*]] = getelementptr i8, ptr addrspace(1) [[CB]], i32 [[BYTES]]
-; CHECK-NEXT: [[FIELD1PTR:%.*]] = getelementptr half, ptr addrspace(1) [[ROW]], i32 1
+; CHECK-NEXT: [[BYTEINDEX:%.*]] = sext i32 [[BYTES]] to i64
+; CHECK-NEXT: [[ROW:%.*]] = getelementptr i8, ptr addrspace(1) [[CB]], i64 [[BYTEINDEX]]
+; CHECK-NEXT: [[FIELD1PTR:%.*]] = getelementptr i8, ptr addrspace(1) [[ROW]], i64 2
 ; CHECK-NEXT: [[FIELD1:%.*]] = load half, ptr addrspace(1) [[FIELD1PTR]], align 2
 ; CHECK-NEXT: ret half [[FIELD1]]
 define half @cbuffer_row(i32 %idx) #0 {

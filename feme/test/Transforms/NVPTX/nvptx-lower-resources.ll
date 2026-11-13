@@ -29,9 +29,11 @@ define void @dynamic_binding_index(i32 %idx) #0 {
 ; Bindings become trailing arguments in (space, register) order, regardless of
 ; the order the shader happens to create handles in.
 ; CHECK: define void @entry(i32 %idx, ptr addrspace(1) %res.space0.reg0, ptr addrspace(1) %res.space1.reg3) [[ATTRS]]
-; CHECK-NEXT: [[SRC:%.*]] = getelementptr <4 x float>, ptr addrspace(1) %res.space1.reg3, i32 %idx
+; CHECK-NEXT: [[SRCIDX:%.*]] = sext i32 %idx to i64
+; CHECK-NEXT: [[SRC:%.*]] = getelementptr [16 x i8], ptr addrspace(1) %res.space1.reg3, i64 [[SRCIDX]]
 ; CHECK-NEXT: [[VAL:%.*]] = load <4 x float>, ptr addrspace(1) [[SRC]], align 16
-; CHECK-NEXT: [[DST:%.*]] = getelementptr <4 x float>, ptr addrspace(1) %res.space0.reg0, i32 %idx
+; CHECK-NEXT: [[DSTIDX:%.*]] = sext i32 %idx to i64
+; CHECK-NEXT: [[DST:%.*]] = getelementptr [16 x i8], ptr addrspace(1) %res.space0.reg0, i64 [[DSTIDX]]
 ; CHECK-NEXT: store <4 x float> [[VAL]], ptr addrspace(1) [[DST]], align 16
 ; CHECK-NEXT: ret void
 define void @entry(i32 %idx) #0 {

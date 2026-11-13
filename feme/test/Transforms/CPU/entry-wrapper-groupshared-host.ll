@@ -8,8 +8,8 @@
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {
 ; CHECK-NOT: alloca
-; CHECK: getelementptr inbounds nuw {{.*}}, ptr %args, i32 0, i32 3
-; CHECK: load ptr, ptr %{{.*}}
+; CHECK: [[SLOT:%.*]] = getelementptr inbounds nuw i8, ptr %args, i64 120
+; CHECK: load ptr, ptr [[SLOT]]
 define void @main() #0 {
   %ptr = getelementptr inbounds [8192 x i32], ptr addrspace(3) @shared, i32 0, i32 0
   %val = load i32, ptr addrspace(3) %ptr

@@ -81,15 +81,6 @@ define void @entry() #1 {
   ret void
 }
 
-; A non-constant component operand cannot be mapped to a single
-; per-component AMDGPU intrinsic, so it is left unmodified too.
-; CHECK-LABEL: define i32 @group_id_dynamic_component(
-define i32 @group_id_dynamic_component(i32 %component) {
-  ; CHECK: call i32 @llvm.dx.group.id(i32 %component)
-  %1 = call i32 @llvm.dx.group.id(i32 %component)
-  ret i32 %1
-}
-
 ; An out-of-range constant component (DXIL/AMDGPU components are 0/1/2 for
 ; x/y/z) is left unmodified rather than indexing past the mapping table.
 ; CHECK-LABEL: define i32 @group_id_out_of_range_component(

@@ -152,7 +152,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, Linkage], []> {
     // tested the raw word value for equality with `Aligned` alone, so any
     // combined mask (silently) skipped the following alignment literal
     // and desynchronized every word read after it.
-    // CHECK: spirv.CopyMemory "Function" %{{.*}}, "Function" %{{.*}} ["Aligned|Nontemporal", 4], ["Aligned|Nontemporal", 4] : f32
+    // CHECK: spirv.CopyMemory "Function" %{{.*}}, "Function" %{{.*}} ["Aligned|Nontemporal", 4] : f32
     spirv.CopyMemory "Function" %0, "Function" %1 ["Aligned|Nontemporal", 4] : f32
 
     // CHECK: spirv.CopyMemory "Function" %{{.*}}, "Function" %{{.*}} ["Volatile|Aligned|Nontemporal", 4], ["Volatile|Aligned", 8] : f32

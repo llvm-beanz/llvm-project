@@ -256,7 +256,7 @@ Expected<PipelineResult> runPipeline(Module &M,
   // `Vertex`/`Fragment`/`Mesh` only (a real no-op for `Compute` either
   // way), so both passes are safe to run for every stage uniformly.
   {
-    PassBuilder ValidatePB;
+    PassBuilder ValidatePB(M.getContext());
     ModuleAnalysisManager ValidateMAM;
     ValidatePB.registerModuleAnalyses(ValidateMAM);
     ErrorDiagnosticGuard ValidateGuard(M.getContext());
@@ -295,7 +295,7 @@ Expected<PipelineResult> runPipeline(Module &M,
     consumeError(DL.takeError());
 
   {
-    PassBuilder PB;
+    PassBuilder PB(M.getContext());
     LoopAnalysisManager LAM;
     FunctionAnalysisManager FAM;
     CGSCCAnalysisManager CGAM;

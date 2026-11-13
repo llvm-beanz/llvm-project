@@ -2090,17 +2090,24 @@ TEST(SIMDizeTest, WidensGroupSharedAtomicRMWThroughUniformGEP) {
   unsigned AtomicRMWCount = 0;
   GetElementPtrInst *SharedGEP = nullptr;
   for (Instruction &I : instructions(F)) {
-    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
-      if (GEP->getSourceElementType()->isArrayTy())
+    if (auto *Atomic = dyn_cast<AtomicRMWInst>(&I)) {
+      auto *GEP = dyn_cast<GetElementPtrInst>(Atomic->getPointerOperand());
+      ASSERT_TRUE(GEP);
+      if (!SharedGEP)
         SharedGEP = GEP;
-    if (isa<AtomicRMWInst>(&I))
+      EXPECT_EQ(GEP, SharedGEP);
       ++AtomicRMWCount;
+    }
   }
   EXPECT_EQ(AtomicRMWCount, 4u);
   // Every widened `atomicrmw` shares the *same* `getelementptr` -- the
   // broadcast this test guards against would instead have left each one
   // reading a separate `extractelement` of a splat.
   ASSERT_TRUE(SharedGEP);
+  APInt Offset(M->getDataLayout().getIndexTypeSizeInBits(SharedGEP->getType()),
+               0);
+  ASSERT_TRUE(SharedGEP->accumulateConstantOffset(M->getDataLayout(), Offset));
+  EXPECT_EQ(Offset.getZExtValue(), 8u);
   for (User *U : SharedGEP->users())
     EXPECT_TRUE(isa<AtomicRMWInst>(U));
 }

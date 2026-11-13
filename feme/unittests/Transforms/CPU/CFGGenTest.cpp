@@ -33,7 +33,7 @@ namespace {
 /// Runs the same sequence `feme::cpu::PreparePass` does, minus entry-point
 /// selection (`generateCFGIR`'s output always has exactly one function).
 void structurize(Function &F) {
-  PassBuilder PB;
+  PassBuilder PB(F.getContext());
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;

@@ -257,7 +257,7 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   case Intrinsic::dx_wave_readlane:
   case Intrinsic::spv_wave_broadcast:
   case Intrinsic::dx_wave_get_lane_count:
-  case Intrinsic::spv_wave_get_lane_count:
+  case Intrinsic::spv_subgroup_size:
   case Intrinsic::dx_wave_any:
   case Intrinsic::spv_wave_any:
   case Intrinsic::dx_wave_all:

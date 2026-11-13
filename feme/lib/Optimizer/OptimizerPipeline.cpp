@@ -17,7 +17,7 @@ using namespace feme;
 
 void OptimizerPipeline::run(llvm::Module &M, const OptimizerOptions &Opts,
                             llvm::TargetMachine *TM) const {
-  llvm::PassBuilder PB(TM);
+  llvm::PassBuilder PB(M.getContext(), TM);
 
   // Registers the standard set of analyses (target-specific ones too, when
   // TM is non-null) that the default pipeline's passes expect to be able to

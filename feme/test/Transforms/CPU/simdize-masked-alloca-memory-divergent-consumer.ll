@@ -25,7 +25,8 @@
 ; CHECK: %result.perlane = alloca [4 x [4 x float]]
 ; CHECK-NOT: alloca [4 x float]
 ; CHECK: loop:
-; CHECK: %addr.wide = getelementptr [4 x float], <4 x ptr> %result.perlane.ptrs{{[0-9]*}}, i32 0, i32 %i
+; CHECK: %[[INDEX:.*]] = sext i32 %i to i64
+; CHECK-NEXT: %addr.wide = getelementptr [4 x i8], <4 x ptr> %result.perlane.ptrs{{[0-9]*}}, i64 %[[INDEX]]
 ; CHECK: merge:
 ; CHECK: %operand.splat.splat = shufflevector <4 x float>
 ; CHECK: %sum.wide = fadd <4 x float> %{{[0-9]+}}, %operand.splat.splat

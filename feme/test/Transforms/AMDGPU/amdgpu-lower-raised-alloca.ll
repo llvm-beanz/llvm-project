@@ -19,7 +19,8 @@
 define <3 x float> @read_local_array(i32 %idx) {
   ; CHECK: [[ALLOCA:%.*]] = alloca [2 x <3 x float>], align 16, addrspace(5)
   ; CHECK: store <6 x float> {{.*}}, ptr addrspace(5) [[ALLOCA]]
-  ; CHECK: [[GEP:%.*]] = getelementptr [2 x <3 x float>], ptr addrspace(5) [[ALLOCA]], i32 0, i32 %idx
+  ; CHECK: [[INDEX:%.*]] = sext i32 %idx to i64
+  ; CHECK: [[GEP:%.*]] = getelementptr [16 x i8], ptr addrspace(5) [[ALLOCA]], i64 [[INDEX]]
   ; CHECK: load <3 x float>, ptr addrspace(5) [[GEP]]
   %1 = alloca [2 x <3 x float>], align 16
   store <6 x float> <float 0.0, float 0.0, float 0.0, float 1.0, float 0.5, float 0.25>, ptr %1

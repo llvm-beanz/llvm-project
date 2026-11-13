@@ -35,17 +35,17 @@
 ; CHECK-NOT: addrspace(3)
 ; CHECK: t:
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK-NEXT: %ptr{{[0-9]*}} = getelementptr inbounds [1 x <4 x i32>], ptr %shared.flat, i32 0, i32 %widx{{[0-9]*}}
+; CHECK-NEXT: %[[INDEX:.*]] = sext i32 %widx{{[0-9]*}} to i64
+; CHECK-NEXT: %ptr{{[0-9]*}} = getelementptr inbounds [16 x i8], ptr %shared.flat, i64 %[[INDEX]]
 ; CHECK-NEXT: %ptr{{[0-9]*}}.splat.splatinsert = insertelement <4 x ptr> poison, ptr %ptr{{[0-9]*}}, i64 0
 ; CHECK-NEXT: %ptr{{[0-9]*}}.splat.splat = shufflevector <4 x ptr> %ptr{{[0-9]*}}.splat.splatinsert, <4 x ptr> poison, <4 x i32> zeroinitializer
 ; CHECK: %masked.mask = and <4 x i1> %wave_sideeffect_mask, %sideeffect.t.wide
-; CHECK-NEXT: %{{.*}}.elt0.ptr{{[0-9]*}} = getelementptr <4 x i32>, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i32 0, i32 0
-; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 16 %{{.*}}.elt0.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
-; CHECK-NEXT: %{{.*}}.elt1.ptr{{[0-9]*}} = getelementptr <4 x i32>, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i32 0, i32 1
+; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 16 %ptr{{[0-9]*}}.splat.splat, <4 x i1> %masked.mask)
+; CHECK-NEXT: %{{.*}}.elt1.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i64 4
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 4 %{{.*}}.elt1.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
-; CHECK-NEXT: %{{.*}}.elt2.ptr{{[0-9]*}} = getelementptr <4 x i32>, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i32 0, i32 2
+; CHECK-NEXT: %{{.*}}.elt2.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i64 8
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 8 %{{.*}}.elt2.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
-; CHECK-NEXT: %{{.*}}.elt3.ptr{{[0-9]*}} = getelementptr <4 x i32>, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i32 0, i32 3
+; CHECK-NEXT: %{{.*}}.elt3.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i64 12
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 4 %{{.*}}.elt3.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
 define void @main() #0 {
 entry:

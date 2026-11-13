@@ -102,7 +102,7 @@ UnrollConstantTripCountStageLoopsPass::run(Module &M, ModuleAnalysisManager &) {
   // and loop-level analyses (`LoopInfo`, `ScalarEvolution`, the `AAManager`
   // `LoopFullUnrollPass`'s own adaptor requires) that a bare, minimally-
   // registered caller-supplied manager is not guaranteed to provide.
-  PassBuilder PB;
+  PassBuilder PB(M.getContext());
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;

@@ -50,8 +50,8 @@ define i1 @isnan_f32(float %a) {
 
 ; CHECK-LABEL: define i32 @thread_id(
 define i32 @thread_id(i32 %a) {
-  ; CHECK: call i32 @llvm.dx.thread.id(i32 %a)
-  %1 = call i32 @dx.op.threadId.i32(i32 93, i32 %a)
+  ; CHECK: call i32 @llvm.dx.thread.id(i32 0)
+  %1 = call i32 @dx.op.threadId.i32(i32 93, i32 0)
   ret i32 %1
 }
 

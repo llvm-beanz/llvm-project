@@ -16,15 +16,17 @@
 ; CHECK-LABEL: define void @main(
 ; CHECK: %v.perlane = alloca [4 x <4 x i32>]
 ; CHECK-NOT: alloca <4 x i32>
-; CHECK: %v.lane0 = getelementptr [4 x <4 x i32>], ptr %v.perlane, i32 0, i32 0
-; CHECK: %v.lane1 = getelementptr [4 x <4 x i32>], ptr %v.perlane, i32 0, i32 1
-; CHECK: %v.lane2 = getelementptr [4 x <4 x i32>], ptr %v.perlane, i32 0, i32 2
-; CHECK: %v.lane3 = getelementptr [4 x <4 x i32>], ptr %v.perlane, i32 0, i32 3
+; CHECK: %v.perlane.ptrs = insertelement <4 x ptr> poison, ptr %v.perlane, i32 0
+; CHECK: %v.lane1 = getelementptr i8, ptr %v.perlane, i64 16
+; CHECK: %v.lane2 = getelementptr i8, ptr %v.perlane, i64 32
+; CHECK: %v.lane3 = getelementptr i8, ptr %v.perlane, i64 48
 ; CHECK: t:
-; CHECK: %addr.wide = getelementptr <4 x i32>, <4 x ptr> %v.perlane.ptrs{{[0-9]*}}, i32 0, i32 %idx
+; CHECK: %[[INDEX:.*]] = sext i32 %idx to i64
+; CHECK-NEXT: %addr.wide = getelementptr [4 x i8], <4 x ptr> %v.perlane.ptrs{{[0-9]*}}, i64 %[[INDEX]]
 ; CHECK: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> splat (i32 10), <4 x ptr> {{.*}}%addr.wide
 ; CHECK: merge:
-; CHECK: %raddr.wide = getelementptr <4 x i32>, <4 x ptr> %v.perlane.ptrs{{[0-9]*}}, i32 0, i32 %idx
+; CHECK: %[[RINDEX:.*]] = sext i32 %idx to i64
+; CHECK-NEXT: %raddr.wide = getelementptr [4 x i8], <4 x ptr> %v.perlane.ptrs{{[0-9]*}}, i64 %[[RINDEX]]
 ; CHECK: call <4 x i32> @llvm.masked.gather.v4i32.v4p0(<4 x ptr> {{.*}}%raddr.wide
 define void @main(ptr %out) #0 {
 entry:

@@ -18,10 +18,10 @@
 ; CHECK-LABEL: define void @main(
 ; CHECK: %v.perlane = alloca [4 x i32]
 ; CHECK-NOT: alloca i32
-; CHECK: %v.lane0 = getelementptr [4 x i32], ptr %v.perlane, i32 0, i32 0
-; CHECK: %v.lane1 = getelementptr [4 x i32], ptr %v.perlane, i32 0, i32 1
-; CHECK: %v.lane2 = getelementptr [4 x i32], ptr %v.perlane, i32 0, i32 2
-; CHECK: %v.lane3 = getelementptr [4 x i32], ptr %v.perlane, i32 0, i32 3
+; CHECK: %v.perlane.ptrs = insertelement <4 x ptr> poison, ptr %v.perlane, i32 0
+; CHECK: %v.lane1 = getelementptr i8, ptr %v.perlane, i64 4
+; CHECK: %v.lane2 = getelementptr i8, ptr %v.perlane, i64 8
+; CHECK: %v.lane3 = getelementptr i8, ptr %v.perlane, i64 12
 ; CHECK: t:
 ; CHECK: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> splat (i32 10), <4 x ptr> {{.*}}%v.perlane.ptrs{{[0-9]*}}
 ; CHECK: f:

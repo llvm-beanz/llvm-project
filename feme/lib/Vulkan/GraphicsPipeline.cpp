@@ -552,7 +552,7 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   // `PassBuilder` up front (mirroring `feme::cpu::runPipeline`'s own,
   // later, equivalent setup in Target/CPU/Pipeline.cpp) costs nothing
   // extra for the two passes that never queried anything anyway.
-  PassBuilder PB;
+  PassBuilder PB(AsLLVMIR->getLLVMModule().getContext());
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;

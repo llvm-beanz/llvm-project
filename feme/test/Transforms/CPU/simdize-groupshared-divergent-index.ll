@@ -17,8 +17,9 @@
 ; CHECK-LABEL: define void @main(
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
+; CHECK: %[[INDEX:.*]] = sext <4 x i32> %tid{{[0-9]*}} to <4 x i64>
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK-NEXT: %ptr.wide{{[0-9]*}} = getelementptr inbounds [4 x i32], ptr %shared.flat, i32 0, <4 x i32> %tid{{[0-9]*}}
+; CHECK-NEXT: %ptr.wide{{[0-9]*}} = getelementptr inbounds [4 x i8], ptr %shared.flat, <4 x i64> %[[INDEX]]
 ; CHECK-NEXT: call <4 x i32> @llvm.masked.gather.v4i32.v4p0(<4 x ptr> align 4 %ptr.wide{{[0-9]*}}, <4 x i1> %wave_entry_mask, <4 x i32> zeroinitializer)
 define void @main() #0 {
   %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)

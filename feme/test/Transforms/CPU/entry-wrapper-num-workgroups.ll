@@ -14,13 +14,13 @@
 ; CHECK-SAME: i32 %wave_group_count_x, i32 %wave_group_count_y, i32 %wave_group_count_z,
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {
 ; CHECK: entry:
-; CHECK: getelementptr inbounds nuw {{.*}}, ptr %args, i32 0, i32 1
-; CHECK: %[[GIDVEC:.*]] = load [3 x i32],
+; CHECK: %[[GIDSLOT:.*]] = getelementptr inbounds nuw i8, ptr %args, i64 96
+; CHECK: %[[GIDVEC:.*]] = load [3 x i32], ptr %[[GIDSLOT]]
 ; CHECK-DAG: %[[GIDX:.*]] = extractvalue [3 x i32] %[[GIDVEC]], 0
 ; CHECK-DAG: %[[GIDY:.*]] = extractvalue [3 x i32] %[[GIDVEC]], 1
 ; CHECK-DAG: %[[GIDZ:.*]] = extractvalue [3 x i32] %[[GIDVEC]], 2
-; CHECK: getelementptr inbounds nuw {{.*}}, ptr %args, i32 0, i32 2
-; CHECK: %[[GCVEC:.*]] = load [3 x i32],
+; CHECK: %[[GCSLOT:.*]] = getelementptr inbounds nuw i8, ptr %args, i64 108
+; CHECK: %[[GCVEC:.*]] = load [3 x i32], ptr %[[GCSLOT]]
 ; CHECK-DAG: %[[GCX:.*]] = extractvalue [3 x i32] %[[GCVEC]], 0
 ; CHECK-DAG: %[[GCY:.*]] = extractvalue [3 x i32] %[[GCVEC]], 1
 ; CHECK-DAG: %[[GCZ:.*]] = extractvalue [3 x i32] %[[GCVEC]], 2

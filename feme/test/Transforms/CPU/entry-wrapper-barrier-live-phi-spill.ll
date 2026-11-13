@@ -10,15 +10,15 @@
 
 ; CHECK-LABEL: define internal void @main(
 ; CHECK-SAME: ptr %barrier_spill)
-; CHECK: %val.wide.reload.val = load <4 x i32>, ptr %val.wide.reload
+; CHECK: %val.wide.reload.val = load <4 x i32>, ptr %val.wide.reload.slot
 ; CHECK: ret void
 
 ; CHECK-LABEL: define internal void @main.region0(
 ; CHECK-SAME: ptr %barrier_spill)
 ; CHECK: %val.wide = phi <4 x i32>
-; CHECK-NEXT: %val.wide.spill.slot = getelementptr
-; CHECK-NEXT: %val.wide.spill = getelementptr
-; CHECK-NEXT: store <4 x i32> %val.wide, ptr %val.wide.spill
+; CHECK-NEXT: %[[INDEX:.*]] = sext i32 %wave_index to i64
+; CHECK-NEXT: %val.wide.spill.slot = getelementptr [16 x i8], ptr %barrier_spill, i64 %[[INDEX]]
+; CHECK-NEXT: store <4 x i32> %val.wide, ptr %val.wide.spill.slot
 ; CHECK: ret void
 define void @main() #0 {
 entry:

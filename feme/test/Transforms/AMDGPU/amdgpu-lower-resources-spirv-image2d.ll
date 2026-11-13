@@ -41,13 +41,15 @@ define void @cube(<3 x i32> %coord) #0 {
 ; CHECK-NEXT: [[Y0:%.*]] = extractelement <2 x i32> [[COORD]], i32 1
 ; CHECK-NEXT: [[ROW0:%.*]] = mul i32 [[Y0]], %res.space0.reg0.stride0
 ; CHECK-NEXT: [[IDX0:%.*]] = add i32 [[X0]], [[ROW0]]
-; CHECK-NEXT: [[SRC:%.*]] = getelementptr <4 x float>, ptr addrspace(1) %res.space0.reg0, i32 [[IDX0]]
+; CHECK-NEXT: [[SRCIDX:%.*]] = sext i32 [[IDX0]] to i64
+; CHECK-NEXT: [[SRC:%.*]] = getelementptr [16 x i8], ptr addrspace(1) %res.space0.reg0, i64 [[SRCIDX]]
 ; CHECK-NEXT: [[VALUE:%.*]] = load <4 x float>, ptr addrspace(1) [[SRC]], align 16
 ; CHECK-NEXT: [[X1:%.*]] = extractelement <2 x i32> [[COORD]], i32 0
 ; CHECK-NEXT: [[Y1:%.*]] = extractelement <2 x i32> [[COORD]], i32 1
 ; CHECK-NEXT: [[ROW1:%.*]] = mul i32 [[Y1]], %res.space0.reg1.stride0
 ; CHECK-NEXT: [[IDX1:%.*]] = add i32 [[X1]], [[ROW1]]
-; CHECK-NEXT: [[DST:%.*]] = getelementptr <4 x float>, ptr addrspace(1) %res.space0.reg1, i32 [[IDX1]]
+; CHECK-NEXT: [[DSTIDX:%.*]] = sext i32 [[IDX1]] to i64
+; CHECK-NEXT: [[DST:%.*]] = getelementptr [16 x i8], ptr addrspace(1) %res.space0.reg1, i64 [[DSTIDX]]
 ; CHECK-NEXT: store <4 x float> [[VALUE]], ptr addrspace(1) [[DST]], align 16
 ; CHECK-NEXT: ret void
 define void @image2d(i32 %x, i32 %y) #0 {

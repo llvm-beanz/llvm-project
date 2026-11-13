@@ -16,7 +16,7 @@
 ; CHECK-NOT: addrspace(3)
 ; CHECK: if.then:
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK: %ptr{{[0-9]*}} = getelementptr inbounds [4 x i32], ptr %shared.flat, i32 0, i32 2
+; CHECK: %ptr{{[0-9]*}} = getelementptr inbounds i8, ptr %shared.flat, i64 8
 ; CHECK: %ptr{{[0-9]*}}.splat.splat = shufflevector <4 x ptr> {{.*}}%ptr{{[0-9]*}}{{.*}}, <4 x ptr> poison, <4 x i32> zeroinitializer
 ; CHECK: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> splat (i32 42), <4 x ptr> align 4 %ptr{{[0-9]*}}.splat.splat, <4 x i1> %masked.mask)
 define void @main() #0 {

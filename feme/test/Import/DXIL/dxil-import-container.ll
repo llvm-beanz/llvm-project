@@ -18,7 +18,7 @@ define i32 @add(i32 %a, i32 %b) {
   ret i32 %sum
 }
 
-; CHECK: define i32 @add(i32 %a, i32 %b) {
+; CHECK: define i32 @add(i32 %a, i32 %b){{.*}} {
 ; CHECK-NEXT:   %sum = add i32 %a, %b
 ; CHECK-NEXT:   ret i32 %sum
 ; CHECK-NEXT: }

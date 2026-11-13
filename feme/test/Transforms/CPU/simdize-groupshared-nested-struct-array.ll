@@ -30,8 +30,8 @@
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK-NEXT: %inner{{[0-9]*}} = getelementptr inbounds { i32, [4 x i32] }, ptr %shared.flat, i32 0, i32 1
-; CHECK-NEXT: %elt{{[0-9]*}} = getelementptr inbounds [4 x i32], ptr %inner{{[0-9]*}}, i32 0, i32 2
+; CHECK-NEXT: %inner{{[0-9]*}} = getelementptr inbounds i8, ptr %shared.flat, i64 4
+; CHECK-NEXT: %elt{{[0-9]*}} = getelementptr inbounds i8, ptr %inner{{[0-9]*}}, i64 8
 ; CHECK-NEXT: %v = load i32, ptr %elt{{[0-9]*}}, align 4
 ; CHECK-NEXT: store i32 %v, ptr %elt{{[0-9]*}}, align 4
 define void @main() #0 {

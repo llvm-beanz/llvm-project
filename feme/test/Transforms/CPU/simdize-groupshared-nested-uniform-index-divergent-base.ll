@@ -40,7 +40,8 @@
 ; hits, downstream of this very GEP).
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %leaf.wide{{[0-9]*}} = getelementptr [4 x i32], <4 x ptr> %row.wide{{[0-9]*}}, i32 0, i32 %u
+; CHECK: %[[INDEX:.*]] = sext i32 %u to i64
+; CHECK-NEXT: %leaf.wide{{[0-9]*}} = getelementptr [4 x i8], <4 x ptr> %row.wide{{[0-9]*}}, i64 %[[INDEX]]
 ; CHECK: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> {{.*}}, <4 x ptr> {{.*}}%leaf.wide{{[0-9]*}}, <4 x i1> %wave_sideeffect_mask)
 define void @main(i32 %u) #0 {
   %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)

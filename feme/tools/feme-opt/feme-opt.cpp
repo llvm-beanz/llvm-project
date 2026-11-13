@@ -429,7 +429,7 @@ int runLLVMIRMode(int Argc, char **Argv) {
     return 1;
   }
 
-  PassBuilder PB;
+  PassBuilder PB(Context);
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;

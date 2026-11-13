@@ -245,7 +245,7 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
 
   std::string WrapperName;
   if (Reference) {
-    PassBuilder PB;
+    PassBuilder PB(Mod.getContext());
     LoopAnalysisManager LAM;
     FunctionAnalysisManager FAM;
     CGSCCAnalysisManager CGAM;

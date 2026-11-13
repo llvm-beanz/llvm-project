@@ -206,7 +206,7 @@ PreservedAnalyses PreparePass::run(Module &M, ModuleAnalysisManager &) {
 
   removeUnreachableDefinitions(M, **Entry);
 
-  PassBuilder PB;
+  PassBuilder PB(M.getContext());
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;

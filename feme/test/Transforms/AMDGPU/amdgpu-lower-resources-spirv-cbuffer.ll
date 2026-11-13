@@ -19,9 +19,8 @@
 target triple = "amdgcn-amd-amdhsa"
 
 ; CHECK: define float @cbuffer(ptr addrspace(1) %res.space0.reg0)
-; CHECK-NEXT: [[A_PTR:%.*]] = getelementptr float, ptr addrspace(1) %res.space0.reg0, i32 0
-; CHECK-NEXT: %a = load float, ptr addrspace(1) [[A_PTR]], align 4
-; CHECK-NEXT: [[B_PTR:%.*]] = getelementptr float, ptr addrspace(1) %res.space0.reg0, i32 1
+; CHECK-NEXT: %a = load float, ptr addrspace(1) %res.space0.reg0, align 4
+; CHECK-NEXT: [[B_PTR:%.*]] = getelementptr i8, ptr addrspace(1) %res.space0.reg0, i64 4
 ; CHECK-NEXT: %b = load float, ptr addrspace(1) [[B_PTR]], align 4
 ; CHECK-NEXT: %sum = fadd float %a, %b
 ; CHECK-NEXT: ret float %sum

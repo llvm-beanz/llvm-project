@@ -1215,7 +1215,7 @@ bool spillValuesLiveAcrossBarriers(
     // so a spilled phi's store goes after the block's last phi rather than
     // right after the phi itself.
     Instruction *InsertPt = isa<PHINode>(Def)
-                                ? &*Def->getParent()->getFirstNonPHIOrDbg()
+                                ? &*Def->getParent()->getFirstNonPHIIt()
                                 : Def->getNextNode();
     IRBuilder<> Builder(InsertPt);
     Value *Field = buildFieldPtr(Builder, Def, Def->getName() + ".spill");
@@ -1279,7 +1279,7 @@ bool spillValuesLiveAcrossBarriers(
           break;
       }
       return Last ? Last->getNextNode()
-                  : &*Chain.front()->getFirstNonPHIOrDbg();
+                  : &*Chain.front()->getFirstNonPHIIt();
     };
 
     SmallVector<Use *, 8> Uses;
@@ -1311,7 +1311,7 @@ bool spillValuesLiveAcrossBarriers(
 
     Instruction *StoreAt =
         isa<PHINode>(P.NextValue)
-            ? &*P.NextValue->getParent()->getFirstNonPHIOrDbg()
+            ? &*P.NextValue->getParent()->getFirstNonPHIIt()
             : P.NextValue->getNextNode();
     IRBuilder<> Builder(StoreAt);
     Value *Field =
@@ -2562,7 +2562,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     Instruction *SeedInsertBefore = Shape.PrefixOrder.back()->getTerminator();
     if (auto *InitialInst = dyn_cast<Instruction>(Ind.InitialValue))
       SeedInsertBefore = isa<PHINode>(InitialInst)
-                             ? &*InitialInst->getParent()->getFirstNonPHIOrDbg()
+                             ? &*InitialInst->getParent()->getFirstNonPHIIt()
                              : InitialInst->getNextNode();
     Persistent.push_back(
         {Ind.HeaderPhi, Ind.InitialValue,

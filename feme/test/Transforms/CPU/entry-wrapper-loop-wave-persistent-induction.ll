@@ -15,16 +15,16 @@
 
 ; The prefix region seeds every wave's slot with the phi's initial value.
 ; CHECK-LABEL: define internal void @main.prefix0(
-; CHECK: %acc.init.slot = getelementptr %main.barrier_spill, ptr %barrier_spill, i32 %wave_index
-; CHECK: %acc.init = getelementptr {{.*}} %main.barrier_spill, ptr %acc.init.slot, i32 0, i32 0
-; CHECK: store i32 0, ptr %acc.init
+; CHECK: %[[INDEX:.*]] = sext i32 %wave_index to i64
+; CHECK: %acc.init.slot = getelementptr [4 x i8], ptr %barrier_spill, i64 %[[INDEX]]
+; CHECK: store i32 0, ptr %acc.init.slot
 
 ; The body region reloads the carried value, recomputes it, and stores it
 ; straight back into the same slot for the next iteration.
 ; CHECK-LABEL: define internal void @main.body0(
-; CHECK: %acc.reload.val = load i32, ptr %acc.reload
+; CHECK: %acc.reload.val = load i32, ptr %acc.reload.slot
 ; CHECK: %acc.next = add i32 %acc.reload.val, %wave_group_id_x
-; CHECK: store i32 %acc.next, ptr %acc.carry
+; CHECK: store i32 %acc.next, ptr %acc.carry.slot
 
 ; Only `%i` survives as a scalar phi in the wrapper's own loop -- phis are
 ; contiguous at the top of a block, so the `icmp` right after it proves

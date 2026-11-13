@@ -343,7 +343,6 @@ std::optional<MatchedWaveCall> matchWaveCall(const CallInst &CI) {
 std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
   switch (ID) {
   case Intrinsic::dx_wave_get_lane_count:
-  case Intrinsic::spv_wave_get_lane_count:
   case Intrinsic::spv_subgroup_size:
     return WaveCallKind::GetLaneCount;
   case Intrinsic::dx_wave_is_first_lane:

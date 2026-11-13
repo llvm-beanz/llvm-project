@@ -22,10 +22,10 @@
 ; CHECK-LABEL: define void @main(
 ; CHECK: %v.perlane = alloca [4 x float]
 ; CHECK-NOT: alloca float
-; CHECK: %v.lane0 = getelementptr [4 x float], ptr %v.perlane, i32 0, i32 0
-; CHECK: %v.lane1 = getelementptr [4 x float], ptr %v.perlane, i32 0, i32 1
-; CHECK: %v.lane2 = getelementptr [4 x float], ptr %v.perlane, i32 0, i32 2
-; CHECK: %v.lane3 = getelementptr [4 x float], ptr %v.perlane, i32 0, i32 3
+; CHECK: %v.perlane.ptrs = insertelement <4 x ptr> poison, ptr %v.perlane, i32 0
+; CHECK: %v.lane1 = getelementptr i8, ptr %v.perlane, i64 4
+; CHECK: %v.lane2 = getelementptr i8, ptr %v.perlane, i64 8
+; CHECK: %v.lane3 = getelementptr i8, ptr %v.perlane, i64 12
 ; Every lane stores its own value into its own address.
 ; CHECK: store float %{{.*}}, ptr %.lane0
 ; CHECK: store float %{{.*}}, ptr %.lane1

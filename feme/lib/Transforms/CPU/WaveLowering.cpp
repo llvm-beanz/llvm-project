@@ -405,7 +405,7 @@ constexpr unsigned ReadLaneMemoryGatherMinWaveSize = 16;
 AllocaInst *createLaneScratch(IRBuilder<> &Builder, Type *StorageTy,
                               unsigned WaveSize, const Twine &Name) {
   BasicBlock &Entry = Builder.GetInsertBlock()->getParent()->getEntryBlock();
-  IRBuilder<> EntryBuilder(&Entry, Entry.getFirstNonPHIOrDbgOrAlloca());
+  IRBuilder<> EntryBuilder(&Entry, Entry.getFirstNonPHIOrAlloca());
   auto *ArrTy = ArrayType::get(StorageTy, WaveSize);
   AllocaInst *Scratch = EntryBuilder.CreateAlloca(ArrTy, nullptr, Name);
   const DataLayout &DL = Entry.getModule()->getDataLayout();

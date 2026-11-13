@@ -27,16 +27,16 @@
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
 ; CHECK: t:
+; CHECK: %[[INDEX:.*]] = sext <4 x i32> %tid{{[0-9]*}} to <4 x i64>
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK-NEXT: %ptr.wide{{[0-9]*}} = getelementptr inbounds [4 x <4 x float>], ptr %shared.flat, i32 0, <4 x i32> %tid{{[0-9]*}}
+; CHECK-NEXT: %ptr.wide{{[0-9]*}} = getelementptr inbounds [16 x i8], ptr %shared.flat, <4 x i64> %[[INDEX]]
 ; CHECK: %masked.mask = and <4 x i1> %wave_sideeffect_mask, %sideeffect.t.wide
-; CHECK-NEXT: %{{.*}}.elt0.ptr{{[0-9]*}} = getelementptr <4 x float>, <4 x ptr> %ptr.wide{{[0-9]*}}, i32 0, i32 0
-; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 1.000000e+00), <4 x ptr> align 16 %{{.*}}.elt0.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
-; CHECK-NEXT: %{{.*}}.elt1.ptr{{[0-9]*}} = getelementptr <4 x float>, <4 x ptr> %ptr.wide{{[0-9]*}}, i32 0, i32 1
+; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 1.000000e+00), <4 x ptr> align 16 %ptr.wide{{[0-9]*}}, <4 x i1> %masked.mask)
+; CHECK-NEXT: %{{.*}}.elt1.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr.wide{{[0-9]*}}, i64 4
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 2.000000e+00), <4 x ptr> align 4 %{{.*}}.elt1.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
-; CHECK-NEXT: %{{.*}}.elt2.ptr{{[0-9]*}} = getelementptr <4 x float>, <4 x ptr> %ptr.wide{{[0-9]*}}, i32 0, i32 2
+; CHECK-NEXT: %{{.*}}.elt2.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr.wide{{[0-9]*}}, i64 8
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 3.000000e+00), <4 x ptr> align 8 %{{.*}}.elt2.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
-; CHECK-NEXT: %{{.*}}.elt3.ptr{{[0-9]*}} = getelementptr <4 x float>, <4 x ptr> %ptr.wide{{[0-9]*}}, i32 0, i32 3
+; CHECK-NEXT: %{{.*}}.elt3.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr.wide{{[0-9]*}}, i64 12
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 4.000000e+00), <4 x ptr> align 4 %{{.*}}.elt3.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
 define void @main() #0 {
 entry:

@@ -37,16 +37,16 @@ declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
 ; non-constant initial value right after that value is computed.
 ; CHECK-LABEL: define internal void @main.prefix0(
 ; CHECK: %live.merge.wide = select i1 %is.last.lane, <4 x i1> splat (i1 true), <4 x i1> %wave_sideeffect_mask
-; CHECK-NEXT: %mask.init.slot = getelementptr %main.barrier_spill, ptr %barrier_spill, i32 %wave_index
-; CHECK-NEXT: %mask.init = getelementptr {{.*}} %main.barrier_spill, ptr %mask.init.slot, i32 0, i32 0
-; CHECK-NEXT: store <4 x i1> %live.merge.wide, ptr %mask.init
+; CHECK-NEXT: %[[INDEX:.*]] = sext i32 %wave_index to i64
+; CHECK-NEXT: %mask.init.slot = getelementptr i8, ptr %barrier_spill, i64 %[[INDEX]]
+; CHECK-NEXT: store <4 x i1> %live.merge.wide, ptr %mask.init.slot
 
 ; The body region reloads the carried mask and never stores a new value
 ; back into the same slot: it is loop-invariant.
 ; CHECK-LABEL: define internal void @main.body0(
-; CHECK: %mask.reload.val = load <4 x i1>, ptr %mask.reload
+; CHECK: %mask.reload.val = load <4 x i1>, ptr %mask.reload.slot
 ; CHECK: call void @feme.cpu.resource.store.raw.i32(
-; CHECK-NOT: store <4 x i1> {{.*}}, ptr %mask.carry
+; CHECK-NOT: store <4 x i1> {{.*}}, ptr %mask.carry.slot
 
 define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count, i32 %wave_group_id_x, i32 %wave_group_id_y, i32 %wave_group_id_z, i32 %wave_group_count_x, i32 %wave_group_count_y, i32 %wave_group_count_z, i32 %wave_index, <4 x i1> %wave_entry_mask, <4 x i1> %wave_sideeffect_mask, ptr %wave_groupshared) #0 {
   %tid = mul i32 %wave_index, 4

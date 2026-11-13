@@ -24,7 +24,7 @@
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK-NEXT: %ptr{{[0-9]*}} = getelementptr inbounds [4 x i32], ptr %shared.flat, i32 0, i32 2
+; CHECK-NEXT: %ptr{{[0-9]*}} = getelementptr inbounds i8, ptr %shared.flat, i64 8
 ; CHECK-COUNT-4: %lane.mask{{[0-9]*}} = extractelement <4 x i1> %wave_sideeffect_mask, i32 {{[0-9]}}
 ; CHECK: atomicrmw add ptr %ptr{{[0-9]*}}, i32 %lane.val.masked{{[0-9]*}} monotonic
 define void @main() #0 {

@@ -462,9 +462,10 @@ dxsa.module pixel_shader 5 0 {
 )mlir");
   ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
   // Four elements of two components each, and the (1, y) slot is at
-  // 1 * 2 + 1.
+  // 1 * 2 + 1 (byte offset 12).
   EXPECT_NE(IR->find("alloca [8 x i32]"), std::string::npos) << *IR;
-  EXPECT_EQ(occurrences(*IR, "i32 0, i32 3"), 2u) << *IR;
+  EXPECT_EQ(occurrences(*IR, "getelementptr i8, ptr %dx.v32.x01, i64 12"), 2u)
+      << *IR;
   // The array is not promoted, unlike a plain temp register.
   EXPECT_NE(IR->find("load i32"), std::string::npos) << *IR;
 }

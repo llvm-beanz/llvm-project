@@ -42,7 +42,7 @@ std::unique_ptr<Module> parseIR(LLVMContext &Ctx, StringRef Assembly) {
 // Pipeline.cpp -- every analysis manager tier needs to be built and
 // cross-registered, not just a bare `ModuleAnalysisManager`.
 PreservedAnalyses runPass(Module &M) {
-  PassBuilder PB;
+  PassBuilder PB(M.getContext());
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;

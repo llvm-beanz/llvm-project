@@ -10,8 +10,8 @@
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {
 ; CHECK-NOT: alloca
-; CHECK: getelementptr inbounds nuw {{.*}}, ptr %args, i32 0, i32 3
-; CHECK: [[BUF:%.*]] = load ptr, ptr %{{.*}}
+; CHECK: [[SLOT:%.*]] = getelementptr inbounds nuw i8, ptr %args, i64 120
+; CHECK: [[BUF:%.*]] = load ptr, ptr [[SLOT]]
 ; CHECK: call void @llvm.memset{{.*}}(ptr align 16 [[BUF]], i8 0, i64 32768, i1 false)
 define void @main() #0 {
   %ptr = getelementptr inbounds [8192 x i32], ptr addrspace(3) @shared, i32 0, i32 0

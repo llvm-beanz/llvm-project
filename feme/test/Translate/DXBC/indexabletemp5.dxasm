@@ -71,19 +71,19 @@ ret
 // CHECK-NEXT: %1 = call i32 @dx.op.loadInput.i32(i32 4, i32 1, i32 0, i8 0, i32 undef)
 // CHECK-NEXT: %2 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %0, i32 %1)
 // CHECK-NEXT: %3 = extractvalue %dx.types.CBufRet.f32 %2, 0
-// CHECK-NEXT: %4 = getelementptr [16 x half], ptr %dx.v16.x0, i32 0, i32 0
-// CHECK-NEXT: %5 = fptrunc float %3 to half
-// CHECK-NEXT: store half %5, ptr %4, align 2
-// CHECK-NEXT: %6 = add i32 %1, 4
-// CHECK-NEXT: %7 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %0, i32 %6)
-// CHECK-NEXT: %8 = extractvalue %dx.types.CBufRet.f32 %7, 0
-// CHECK-NEXT: %9 = getelementptr [16 x half], ptr %dx.v16.x0, i32 0, i32 4
-// CHECK-NEXT: %10 = fptrunc float %8 to half
-// CHECK-NEXT: store half %10, ptr %9, align 2
-// CHECK-NEXT: %11 = call i32 @dx.op.loadInput.i32(i32 4, i32 2, i32 0, i8 0, i32 undef)
-// CHECK-NEXT: %12 = mul i32 %11, 4
-// CHECK-NEXT: %13 = add i32 %12, 0
-// CHECK-NEXT: %14 = getelementptr [16 x half], ptr %dx.v16.x0, i32 0, i32 %13
+// CHECK-NEXT: %4 = fptrunc float %3 to half
+// CHECK-NEXT: store half %4, ptr %dx.v16.x0, align 2
+// CHECK-NEXT: %5 = add i32 %1, 4
+// CHECK-NEXT: %6 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %0, i32 %5)
+// CHECK-NEXT: %7 = extractvalue %dx.types.CBufRet.f32 %6, 0
+// CHECK-NEXT: %8 = getelementptr i8, ptr %dx.v16.x0, i64 8
+// CHECK-NEXT: %9 = fptrunc float %7 to half
+// CHECK-NEXT: store half %9, ptr %8, align 2
+// CHECK-NEXT: %10 = call i32 @dx.op.loadInput.i32(i32 4, i32 2, i32 0, i8 0, i32 undef)
+// CHECK-NEXT: %11 = mul i32 %10, 4
+// CHECK-NEXT: %12 = add i32 %11, 0
+// CHECK-NEXT: %13 = sext i32 %12 to i64
+// CHECK-NEXT: %14 = getelementptr [2 x i8], ptr %dx.v16.x0, i64 %13
 // CHECK-NEXT: %15 = load half, ptr %14, align 2
 // CHECK-NEXT: %16 = fpext half %15 to float
 // CHECK-NEXT: %17 = fptrunc float %16 to half

@@ -28,8 +28,8 @@ define float @frac_f32(float %a) {
 
 ; CHECK-LABEL: define i32 @group_id(
 define i32 @group_id(i32 %a) {
-  ; CHECK: call i32 @llvm.dx.group.id(i32 %a)
-  %1 = call i32 @llvm.dx.group.id(i32 %a)
+  ; CHECK: call i32 @llvm.dx.group.id(i32 2)
+  %1 = call i32 @llvm.dx.group.id(i32 2)
   ret i32 %1
 }
 

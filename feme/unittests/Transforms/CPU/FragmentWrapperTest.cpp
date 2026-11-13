@@ -131,7 +131,7 @@ TEST(FragmentWrapperTest, ResolvesRequestedPositionComponentNotAlwaysX) {
 
   // Every lane's Position component load is a `load float, ptr %ComponentPtr`
   // where `%ComponentPtr` is the final GEP indexing the requested component
-  // -- check *that* GEP's last index specifically (not any GEP in the
+  // -- check *that* GEP's byte offset specifically (not any GEP in the
   // function; the outer per-lane array GEP incidentally uses a constant
   // index too, for the unrelated quad-lane selector, which would give a
   // false pass if conflated with the component-selecting GEP).
@@ -146,13 +146,12 @@ TEST(FragmentWrapperTest, ResolvesRequestedPositionComponentNotAlwaysX) {
     const auto *GEP = dyn_cast<GetElementPtrInst>(Load->getPointerOperand());
     if (!GEP)
       continue;
-    auto *LastIdx =
-        dyn_cast<ConstantInt>(GEP->getOperand(GEP->getNumOperands() - 1));
-    if (!LastIdx)
+    APInt Offset(M->getDataLayout().getIndexTypeSizeInBits(GEP->getType()), 0);
+    if (!GEP->accumulateConstantOffset(M->getDataLayout(), Offset))
       continue;
-    if (LastIdx->getZExtValue() == 2)
+    if (Offset.getZExtValue() == 2 * sizeof(float))
       FoundComponentTwoLoad = true;
-    if (LastIdx->getZExtValue() == 0)
+    if (Offset.isZero())
       FoundComponentZeroLoad = true;
   }
   EXPECT_TRUE(FoundComponentTwoLoad)
@@ -353,9 +352,9 @@ TEST(FragmentWrapperTest, LowersSamplePositionSystemValueInput) {
     const auto *GEP = dyn_cast<GetElementPtrInst>(Load->getPointerOperand());
     if (!GEP)
       continue;
-    auto *LastIdx =
-        dyn_cast<ConstantInt>(GEP->getOperand(GEP->getNumOperands() - 1));
-    if (LastIdx && LastIdx->getZExtValue() == 1)
+    APInt Offset(M->getDataLayout().getIndexTypeSizeInBits(GEP->getType()), 0);
+    if (GEP->accumulateConstantOffset(M->getDataLayout(), Offset) &&
+        Offset.getZExtValue() == sizeof(float))
       FoundComponentOneLoad = true;
   }
   EXPECT_TRUE(FoundComponentOneLoad)
@@ -458,7 +457,7 @@ TEST(FragmentWrapperTest, InterpolateAtAddressesVertexInputsWithOwnLayout) {
   bool VertexInputLayoutUsed = false;
   for (const Use &U : VertexInputLayoutArg->uses()) {
     if (isa<BitCastInst>(U.getUser()) || isa<GetElementPtrInst>(U.getUser()) ||
-        isa<CallInst>(U.getUser())) {
+        isa<LoadInst>(U.getUser()) || isa<CallInst>(U.getUser())) {
       VertexInputLayoutUsed = true;
       break;
     }
@@ -476,7 +475,8 @@ TEST(FragmentWrapperTest, InterpolateAtAddressesVertexInputsWithOwnLayout) {
   // must stay entirely unused.
   bool InputLayoutDereferenced = false;
   for (const Use &U : InputLayoutArg->uses())
-    if (isa<BitCastInst>(U.getUser()) || isa<GetElementPtrInst>(U.getUser()))
+    if (isa<BitCastInst>(U.getUser()) || isa<GetElementPtrInst>(U.getUser()) ||
+        isa<LoadInst>(U.getUser()))
       InputLayoutDereferenced = true;
   EXPECT_FALSE(InputLayoutDereferenced)
       << "stage_input_layout was dereferenced even though this shader has "
