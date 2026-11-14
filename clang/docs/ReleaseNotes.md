@@ -511,6 +511,9 @@ documentation](CIR/index.md) for more information regarding ClangIR's status and
 
 ### Improvements to Clang's diagnostics
 
+- Fixed `-Wheader-guard` warnings pointing at `if` instead of the macro name
+  in `#if !defined(...)` header guards.
+
 - Fixed a false-positive `-Wimplicit-fallthrough` warning when
   consecutive switch labels share a body and are annotated with
   attributes like `[[unlikely]]`. (#GH230802)
@@ -1262,6 +1265,10 @@ documentation](CIR/index.md) for more information regarding ClangIR's status and
   `-Wdocumentation` or `-fparse-all-comments`) to a declaration group that spans
   multiple files, such as when a declaration uses a macro defined in an
   included header.
+
+- Fixed incorrect comparisons between `ObjCProtocolLoc` nodes stored in a
+  `DynTypedNode`. This subsequently fixes incorrect nodes found by
+  `ASTContext::getParents()` for an `ObjCProtocolLoc`.
   
 #### Miscellaneous Bug Fixes
 
@@ -1582,6 +1589,10 @@ The `alpha.cplusplus.UseAfterLifetimeEnd` checker was renamed to `alpha.core.Use
   modes for `-fsanitize=alloc-token`, selected with
   `-Xclang -falloc-token-mode=<mode>`. These modes derive token IDs from both
   the allocated type and the name of the function containing the allocation.
+- Fixed `-fsanitize-cfi-icall-experimental-normalize-integers` to only
+  normalize `cfi-icall` and `kcfi` function type metadata, leaving C++ class
+  vtable, member-pointer, and `-fexperimental-call-graph-section` metadata
+  canonical so whole-program devirtualization works reliably. (#GH242466)
 
 ### Python Binding Changes
 
