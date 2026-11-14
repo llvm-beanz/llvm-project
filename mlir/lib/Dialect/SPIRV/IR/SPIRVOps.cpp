@@ -666,19 +666,14 @@ ParseResult spirv::ConstantOp::parse(OpAsmParser &parser,
 
 void spirv::ConstantOp::print(OpAsmPrinter &printer) {
   printer << ' ' << getValue();
-  // Array/struct constants' own element type isn't otherwise recoverable
-  // from their `ArrayAttr` value alone, so the type is always printed for
-  // them. A pointer-typed (null) constant's `UnitAttr` value carries no
-  // type information whatsoever (unlike every other constant kind, whose
-  // `TypedAttr` value is itself enough to parse the type back), so its
-  // type must likewise always be printed to round-trip correctly.
-  if (isa<spirv::ArrayType, spirv::StructType, spirv::PointerType>(getType()))
+  if (isa<spirv::ArrayType, spirv::StructType, spirv::PointerType>(getType()) &&
+      !isa<spirv::NullAttr>(getValue()))
     printer << " : " << getType();
 }
 
 static LogicalResult verifyConstantType(spirv::ConstantOp op, Attribute value,
                                         Type opType) {
-  if (isa<spirv::PointerType>(opType)) {
+  if (isa<spirv::PointerType>(opType) && !isa<spirv::NullAttr>(value)) {
     // A pointer-typed constant's only legal value is a null pointer
     // (`OpConstantNull`); there is no other SPIR-V pointer-typed constant
     // instruction. A `UnitAttr` is used as a type-free marker for this,
@@ -698,7 +693,11 @@ static LogicalResult verifyConstantType(spirv::ConstantOp op, Attribute value,
                             "matrix constant, but found ")
              << denseAttr;
   }
-  if (isa<IntegerAttr, FloatAttr>(value)) {
+  if (isa<spirv::NullAttr>(value) &&
+      !isa<spirv::ArrayType, spirv::PointerType, spirv::StructType>(opType))
+    return op.emitOpError("must have spirv.ptr, spirv.array or spirv.struct "
+                          "result type for null value");
+  if (isa<IntegerAttr, FloatAttr, spirv::NullAttr>(value)) {
     auto valueType = cast<TypedAttr>(value).getType();
     if (valueType != opType)
       return op.emitOpError("result type (")

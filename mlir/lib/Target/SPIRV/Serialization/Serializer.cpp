@@ -1040,10 +1040,9 @@ uint32_t Serializer::prepareConstant(Location loc, Type constType,
   }
 
   // A null-pointer constant (`OpConstantNull` on a pointer type) is
-  // represented as a type-free `UnitAttr` marker (see
-  // `Deserializer::getNullAttrForType`), since there is no meaningful
-  // payload to serialize. Unlike every other constant kind, this is
-  // handled before the dedup-by-attribute logic below: a bare `UnitAttr`
+  // also accepted as a type-free `UnitAttr` marker for compatibility.
+  // Unlike every other constant kind, this is handled before the
+  // dedup-by-attribute logic below: a bare `UnitAttr`
   // carries no type of its own, so looking it up in `constIDMap` (keyed
   // purely by `Attribute`, not by `(Attribute, Type)`) would incorrectly
   // alias two different pointer types' null constants onto the same
@@ -1081,6 +1080,10 @@ uint32_t Serializer::prepareConstant(Location loc, Type constType,
                                             /*dim=*/0, index);
   } else if (auto arrayAttr = dyn_cast<ArrayAttr>(valueAttr)) {
     resultID = prepareArrayConstant(loc, constType, arrayAttr);
+  } else if (isa<spirv::NullAttr>(valueAttr)) {
+    resultID = getNextID();
+    encodeInstructionInto(typesGlobalValues, spirv::Opcode::OpConstantNull,
+                          {typeID, resultID});
   }
 
   if (resultID == 0) {

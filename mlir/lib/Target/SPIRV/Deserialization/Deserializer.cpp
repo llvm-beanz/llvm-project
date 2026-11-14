@@ -2665,39 +2665,8 @@ Attribute spirv::Deserializer::getNullAttrForType(Type type) {
       return DenseElementsAttr::get(tensorType, element);
     return nullptr;
   }
-  // An array/struct's null value is the same shape
-  // `processConstantComposite` builds for one of its ordinary composite
-  // constants: an `ArrayAttr` of each member's own null value, recursively.
-  if (auto arrayType = dyn_cast<spirv::ArrayType>(type)) {
-    Attribute elementAttr = getNullAttrForType(arrayType.getElementType());
-    if (!elementAttr)
-      return nullptr;
-    return opBuilder.getArrayAttr(
-        SmallVector<Attribute>(arrayType.getNumElements(), elementAttr));
-  }
-  if (auto structType = dyn_cast<spirv::StructType>(type)) {
-    SmallVector<Attribute, 4> memberAttrs;
-    memberAttrs.reserve(structType.getNumElements());
-    for (Type memberType : structType.getElementTypes()) {
-      Attribute memberAttr = getNullAttrForType(memberType);
-      if (!memberAttr)
-        return nullptr;
-      memberAttrs.push_back(memberAttr);
-    }
-    return opBuilder.getArrayAttr(memberAttrs);
-  }
-  // A null pointer has no meaningful payload to record (unlike every case
-  // above, a pointer's own "value" isn't an integer/float/composite literal
-  // at all), so a plain `UnitAttr` is used as a type-free marker -- read by
-  // both `spirv.Constant`'s own verifier (`verifyConstantType` in
-  // `SPIRVOps.cpp`, which accepts a `UnitAttr` specifically for
-  // pointer-typed constants) and the serializer's own `prepareConstant`
-  // (which re-emits a fresh `OpConstantNull`, never deduplicating via
-  // `constIDMap` the way every other constant kind above does, since a
-  // bare `UnitAttr` carries no type and would otherwise incorrectly alias
-  // two different pointer types' null constants together).
-  if (isa<spirv::PointerType>(type))
-    return opBuilder.getUnitAttr();
+  if (isa<spirv::ArrayType, spirv::PointerType, spirv::StructType>(type))
+    return spirv::NullAttr::get(type);
   return nullptr;
 }
 

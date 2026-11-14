@@ -467,9 +467,7 @@ private:
   LogicalResult processConstantNull(ArrayRef<uint32_t> operands);
 
   /// Returns the all-zero attribute `OpConstantNull`'s \p type produces, or
-  /// null if \p type is not (recursively, for an array/struct) one of the
-  /// scalar/vector/tensor/array/struct types this deserializer knows how to
-  /// build a null value for.
+  /// null if this deserializer does not support a null value for \p type.
   Attribute getNullAttrForType(Type type);
 
   /// Processes a SPIR-V OpGraphConstantARM instruction with the given

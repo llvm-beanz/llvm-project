@@ -140,6 +140,9 @@ std::optional<llvm::Triple> tryParseTriple(StringRef Profile) {
   case 9:
     SubArch = llvm::Triple::DXILSubArch_v1_9;
     break;
+  case 10:
+    SubArch = llvm::Triple::DXILSubArch_v1_10;
+    break;
   case OfflineLibMinor:
     // Always consider minor version x as the latest supported DXIL version
     SubArch = llvm::Triple::LatestDXILSubArch;
@@ -243,16 +246,11 @@ void getSpirvExtOperand(StringRef SpvExtensionArg, raw_ostream &out) {
 }
 
 SmallString<1024> getSpirvExtArg(ArrayRef<std::string> SpvExtensionArgs) {
-  if (SpvExtensionArgs.empty()) {
-    // SPV_KHR_poison_freeze is excluded from the "enable everything" default:
-    // it is a recently added, still-provisional SPIR-V backend extension
-    // that no real-world SPIR-V consumer (e.g. SPIRV-Tools' spirv-val)
-    // currently recognizes, so sweeping it in by default would silently
-    // break codegen for any shader whose lowering happens to produce a
-    // poison value (e.g. HLSL's matrix-to-vector packing for elementwise
-    // library-function calls) without the user ever requesting it.
-    return StringRef("-spirv-ext=all,-SPV_KHR_poison_freeze");
-  }
+  // The backend uses any enabled extension it can, so `all` makes modules
+  // declare extensions that a Vulkan application may not have enabled.
+  const std::string DefaultExtension = "DXC";
+  if (SpvExtensionArgs.empty())
+    SpvExtensionArgs = ArrayRef<std::string>(DefaultExtension);
 
   llvm::SmallString<1024> LlvmOption;
   raw_svector_ostream out(LlvmOption);
@@ -269,7 +267,7 @@ SmallString<1024> getSpirvExtArg(ArrayRef<std::string> SpvExtensionArgs) {
 }
 
 bool isValidSPIRVExtensionName(const std::string &str) {
-  std::regex pattern("dxc|DXC|khr|KHR|SPV_[a-zA-Z0-9_]+");
+  std::regex pattern("dxc|DXC|khr|KHR|all|SPV_[a-zA-Z0-9_]+");
   return std::regex_match(str, pattern);
 }
 
