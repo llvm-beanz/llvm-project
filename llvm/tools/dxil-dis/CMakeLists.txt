@@ -1,7 +1,7 @@
 option(LLVM_INCLUDE_DXIL_TESTS "Include DXIL tests" Off)
 mark_as_advanced(LLVM_INCLUDE_DXIL_TESTS)
 
-if (NOT LLVM_INCLUDE_DXIL_TESTS)
+if (NOT LLVM_INCLUDE_DXIL_TESTS OR "dxil-tools" IN_LIST LLVM_EXTERNAL_PROJECTS)
   return()
 endif ()
 
