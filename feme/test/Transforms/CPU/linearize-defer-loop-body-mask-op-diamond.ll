@@ -231,14 +231,13 @@ attributes #2 = { nounwind willreturn memory(argmem: readwrite) }
 // header for it since it is codegen-internal to the CPU target's JIT/AOT
 // dispatch path).
 //
-// Keep the harness independent of platform C library headers using
-// compiler-provided integer types and local memory helpers.
+#include <stdio.h>
+
+// Use compiler-provided integer types and local memory helpers.
 typedef __INT32_TYPE__ int32_t;
 typedef __INT64_TYPE__ int64_t;
 typedef __INT8_TYPE__ int8_t;
 typedef __SIZE_TYPE__ size_t;
-
-extern int printf(const char *, ...);
 
 static void harness_memset(void *dst, int value, size_t n) {
   unsigned char *d = (unsigned char *)dst;
