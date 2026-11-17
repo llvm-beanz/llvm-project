@@ -40,7 +40,8 @@
 ; CHECK-NEXT: %ptr{{[0-9]*}}.splat.splatinsert = insertelement <4 x ptr> poison, ptr %ptr{{[0-9]*}}, i64 0
 ; CHECK-NEXT: %ptr{{[0-9]*}}.splat.splat = shufflevector <4 x ptr> %ptr{{[0-9]*}}.splat.splatinsert, <4 x ptr> poison, <4 x i32> zeroinitializer
 ; CHECK: %masked.mask = and <4 x i1> %wave_sideeffect_mask, %sideeffect.t.wide
-; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 16 %ptr{{[0-9]*}}.splat.splat, <4 x i1> %masked.mask)
+; CHECK-NEXT: [[ROW0_PTR:%.*]] = getelementptr i8, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, <4 x i64> zeroinitializer
+; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 16 [[ROW0_PTR]], <4 x i1> %masked.mask)
 ; CHECK-NEXT: %{{.*}}.elt1.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i64 4
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> zeroinitializer, <4 x ptr> align 4 %{{.*}}.elt1.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
 ; CHECK-NEXT: %{{.*}}.elt2.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr{{[0-9]*}}.splat.splat, i64 8

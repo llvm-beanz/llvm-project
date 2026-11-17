@@ -22,7 +22,9 @@
 ; CHECK-NEXT: ret void
 
 ; CHECK-LABEL: define internal void @main.region0(
-; CHECK: store i32 %wave_group_id_x, ptr %shared.flat
+; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
+; CHECK-NEXT: [[PTR:%.*]] = getelementptr inbounds i8, ptr %shared.flat, i64 0
+; CHECK-NEXT: store i32 %wave_group_id_x, ptr [[PTR]]
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {
 ; CHECK: wave.loop.header.0:

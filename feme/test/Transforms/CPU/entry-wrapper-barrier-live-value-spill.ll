@@ -13,7 +13,8 @@
 ; CHECK-SAME: ptr %barrier_spill)
 ; CHECK: %[[RELOADINDEX:.*]] = sext i32 %wave_index to i64
 ; CHECK: %sum.reload.slot = getelementptr [4 x i8], ptr %barrier_spill, i64 %[[RELOADINDEX]]
-; CHECK: %sum.reload.val = load i32, ptr %sum.reload.slot
+; CHECK-NEXT: %sum.reload = getelementptr inbounds nuw i8, ptr %sum.reload.slot, i64 0
+; CHECK-NEXT: %sum.reload.val = load i32, ptr %sum.reload
 ; CHECK: %doubled = mul i32 %sum.reload.val, 2
 ; CHECK: ret void
 
@@ -21,7 +22,8 @@
 ; CHECK-SAME: ptr %barrier_spill)
 ; CHECK: %[[SPILLINDEX:.*]] = sext i32 %wave_index to i64
 ; CHECK: %sum.spill.slot = getelementptr [4 x i8], ptr %barrier_spill, i64 %[[SPILLINDEX]]
-; CHECK: store i32 %sum, ptr %sum.spill.slot
+; CHECK-NEXT: %sum.spill = getelementptr inbounds nuw i8, ptr %sum.spill.slot, i64 0
+; CHECK-NEXT: store i32 %sum, ptr %sum.spill
 ; CHECK: ret void
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {

@@ -13,7 +13,8 @@
 ; CHECK-LABEL: define internal void @main(
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK-NEXT: %val = load i32, ptr %shared.flat, align 4
+; CHECK-NEXT: [[PTR:%.*]] = getelementptr inbounds i8, ptr %shared.flat, i64 0
+; CHECK-NEXT: %val = load i32, ptr [[PTR]], align 4
 
 ; CHECK-LABEL: define void @feme_cpu_entry_main(ptr %args) {
 ; CHECK: %groupshared = alloca [16 x i8], align 4

@@ -31,7 +31,8 @@
 ; CHECK-NOT: alloca [1 x i32]
 ; Every lane copies its own element from its own `%src` slot into its own
 ; `%dst` slot, not a single broadcast scalar round trip.
-; CHECK: %dst.perlane.ptrs = insertelement <4 x ptr> poison, ptr %dst.perlane, i32 0
+; CHECK: %dst.lane0 = getelementptr i8, ptr %dst.perlane, i64 0
+; CHECK-NEXT: %dst.perlane.ptrs = insertelement <4 x ptr> poison, ptr %dst.lane0, i32 0
 ; CHECK: %dst.lane1 = getelementptr i8, ptr %dst.perlane, i64 4
 ; CHECK: %dst.lane2 = getelementptr i8, ptr %dst.perlane, i64 8
 ; CHECK: %dst.lane3 = getelementptr i8, ptr %dst.perlane, i64 12

@@ -18,7 +18,8 @@
 ; CHECK-LABEL: define void @main(
 ; CHECK: %v.perlane = alloca [4 x i32]
 ; CHECK-NOT: alloca i32
-; CHECK: %v.perlane.ptrs = insertelement <4 x ptr> poison, ptr %v.perlane, i32 0
+; CHECK: %v.lane0 = getelementptr i8, ptr %v.perlane, i64 0
+; CHECK-NEXT: %v.perlane.ptrs = insertelement <4 x ptr> poison, ptr %v.lane0, i32 0
 ; CHECK: %v.lane1 = getelementptr i8, ptr %v.perlane, i64 4
 ; CHECK: %v.lane2 = getelementptr i8, ptr %v.perlane, i64 8
 ; CHECK: %v.lane3 = getelementptr i8, ptr %v.perlane, i64 12

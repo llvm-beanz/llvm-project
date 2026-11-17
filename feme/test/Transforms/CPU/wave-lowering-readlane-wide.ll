@@ -30,7 +30,8 @@
 ; CHECK: %[[SP0:.*]] = getelementptr inbounds [4 x i8], ptr %[[SRCA]], i64 %[[SRCIDX0]]
 ; CHECK: %[[V0:.*]] = load i32, ptr %[[SP0]]
 ; CHECK: %[[SEL0:.*]] = select i1 %[[ACT0]], i32 %[[V0]], i32 0
-; CHECK: store i32 %[[SEL0]], ptr %[[DSTA]]
+; CHECK: %[[DP0:.*]] = getelementptr inbounds i8, ptr %[[DSTA]], i64 0
+; CHECK-NEXT: store i32 %[[SEL0]], ptr %[[DP0]]
 ; CHECK: load <16 x i32>, ptr %[[DSTA]]
 
 ; NARROW-LABEL: define void @main(

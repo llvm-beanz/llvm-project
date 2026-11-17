@@ -31,7 +31,8 @@
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
 ; CHECK-NEXT: %ptr.wide{{[0-9]*}} = getelementptr inbounds [16 x i8], ptr %shared.flat, <4 x i64> %[[INDEX]]
 ; CHECK: %masked.mask = and <4 x i1> %wave_sideeffect_mask, %sideeffect.t.wide
-; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 1.000000e+00), <4 x ptr> align 16 %ptr.wide{{[0-9]*}}, <4 x i1> %masked.mask)
+; CHECK-NEXT: [[ROW0_PTR:%.*]] = getelementptr i8, <4 x ptr> %ptr.wide{{[0-9]*}}, <4 x i64> zeroinitializer
+; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 1.000000e+00), <4 x ptr> align 16 [[ROW0_PTR]], <4 x i1> %masked.mask)
 ; CHECK-NEXT: %{{.*}}.elt1.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr.wide{{[0-9]*}}, i64 4
 ; CHECK-NEXT: call void @llvm.masked.scatter.v4f32.v4p0(<4 x float> splat (float 2.000000e+00), <4 x ptr> align 4 %{{.*}}.elt1.ptr{{[0-9]*}}, <4 x i1> %masked.mask)
 ; CHECK-NEXT: %{{.*}}.elt2.ptr{{[0-9]*}} = getelementptr i8, <4 x ptr> %ptr.wide{{[0-9]*}}, i64 8
