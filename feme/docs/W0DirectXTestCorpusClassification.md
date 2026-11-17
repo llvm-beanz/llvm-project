@@ -1,9 +1,10 @@
 # W0(c) Direct3D test corpus classification
 
-**Current integration direction (2026-11-06):** container-first application-local
-user-mode software driver through stock D3D12/DXGI. The
+**Current integration direction (updated 2026-11-17):** VM-first
+application-local user-mode software driver through stock D3D12/DXGI. The
 [integration report](W0WindowsIntegrationProbe.md) supplies a standalone
-reference-WARP runner and the next container verification steps. The FeMe
+reference-WARP runner and historical container measurements; continue
+development and validation in the Windows VM. The FeMe
 selection helper below remains a design until W0(f)/W1(a) supplies a valid
 FeMe adapter; kernel installation is not a prerequisite for starting this work.
 
@@ -156,7 +157,8 @@ separately negotiated, not part of the FL 12_2 / SM 6.5 minimum:
 ### Display/HLK-dependency tests
 
 Tests that require a real, display-capable host (or a separately installed
-kernel driver) and cannot run headlessly in this process-isolated container:
+kernel driver) and cannot be validated in a headless VM without display/GPU
+passthrough:
 
 - `src\D3D12Conf\Displayable`, `DirectSR`, `VideoBlit`, and `video`/
   `videodata` content: presentation/flip-model and display-dependent paths,
@@ -164,8 +166,7 @@ kernel driver) and cannot run headlessly in this process-isolated container:
 - Anything built on `SoftGpuApiHelper` (see above): requires an elevated
   process plus the separately installed SoftGpu kernel driver.
 - `src\D3D12Conf\MultiGPU`, `Multiengine`: typically require specific
-  multi-adapter hardware configurations not present in a software-only
-  container.
+  multi-adapter hardware configurations not present in a software-only VM.
 
 ## Source/test redistribution
 

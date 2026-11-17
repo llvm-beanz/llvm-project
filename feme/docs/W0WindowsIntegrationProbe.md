@@ -2,7 +2,8 @@
 
 **W0(b) decision: WARP-compatible application-local UMD drop-in.**
 Stock D3D12 reaches LLVM-owned `OpenAdapter12`, queries its public adapter
-callbacks, and closes it on both the host and Windows container. The owned
+callbacks, and closed it in the historical host and Windows-container
+measurements. The owned
 cases need neither ordinal 199 nor reference-WARP forwarding. This uses
 Microsoft's existing WARP adapter identity, not a distinct FeMe adapter;
 the user selected that identity and the unmodified WARP kernel-mode driver
@@ -14,9 +15,11 @@ The public general-provider search remains negative, but that is not a
 runtime-routing impossibility result. No system WARP binaries or kernel-mode
 driver are to be replaced or modified.
 
-This is host and container evidence for [WARPRoadmap.md](WARPRoadmap.md),
-collected on 2026-11-06. The user selected stock-runtime user-mode/software-adapter probing
-first, with no system changes. The LLVM-owned
+This report preserves historical host/container evidence for
+[WARPRoadmap.md](WARPRoadmap.md), collected on 2026-11-06. Development and
+validation now continue in a full-featured Windows VM, per the
+2026-11-17 workflow change. The user selected stock-runtime
+user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 [standalone probe](../utils/windows-adapter-probe/CMakeLists.txt) uses public
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
@@ -110,7 +113,7 @@ probe. The design's prohibition on depending on private WARP ordinals remains.
 The user selected a WARP-compatible application-local UMD drop-in on
 2026-11-17: keep Microsoft's WARP adapter identity and use the existing,
 unmodified WARP kernel-mode driver. This closes the product-choice gate, not
-the technical feasibility gate. The container-first implementation must still
+the technical feasibility gate. The VM-first implementation must still
 prove that a real FeMe device/resource lifecycle works through that existing
 kernel-mode support. No system WARP binaries are replaced, no kernel driver is
 installed or modified, and no application-local COM runtime is selected.
@@ -150,9 +153,10 @@ installed or modified, and no application-local COM runtime is selected.
 W0(a) and W0(d) remain incomplete: there is no FeMe D3D12 device, no verified
 resource lifecycle through WARP's existing kernel-mode driver, and no runner
 that asserts both WARP identity and FeMe-module provenance. W0(b)'s selected
-product boundary is closed. The user-mode stock-runtime path is container-
-verified through owned adapter queries/close in alternative B, but that is not
-a real-device result. No public general-provider bootstrap was found; the
+product boundary is closed. The user-mode stock-runtime path was historically
+verified in the container through owned adapter queries/close in alternative
+B, but that is not a real-device result. No public
+general-provider bootstrap was found; the
 WARP-specific route is separately proven and remains subject to its
 application-local compatibility limits. Installed-driver, signing/reboot,
 display and HLK work are outside the selected deployment contract. Missing
@@ -160,7 +164,10 @@ evidence is not Pass.
 
 ## Container measurements
 
-Collected 2026-11-06 in this process-isolated Windows container, using the
+Historical results collected 2026-11-06 in the process-isolated Windows
+container; these are retained as evidence, not as the current development
+environment. Current implementation and validation proceed in the Windows VM.
+The measurements used the
 same LLVM-owned standalone probe as the host measurements above (no changes
 to `AdapterProbe.cpp`/`RejectionStub.cpp` were needed to build or run here).
 
@@ -715,11 +722,96 @@ established for this harness) beyond a basic internal-consistency check (if
 the callback probe ran at all, it must report either completing or having
 been caught by SEH, never neither).
 
+### W0(g) public DDI-version matrix (VM measurements)
+
+The application-local probe project
+[`windows-warp-interposition`](../utils/windows-warp-interposition/CMakeLists.txt)
+now accepts a semicolon-separated list of public
+`D3D12DDI_SUPPORTED_00NN` macros through `FEME_PROBE_DDI_VERSIONS`. Each entry
+builds an owned audit shim and an `os-routed-pinned-version-custom-NNNN`
+CTest. `FEME_PROBE_DDI_MATRIX_ONLY=ON` omits the unrelated WARP-forwarding
+controls, so this matrix does not require the pinned NuGet WARP binary. The
+matrix remains an audit stub: it cannot establish a working device or
+resource lifecycle.
+
+The matrix was built with MSVC 19.44.35230.0 for x64 and Windows SDK/WDK
+10.0.26100.0, CMake 3.31.6, and Ninja 1.12.1, then run on Windows 11
+Enterprise build 26300 (ARM64). The system inbox `d3d12.dll` and
+`D3D12Core.dll` were both 10.0.26100.9818. The runtime selected
+`Microsoft Basic Render Driver` with WARP identity
+`vendor=1414`, `device=008c`, `flags=2`. Twenty-nine public versions were
+tested: representative interface/build boundaries from 0010 through 0110,
+plus every macro defined by this WDK from 0060 through 0089. All 29 CTest
+cases passed as audit assertions, but the result varied at two exact builds:
+
+- Every tested version other than 0070 and 0071 reached
+  `CalcPrivateDeviceSize` and `CreateDevice`; `CreateDevice` deliberately
+  returned `E_NOTIMPL` (`0x80004001`). The counters were
+  `Open=1, Size=1, Versions=2, Caps=1, Create=1, Close=1`.
+- `D3D12DDI_SUPPORTED_0070` and `_0071` returned
+  `DXGI_ERROR_UNSUPPORTED` (`0x887a0004`) before
+  `CalcPrivateDeviceSize` or `CreateDevice` (`Open=1, Size=0, Versions=2,
+  Caps=1, Create=0, Close=1`). Each was repeated three times with the same
+  result; `_0072` was the adjacent successful negotiation control.
+
+Thus, on this particular inbox runtime, the earlier 0119 failure is not a
+general "newer DDI" cutoff: the unsupported point is limited to builds 0070
+and 0071 in the tested range, with 0072 and later tested values reaching the
+stub. The cause of this narrow rejection remains unknown. No allocation or
+residency callback was invoked, and `E_NOTIMPL` is not device creation.
+
+To reproduce, use the x64 Visual Studio developer environment configured for
+the same installed SDK/WDK (`VsDevCmd.bat -arch=amd64 -winsdk=10.0.26100.0`),
+and keep configure/build/test in that environment so the matching WDK include
+path remains selected. Update the macro list to match the VM's `d3d12umddi.h`:
+
+```powershell
+$cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+$ctest = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe'
+$ninja = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe'
+$repo = 'C:\Users\cbieneman\dev\llvm-project\feme'
+$build = 'C:\Users\cbieneman\dev\warp-ddi-matrix'
+$ddiVersions = @(
+  'D3D12DDI_SUPPORTED_0010', 'D3D12DDI_SUPPORTED_0020',
+  'D3D12DDI_SUPPORTED_0030', 'D3D12DDI_SUPPORTED_0040',
+  'D3D12DDI_SUPPORTED_0050', 'D3D12DDI_SUPPORTED_0060',
+  'D3D12DDI_SUPPORTED_0061', 'D3D12DDI_SUPPORTED_0062',
+  'D3D12DDI_SUPPORTED_0063', 'D3D12DDI_SUPPORTED_0064',
+  'D3D12DDI_SUPPORTED_0065', 'D3D12DDI_SUPPORTED_0070',
+  'D3D12DDI_SUPPORTED_0071', 'D3D12DDI_SUPPORTED_0072',
+  'D3D12DDI_SUPPORTED_0073', 'D3D12DDI_SUPPORTED_0074',
+  'D3D12DDI_SUPPORTED_0075', 'D3D12DDI_SUPPORTED_0076',
+  'D3D12DDI_SUPPORTED_0080', 'D3D12DDI_SUPPORTED_0081',
+  'D3D12DDI_SUPPORTED_0082', 'D3D12DDI_SUPPORTED_0083',
+  'D3D12DDI_SUPPORTED_0084', 'D3D12DDI_SUPPORTED_0086',
+  'D3D12DDI_SUPPORTED_0088', 'D3D12DDI_SUPPORTED_0089',
+  'D3D12DDI_SUPPORTED_0090', 'D3D12DDI_SUPPORTED_0100',
+  'D3D12DDI_SUPPORTED_0110'
+) -join ';'
+& $cmake -S "$repo\utils\windows-warp-interposition" `
+  -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" `
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=cl.exe `
+  -DCMAKE_SYSTEM_VERSION=10.0.26100.0 `
+  "-DCMAKE_CXX_FLAGS_DEBUG=/Z7 /Ob0 /Od /RTC1" `
+  -DFEME_PROBE_DDI_MATRIX_ONLY=ON `
+  "-DFEME_PROBE_DDI_VERSIONS=$ddiVersions"
+& $cmake --build $build
+& $ctest --test-dir $build -V `
+  -R "os-routed-pinned-version-custom-"
+```
+
+The custom targets are the only targets in matrix-only mode, so a default
+build compiles all versions in `$ddiVersions`. Preserve the exact WDK macro
+list and environment details with each result; SDK-version mismatches can
+silently test a different header/runtime combination.
+
 ### Reproduce the B investigation
 
-In the container's x64 developer shell with SDK/WDK 28000, use CMake >= 3.29
-and the existing `lld-link` on PATH. The tested forwarding build uses
-`CMAKE_LINKER_TYPE=LLD`; setting `CMAKE_LINKER` alone did not select it here.
+In the Windows development VM's x64 developer shell, use an SDK/WDK with the
+required public DDI macros, CMake >= 3.29 and the existing `lld-link` on PATH.
+The previously tested forwarding build used SDK/WDK 28000.
+`CMAKE_LINKER_TYPE=LLD` selected the linker; setting `CMAKE_LINKER` alone did
+not.
 MSVC-link forwarding attempts failed with unresolved exports; their exact
 cause was not established.
 
@@ -734,10 +826,12 @@ cmake --build C:\dev\warp-interposition
 ctest --test-dir C:\dev\warp-interposition -V --repeat until-fail:3
 ```
 
-On the host, use the same flags with host paths and the typed manifest-tool
-override `-DCMAKE_MT:FILEPATH=...` described below. Explicitly select the
-MSVC compiler when prepending LLVM's directory to PATH, so CMake does not
-accidentally choose GNU-style clang with MSVC-only flags.
+Use the VM's paths and toolchain. A previous host required a typed
+manifest-tool override (`-DCMAKE_MT:FILEPATH=...`), described below; do not
+carry that workaround into the VM unless its compiler check reproduces the
+same manifest-tool launch failure. Explicitly select the MSVC compiler if
+prepending LLVM's directory to PATH, so CMake does not accidentally choose
+GNU-style clang with MSVC-only flags.
 
 For Agility, build `windows-adapter-probe` separately with the existing
 `FEME_PROBE_AGILITY_CORE`/`FEME_PROBE_AGILITY_VERSION=619` options below,
@@ -747,11 +841,12 @@ The harness's explicit load permits those DLLs to reside in the other build's
 directories. Check the reported AgilitySDK core path and reference-module
 absence; an Agility build option alone is not runtime-selection evidence.
 
-### Container starting point
+### Windows development VM starting point
 
-Use the Windows tooling's x64 developer-shell setup and its existing sccache.
-The container's actual kit selection needs no `CMAKE_MT` workaround (see the
-measurements above); this differs from the host's SDK 28000 `mt.exe` failure.
+Use the VM's x64 developer shell, selected SDK/WDK, CMake, Ninja, and sccache.
+The historical container had no `CMAKE_MT` issue; on the VM use its matching
+manifest tool, and only select a different `CMAKE_MT` path if the configured
+tool cannot launch.
 
 ```powershell
 cmake -S C:\dev\llvm-project\feme\utils\windows-adapter-probe `
@@ -763,18 +858,22 @@ ctest --test-dir C:\dev\adapter-probe -V
 ```
 
 The four cases are reference WARP, software-reference WARP, pre-DDI stub
-rejection, and explicit missing-module failure; all four passed as recorded
-above. For the Agility-core matrix rows, reconfigure into a second build
+rejection, and explicit missing-module failure. Historical container results
+for these cases are recorded above; run them again in the VM for current
+validation. For the Agility-core matrix rows, reconfigure into a second build
 directory with `-DFEME_PROBE_AGILITY_VERSION=619` and
-`-DFEME_PROBE_AGILITY_CORE=<path to a container-local D3D12Core.dll>`, then
+`-DFEME_PROBE_AGILITY_CORE=<path to a VM-local D3D12Core.dll>`, then
 run that build's four CTests and `feme-windows-adapter-probe.exe` directly
 with no arguments, `--software <WARP path>`,
 or `--stub <path to feme-adapter-rejection-stub.dll>`.
 
-## Reproduce without configuring the LLVM build
+## Historical host probe workaround
 
-Use a VS x64 developer shell with SDK/WDK `10.0.28000.0`. Choose an out-of-tree
-build directory; the standalone project has no FeMe/LLVM library dependency.
+This command records the workaround used on the earlier host, not the current
+VM setup. Start with the VM's matching SDK/WDK manifest tool; use the
+`CMAKE_MT` override only if the same launch failure occurs there. Choose an
+out-of-tree build directory; the standalone project has no FeMe/LLVM library
+dependency.
 
 ```powershell
 cmake -S C:\Users\cbieneman\dev\llvm-project\feme\utils\windows-adapter-probe `

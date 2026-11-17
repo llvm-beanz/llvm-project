@@ -14,14 +14,25 @@ if(NOT MSVC)
   message(FATAL_ERROR "Use an MSVC-compatible compiler and PE linker.")
 endif()
 
-set(FEME_WARP_REFERENCE "" CACHE FILEPATH "Existing WARP 1.0.19 x64 DLL")
-if(NOT EXISTS "${FEME_WARP_REFERENCE}")
-  message(FATAL_ERROR "Supply FEME_WARP_REFERENCE; no binaries are downloaded.")
+option(FEME_PROBE_DDI_MATRIX_ONLY
+  "Configure only the public DDI-version audit tests" OFF)
+set(FEME_PROBE_DDI_VERSIONS "" CACHE STRING
+  "Semicolon-separated D3D12DDI_SUPPORTED_00NN macros to audit")
+if(FEME_PROBE_DDI_MATRIX_ONLY AND NOT FEME_PROBE_DDI_VERSIONS)
+  message(FATAL_ERROR
+    "Set FEME_PROBE_DDI_VERSIONS when FEME_PROBE_DDI_MATRIX_ONLY is enabled.")
 endif()
-file(SHA256 "${FEME_WARP_REFERENCE}" REFERENCE_HASH)
-if(NOT REFERENCE_HASH STREQUAL
-   "1fd2f9d991f00d890d06c00f791a756446f5f29da508b12fdeb8ffd1b5696add")
-  message(FATAL_ERROR "The reference DLL is not the pinned WARP 1.0.19 x64 binary.")
+
+if(NOT FEME_PROBE_DDI_MATRIX_ONLY)
+  set(FEME_WARP_REFERENCE "" CACHE FILEPATH "Existing WARP 1.0.19 x64 DLL")
+  if(NOT EXISTS "${FEME_WARP_REFERENCE}")
+    message(FATAL_ERROR "Supply FEME_WARP_REFERENCE; no binaries are downloaded.")
+  endif()
+  file(SHA256 "${FEME_WARP_REFERENCE}" REFERENCE_HASH)
+  if(NOT REFERENCE_HASH STREQUAL
+     "1fd2f9d991f00d890d06c00f791a756446f5f29da508b12fdeb8ffd1b5696add")
+    message(FATAL_ERROR "The reference DLL is not the pinned WARP 1.0.19 x64 binary.")
+  endif()
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -31,11 +42,12 @@ add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 # PE forwarding preserves the reference functions' ABI without guessing private
 # signatures or importing Microsoft's implementation into this project.
+enable_testing()
+if(NOT FEME_PROBE_DDI_MATRIX_ONLY)
 set(REFERENCE_EXPORTS
   D3D11RefGetLastCreation D3DLayerGetInterface OpenAdapter OpenAdapter10_2
   OpenDisplayAdapter1 QueryDListForApplication1 QueryDListForApplication2
   QueryMuxDListForApplication)
-enable_testing()
 foreach(VARIANT reference public-exports private-ordinal bare negotiation
                 pinned-version pinned-version-newer callback-probe)
   set(OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/${VARIANT}")
@@ -128,6 +140,7 @@ foreach(VARIANT reference public-exports private-ordinal bare negotiation
       --warp-shim $<TARGET_FILE:${VARIANT}-shim>)
   endif()
 endforeach()
+
 add_test(NAME generic-software-rejection COMMAND bare-harness
   --stub $<TARGET_FILE:bare-shim>)
 set_tests_properties(reference-forwarding public-exports-interception
@@ -135,3 +148,45 @@ set_tests_properties(reference-forwarding public-exports-interception
   os-routed-pinned-version os-routed-pinned-version-newer
   os-routed-callback-probe generic-software-rejection
   PROPERTIES TIMEOUT 30)
+endif()
+
+# Allow the VM-first W0(g) version bisect to test an explicit set of public
+# WDK DDI versions without editing this project for each trial.
+set(SEEN_DDI_VERSIONS)
+foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
+  if(NOT DDI_VERSION MATCHES "^D3D12DDI_SUPPORTED_[0-9][0-9][0-9][0-9]$")
+    message(FATAL_ERROR
+      "Invalid DDI version '${DDI_VERSION}'; use a public "
+      "D3D12DDI_SUPPORTED_00NN macro from d3d12umddi.h")
+  endif()
+  if(DDI_VERSION IN_LIST SEEN_DDI_VERSIONS)
+    message(FATAL_ERROR "Duplicate DDI version '${DDI_VERSION}'")
+  endif()
+  list(APPEND SEEN_DDI_VERSIONS "${DDI_VERSION}")
+  string(REGEX REPLACE "^D3D12DDI_SUPPORTED_" "" DDI_VERSION_SUFFIX
+    "${DDI_VERSION}")
+  set(VARIANT "pinned-version-custom-${DDI_VERSION_SUFFIX}")
+  set(OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/${VARIANT}")
+  file(MAKE_DIRECTORY "${OUTPUT_DIR}")
+
+  add_library(${VARIANT}-shim SHARED
+    ../windows-adapter-bootstrap/BootstrapStub.cpp)
+  target_compile_definitions(${VARIANT}-shim PRIVATE
+    FEME_BOOTSTRAP_PINNED_VERSION=${DDI_VERSION})
+  set_target_properties(${VARIANT}-shim PROPERTIES
+    OUTPUT_NAME d3d10warp RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
+
+  add_executable(${VARIANT}-harness ../windows-adapter-probe/AdapterProbe.cpp)
+  set_target_properties(${VARIANT}-harness PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
+  target_link_libraries(${VARIANT}-harness PRIVATE d3d12 dxgi)
+  add_dependencies(${VARIANT}-harness ${VARIANT}-shim)
+  if(MSVC)
+    target_compile_options(${VARIANT}-shim PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+    target_compile_options(${VARIANT}-harness PRIVATE /W4 /WX /UNDEBUG)
+  endif()
+  add_test(NAME "os-routed-${VARIANT}" COMMAND ${VARIANT}-harness
+    --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
+  set_tests_properties("os-routed-${VARIANT}" PROPERTIES TIMEOUT 30)
+endforeach()
