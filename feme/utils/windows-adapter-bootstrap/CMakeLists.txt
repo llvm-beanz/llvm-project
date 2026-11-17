@@ -26,3 +26,18 @@ enable_testing()
 add_test(NAME direct-openadapter12 COMMAND feme-windows-adapter-direct-harness
   $<TARGET_FILE:feme-adapter-bootstrap-stub>)
 set_tests_properties(direct-openadapter12 PROPERTIES TIMEOUT 30)
+
+if(MSVC)
+  add_executable(feme-paging-queue-tests BootstrapStub.cpp PagingQueueTests.cpp)
+  target_compile_definitions(feme-paging-queue-tests PRIVATE
+    FEME_BOOTSTRAP_PROBE_PAGING_QUEUE=1)
+  target_compile_options(feme-paging-queue-tests PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+  foreach(SCENARIO success create-failure destroy-failure missing-create
+                   missing-destroy missing-device missing-table missing-queue
+                   missing-sync missing-fence create-exception destroy-exception
+                   create-status destroy-status)
+    add_test(NAME "paging-queue-fixture-${SCENARIO}"
+      COMMAND feme-paging-queue-tests "${SCENARIO}")
+    set_tests_properties("paging-queue-fixture-${SCENARIO}" PROPERTIES TIMEOUT 30)
+  endforeach()
+endif()

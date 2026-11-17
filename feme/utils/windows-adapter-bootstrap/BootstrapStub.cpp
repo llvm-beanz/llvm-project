@@ -38,6 +38,12 @@
 // still audit work: no capability or device contract is implemented, and no
 // allocation/resource callback is ever called.
 //
+// FEME_BOOTSTRAP_PROBE_PAGING_QUEUE is a separate opt-in experiment using
+// the public KT create/destroy paging-queue callbacks and hRTDevice handle.
+// It supplies no private driver data and submits no memory or GPU work.
+// A successful round trip still ends in E_NOTIMPL, not a working device;
+// callback failures and exceptions are preserved in the probe telemetry.
+//
 //===----------------------------------------------------------------------===//
 
 #include "BootstrapAudit.h"
@@ -48,6 +54,11 @@
 #include <d3d10umddi.h>
 #include <d3d12umddi.h>
 #include <dxgi.h>
+
+#if defined(FEME_BOOTSTRAP_PROBE_CALLBACK) &&                                  \
+    defined(FEME_BOOTSTRAP_PROBE_PAGING_QUEUE)
+#error "Run diagnostic-error and paging-queue probes separately."
+#endif
 
 namespace {
 struct Counters {
@@ -85,6 +96,65 @@ struct CreateDeviceAudit {
 };
 CreateDeviceAudit GCreateDeviceAudit;
 feme::probe::BootstrapContractAudit GContractAudit;
+feme::probe::PagingQueueProbe GPagingQueueProbe;
+
+#ifdef FEME_BOOTSTRAP_PROBE_PAGING_QUEUE
+HRESULT probePagingQueue(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
+  GPagingQueueProbe.Enabled = true;
+  if (!Args || !Args->hRTDevice.handle)
+    return E_INVALIDARG;
+  if (!Args->pKTCallbacks || !Args->pKTCallbacks->pfnCreatePagingQueueCb ||
+      !Args->pKTCallbacks->pfnDestroyPagingQueueCb)
+    return E_NOINTERFACE;
+
+  D3DDDICB_CREATEPAGINGQUEUE Queue{};
+  Queue.Priority = D3DDDI_PAGINGQUEUE_PRIORITY_NORMAL;
+  Queue.PhysicalAdapterIndex = 0;
+  GPagingQueueProbe.CreateAttempted = true;
+  DWORD Code = 0;
+  __try {
+    GPagingQueueProbe.CreateResult = Args->pKTCallbacks->pfnCreatePagingQueueCb(
+        Args->hRTDevice.handle, &Queue);
+    GPagingQueueProbe.CreateReturned = true;
+  } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    GPagingQueueProbe.ExceptionCode = Code;
+    return E_FAIL;
+  }
+  if (GPagingQueueProbe.CreateResult != S_OK)
+    return FAILED(GPagingQueueProbe.CreateResult)
+               ? GPagingQueueProbe.CreateResult
+               : E_FAIL;
+
+  GPagingQueueProbe.HasPagingQueue = Queue.hPagingQueue != 0;
+  GPagingQueueProbe.HasSyncObject = Queue.hSyncObject != 0;
+  GPagingQueueProbe.HasFenceMapping =
+      Queue.FenceValueCPUVirtualAddress != nullptr;
+  if (!Queue.hPagingQueue)
+    return E_FAIL;
+
+  // Destroy every successfully created queue, even if its other outputs were
+  // incomplete. Destruction also releases its sync object and fence mapping.
+  D3DDDI_DESTROYPAGINGQUEUE DestroyArgs{};
+  DestroyArgs.hPagingQueue = Queue.hPagingQueue;
+  GPagingQueueProbe.DestroyAttempted = true;
+  __try {
+    GPagingQueueProbe.DestroyResult =
+        Args->pKTCallbacks->pfnDestroyPagingQueueCb(Args->hRTDevice.handle,
+                                                    &DestroyArgs);
+    GPagingQueueProbe.DestroyReturned = true;
+  } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    GPagingQueueProbe.ExceptionCode = Code;
+    return E_FAIL;
+  }
+  if (GPagingQueueProbe.DestroyResult != S_OK)
+    return FAILED(GPagingQueueProbe.DestroyResult)
+               ? GPagingQueueProbe.DestroyResult
+               : E_FAIL;
+  return GPagingQueueProbe.HasSyncObject && GPagingQueueProbe.HasFenceMapping
+             ? S_OK
+             : E_FAIL;
+}
+#endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_CALLBACK
 // W0(g) follow-up: evidence from actually invoking pfnSetErrorCb once. This
@@ -136,10 +206,7 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
     GCreateDeviceAudit.Version = Args->Version;
     GCreateDeviceAudit.HasKTCallbacks = Args->pKTCallbacks != nullptr;
     GCreateDeviceAudit.HasUMCallbacks = Args->p12UMCallbacks != nullptr;
-    // Read-only: check individual callback-table fields without invoking
-    // any of them. pKTCallbacks's fields are all allocation/residency
-    // operations (pfnAllocateCb, pfnDeallocateCb, ...), out of scope for a
-    // read-only audit or a non-allocation invocation probe.
+    // Pointer observations are separate from the opt-in invocation probes.
     if (Args->pKTCallbacks) {
       GCreateDeviceAudit.HasKTAllocateCb =
           Args->pKTCallbacks->pfnAllocateCb != nullptr;
@@ -184,6 +251,11 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
 #ifdef FEME_BOOTSTRAP_PROBE_CALLBACK
   if (Args && Args->p12UMCallbacks && Args->p12UMCallbacks->pfnSetErrorCb)
     probeSetErrorCb(Args->hRTDevice, Args->p12UMCallbacks->pfnSetErrorCb);
+#endif
+#ifdef FEME_BOOTSTRAP_PROBE_PAGING_QUEUE
+  HRESULT PagingResult = probePagingQueue(Args);
+  if (FAILED(PagingResult))
+    return PagingResult;
 #endif
   // A real device table is out of scope for this experiment; fail loudly and
   // distinctly so a caller cannot mistake this for the generic rejection
@@ -330,6 +402,11 @@ FeMeBootstrapGetContractAudit(feme::probe::BootstrapContractAudit *Audit) {
 #ifdef FEME_BOOTSTRAP_PINNED_VERSION
   Audit->PinnedVersion = FEME_BOOTSTRAP_PINNED_VERSION;
 #endif
+}
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetPagingQueueProbe(feme::probe::PagingQueueProbe *Probe) {
+  *Probe = GPagingQueueProbe;
 }
 
 extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(

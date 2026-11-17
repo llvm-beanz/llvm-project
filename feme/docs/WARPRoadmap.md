@@ -209,6 +209,14 @@ unknown. The public 0022-and-later core-layer callback table supplies
 allocation/deallocation entries even when the legacy KT entries are null.
 These entries are audited, not invoked; this is not resource-lifecycle
 evidence or closure of W0(g).
+The subsequent [public paging-queue lifecycle probe](W0WindowsIntegrationProbe.md#w0g-public-kernel-paging-queue-lifecycle-vm)
+does invoke the KT create/destroy paging-queue pair: both return `S_OK`,
+with valid queue/sync handles and a fence mapping, on x64 inbox, native
+ARM64 inbox and native Agility 619 at DDIs 0010/0022/0072/0110.
+The probe is opt-in and has strict outcome and mock failure/cleanup tests.
+This closes the pointer-only limitation for that pair, not W0(g): buffer/
+texture allocation, residency and a real owned device are still unproven,
+and the 0070/0071 rejection remains unexplained.
 The negative public general-provider search and the successful WARP-specific
 route are different findings; do not classify all further research as blocked.
 Installed-path evaluation remains separate. No driver installation, signing

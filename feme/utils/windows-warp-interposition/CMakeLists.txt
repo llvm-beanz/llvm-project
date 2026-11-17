@@ -20,6 +20,12 @@ set(FEME_PROBE_DDI_VERSIONS "" CACHE STRING
   "Semicolon-separated D3D12DDI_SUPPORTED_00NN macros to audit")
 set(FEME_PROBE_DDI_EXPECT_UNSUPPORTED "" CACHE STRING
   "Subset of FEME_PROBE_DDI_VERSIONS expected to fail before CreateDevice")
+option(FEME_PROBE_PAGING_QUEUE
+  "Exercise public kernel paging-queue create/destroy in the DDI matrix" OFF)
+if(FEME_PROBE_PAGING_QUEUE AND NOT FEME_PROBE_DDI_VERSIONS)
+  message(FATAL_ERROR
+    "Set FEME_PROBE_DDI_VERSIONS when FEME_PROBE_PAGING_QUEUE is enabled.")
+endif()
 if(FEME_PROBE_DDI_MATRIX_ONLY AND NOT FEME_PROBE_DDI_VERSIONS)
   message(FATAL_ERROR
     "Set FEME_PROBE_DDI_VERSIONS when FEME_PROBE_DDI_MATRIX_ONLY is enabled.")
@@ -183,6 +189,10 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
     ../windows-adapter-bootstrap/BootstrapStub.cpp)
   target_compile_definitions(${VARIANT}-shim PRIVATE
     FEME_BOOTSTRAP_PINNED_VERSION=${DDI_VERSION})
+  if(FEME_PROBE_PAGING_QUEUE)
+    target_compile_definitions(${VARIANT}-shim PRIVATE
+      FEME_BOOTSTRAP_PROBE_PAGING_QUEUE=1)
+  endif()
   set_target_properties(${VARIANT}-shim PROPERTIES
     OUTPUT_NAME d3d10warp RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}"
     ARCHIVE_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
@@ -198,6 +208,9 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
   endif()
   set(EXPECTED_STAGE --expect-create-device)
   set(UNEXPECTED_STAGE --expect-unsupported)
+  if(FEME_PROBE_PAGING_QUEUE)
+    set(EXPECTED_STAGE --expect-paging-queue)
+  endif()
   if(DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
     set(EXPECTED_STAGE --expect-unsupported)
     set(UNEXPECTED_STAGE --expect-create-device)
@@ -212,4 +225,15 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
       "-DEXPECTATION=${UNEXPECTED_STAGE}"
       -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
   set_tests_properties("os-routed-${VARIANT}-wrong-stage" PROPERTIES TIMEOUT 30)
+  if(NOT FEME_PROBE_PAGING_QUEUE AND
+     NOT DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
+    add_test(NAME "os-routed-${VARIANT}-paging-disabled"
+      COMMAND ${CMAKE_COMMAND}
+        "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
+        "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
+        "-DEXPECTATION=--expect-paging-queue"
+        -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
+    set_tests_properties("os-routed-${VARIANT}-paging-disabled"
+      PROPERTIES TIMEOUT 30)
+  endif()
 endforeach()

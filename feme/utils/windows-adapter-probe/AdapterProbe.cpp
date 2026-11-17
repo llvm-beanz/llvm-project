@@ -132,7 +132,9 @@ int wmain(int Argc, wchar_t **Argv) {
                            std::wcscmp(Argv[3], L"--expect-unsupported") == 0;
   bool ExpectCallback = WarpBootstrapAudit && Argc == 4 &&
                         std::wcscmp(Argv[3], L"--expect-callback") == 0;
-  ExpectCreateDevice |= ExpectCallback;
+  bool ExpectPagingQueue = WarpBootstrapAudit && Argc == 4 &&
+                           std::wcscmp(Argv[3], L"--expect-paging-queue") == 0;
+  ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
        !WarpBootstrapAudit) ||
       (WarpBootstrapAudit && Argc == 4 && !ExpectCreateDevice &&
@@ -142,7 +144,7 @@ int wmain(int Argc, wchar_t **Argv) {
         L"Usage: %ls [--software DLL | --stub DLL | --warp-shim DLL | "
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
-        L"--expect-callback]]\n",
+        L"--expect-callback | --expect-paging-queue]]\n",
         Argv[0]);
     return 1;
   }
@@ -194,12 +196,14 @@ int wmain(int Argc, wchar_t **Argv) {
   using GetCallbackProbe = void(APIENTRY *)(LONG *, LONG *, LONG *, DWORD *);
   using GetContractAudit =
       void(APIENTRY *)(feme::probe::BootstrapContractAudit *);
+  using GetPagingQueueProbe = void(APIENTRY *)(feme::probe::PagingQueueProbe *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
   GetAudit ReadAudit = nullptr;
   GetCallbackProbe ReadCallbackProbe = nullptr;
   GetContractAudit ReadContractAudit = nullptr;
+  GetPagingQueueProbe ReadPagingQueueProbe = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -236,6 +240,14 @@ int wmain(int Argc, wchar_t **Argv) {
         GetProcAddress(Module, "FeMeBootstrapGetCallbackProbe"));
     ReadContractAudit = reinterpret_cast<GetContractAudit>(
         GetProcAddress(Module, "FeMeBootstrapGetContractAudit"));
+    ReadPagingQueueProbe = reinterpret_cast<GetPagingQueueProbe>(
+        GetProcAddress(Module, "FeMeBootstrapGetPagingQueueProbe"));
+    if (ExpectPagingQueue && !ReadPagingQueueProbe) {
+      report(L"GetProcAddress(FeMeBootstrapGetPagingQueueProbe)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
     if ((ExpectCreateDevice || ExpectUnsupported) && !ReadContractAudit) {
       report(L"GetProcAddress(FeMeBootstrapGetContractAudit)",
              HRESULT_FROM_WIN32(GetLastError()));
@@ -368,7 +380,7 @@ int wmain(int Argc, wchar_t **Argv) {
                    static_cast<unsigned long long>(Audit.PinnedVersion),
                    static_cast<unsigned long long>(NegotiatedVersion));
       std::wprintf(
-          L"Modern kernel callback pointers (read-only, never invoked): "
+          L"Modern kernel callback pointers (invocations reported separately): "
           L"MakeResident=%u Evict=%u CreatePagingQueue=%u "
           L"DestroyPagingQueue=%u "
           L"MapGpuVirtualAddress=%u Deallocate2=%u\n",
@@ -420,6 +432,34 @@ int wmain(int Argc, wchar_t **Argv) {
       if (ExpectCallback && (Attempted != 1 || Completed != 1 ||
                              ExceptionCaught || ExceptionCode)) {
         report(L"Expected successful user-mode callback probe", E_FAIL);
+        ExpectedDDICalls = false;
+      }
+    }
+    if (ReadPagingQueueProbe) {
+      feme::probe::PagingQueueProbe Probe;
+      ReadPagingQueueProbe(&Probe);
+      std::wprintf(
+          L"Kernel paging queue probe: Enabled=%u "
+          L"CreateAttempted=%u CreateReturned=%u CreateResult=0x%08lx "
+          L"HasPagingQueue=%u HasSyncObject=%u HasFenceMapping=%u "
+          L"DestroyAttempted=%u DestroyReturned=%u DestroyResult=0x%08lx "
+          L"ExceptionCode=0x%08lx\n",
+          unsigned(Probe.Enabled), unsigned(Probe.CreateAttempted),
+          unsigned(Probe.CreateReturned),
+          static_cast<unsigned long>(Probe.CreateResult),
+          unsigned(Probe.HasPagingQueue), unsigned(Probe.HasSyncObject),
+          unsigned(Probe.HasFenceMapping), unsigned(Probe.DestroyAttempted),
+          unsigned(Probe.DestroyReturned),
+          static_cast<unsigned long>(Probe.DestroyResult),
+          static_cast<unsigned long>(Probe.ExceptionCode));
+      if (ExpectPagingQueue &&
+          (!Probe.Enabled || !Probe.CreateAttempted || !Probe.CreateReturned ||
+           Probe.CreateResult != S_OK || !Probe.HasPagingQueue ||
+           !Probe.HasSyncObject || !Probe.HasFenceMapping ||
+           !Probe.DestroyAttempted || !Probe.DestroyReturned ||
+           Probe.DestroyResult != S_OK || Probe.ExceptionCode)) {
+        report(L"Expected successful kernel paging queue create/destroy",
+               E_FAIL);
         ExpectedDDICalls = false;
       }
     }

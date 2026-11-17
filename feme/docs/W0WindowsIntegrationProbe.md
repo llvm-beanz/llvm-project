@@ -14,6 +14,9 @@ universal transparent substitution is proven. See
 The public general-provider search remains negative, but that is not a
 runtime-routing impossibility result. No system WARP binaries or kernel-mode
 driver are to be replaced or modified.
+The [VM paging-queue follow-up](#w0g-public-kernel-paging-queue-lifecycle-vm)
+now demonstrates a public kernel-service callback create/destroy round trip;
+it still creates no working D3D12 device or buffer/texture allocation.
 
 This report preserves historical host/container evidence for
 [WARPRoadmap.md](WARPRoadmap.md), collected on 2026-11-06. Development and
@@ -857,8 +860,9 @@ KT `MakeResident`, `Evict`, `CreatePagingQueue`, `DestroyPagingQueue` and
 `MapGpuVirtualAddress` were non-null. Core-layer `MakeResident`/`Evict`
 were non-null, while its paging-queue entries were null. This identifies
 the public, versioned allocation surface to investigate next; a null legacy
-KT entry is not proof that allocation is unavailable. No kernel-service
-callback was invoked and no allocation or real device was created.
+KT entry is not proof that allocation is unavailable. At this stage no
+kernel-service callback was invoked and no allocation or real device was
+created; the paging-queue follow-up below adds invocation evidence separately.
 
 Validation used MSVC 19.44.35230.0, warnings as errors, assertions and
 disabled PCH:
@@ -887,6 +891,121 @@ DDIs; that is a version boundary, **not an established cause** of rejection.
 The exact runtime reason remains unknown. W0(g) stays open for that
 explanation and, more importantly, an owned device and kernel-service
 resource lifecycle through the unmodified WARP kernel-mode driver.
+
+### W0(g) public kernel paging-queue lifecycle (VM)
+
+Follow-up on 2026-11-17, on the same Windows 11 Enterprise build 26300 ARM64
+VM, using MSVC 19.44.35230.0 and SDK/WDK 10.0.26100.0. An explicitly
+enabled, LLVM-owned shim now invokes the runtime-supplied
+`pKTCallbacks->pfnCreatePagingQueueCb` and `pfnDestroyPagingQueueCb`
+during its deliberately failing `CreateDevice`.
+
+The public contracts used are
+[D3D12DDIARG_CREATEDEVICE_0003](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3d12umddi/ns-d3d12umddi-d3d12ddiarg_createdevice_0003),
+[pfnCreatePagingQueueCb](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/nc-d3dumddi-pfnd3dddi_createpagingqueuecb),
+[D3DDDICB_CREATEPAGINGQUEUE](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/ns-d3dumddi-d3dddicb_createpagingqueue),
+and [pfnDestroyPagingQueueCb](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/nc-d3dumddi-pfnd3dddi_destroypagingqueuecb).
+The shim passes `hRTDevice.handle`, a zero-initialized create structure with
+normal priority and physical adapter index zero, and no private driver data.
+On successful creation it records a nonzero paging-queue handle, a nonzero
+sync-object handle and a non-null CPU fence mapping. It then destroys the
+queue using the returned queue handle. The public destruction contract
+also invalidates the associated sync object and fence mapping.
+
+Both callbacks returned `S_OK` for each of the four versions that reached
+`CreateDevice`:
+
+| Runtime / architecture | DDI versions | Result |
+|---|---|---|
+| Inbox 10.0.26100.9818, x64 process | 0010, 0022, 0072, 0110 | Create/destroy both `S_OK`, all three outputs present, no SEH exception; each repeated three times |
+| Inbox 10.0.26100.9818, native ARM64 | Same four | Same result; each repeated three times |
+| Agility 619, core 1.619.5.0, native ARM64 | Same four | Same result; each repeated three times; actual loaded core path verified under `AgilitySDK` |
+| All three configurations | 0070, 0071 | Expected `DXGI_ERROR_UNSUPPORTED` before `CreateDevice`; no paging callback attempted; each repeated three times |
+
+Representative successful telemetry:
+
+```text
+Kernel paging queue probe: Enabled=1 CreateAttempted=1 CreateReturned=1 CreateResult=0x00000000 HasPagingQueue=1 HasSyncObject=1 HasFenceMapping=1 DestroyAttempted=1 DestroyReturned=1 DestroyResult=0x00000000 ExceptionCode=0x00000000
+```
+
+The shim returns `E_NOTIMPL` after a successful round trip. There is still
+no owned device table, successful `D3D12CreateDevice`, buffer/texture
+allocation, residency operation or command submission. The fence mapping is
+not dereferenced, and none of the returned values is used after destruction.
+This proves invocation and a bounded lifecycle through public runtime
+kernel-service callbacks under the selected WARP identity, not the complete
+WARP-kernel resource contract or an independently traced miniport call.
+No system DLL, driver installation, signing or registry change was required.
+
+The experiment is default-off. `FEME_PROBE_PAGING_QUEUE=ON` applies only to
+the configured custom DDI matrix and selects `--expect-paging-queue`.
+That runner mode requires the existing strict negotiation/provenance checks
+plus both callback calls returning `S_OK`, all three outputs present and no
+exception. It rejects a read-only shim rather than treating pointer
+availability as successful execution. Explicitly rejected versions retain
+their pre-device rejection expectation. Run the error-reporting callback
+probe separately: setting a device error is intentionally incompatible with
+this successful lifecycle experiment.
+
+Failures are observable and do not become successful audit results.
+The shim propagates callback failure HRESULTs and records SEH exception
+codes. It does not destroy a queue after a failed create, but always attempts
+destruction after a successful create with a valid queue handle, even if the
+sync handle or fence mapping is missing. Incomplete outputs, non-`S_OK`
+success codes and failed/exceptional destruction fail the strict check.
+Separate mock-only fixtures exercise those paths without kernel calls.
+
+Validation:
+
+- The six-version x64 and native inbox matrices each passed 12/12 CTests
+  (six expected outcomes and six wrong-stage controls), each repeated three
+  times. The six native Agility outcomes also passed three repetitions.
+- Both architectures passed all 14 mock scenarios plus the existing direct
+  adapter-table regression (15/15 CTests each). Scenarios include missing
+  callbacks/device/table, create OOM, destruction failure, missing outputs,
+  exceptions in either callback, and unexpected `S_FALSE` results.
+- The default-off x64 29-version matrix retains its prior negotiation
+  checks and adds disabled-paging negative controls for versions reaching
+  `CreateDevice` (85/85 CTests); a read-only shim must fail
+  `--expect-paging-queue`.
+- The four original reference-WARP/software-WARP/rejection/missing-module
+  controls passed on native Agility 619.
+
+To reproduce the opt-in matrix, use the matching Visual Studio developer
+environment (`VsDevCmd.bat -arch=arm64 -host_arch=amd64
+-winsdk=10.0.26100.0` for native ARM64, or `-arch=amd64` for x64) and a
+separate build directory:
+
+```powershell
+$repo = 'C:\Users\cbieneman\dev\llvm-project\feme'
+$build = 'C:\Users\cbieneman\dev\warp-paging-probe'
+$versions = @(
+  'D3D12DDI_SUPPORTED_0010', 'D3D12DDI_SUPPORTED_0022',
+  'D3D12DDI_SUPPORTED_0070', 'D3D12DDI_SUPPORTED_0071',
+  'D3D12DDI_SUPPORTED_0072', 'D3D12DDI_SUPPORTED_0110'
+) -join ';'
+cmake -S "$repo\utils\windows-warp-interposition" -B $build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=cl.exe `
+  -DCMAKE_SYSTEM_VERSION=10.0.26100.0 `
+  "-DCMAKE_CXX_FLAGS_DEBUG=/Z7 /Ob0 /Od /RTC1" `
+  -DFEME_PROBE_DDI_MATRIX_ONLY=ON -DFEME_PROBE_PAGING_QUEUE=ON `
+  "-DFEME_PROBE_DDI_VERSIONS=$versions" `
+  "-DFEME_PROBE_DDI_EXPECT_UNSUPPORTED=D3D12DDI_SUPPORTED_0070;D3D12DDI_SUPPORTED_0071"
+cmake --build $build --parallel 2
+ctest --test-dir $build --output-on-failure --repeat until-fail:3
+```
+
+The standalone `windows-adapter-bootstrap` project builds the mock fixtures.
+For Agility, use the separately built `windows-adapter-probe` with its
+documented core/version options and a matching-architecture shim; run
+`--warp-bootstrap-audit <shim-path> --expect-paging-queue` for each accepted
+version and `--expect-unsupported` for the two rejected controls.
+
+W0(g) remains open. The next resource gate is a public allocation/
+deallocation and residency lifecycle, using the version-appropriate
+callback surface, followed by a real owned device. Do not infer either from
+this paging-queue result or introduce private WARP allocation data without
+separate approval. The exact 0070/0071 rejection reason also remains unknown.
 
 ### Reproduce the B investigation
 

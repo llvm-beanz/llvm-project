@@ -32,6 +32,21 @@ struct BootstrapContractAudit {
   bool HasUMDeallocateCb = false;
 };
 
+/// Results of the opt-in kernel paging-queue create/destroy experiment.
+struct PagingQueueProbe {
+  bool Enabled = false;
+  bool CreateAttempted = false;
+  bool CreateReturned = false;
+  std::int32_t CreateResult = 0;
+  bool HasPagingQueue = false;
+  bool HasSyncObject = false;
+  bool HasFenceMapping = false;
+  bool DestroyAttempted = false;
+  bool DestroyReturned = false;
+  std::int32_t DestroyResult = 0;
+  std::uint32_t ExceptionCode = 0;
+};
+
 } // namespace probe
 } // namespace feme
 
