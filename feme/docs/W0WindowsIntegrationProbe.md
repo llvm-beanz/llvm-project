@@ -716,11 +716,14 @@ rather than guessing at a cause.
 
 Both new variants are permanent CTest entries (`os-routed-callback-probe`,
 `os-routed-pinned-version-newer`), both using the existing
-`--warp-bootstrap-audit` probe mode; neither asserts a specific value for the
+`--warp-bootstrap-audit` probe mode. At the time of this measurement, neither
+asserted a specific value for the
 new evidence fields (consistent with the audit-only philosophy already
 established for this harness) beyond a basic internal-consistency check (if
 the callback probe ran at all, it must report either completing or having
-been caught by SEH, never neither).
+been caught by SEH, never neither). The VM follow-up below tightens the
+callback variant to require a completed, exception-free invocation and the
+observed device-removal result.
 
 ### W0(g) public DDI-version matrix (VM measurements)
 
@@ -729,7 +732,8 @@ The application-local probe project
 now accepts a semicolon-separated list of public
 `D3D12DDI_SUPPORTED_00NN` macros through `FEME_PROBE_DDI_VERSIONS`. Each entry
 builds an owned audit shim and an `os-routed-pinned-version-custom-NNNN`
-CTest. `FEME_PROBE_DDI_MATRIX_ONLY=ON` omits the unrelated WARP-forwarding
+CTest, plus a paired `-wrong-stage` negative control.
+`FEME_PROBE_DDI_MATRIX_ONLY=ON` omits the unrelated WARP-forwarding
 controls, so this matrix does not require the pinned NuGet WARP binary. The
 matrix remains an audit stub: it cannot establish a working device or
 resource lifecycle.
@@ -741,8 +745,8 @@ Enterprise build 26300 (ARM64). The system inbox `d3d12.dll` and
 `Microsoft Basic Render Driver` with WARP identity
 `vendor=1414`, `device=008c`, `flags=2`. Twenty-nine public versions were
 tested: representative interface/build boundaries from 0010 through 0110,
-plus every macro defined by this WDK from 0060 through 0089. All 29 CTest
-cases passed as audit assertions, but the result varied at two exact builds:
+plus every macro defined by this WDK from 0060 through 0089. All 29 original CTest cases passed as audit assertions, but the result varied
+at two exact builds:
 
 - Every tested version other than 0070 and 0071 reached
   `CalcPrivateDeviceSize` and `CreateDevice`; `CreateDevice` deliberately
@@ -794,6 +798,7 @@ $ddiVersions = @(
   -DCMAKE_SYSTEM_VERSION=10.0.26100.0 `
   "-DCMAKE_CXX_FLAGS_DEBUG=/Z7 /Ob0 /Od /RTC1" `
   -DFEME_PROBE_DDI_MATRIX_ONLY=ON `
+  "-DFEME_PROBE_DDI_EXPECT_UNSUPPORTED=D3D12DDI_SUPPORTED_0070;D3D12DDI_SUPPORTED_0071" `
   "-DFEME_PROBE_DDI_VERSIONS=$ddiVersions"
 & $cmake --build $build
 & $ctest --test-dir $build -V `
@@ -804,6 +809,84 @@ The custom targets are the only targets in matrix-only mode, so a default
 build compiles all versions in `$ddiVersions`. Preserve the exact WDK macro
 list and environment details with each result; SDK-version mismatches can
 silently test a different header/runtime combination.
+
+### W0(g) strict negotiation gates and versioned callback audit (VM)
+
+Follow-up on 2026-11-17, using the same VM and SDK/WDK 10.0.26100.0.
+The audit now distinguishes an observed failure from an expected negotiation
+stage:
+
+- `--expect-create-device` requires one size calculation and one
+  `CreateDevice`, the deliberate `E_NOTIMPL` result, matching pinned and
+  negotiated 64-bit DDI versions, populated runtime callback tables and
+  `pfnSetErrorCb`, and adapter close without device destruction.
+- `--expect-unsupported` requires `DXGI_ERROR_UNSUPPORTED` before either
+  device-size calculation or device creation, and adapter close.
+- `--expect-callback` additionally requires exactly one completed
+  `pfnSetErrorCb` invocation, no SEH exception, and
+  `DXGI_ERROR_DEVICE_REMOVED` (`0x887a0005`). Reporting `E_NOTIMPL` through
+  that callback changes the runtime result; it is not interchangeable with
+  the callback-free stub's `E_NOTIMPL`.
+- Strict modes require the module registered as `d3d10warp.dll` to be the
+  exact module handle explicitly loaded for the audit, with no reference
+  WARP forwarding dependency. Adapter identity alone is insufficient.
+
+Custom matrix cases default to `--expect-create-device`. Only versions
+explicitly listed in `FEME_PROBE_DDI_EXPECT_UNSUPPORTED`, a checked subset of
+`FEME_PROBE_DDI_VERSIONS`, use the rejection expectation. Do not copy the
+0070/0071 exception list to another runtime without measuring it. Each case
+has a paired wrong-stage CTest which requires exit code 1 and the explicit
+expectation-mismatch diagnostic, not merely any failure or DLL-load error.
+The unqualified `--warp-bootstrap-audit DLL` remains available for discovery
+and compatibility with older audit shims; it is not a strict regression gate.
+
+The public callback audit also corrects an important interpretation:
+`p12UMCallbacks` is **not exclusively user-mode diagnostics**. Its public
+core-layer tables also contain kernel-service wrappers. The WDK's
+`D3D12DDI_CORELAYER_DEVICECALLBACKS_0022` extends the older callback prefix
+with allocation/deallocation entries. The shim reads those added entries
+only when the negotiated DDI is at least `D3D12DDI_SUPPORTED_0022`.
+
+| Negotiated DDI samples | Legacy KT allocate/deallocate | KT `Deallocate2` | Core-layer 0022 allocate/deallocate |
+|---|---|---|---|
+| 0010, 0020 | Both non-null | Non-null | Not read: older contract |
+| 0022, 0072, 0110 | Both null | Null | Both non-null |
+
+These are pointer observations, not invocation evidence. In these samples,
+KT `MakeResident`, `Evict`, `CreatePagingQueue`, `DestroyPagingQueue` and
+`MapGpuVirtualAddress` were non-null. Core-layer `MakeResident`/`Evict`
+were non-null, while its paging-queue entries were null. This identifies
+the public, versioned allocation surface to investigate next; a null legacy
+KT entry is not proof that allocation is unavailable. No kernel-service
+callback was invoked and no allocation or real device was created.
+
+Validation used MSVC 19.44.35230.0, warnings as errors, assertions and
+disabled PCH:
+
+| Run | Result |
+|---|---|
+| x64 inbox, original 29 DDI versions with explicit 0070/0071 rejection expectations and paired negative controls | 58/58 CTests, each repeated three times |
+| Native ARM64 inbox, 0010/0022/0070/0071/0072/0110 with paired negative controls | 12/12 CTests, each repeated three times |
+| Native ARM64 Agility 619 (`D3D12Core.dll` 1.619.5.0), same six versions through the separately built Agility probe | All six strict expectations passed; loaded core path verified under `AgilitySDK` |
+| Native ARM64 callback-enabled 0010 shim, inbox and Agility 619 | Both strict callback checks passed; completed once, no exception, device-removal result |
+| Original standalone probe controls, x64 inbox and native ARM64 Agility | 4/4 CTests in each build |
+| Direct, non-OS-routed adapter-table regression | 1/1 CTest |
+
+For native builds use `VsDevCmd.bat -arch=arm64 -host_arch=amd64` and a
+separate build directory. Match the shim, harness and Agility core
+architectures. The available local Agility 619 binary was ARM64; no x64
+Agility result is claimed here. The callback-only control was built with
+`FEME_BOOTSTRAP_PROBE_CALLBACK=1` and run with `--expect-callback`, separately
+from the callback-free version matrix.
+
+Both native runtimes reject 0070/0071 at the same stage as the x64 inbox
+matrix, while 0072 reaches the stub. Thus the rejection is not limited to
+x64 emulation or the inbox runtime. The public header describes 0070/0071
+as R7 builds 0/1 and 0072 as R7 build 2 with revised `AddToStateObject`
+DDIs; that is a version boundary, **not an established cause** of rejection.
+The exact runtime reason remains unknown. W0(g) stays open for that
+explanation and, more importantly, an owned device and kernel-service
+resource lifecycle through the unmodified WARP kernel-mode driver.
 
 ### Reproduce the B investigation
 

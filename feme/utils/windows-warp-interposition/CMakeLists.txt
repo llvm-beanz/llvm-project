@@ -18,6 +18,8 @@ option(FEME_PROBE_DDI_MATRIX_ONLY
   "Configure only the public DDI-version audit tests" OFF)
 set(FEME_PROBE_DDI_VERSIONS "" CACHE STRING
   "Semicolon-separated D3D12DDI_SUPPORTED_00NN macros to audit")
+set(FEME_PROBE_DDI_EXPECT_UNSUPPORTED "" CACHE STRING
+  "Subset of FEME_PROBE_DDI_VERSIONS expected to fail before CreateDevice")
 if(FEME_PROBE_DDI_MATRIX_ONLY AND NOT FEME_PROBE_DDI_VERSIONS)
   message(FATAL_ERROR
     "Set FEME_PROBE_DDI_VERSIONS when FEME_PROBE_DDI_MATRIX_ONLY is enabled.")
@@ -128,13 +130,14 @@ foreach(VARIANT reference public-exports private-ordinal bare negotiation
       --warp-bootstrap $<TARGET_FILE:${VARIANT}-shim>)
   elseif(VARIANT STREQUAL pinned-version)
     add_test(NAME os-routed-pinned-version COMMAND ${VARIANT}-harness
-      --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
+      --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>
+      --expect-create-device)
   elseif(VARIANT STREQUAL pinned-version-newer)
     add_test(NAME os-routed-pinned-version-newer COMMAND ${VARIANT}-harness
       --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
   elseif(VARIANT STREQUAL callback-probe)
     add_test(NAME os-routed-callback-probe COMMAND ${VARIANT}-harness
-      --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
+      --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim> --expect-callback)
   else()
     add_test(NAME ${VARIANT}-interception COMMAND ${VARIANT}-harness
       --warp-shim $<TARGET_FILE:${VARIANT}-shim>)
@@ -153,6 +156,13 @@ endif()
 # Allow the VM-first W0(g) version bisect to test an explicit set of public
 # WDK DDI versions without editing this project for each trial.
 set(SEEN_DDI_VERSIONS)
+foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
+  if(NOT DDI_VERSION IN_LIST FEME_PROBE_DDI_VERSIONS)
+    message(FATAL_ERROR
+      "Expected unsupported version '${DDI_VERSION}' is not in "
+      "FEME_PROBE_DDI_VERSIONS")
+  endif()
+endforeach()
 foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
   if(NOT DDI_VERSION MATCHES "^D3D12DDI_SUPPORTED_[0-9][0-9][0-9][0-9]$")
     message(FATAL_ERROR
@@ -186,7 +196,20 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
     target_compile_options(${VARIANT}-shim PRIVATE /W4 /WX /wd4201 /UNDEBUG)
     target_compile_options(${VARIANT}-harness PRIVATE /W4 /WX /UNDEBUG)
   endif()
+  set(EXPECTED_STAGE --expect-create-device)
+  set(UNEXPECTED_STAGE --expect-unsupported)
+  if(DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
+    set(EXPECTED_STAGE --expect-unsupported)
+    set(UNEXPECTED_STAGE --expect-create-device)
+  endif()
   add_test(NAME "os-routed-${VARIANT}" COMMAND ${VARIANT}-harness
-    --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
+    --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim> ${EXPECTED_STAGE})
   set_tests_properties("os-routed-${VARIANT}" PROPERTIES TIMEOUT 30)
+  add_test(NAME "os-routed-${VARIANT}-wrong-stage"
+    COMMAND ${CMAKE_COMMAND}
+      "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
+      "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
+      "-DEXPECTATION=${UNEXPECTED_STAGE}"
+      -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
+  set_tests_properties("os-routed-${VARIANT}-wrong-stage" PROPERTIES TIMEOUT 30)
 endforeach()

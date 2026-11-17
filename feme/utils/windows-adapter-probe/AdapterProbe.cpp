@@ -7,6 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "../windows-adapter-bootstrap/BootstrapAudit.h"
+
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <windows.h>
@@ -121,16 +123,31 @@ int wmain(int Argc, wchar_t **Argv) {
   bool WarpBootstrap =
       Argc == 3 && std::wcscmp(Argv[1], L"--warp-bootstrap") == 0;
   bool WarpBootstrapAudit =
-      Argc == 3 && std::wcscmp(Argv[1], L"--warp-bootstrap-audit") == 0;
-  if (Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
-      !WarpBootstrapAudit) {
+      (Argc == 3 || Argc == 4) &&
+      std::wcscmp(Argv[1], L"--warp-bootstrap-audit") == 0;
+  bool ExpectCreateDevice =
+      WarpBootstrapAudit && Argc == 4 &&
+      std::wcscmp(Argv[3], L"--expect-create-device") == 0;
+  bool ExpectUnsupported = WarpBootstrapAudit && Argc == 4 &&
+                           std::wcscmp(Argv[3], L"--expect-unsupported") == 0;
+  bool ExpectCallback = WarpBootstrapAudit && Argc == 4 &&
+                        std::wcscmp(Argv[3], L"--expect-callback") == 0;
+  ExpectCreateDevice |= ExpectCallback;
+  if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
+       !WarpBootstrapAudit) ||
+      (WarpBootstrapAudit && Argc == 4 && !ExpectCreateDevice &&
+       !ExpectUnsupported)) {
     std::fwprintf(
         stderr,
         L"Usage: %ls [--software DLL | --stub DLL | --warp-shim DLL | "
-        L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL]\n",
+        L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
+        L"[--expect-create-device | --expect-unsupported | "
+        L"--expect-callback]]\n",
         Argv[0]);
     return 1;
   }
+  if (ExpectCreateDevice || ExpectUnsupported)
+    std::wprintf(L"Explicit bootstrap expectation: %ls\n", Argv[3]);
   ComPtr<IDXGIFactory4> Factory;
   if (FAILED(report(L"CreateDXGIFactory1",
                     CreateDXGIFactory1(IID_PPV_ARGS(&Factory)))))
@@ -173,14 +190,16 @@ int wmain(int Argc, wchar_t **Argv) {
       LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *);
   using GetAuditCapacity = UINT32(APIENTRY *)();
   using GetAudit = void(APIENTRY *)(LONG *, LONG *, UINT *, UINT *, LONG *,
-                                     LONG *, LONG *, LONG *, LONG *);
-  using GetCallbackProbe =
-      void(APIENTRY *)(LONG *, LONG *, LONG *, DWORD *);
+                                    LONG *, LONG *, LONG *, LONG *);
+  using GetCallbackProbe = void(APIENTRY *)(LONG *, LONG *, LONG *, DWORD *);
+  using GetContractAudit =
+      void(APIENTRY *)(feme::probe::BootstrapContractAudit *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
   GetAudit ReadAudit = nullptr;
   GetCallbackProbe ReadCallbackProbe = nullptr;
+  GetContractAudit ReadContractAudit = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -215,6 +234,20 @@ int wmain(int Argc, wchar_t **Argv) {
     // W0(g) follow-up: optional, since older-shaped shims may not export it.
     ReadCallbackProbe = reinterpret_cast<GetCallbackProbe>(
         GetProcAddress(Module, "FeMeBootstrapGetCallbackProbe"));
+    ReadContractAudit = reinterpret_cast<GetContractAudit>(
+        GetProcAddress(Module, "FeMeBootstrapGetContractAudit"));
+    if ((ExpectCreateDevice || ExpectUnsupported) && !ReadContractAudit) {
+      report(L"GetProcAddress(FeMeBootstrapGetContractAudit)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
+    if (ExpectCallback && !ReadCallbackProbe) {
+      report(L"GetProcAddress(FeMeBootstrapGetCallbackProbe)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
   }
   ComPtr<IDXGIAdapter> SoftwareAdapter;
   HRESULT Result =
@@ -264,8 +297,17 @@ int wmain(int Argc, wchar_t **Argv) {
       // CreateDevice; that count is audit evidence here, not an assumption.
       // Destroy should still never fire, since createDevice deliberately
       // fails and no device handle is ever produced to destroy.
-      ExpectedDDICalls = Open == 1 && Versions > 0 && Caps > 0 &&
-                         Close == 1 && Destroy == 0;
+      ExpectedDDICalls =
+          Open == 1 && Versions > 0 && Caps > 0 && Close == 1 && Destroy == 0;
+      if (ExpectCreateDevice) {
+        HRESULT ExpectedResult =
+            ExpectCallback ? DXGI_ERROR_DEVICE_REMOVED : E_NOTIMPL;
+        ExpectedDDICalls &= Size == 1 && Create == 1 && Optional == 0 &&
+                            Fill == 0 && Result == ExpectedResult;
+      }
+      if (ExpectUnsupported)
+        ExpectedDDICalls &= Size == 0 && Create == 0 && Optional == 0 &&
+                            Fill == 0 && Result == DXGI_ERROR_UNSUPPORTED;
     } else {
       ExpectedDDICalls = Open == 1 && Versions > 0 && Caps > 0 && Close == 1 &&
                          Size == 0 && Optional == 0 && Fill == 0 &&
@@ -273,6 +315,12 @@ int wmain(int Argc, wchar_t **Argv) {
     }
     if (GetModuleHandleW(L"feme_warp_reference.dll")) {
       report(L"Unexpected reference WARP dependency", E_FAIL);
+      ExpectedDDICalls = false;
+    }
+    if ((ExpectCreateDevice || ExpectUnsupported) &&
+        GetModuleHandleW(L"d3d10warp.dll") != Module) {
+      report(L"Selected WARP module does not match the owned audit module",
+             E_FAIL);
       ExpectedDDICalls = false;
     }
     if (!ExpectedDDICalls)
@@ -311,11 +359,52 @@ int wmain(int Argc, wchar_t **Argv) {
                  CreateHasKTAllocateCb ? L"non-null" : L"null",
                  CreateHasKTDeallocateCb ? L"non-null" : L"null",
                  CreateHasUMSetErrorCb ? L"non-null" : L"null");
+    if (ReadContractAudit) {
+      feme::probe::BootstrapContractAudit Audit;
+      ReadContractAudit(&Audit);
+      std::uint64_t NegotiatedVersion =
+          (static_cast<std::uint64_t>(CreateInterface) << 32) | CreateVersion;
+      std::wprintf(L"Pinned DDI: 0x%016llx; CreateDevice DDI: 0x%016llx\n",
+                   static_cast<unsigned long long>(Audit.PinnedVersion),
+                   static_cast<unsigned long long>(NegotiatedVersion));
+      std::wprintf(
+          L"Modern kernel callback pointers (read-only, never invoked): "
+          L"MakeResident=%u Evict=%u CreatePagingQueue=%u "
+          L"DestroyPagingQueue=%u "
+          L"MapGpuVirtualAddress=%u Deallocate2=%u\n",
+          unsigned(Audit.HasKTMakeResidentCb), unsigned(Audit.HasKTEvictCb),
+          unsigned(Audit.HasKTCreatePagingQueueCb),
+          unsigned(Audit.HasKTDestroyPagingQueueCb),
+          unsigned(Audit.HasKTMapGpuVirtualAddressCb),
+          unsigned(Audit.HasKTDeallocate2Cb));
+      std::wprintf(
+          L"Core-layer kernel-service pointers (read-only, never invoked): "
+          L"CreatePagingQueue=%u DestroyPagingQueue=%u MakeResident=%u "
+          L"Evict=%u "
+          L"Allocate0022=%u Deallocate0022=%u\n",
+          unsigned(Audit.HasUMCreatePagingQueueCb),
+          unsigned(Audit.HasUMDestroyPagingQueueCb),
+          unsigned(Audit.HasUMMakeResidentCb), unsigned(Audit.HasUMEvictCb),
+          unsigned(Audit.HasUMAllocateCb), unsigned(Audit.HasUMDeallocateCb));
+      if (ExpectCreateDevice &&
+          (!Audit.PinnedVersion || NegotiatedVersion != Audit.PinnedVersion ||
+           !CreateHasKTCallbacks || !CreateHasUMCallbacks ||
+           !CreateHasUMSetErrorCb)) {
+        report(L"Expected pinned CreateDevice DDI and runtime callbacks",
+               E_FAIL);
+        ExpectedDDICalls = false;
+      }
+      if (ExpectUnsupported && (!Audit.PinnedVersion || NegotiatedVersion ||
+                                CreateHasKTCallbacks || CreateHasUMCallbacks)) {
+        report(L"Expected rejection before CreateDevice", E_FAIL);
+        ExpectedDDICalls = false;
+      }
+    }
     if (ReadCallbackProbe) {
       LONG Attempted = 0, Completed = 0, ExceptionCaught = 0;
       DWORD ExceptionCode = 0;
       ReadCallbackProbe(&Attempted, &Completed, &ExceptionCaught,
-                         &ExceptionCode);
+                        &ExceptionCode);
       std::wprintf(L"Callback probe (p12UMCallbacks->pfnSetErrorCb): "
                    L"Attempted=%ld Completed=%ld ExceptionCaught=%ld "
                    L"ExceptionCode=0x%08lx\n",
@@ -328,19 +417,25 @@ int wmain(int Argc, wchar_t **Argv) {
         report(L"Callback probe ran but reported neither outcome", E_FAIL);
         ExpectedDDICalls = false;
       }
+      if (ExpectCallback && (Attempted != 1 || Completed != 1 ||
+                             ExceptionCaught || ExceptionCode)) {
+        report(L"Expected successful user-mode callback probe", E_FAIL);
+        ExpectedDDICalls = false;
+      }
     }
   }
+  if ((ExpectCreateDevice || ExpectUnsupported) && !ExpectedDDICalls)
+    report(L"Explicit bootstrap expectation failed", E_FAIL);
   bool Released = FreeLibrary(Module) != FALSE;
   if (!Released)
     report(L"FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
   std::wprintf(L"Software adapter objects released. Stub rejection is an "
                L"experiment, not a working FeMe adapter.\n");
   return Released && Opened && ExpectedDDICalls &&
-                 (WarpBootstrapAudit
-                      ? FAILED(Result)
-                      : (Stub || WarpShim || WarpBootstrap
-                             ? Result == DXGI_ERROR_UNSUPPORTED
-                             : SUCCEEDED(Result)))
+                 (WarpBootstrapAudit ? FAILED(Result)
+                                     : (Stub || WarpShim || WarpBootstrap
+                                            ? Result == DXGI_ERROR_UNSUPPORTED
+                                            : SUCCEEDED(Result)))
              ? 0
              : 1;
 }

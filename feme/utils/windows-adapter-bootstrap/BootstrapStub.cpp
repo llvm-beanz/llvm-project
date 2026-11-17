@@ -27,10 +27,9 @@
 //
 // A further W0(g) follow-up audits CreateDevice's thunk-service pointers one
 // level deeper: individual function-pointer fields inside pKTCallbacks
-// (D3DDDI_DEVICECALLBACKS, kernel-routed) and p12UMCallbacks
-// (D3D12DDI_CORELAYER_DEVICECALLBACKS_0003, user-mode-only) are checked for
-// non-null-ness without ever being invoked -- pKTCallbacks's fields are all
-// allocation/residency operations, out of scope for a read-only audit.
+// (D3DDDI_DEVICECALLBACKS) and p12UMCallbacks are checked for non-null-ness
+// without invoking resource callbacks. Both tables include kernel-service
+// entry points; p12UMCallbacks also supplies user-mode diagnostics.
 // FEME_BOOTSTRAP_PROBE_CALLBACK additionally invokes exactly one pure
 // user-mode, non-allocation callback (pfnSetErrorCb, the documented
 // mechanism for a driver to report a device error to the runtime) with a
@@ -40,6 +39,8 @@
 // allocation/resource callback is ever called.
 //
 //===----------------------------------------------------------------------===//
+
+#include "BootstrapAudit.h"
 
 #include <windows.h>
 #include <winternl.h>
@@ -83,6 +84,7 @@ struct CreateDeviceAudit {
   LONG HasUMSetErrorCb = 0;
 };
 CreateDeviceAudit GCreateDeviceAudit;
+feme::probe::BootstrapContractAudit GContractAudit;
 
 #ifdef FEME_BOOTSTRAP_PROBE_CALLBACK
 // W0(g) follow-up: evidence from actually invoking pfnSetErrorCb once. This
@@ -102,7 +104,7 @@ CallbackProbe GCallbackProbe;
 // supplied is safe, rather than letting an unexpected fault silently tear
 // down the whole harness process.
 void probeSetErrorCb(D3D12DDI_HRTDEVICE RTDevice,
-                      PFND3D12DDI_SETERROR_CB Callback) {
+                     PFND3D12DDI_SETERROR_CB Callback) {
   InterlockedExchange(&GCallbackProbe.Attempted, 1);
   DWORD Code = 0;
   __try {
@@ -118,8 +120,9 @@ void probeSetErrorCb(D3D12DDI_HRTDEVICE RTDevice,
 }
 #endif
 
-SIZE_T APIENTRY
-calcPrivateDeviceSize(D3D12DDI_HADAPTER, CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE *) {
+SIZE_T
+APIENTRY calcPrivateDeviceSize(D3D12DDI_HADAPTER,
+                               CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE *) {
   InterlockedIncrement(&GCalls.CalcPrivateDeviceSize);
   // A nonzero, deliberately recognizable size; nothing allocates against it.
   return 64;
@@ -142,10 +145,41 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
           Args->pKTCallbacks->pfnAllocateCb != nullptr;
       GCreateDeviceAudit.HasKTDeallocateCb =
           Args->pKTCallbacks->pfnDeallocateCb != nullptr;
+      GContractAudit.HasKTMakeResidentCb =
+          Args->pKTCallbacks->pfnMakeResidentCb != nullptr;
+      GContractAudit.HasKTEvictCb = Args->pKTCallbacks->pfnEvictCb != nullptr;
+      GContractAudit.HasKTCreatePagingQueueCb =
+          Args->pKTCallbacks->pfnCreatePagingQueueCb != nullptr;
+      GContractAudit.HasKTDestroyPagingQueueCb =
+          Args->pKTCallbacks->pfnDestroyPagingQueueCb != nullptr;
+      GContractAudit.HasKTMapGpuVirtualAddressCb =
+          Args->pKTCallbacks->pfnMapGpuVirtualAddressCb != nullptr;
+      GContractAudit.HasKTDeallocate2Cb =
+          Args->pKTCallbacks->pfnDeallocate2Cb != nullptr;
     }
-    if (Args->p12UMCallbacks)
+    if (Args->p12UMCallbacks) {
       GCreateDeviceAudit.HasUMSetErrorCb =
           Args->p12UMCallbacks->pfnSetErrorCb != nullptr;
+      GContractAudit.HasUMCreatePagingQueueCb =
+          Args->p12UMCallbacks->pfnCreatePagingQueueCb != nullptr;
+      GContractAudit.HasUMDestroyPagingQueueCb =
+          Args->p12UMCallbacks->pfnDestroyPagingQueueCb != nullptr;
+      GContractAudit.HasUMMakeResidentCb =
+          Args->p12UMCallbacks->pfnMakeResidentCb != nullptr;
+      GContractAudit.HasUMEvictCb = Args->p12UMCallbacks->pfnEvictCb != nullptr;
+      // The public 0022 contract extends the 0003 callback prefix with
+      // allocation wrappers; older negotiated versions cannot expose them.
+      UINT64 Version =
+          (static_cast<UINT64>(Args->Interface) << 32) | Args->Version;
+      if (Version >= D3D12DDI_SUPPORTED_0022) {
+        const auto *Callbacks =
+            reinterpret_cast<const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *>(
+                Args->p12UMCallbacks);
+        GContractAudit.HasUMAllocateCb = Callbacks->pfnAllocateCb != nullptr;
+        GContractAudit.HasUMDeallocateCb =
+            Callbacks->pfnDeallocateCb != nullptr;
+      }
+    }
   }
 #ifdef FEME_BOOTSTRAP_PROBE_CALLBACK
   if (Args && Args->p12UMCallbacks && Args->p12UMCallbacks->pfnSetErrorCb)
@@ -163,7 +197,7 @@ HRESULT APIENTRY closeAdapter(D3D12DDI_HADAPTER) {
 }
 
 HRESULT APIENTRY getSupportedVersions(D3D12DDI_HADAPTER, UINT32 *EntryCount,
-                                       UINT64 *Versions) {
+                                      UINT64 *Versions) {
   InterlockedIncrement(&GCalls.GetSupportedVersions);
 #ifndef FEME_BOOTSTRAP_PINNED_VERSION
   (void)Versions;
@@ -193,8 +227,8 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
 
   // W0(g): answer the two caps the stock runtime is observed to query before
   // CreateDevice, truthfully and minimally. Every other cap still fails.
-  if (Args->Type == D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 &&
-      Args->pData && Args->DataSize >= sizeof(D3D12DDI_3DPIPELINESUPPORT1_DATA_0081)) {
+  if (Args->Type == D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 && Args->pData &&
+      Args->DataSize >= sizeof(D3D12DDI_3DPIPELINESUPPORT1_DATA_0081)) {
     auto *Data =
         static_cast<D3D12DDI_3DPIPELINESUPPORT1_DATA_0081 *>(Args->pData);
     // The runtime supplies its own requested level as input; echoing it back
@@ -226,7 +260,7 @@ HRESULT APIENTRY getOptionalDDITables(D3D12DDI_HADAPTER, UINT32 *EntryCount,
 }
 
 HRESULT APIENTRY fillDDITable(D3D12DDI_HADAPTER, D3D12DDI_TABLE_TYPE, VOID *,
-                               SIZE_T, UINT, D3D12DDI_HRTTABLE) {
+                              SIZE_T, UINT, D3D12DDI_HRTTABLE) {
   InterlockedIncrement(&GCalls.FillDDITable);
   return E_NOTIMPL;
 }
@@ -263,12 +297,12 @@ OpenAdapter12(D3D12DDIARG_OPENADAPTER *Args) {
   return S_OK;
 }
 
-extern "C" __declspec(dllexport) void APIENTRY
-FeMeBootstrapGetCalls(LONG *OpenAdapter12Count, LONG *CalcPrivateDeviceSizeCount,
-                       LONG *GetSupportedVersionsCount, LONG *GetCapsCount,
-                       LONG *GetOptionalDDITablesCount, LONG *FillDDITableCount,
-                       LONG *CreateDeviceCount, LONG *CloseAdapterCount,
-                       LONG *DestroyDeviceCount) {
+extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetCalls(
+    LONG *OpenAdapter12Count, LONG *CalcPrivateDeviceSizeCount,
+    LONG *GetSupportedVersionsCount, LONG *GetCapsCount,
+    LONG *GetOptionalDDITablesCount, LONG *FillDDITableCount,
+    LONG *CreateDeviceCount, LONG *CloseAdapterCount,
+    LONG *DestroyDeviceCount) {
   *OpenAdapter12Count = InterlockedCompareExchange(&GCalls.OpenAdapter12, 0, 0);
   *CalcPrivateDeviceSizeCount =
       InterlockedCompareExchange(&GCalls.CalcPrivateDeviceSize, 0, 0);
@@ -291,20 +325,25 @@ FeMeBootstrapGetAuditCapacity() {
 }
 
 extern "C" __declspec(dllexport) void APIENTRY
-FeMeBootstrapGetAudit(LONG *CapsTypeCount,
-                      LONG CapsTypes[/* FeMeBootstrapGetAuditCapacity() */],
-                      UINT *CreateDeviceInterface, UINT *CreateDeviceVersion,
-                      LONG *CreateDeviceHasKTCallbacks,
-                      LONG *CreateDeviceHasUMCallbacks,
-                      LONG *CreateDeviceHasKTAllocateCb,
-                      LONG *CreateDeviceHasKTDeallocateCb,
-                      LONG *CreateDeviceHasUMSetErrorCb) {
+FeMeBootstrapGetContractAudit(feme::probe::BootstrapContractAudit *Audit) {
+  *Audit = GContractAudit;
+#ifdef FEME_BOOTSTRAP_PINNED_VERSION
+  Audit->PinnedVersion = FEME_BOOTSTRAP_PINNED_VERSION;
+#endif
+}
+
+extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(
+    LONG *CapsTypeCount, LONG CapsTypes[/* FeMeBootstrapGetAuditCapacity() */],
+    UINT *CreateDeviceInterface, UINT *CreateDeviceVersion,
+    LONG *CreateDeviceHasKTCallbacks, LONG *CreateDeviceHasUMCallbacks,
+    LONG *CreateDeviceHasKTAllocateCb, LONG *CreateDeviceHasKTDeallocateCb,
+    LONG *CreateDeviceHasUMSetErrorCb) {
   LONG Count = InterlockedCompareExchange(&GCapsTypeLogCount, 0, 0);
   *CapsTypeCount = Count;
   UINT32 Fill = Count <= 0 ? 0
                 : static_cast<UINT32>(Count) < MaxCapsTypeLog
-                      ? static_cast<UINT32>(Count)
-                      : MaxCapsTypeLog;
+                    ? static_cast<UINT32>(Count)
+                    : MaxCapsTypeLog;
   for (UINT32 I = 0; I < Fill; ++I)
     CapsTypes[I] = GCapsTypeLog[I];
   *CreateDeviceInterface = GCreateDeviceAudit.Interface;

@@ -200,6 +200,15 @@ populated, and one user-mode diagnostic callback was called successfully.
 The kernel-routed allocation/residency callbacks remain untested, and the
 audit stub is not a working device or proof that WARP's kernel-mode driver
 accepts FeMe's resource contract.
+The [strict negotiation and versioned callback follow-up](W0WindowsIntegrationProbe.md#w0g-strict-negotiation-gates-and-versioned-callback-audit-vm)
+now gates the expected rejection/`CreateDevice` stage, exact negotiated DDI,
+owned-module identity, and successful diagnostic callback completion.
+The 0070/0071 rejection also reproduces natively on ARM64 with inbox and
+Agility 619, so it is not limited to x64 emulation; its exact cause remains
+unknown. The public 0022-and-later core-layer callback table supplies
+allocation/deallocation entries even when the legacy KT entries are null.
+These entries are audited, not invoked; this is not resource-lifecycle
+evidence or closure of W0(g).
 The negative public general-provider search and the successful WARP-specific
 route are different findings; do not classify all further research as blocked.
 Installed-path evaluation remains separate. No driver installation, signing
@@ -232,7 +241,10 @@ split into further lettered rows -- both blockers are existing upstream `W0`/
 `W1` milestones, not new work needing its own breakdown.
 
 `W0(d)`'s future-runner WARP-identity and FeMe-module-provenance assertion
-(not yet implemented) is also recorded in that document. W0(e)/W0(f)'s
+is also recorded in that document. The strict owned-shim audit now checks
+adapter identity, loaded-module handle identity and absence of reference
+forwarding, but no real FeMe device/build-provenance pairing exists yet.
+W0(e)/W0(f)'s
 standalone runner now implements reference-WARP identity checking and the
 public queue/fence oracle test in both the host and the container. It cannot
 yet verify a real FeMe module/device pairing; the selected WARP-compatible

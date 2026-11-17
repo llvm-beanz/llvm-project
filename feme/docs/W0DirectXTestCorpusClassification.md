@@ -188,7 +188,7 @@ for behavioral understanding, and author new, LLVM-owned tests from the
 *public contracts* those tests exercise (the public category's test names
 and public D3D12 API calls, not their internal assertions or fixtures).
 
-## W0(d) adapter-selection and module-provenance assertion (design, not yet implemented)
+## W0(d) adapter-selection and module-provenance assertion (future-runner design)
 
 `W0(d)` requires explicit selection and identity evidence for the future
 runner. The selected product intentionally shares Microsoft's WARP identity,
@@ -214,6 +214,10 @@ implementing it now:
    acceptance text.
 
 This design does not invent a separate FeMe adapter identity or claim that
-the current routing probe already loads a working device. The assertion must
-wait until `W0(a)`/`W0(g)` supply a real DDI/device path and a verifiable
-application-local module.
+the current routing probe already loads a working device. The
+[strict W0(g) audit](W0WindowsIntegrationProbe.md#w0g-strict-negotiation-gates-and-versioned-callback-audit-vm)
+now checks the WARP adapter identity, requires the selected `d3d10warp.dll`
+module handle to match the explicitly loaded owned shim, and rejects reference
+forwarding. That is prototype-selection evidence only. The full runner
+assertion still needs `W0(a)`/`W0(g)`'s real DDI/device path and a stable
+FeMe build/package provenance value paired with that device.
