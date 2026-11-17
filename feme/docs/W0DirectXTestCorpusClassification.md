@@ -187,32 +187,32 @@ for behavioral understanding, and author new, LLVM-owned tests from the
 *public contracts* those tests exercise (the public category's test names
 and public D3D12 API calls, not their internal assertions or fixtures).
 
-## W0(d) adapter-selection/identity assertion (design, not yet implemented)
+## W0(d) adapter-selection and module-provenance assertion (design, not yet implemented)
 
-`W0(d)` requires "an explicit FeMe adapter selection/identity assertion to
-the future runner." Since no FeMe D3D12 runner exists yet (it depends on
-`W0(a)`/`W0(b)` and `W1(a)`'s not-yet-built Windows build target), this
-records the design for when one does, rather than implementing it now:
+`W0(d)` requires explicit selection and identity evidence for the future
+runner. The selected product intentionally shares Microsoft's WARP identity,
+so adapter IDs alone cannot distinguish FeMe from system WARP. Since no FeMe
+D3D12 runner exists yet (it depends on `W0(a)`/`W0(g)` and `W1(a)`'s
+not-yet-built Windows target), this records the design rather than
+implementing it now:
 
 1. A test fixture-level helper, analogous to `SoftGpuApiHelper`'s elevated
-   installed-driver check but for FeMe: call `IDXGIFactory::EnumAdapters`/
-   `EnumAdapterByLuid`, open each with `D3D12CreateDevice`, and query
-   `DXGI_ADAPTER_DESC1`/the opened device's `CheckFeatureSupport` identity
-   fields for a FeMe-specific signature (a distinct `VendorId`/`DeviceId`/
-   description string FeMe's device-creation path must set once it exists,
-   per `W0(a)`'s requirement to "prove discovery, opening, callback
-   negotiation, and teardown for a distinct FeMe identity").
-2. The helper asserts (not silently skips) if the selected adapter is not the
-   expected FeMe identity when a test explicitly requests FeMe -- mirroring
-   `src\D3D12Conf`'s `/p:UseWarp=true` opt-in but requiring the assertion
-   step the current repo's own WARP-targeting tests do not need (since
-   system WARP is a single well-known adapter; a future FeMe installed
-   alongside system WARP is not).
-3. Record unavailable infrastructure as blocked, not Pass, per `W0(d)`'s own
-   acceptance text -- this helper's design intentionally fails loudly rather
-   than silently falling back to a different adapter if FeMe identity
-   selection cannot be proven.
+   installed-driver check, selects the adapter through the chosen
+   application-local WARP route and opens it with `D3D12CreateDevice`. Assert
+   Microsoft's WARP identity (`VendorId=0x1414`, `DeviceId=0x008c`, software
+   flag) on both the enumerated adapter and created device.
+2. Independently prove that the loaded user-mode driver is the FeMe build
+   selected for the test, not the system WARP module. Record and assert the
+   expected application-local module path and a stable build/package
+   provenance value; the shared WARP IDs and description are not provenance.
+3. If a test explicitly requests FeMe, fail rather than silently fall back to
+   system WARP when either identity or module provenance differs. This mirrors
+   `src\D3D12Conf`'s `/p:UseWarp=true` opt-in while adding the module check
+   needed for a WARP-compatible drop-in.
+4. Record unavailable infrastructure as blocked, not Pass, per `W0(d)`'s own
+   acceptance text.
 
-This design is deliberately conservative: it does not invent a FeMe DXGI
-adapter identity ahead of `W0(a)`/`W1(a)` actually creating one, and it does
-not attempt to pre-build a runner with no device to run against.
+This design does not invent a separate FeMe adapter identity or claim that
+the current routing probe already loads a working device. The assertion must
+wait until `W0(a)`/`W0(g)` supply a real DDI/device path and a verifiable
+application-local module.

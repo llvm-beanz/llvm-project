@@ -1,15 +1,18 @@
 # W0 Windows user-mode integration probe
 
-**Bounded alternative-B investigation authorized and routing proved.**
+**W0(b) decision: WARP-compatible application-local UMD drop-in.**
 Stock D3D12 reaches LLVM-owned `OpenAdapter12`, queries its public adapter
 callbacks, and closes it on both the host and Windows container. The owned
 cases need neither ordinal 199 nor reference-WARP forwarding. This uses
 Microsoft's existing WARP adapter identity, not a distinct FeMe adapter;
-no supported DDI version or FeMe device exists yet. See
+the user selected that identity and the unmodified WARP kernel-mode driver
+for FeMe's application-local compatibility path on 2026-11-17. This closes
+the product-choice gate only: no supported DDI/device/resource contract or
+universal transparent substitution is proven. See
 [Alternative B: application-local WARP DDI routing](#alternative-b-application-local-warp-ddi-routing).
 The public general-provider search remains negative, but that is not a
-runtime-routing impossibility result. `W0(b)` remains a product/compatibility
-decision, not a reason to repeat the already-authorized research question.
+runtime-routing impossibility result. No system WARP binaries or kernel-mode
+driver are to be replaced or modified.
 
 This is host and container evidence for [WARPRoadmap.md](WARPRoadmap.md),
 collected on 2026-11-06. The user selected stock-runtime user-mode/software-adapter probing
@@ -102,13 +105,15 @@ failure. Debugger lookup experiments did not establish that causal link.
 No implementation, signature, or private call was copied or added to the
 probe. The design's prohibition on depending on private WARP ordinals remains.
 
-## Remaining work and decision gate
+## Remaining work under the selected WARP-compatible contract
 
-**Direction selected after the host probe: develop the application-local
-user-mode software driver in the Windows container using stock D3D12/DXGI.**
-This selects implementation order and the first integration boundary to prove,
-not a claim that the third-party contract or container runtime already works.
-It does not select a replacement COM runtime or require a kernel installation.
+The user selected a WARP-compatible application-local UMD drop-in on
+2026-11-17: keep Microsoft's WARP adapter identity and use the existing,
+unmodified WARP kernel-mode driver. This closes the product-choice gate, not
+the technical feasibility gate. The container-first implementation must still
+prove that a real FeMe device/resource lifecycle works through that existing
+kernel-mode support. No system WARP binaries are replaced, no kernel driver is
+installed or modified, and no application-local COM runtime is selected.
 
 1. ~~Build this probe and run all four CTest cases inside the Windows
    container. Record OS/kit/runtime/core/WARP versions and loaded paths,
@@ -123,33 +128,35 @@ It does not select a replacement COM runtime or require a kernel installation.
    No kernel installation is needed to build or run the loading experiments.~~
    Completed 2026-11-06 with a negative result; see
    [Decision: no public third-party route to `OpenAdapter12` was found](#decision-no-public-third-party-route-to-openadapter12-was-found).
-   No such contract was found; this triggers item 4 below.
-3. Extend an LLVM-owned prototype through open/callback negotiation/close with a
-   distinct FeMe identity. Measure the chosen DDI version and teardown, including
-   failure cleanup, rather than inferring support from the installed headers.
+   No such contract was found; the later W0(b) choice selected the separately
+   measured WARP-specific application-local route, not a general provider.
+3. Extend an LLVM-owned prototype through open/callback negotiation/close under
+   Microsoft's WARP identity, preserving the WARP device IDs and using the
+   unmodified WARP kernel-mode driver. Measure the chosen DDI version and
+   teardown, including failure cleanup, rather than inferring support from the
+   installed headers.
    The [direct-call experiment](#direct-openadapter12-invocation-bypassing-dxgi)
    proves the entry point's mechanics; alternative B below now proves
    stock-runtime routing and adapter queries/close without a new kernel driver.
-   Supported-version negotiation, device creation and distinct identity remain
-   separate unfinished requirements.
-4. If only WARP-private binary compatibility makes the application-local UMD
-   route work, request an explicit product/design decision. Do not silently
-   impersonate Microsoft's adapter, use ordinal 199, or declare an installed
-   miniport mandatory. The alternatives are an approved compatibility project,
-   the separately installed WDDM path, or the application-local COM runtime.
-   The user explicitly authorized the bounded B investigation recorded below.
-   That permits controlled WARP-identity diagnostics, not private-ABI guessing,
-   product identity changes, or automatic adoption of a shipping architecture.
+   Supported-version negotiation, real device creation, and FeMe-module
+   provenance remain separate unfinished requirements; a distinct adapter
+   identity is not part of the selected contract.
+4. The selected scope does not authorize undocumented private WARP ABI, ordinal
+   199, system-WARP replacement, or a new kernel component. If one proves
+   necessary, stop and return to the user rather than silently expanding scope.
+   The route must also demonstrate FeMe-module provenance independently from
+   the intentionally shared WARP adapter identity.
 
-W0(a), W0(b), and W0(d) remain incomplete: there is no FeMe D3D12 device, and
-no installed-path test. The user-mode stock-runtime direction is selected and
-now container-verified through owned adapter queries/close in alternative B.
-No public general-provider bootstrap was found and `W0(b)`'s shipping boundary
-is not closed, but the research routing blocker is resolved. W0(d) has host and
-now container evidence only. Installed-driver, signing/reboot, display and
-HLK work are separate host/VM tasks if that deployment requires them; they do
-not block continuing W0(f)'s bootstrap step (tracked as `W0(g)` in
-`WARPRoadmap.md`). Missing evidence is not Pass.
+W0(a) and W0(d) remain incomplete: there is no FeMe D3D12 device, no verified
+resource lifecycle through WARP's existing kernel-mode driver, and no runner
+that asserts both WARP identity and FeMe-module provenance. W0(b)'s selected
+product boundary is closed. The user-mode stock-runtime path is container-
+verified through owned adapter queries/close in alternative B, but that is not
+a real-device result. No public general-provider bootstrap was found; the
+WARP-specific route is separately proven and remains subject to its
+application-local compatibility limits. Installed-driver, signing/reboot,
+display and HLK work are outside the selected deployment contract. Missing
+evidence is not Pass.
 
 ## Container measurements
 
@@ -270,17 +277,36 @@ was found.** This answers `W0(g)`'s "identify a public third-party adapter
 identity/thunk bootstrap" step with a negative result rather than a positive
 one. This originally triggered `W0(b)`'s decision gate among (a) an installed
 adapter, (b) WARP-specific compatibility, or (c) an application-local COM
-runtime. The user subsequently authorized investigation of B. Its successful
-result below supersedes the blanket prototype-routing blocker and the earlier
-recommendation to evaluate A first; it does not select B for distribution.
+runtime. The user selected B for the application-local product boundary on
+2026-11-17. Its successful routing result below supports that choice but does
+not prove a working device or a WARP-kernel resource contract.
 
-### `W0(b)` alternative cost/scope evaluation (not a selection)
+### `W0(b)` decision: WARP-compatible application-local UMD
 
 Collected 2026-11-07, from Microsoft's public driver-signing documentation
 and the WARP architecture documented by Microsoft's own public articles. This
-section only documents cost/scope for each alternative so a future session or
-maintainer can make the `W0(b)` decision with concrete information; it does
-**not** select an alternative.
+section records the user's selection on 2026-11-17 and the boundaries that
+follow from it. The comparison below remains useful context; it is no longer
+an open decision gate.
+
+The selected product is an application-local FeMe user-mode driver intended
+to act as a WARP drop-in under Microsoft's WARP adapter identity
+(`VendorId=0x1414`, `DeviceId=0x008c`, software-adapter flag), relying on the
+existing, unmodified WARP kernel-mode driver. FeMe does not install a new
+miniport, modify that kernel driver, replace system WARP binaries, or provide
+its own D3D12/DXGI COM runtime. The choice is based on WARP-specific
+compatibility, not a public third-party provider-registration contract.
+
+"Drop-in" is bounded to the application-local loading/selection path under
+investigation; it does not claim that every application or Windows runtime
+will transparently load FeMe for `D3D_DRIVER_TYPE_WARP` or
+`EnumWarpAdapter`. The probe establishes owned UMD routing and callback
+negotiation under that identity, but has no real device and has not invoked
+the kernel-routed allocation/residency callbacks. A real device/resource
+lifecycle using WARP's existing kernel-mode support is therefore a required
+W0(g) acceptance gate. If that path requires an undocumented private ABI,
+system DLL replacement, or a new kernel component, stop and return to the
+user rather than silently changing the selected scope.
 
 **(a) Installed-adapter (kernel-mode driver), signing cost.** Microsoft's
 [Driver Signing offerings](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/driver-signing-offerings)
@@ -335,17 +361,16 @@ page documents three signing tiers and a per-OS acceptance table:
   fetched this session and are recorded here only as items needing
   verification before being relied upon, not as established fact.
 
-**(b) WARP-specific compatibility, cost.** Separate two risks: relying on
-application-local WARP filename/identity selection as a provider boundary,
-and depending on actual private binary APIs. The bounded investigation below
-uses the first but does not need the second to enter owned adapter callbacks.
-It uses the public `EnumWarpAdapter` API and public WDK DDI signatures; it
-does not hook APIs or guess ordinal-199 signatures. The filename/identity
-route is still not a documented general third-party registration contract,
-and the resulting Microsoft adapter identity is unsuitable as a truthful
-FeMe product identity. Any later private-API requirement adds compatibility
-and licensing-review costs; ordinals can change without a compatibility
-guarantee. Shipping adoption therefore still needs a separate design decision.
+**(b) WARP-specific compatibility, selected.** Application-local WARP
+filename/identity selection is the provider boundary. The bounded
+investigation uses the public `EnumWarpAdapter` API and public WDK DDI
+signatures to enter owned adapter callbacks; it does not hook APIs or guess
+ordinal-199 signatures. This is not a documented general third-party
+registration contract, and the Microsoft adapter identity is intentionally
+retained rather than presented as a distinct FeMe identity. Any later
+private-API requirement adds compatibility and licensing-review costs;
+ordinals can change without a compatibility guarantee. The selected scope
+does not authorize such a dependency.
 
 **(c) Application-local COM runtime, cost.** This means FeMe owning its own
 D3D12/DXGI-shaped API surface entirely outside the real Microsoft runtime
@@ -372,8 +397,10 @@ into the real one.
 ## Alternative B: application-local WARP DDI routing
 
 Collected 2026-11-06 after the user explicitly requested investigation of B.
-The approval covers bounded, application-local diagnostics, not installation,
-system hooks, guessed private ABIs, or adoption as FeMe's shipping boundary.
+The original approval covered bounded, application-local diagnostics, not
+installation, system hooks, or guessed private ABIs. The later W0(b) decision
+selects this WARP-specific compatibility boundary as the product direction;
+it does not convert the probe into a working driver or authorize private ABI.
 The new LLVM-owned
 [windows-warp-interposition](../utils/windows-warp-interposition/CMakeLists.txt)
 project reuses the probe harness and public adapter-table fixture. No
@@ -460,10 +487,11 @@ Both Agility runs loaded local core `1.619.5.0.20260730.3`, SDK version 619.
 
 **Conclusion:** no new/custom kernel driver, installation, reference forwarding,
 or ordinal 199 is needed to route stock Windows into owned adapter callbacks
-on these measured runtimes. This still uses the existing OS WARP adapter
-infrastructure; it does not prove zero kernel involvement. No distinct FeMe
-identity, supported DDI version, actual FeMe D3D12 device, feature level,
-shader execution, presentation, or shipping compatibility is established.
+on these measured runtimes. This uses the existing OS WARP adapter
+infrastructure; it does not prove that the kernel-routed resource callbacks
+work for FeMe. Microsoft's WARP identity is intentionally selected, but no
+supported DDI version, actual FeMe D3D12 device, feature level, shader
+execution, presentation, or working drop-in implementation is established.
 Private dependencies later in device creation remain unknown.
 
 The next bounded technical step is to audit a pinned public DDI version and
