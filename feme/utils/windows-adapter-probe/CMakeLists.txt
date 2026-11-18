@@ -16,6 +16,7 @@ add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 add_library(feme-adapter-rejection-stub SHARED RejectionStub.cpp)
 add_executable(feme-windows-adapter-probe AdapterProbe.cpp)
+add_executable(feme-buffer-copy-tests BufferCopyTests.cpp)
 target_link_libraries(feme-windows-adapter-probe PRIVATE d3d12 dxgi)
 set(FEME_PROBE_AGILITY_CORE "" CACHE FILEPATH "Existing Agility D3D12Core.dll")
 set(FEME_PROBE_AGILITY_VERSION "" CACHE STRING "Matching D3D12 SDK version")
@@ -37,6 +38,7 @@ if(MSVC)
   # The WDK DDI headers use anonymous structs/unions.
   target_compile_options(feme-adapter-rejection-stub PRIVATE /W4 /WX /wd4201 /UNDEBUG)
   target_compile_options(feme-windows-adapter-probe PRIVATE /W4 /WX /UNDEBUG)
+  target_compile_options(feme-buffer-copy-tests PRIVATE /W4 /WX /UNDEBUG)
 endif()
 
 include(../windows-probe-tests/WindowsProbeTests.cmake)
@@ -48,3 +50,15 @@ feme_add_probe_test(NAME rejection-stub COMMAND feme-windows-adapter-probe
   --stub $<TARGET_FILE:feme-adapter-rejection-stub>)
 feme_add_probe_test(NAME missing-module WILL_FAIL COMMAND feme-windows-adapter-probe
   --software "${CMAKE_CURRENT_BINARY_DIR}/nonexistent-driver.dll")
+feme_add_probe_test(NAME reference-warp-buffer-copy COMMAND "${CMAKE_COMMAND}"
+  "-DHARNESS=$<TARGET_FILE:feme-windows-adapter-probe>"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectBufferCopy.cmake")
+feme_add_probe_test(NAME software-reference-warp-buffer-copy COMMAND "${CMAKE_COMMAND}"
+  "-DHARNESS=$<TARGET_FILE:feme-windows-adapter-probe>"
+  "-DMODULE=$ENV{SystemRoot}/System32/d3d10warp.dll"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectBufferCopy.cmake")
+foreach(scenario success wrong-size missing-data prefix patch-first patch-last
+                 tail-first last-byte patterns)
+  feme_add_probe_test(NAME buffer-copy-fixture-${scenario}
+    COMMAND feme-buffer-copy-tests "${scenario}")
+endforeach()

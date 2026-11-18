@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "../windows-adapter-bootstrap/BootstrapAudit.h"
+#include "BufferCopyValidation.h"
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -60,7 +61,184 @@ static HRESULT checkWarpIdentity(IDXGIAdapter1 *Adapter) {
   return S_OK;
 }
 
-static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter) {
+static HRESULT signalAndWait(ID3D12Device *Device, ID3D12CommandQueue *Queue,
+                             ID3D12CommandList *Commands, bool &Submitted) {
+  Submitted = false;
+  ComPtr<ID3D12Fence> Fence;
+  HRESULT Result =
+      report(L"CreateFence", Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                 IID_PPV_ARGS(&Fence)));
+  if (FAILED(Result))
+    return Result;
+  HANDLE Event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!Event)
+    return report(L"CreateEventW", HRESULT_FROM_WIN32(GetLastError()));
+  Result =
+      report(L"SetEventOnCompletion", Fence->SetEventOnCompletion(1, Event));
+  if (SUCCEEDED(Result) && Commands) {
+    Queue->ExecuteCommandLists(1, &Commands);
+    Submitted = true;
+  }
+  if (SUCCEEDED(Result))
+    Result = report(L"Queue::Signal", Queue->Signal(Fence.Get(), 1));
+  if (SUCCEEDED(Result)) {
+    DWORD Wait = WaitForSingleObject(Event, 10000);
+    if (Wait != WAIT_OBJECT_0)
+      Result = report(L"Fence wait", Wait == WAIT_FAILED
+                                         ? HRESULT_FROM_WIN32(GetLastError())
+                                         : HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+    else if (Fence->GetCompletedValue() != 1)
+      Result = report(L"Fence completed value mismatch", E_FAIL);
+  }
+  if (Submitted && FAILED(Result)) {
+    // Keep the fence and its registered event alive until process exit if
+    // completion could not be established. The caller retains the work objects.
+    Fence.Detach();
+    return Result;
+  }
+  if (!CloseHandle(Event))
+    return report(L"CloseHandle", HRESULT_FROM_WIN32(GetLastError()));
+  return Result;
+}
+
+static D3D12_RESOURCE_DESC bufferDesc(UINT64 Bytes) {
+  D3D12_RESOURCE_DESC Desc{};
+  Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  Desc.Width = Bytes;
+  Desc.Height = 1;
+  Desc.DepthOrArraySize = 1;
+  Desc.MipLevels = 1;
+  Desc.SampleDesc.Count = 1;
+  Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  return Desc;
+}
+
+static HRESULT createCpuBuffer(ID3D12Device *Device, D3D12_HEAP_TYPE Type,
+                               UINT64 Bytes, D3D12_RESOURCE_STATES State,
+                               ID3D12Resource **Resource) {
+  D3D12_HEAP_PROPERTIES Properties{};
+  Properties.Type = Type;
+  Properties.CreationNodeMask = Properties.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC Desc = bufferDesc(Bytes);
+  return report(
+      L"CreateCommittedResource(CPU buffer)",
+      Device->CreateCommittedResource(&Properties, D3D12_HEAP_FLAG_NONE, &Desc,
+                                      State, nullptr, IID_PPV_ARGS(Resource)));
+}
+
+static HRESULT exerciseBufferCopy(ID3D12Device *Device,
+                                  ID3D12CommandQueue *Queue) {
+  using namespace feme::probe;
+  ComPtr<ID3D12Heap> Heap;
+  D3D12_HEAP_DESC HeapDesc{};
+  HeapDesc.SizeInBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  HeapDesc.Properties.CreationNodeMask = HeapDesc.Properties.VisibleNodeMask =
+      1;
+  HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  HRESULT Result = report(L"CreateHeap(default buffer)",
+                          Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Heap)));
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12Resource> Buffer, Upload, Readback;
+  D3D12_RESOURCE_DESC Desc = bufferDesc(BufferBytes);
+  Result = report(L"CreatePlacedResource(buffer)",
+                  Device->CreatePlacedResource(Heap.Get(), 0, &Desc,
+                                               D3D12_RESOURCE_STATE_COPY_DEST,
+                                               nullptr, IID_PPV_ARGS(&Buffer)));
+  if (FAILED(Result))
+    return Result;
+  Result =
+      createCpuBuffer(Device, D3D12_HEAP_TYPE_UPLOAD, 2 * BufferBytes,
+                      D3D12_RESOURCE_STATE_GENERIC_READ, Upload.GetAddressOf());
+  if (FAILED(Result))
+    return Result;
+  Result =
+      createCpuBuffer(Device, D3D12_HEAP_TYPE_READBACK, BufferBytes,
+                      D3D12_RESOURCE_STATE_COPY_DEST, Readback.GetAddressOf());
+  if (FAILED(Result))
+    return Result;
+  void *Mapped = nullptr;
+  D3D12_RANGE NoAccess{0, 0};
+  Result = report(L"Map(upload)", Upload->Map(0, &NoAccess, &Mapped));
+  if (FAILED(Result))
+    return Result;
+  if (!Mapped) {
+    Upload->Unmap(0, &NoAccess);
+    return report(L"Missing upload mapping", E_FAIL);
+  }
+  fillCopyUpload(static_cast<std::uint8_t *>(Mapped));
+  D3D12_RANGE UploadWritten{0, 2 * BufferBytes};
+  Upload->Unmap(0, &UploadWritten);
+
+  ComPtr<ID3D12CommandAllocator> Allocator;
+  Result = report(L"CreateCommandAllocator(copy)",
+                  Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
+                                                 IID_PPV_ARGS(&Allocator)));
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12GraphicsCommandList> Commands;
+  Result = report(L"CreateCommandList(copy)",
+                  Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY,
+                                            Allocator.Get(), nullptr,
+                                            IID_PPV_ARGS(&Commands)));
+  if (FAILED(Result))
+    return Result;
+  Commands->CopyBufferRegion(Buffer.Get(), 0, Upload.Get(), 0,
+                             CopyTargetOffset);
+  Commands->CopyBufferRegion(Buffer.Get(), CopyTargetOffset, Upload.Get(),
+                             BufferBytes + CopySourceOffset, CopyBytes);
+  Commands->CopyBufferRegion(Buffer.Get(), CopyTailOffset, Upload.Get(),
+                             CopyTailOffset, BufferBytes - CopyTailOffset);
+  D3D12_RESOURCE_BARRIER Barrier{};
+  Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  Barrier.Transition.pResource = Buffer.Get();
+  Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  Commands->ResourceBarrier(1, &Barrier);
+  Commands->CopyBufferRegion(Readback.Get(), 0, Buffer.Get(), 0, BufferBytes);
+  Result = report(L"Close(copy list)", Commands->Close());
+  if (FAILED(Result))
+    return Result;
+  bool Submitted = false;
+  Result = signalAndWait(Device, Queue, Commands.Get(), Submitted);
+  if (FAILED(Result)) {
+    if (Submitted) {
+      std::wprintf(
+          L"Retaining copy resources, queue, device and synchronization "
+          L"objects until process exit after completion/teardown failure.\n");
+      Device->AddRef();
+      Queue->AddRef();
+      Heap.Detach();
+      Buffer.Detach();
+      Upload.Detach();
+      Readback.Detach();
+      Allocator.Detach();
+      Commands.Detach();
+    }
+    return Result;
+  }
+  D3D12_RANGE ReadRange{0, BufferBytes};
+  Mapped = nullptr;
+  Result = report(L"Map(readback)", Readback->Map(0, &ReadRange, &Mapped));
+  if (FAILED(Result))
+    return Result;
+  bool Valid = validateBufferCopy(static_cast<const std::uint8_t *>(Mapped),
+                                  BufferBytes);
+  Readback->Unmap(0, &NoAccess);
+  if (!Valid)
+    return report(L"Buffer copy validation", E_FAIL);
+  std::wprintf(
+      L"Buffer copy verified: bytes=%zu prefix=%zu patch=%zu tail=%zu; "
+      L"source-offset=%zu target-offset=%zu\n",
+      BufferBytes, CopyTargetOffset, CopyBytes, BufferBytes - CopyTailOffset,
+      CopySourceOffset, CopyTargetOffset);
+  return S_OK;
+}
+
+static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter,
+                               bool BufferCopy = false) {
   DXGI_ADAPTER_DESC1 Desc{};
   HRESULT Result = report(L"GetDesc1", Adapter->GetDesc1(&Desc));
   if (FAILED(Result))
@@ -84,41 +262,28 @@ static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter) {
       DeviceLuid.LowPart != Desc.AdapterLuid.LowPart)
     return report(L"Device/adapter LUID mismatch", E_FAIL);
   D3D12_COMMAND_QUEUE_DESC QueueDesc{};
-  QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  QueueDesc.Type = BufferCopy ? D3D12_COMMAND_LIST_TYPE_COPY
+                              : D3D12_COMMAND_LIST_TYPE_COMPUTE;
   ComPtr<ID3D12CommandQueue> Queue;
   Result = report(L"CreateCommandQueue",
                   Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
   if (FAILED(Result))
     return Result;
-  ComPtr<ID3D12Fence> Fence;
-  Result = report(L"CreateFence", Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
-                                                      IID_PPV_ARGS(&Fence)));
-  if (FAILED(Result))
-    return Result;
-  HANDLE Event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-  if (!Event)
-    return report(L"CreateEventW", HRESULT_FROM_WIN32(GetLastError()));
-  Result =
-      report(L"SetEventOnCompletion", Fence->SetEventOnCompletion(1, Event));
-  if (SUCCEEDED(Result))
-    Result = report(L"Queue::Signal", Queue->Signal(Fence.Get(), 1));
-  if (SUCCEEDED(Result)) {
-    DWORD Wait = WaitForSingleObject(Event, 10000);
-    if (Wait != WAIT_OBJECT_0)
-      Result = report(L"Fence wait", Wait == WAIT_FAILED
-                                         ? HRESULT_FROM_WIN32(GetLastError())
-                                         : HRESULT_FROM_WIN32(ERROR_TIMEOUT));
-    else if (Fence->GetCompletedValue() != 1)
-      Result = report(L"Fence completed value mismatch", E_FAIL);
-  }
-  if (!CloseHandle(Event))
-    return report(L"CloseHandle", HRESULT_FROM_WIN32(GetLastError()));
-  return Result;
+  if (BufferCopy)
+    return exerciseBufferCopy(Device.Get(), Queue.Get());
+  bool Submitted = false;
+  return signalAndWait(Device.Get(), Queue.Get(), nullptr, Submitted);
 }
 
 int wmain(int Argc, wchar_t **Argv) {
+  bool WarpBufferCopy =
+      Argc == 2 && std::wcscmp(Argv[1], L"--warp-buffer-copy") == 0;
+  bool SoftwareBufferCopy =
+      Argc == 3 && std::wcscmp(Argv[1], L"--software-buffer-copy") == 0;
+  bool BufferCopy = WarpBufferCopy || SoftwareBufferCopy;
   bool Stub = Argc == 3 && std::wcscmp(Argv[1], L"--stub") == 0;
-  bool Software = Argc == 3 && std::wcscmp(Argv[1], L"--software") == 0;
+  bool Software = (Argc == 3 && std::wcscmp(Argv[1], L"--software") == 0) ||
+                  SoftwareBufferCopy;
   bool WarpShim = Argc == 3 && std::wcscmp(Argv[1], L"--warp-shim") == 0;
   bool WarpBootstrap =
       Argc == 3 && std::wcscmp(Argv[1], L"--warp-bootstrap") == 0;
@@ -136,12 +301,13 @@ int wmain(int Argc, wchar_t **Argv) {
                            std::wcscmp(Argv[3], L"--expect-paging-queue") == 0;
   ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
-       !WarpBootstrapAudit) ||
+       !WarpBootstrapAudit && !WarpBufferCopy) ||
       (WarpBootstrapAudit && Argc == 4 && !ExpectCreateDevice &&
        !ExpectUnsupported)) {
     std::fwprintf(
         stderr,
-        L"Usage: %ls [--software DLL | --stub DLL | --warp-shim DLL | "
+        L"Usage: %ls [--warp-buffer-copy | --software-buffer-copy DLL | "
+        L"--software DLL | --stub DLL | --warp-shim DLL | "
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
         L"--expect-callback | --expect-paging-queue]]\n",
@@ -155,16 +321,19 @@ int wmain(int Argc, wchar_t **Argv) {
                     CreateDXGIFactory1(IID_PPV_ARGS(&Factory)))))
     return 1;
   ComPtr<IDXGIAdapter1> Adapter;
-  if (Argc == 1) {
+  if (Argc == 1 || WarpBufferCopy) {
     if (FAILED(report(L"EnumWarpAdapter",
                       Factory->EnumWarpAdapter(IID_PPV_ARGS(&Adapter)))))
       return 1;
     if (FAILED(checkWarpIdentity(Adapter.Get())))
       return 1;
-    HRESULT Result = exerciseAdapter(Adapter.Get());
+    HRESULT Result = exerciseAdapter(Adapter.Get(), BufferCopy);
     Adapter.Reset();
     Factory.Reset();
-    std::wprintf(L"Reference WARP objects released; not FeMe coverage.\n");
+    std::wprintf(
+        BufferCopy
+            ? L"Reference WARP buffer-copy probe finished; not FeMe coverage.\n"
+            : L"Reference WARP objects released; not FeMe coverage.\n");
     return FAILED(Result) ? 1 : 0;
   }
 
@@ -272,11 +441,15 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result)) {
     Result =
         report(L"QueryInterface(IDXGIAdapter1)", SoftwareAdapter.As(&Adapter));
-    if (SUCCEEDED(Result) && (WarpShim || WarpBootstrap || WarpBootstrapAudit))
+    if (SUCCEEDED(Result) &&
+        (WarpShim || WarpBootstrap || WarpBootstrapAudit || SoftwareBufferCopy))
       Result = checkWarpIdentity(Adapter.Get());
     if (SUCCEEDED(Result)) {
       Opened = true;
-      Result = exerciseAdapter(Adapter.Get());
+      Result = exerciseAdapter(Adapter.Get(), BufferCopy);
+      if (SoftwareBufferCopy && SUCCEEDED(Result) &&
+          GetModuleHandleW(L"d3d10warp.dll") != Module)
+        Result = report(L"Requested/selected WARP module mismatch", E_FAIL);
     }
   }
   if (WarpShim || WarpBootstrap || WarpBootstrapAudit)
@@ -469,8 +642,11 @@ int wmain(int Argc, wchar_t **Argv) {
   bool Released = FreeLibrary(Module) != FALSE;
   if (!Released)
     report(L"FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
-  std::wprintf(L"Software adapter objects released. Stub rejection is an "
-               L"experiment, not a working FeMe adapter.\n");
+  std::wprintf(
+      BufferCopy
+          ? L"Software WARP buffer-copy probe finished; not FeMe coverage.\n"
+          : L"Software adapter objects released. Stub rejection is an "
+            L"experiment, not a working FeMe adapter.\n");
   return Released && Opened && ExpectedDDICalls &&
                  (WarpBootstrapAudit ? FAILED(Result)
                                      : (Stub || WarpShim || WarpBootstrap

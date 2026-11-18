@@ -1159,6 +1159,92 @@ An additional full `check-feme` build reached LIT but was stopped after
 several minutes with Runtime CPU GoogleTest shards still running. No
 full-suite pass is claimed; the completed scoped results are listed above.
 
+### W0(d) public buffer-copy and readback oracle (VM)
+
+The 2026-11-18 follow-up adds opt-in resource-data tests to the LLVM-owned
+`windows-adapter-probe` runner. The previous queue/fence test proves ordering
+of a signal, not that any buffer data traverses a command list. The new
+oracle provides that reference behavior for W1(a)'s future owned resource
+path. It does not import the separate KMT control's allocations or assume
+that a runtime callback accepts a KMT device/allocation handle.
+
+The two new CLI modes are:
+
+- `--warp-buffer-copy`: enumerate WARP, require vendor/device/software
+  identity, create a device and require its adapter LUID to match.
+- `--software-buffer-copy DLL`: explicitly load the requested software
+  module, require WARP identity and matching device LUID, then also require
+  the loaded canonical `d3d10warp.dll` handle to equal the requested module.
+
+Both use only public D3D12 calls: create a 64 KiB default heap and placed
+buffer, a 128 KiB committed upload buffer and a 64 KiB committed readback
+buffer. Initialize the upload buffer's two halves with different,
+offset-dependent byte patterns, including high-offset bits rather than a
+pattern repeating every 256 bytes. Record three non-overlapping copies
+into the placed buffer, transition it from `COPY_DEST` to `COPY_SOURCE`,
+and copy its entire contents to readback:
+
+| Region | Destination offset | Upload offset | Bytes |
+|---|---|---|---|
+| Prefix baseline | 0 | 0 | 257 |
+| Patch | 257 | 65536 + 113 | 60013 |
+| Tail baseline | 60270 | 60270 | 5266 |
+
+The copy queue executes the closed copy list, signals a fence and waits
+at most 10000 ms. Only after completion does the probe map readback and
+compare **all 65,536 bytes** against the CPU oracle, including both guards
+and patch boundaries. Map read/write ranges are explicit. Successful runs
+release resources, heap, allocator/list, queue, fence/event and device.
+Fence/event creation and completion-event registration precede submission.
+If submitted work's completion cannot be established, work resources,
+queue/device and synchronization objects are retained until process exit
+rather than released while work may still reference them. Failed operations
+and validation mismatches return failure; no device-loss recovery is claimed.
+The failure-retention policy is not a pending-work fault-injection test.
+
+`ExpectBufferCopy.cmake` requires exit zero **and** the exact full-coverage
+completion marker. A successful old queue-only test, load failure or
+incomplete copy cannot satisfy that assertion. Nine CPU-only fixtures test
+valid data, wrong length, a missing mapping, corruption in the prefix,
+first/last patch bytes, first tail byte and final buffer byte, plus fixed
+pattern values independent of the checker. They are data-oracle controls,
+not mocks of D3D12 failure behavior.
+
+Validation uses Windows 11 Enterprise build 26300 ARM64, MSVC 19.44.35230.0
+and SDK/WDK 10.0.26100.0:
+
+| Configuration | LIT outcome |
+|---|---|
+| x64 inbox runtime 10.0.26100.9818 | 15/15, repeated three times |
+| Native ARM64 inbox runtime 10.0.26100.9818 | 15/15, repeated three times |
+| Native ARM64 Agility 619 core 1.619.5.0.20260730.3 | 15/15, repeated three times |
+| Shared-runner x64 six-DDI negotiation regression | 16/16 |
+
+Each 15-test suite contains the four original adapter controls, the two
+real buffer-copy paths and nine CPU fixtures. Agility runs reported the
+application-local `AgilitySDK\D3D12Core.dll`; inbox runs reported the system
+core, and all reported system WARP. The six-DDI regression covers
+0010/0022/0070/0071/0072/0110, expected 0070/0071 rejection, wrong-stage
+controls and disabled-paging controls. These results do not replace the
+earlier 29-version matrix or imply that its unexplained rejection is fixed.
+
+Use the existing standalone configure instructions and matching developer
+environment/Python with LIT timeout support, then run:
+
+```powershell
+cmake --build $build --target check-feme-windows-probes --parallel 2
+& "$build\feme-windows-adapter-probe.exe" --warp-buffer-copy
+& "$build\feme-windows-adapter-probe.exe" --software-buffer-copy `
+  "$env:SystemRoot\System32\d3d10warp.dll"
+```
+
+For Agility, configure with the existing matching-architecture
+`FEME_PROBE_AGILITY_CORE` and `FEME_PROBE_AGILITY_VERSION=619` options.
+No new shader compiler, binary fixture, private WARP ABI, installed driver
+or system change is required. W0(g) still needs an owned runtime/DDI
+resource lifecycle and a real FeMe device; this is reference-WARP coverage,
+not a FeMe pass or closure of W0(d)'s owned-device provenance gate.
+
 ### Reproduce the B investigation
 
 In the Windows development VM's x64 developer shell, use an SDK/WDK with the

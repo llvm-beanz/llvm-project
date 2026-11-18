@@ -230,6 +230,13 @@ failure/cleanup coverage. It establishes a public OS allocation/residency
 control, not integration with FeMe's runtime-owned allocation callbacks,
 an owned D3D12 heap/resource or closure of W0(g). No transfer between those
 devices is implemented; their handles must not be interchanged.
+The [reference buffer-copy oracle](W0WindowsIntegrationProbe.md#w0d-public-buffer-copy-and-readback-oracle-vm)
+now verifies an ordinary default heap/placed buffer, upload/readback
+resources, copy-list submission, fence completion and all 65,536 result
+bytes on x64 inbox, native ARM64 inbox and native Agility 619. This supplies
+W0(d)'s resource-data reference test for the future W1(a) heap/buffer path,
+not FeMe execution or a bridge from the separate KMT device. Both reference
+entry paths and nine CPU validation controls run through LIT.
 The negative public general-provider search and the successful WARP-specific
 route are different findings; do not classify all further research as blocked.
 Installed-path evaluation remains separate. No driver installation, signing
@@ -266,8 +273,9 @@ is also recorded in that document. The strict owned-shim audit now checks
 adapter identity, loaded-module handle identity and absence of reference
 forwarding, but no real FeMe device/build-provenance pairing exists yet.
 W0(e)/W0(f)'s
-standalone runner now implements reference-WARP identity checking and the
-public queue/fence oracle test in both the host and the container. It cannot
+standalone runner implements reference-WARP identity checking and the
+public queue/fence oracle test in both the host and the container. The VM
+follow-up adds the byte-exact buffer-copy/readback oracle described above. It cannot
 yet verify a real FeMe module/device pairing; the selected WARP-compatible
 path is no longer blocked on a product-choice gate.
 
