@@ -1373,6 +1373,113 @@ residency or mapped-resource lifecycle follows from this rejection.
 No private WARP ABI, system binary replacement or kernel-driver change
 was used.
 
+### W0(g) runtime-owned monitored-fence CPU lifecycle (VM)
+
+The next 2026-11-18 follow-up proves an independent synchronization service
+through the runtime-owned KT device callbacks, without creating a separate
+KMT device, submitting GPU commands or supplying private WARP data.
+It does not bypass the unresolved allocation contract. In particular, the
+public [IoMmu model](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/iommu-model)
+still requires the UMD to allocate through VidMm for residency, resource
+sharing and primary-surface visibility. Shared CPU/GPU address space is not
+permission to substitute a bare `VirtualAlloc` region for that contract.
+The inspected legacy and 0022 allocation callback structures still have no
+documented size/standard-allocation input bridging the earlier KMT control.
+
+The default-off `FEME_PROBE_MONITORED_FENCE` variant:
+
+1. Requires the real runtime device handle and all four public KT
+   create/destroy/CPU-wait/CPU-signal callbacks before doing any work.
+2. Calls `pfnCreateSynchronizationObject2Cb` with
+   `D3DDDI_MONITORED_FENCE`, initial value zero, engine affinity 1 and
+   otherwise-zero flags/inputs. A nonzero sync handle and an aligned
+   read-only CPU mapping are required. No GPU address is dereferenced.
+3. Creates a fresh nonsignaled auto-reset event, requires the initial mapped
+   value to be zero, then registers an asynchronous
+   `pfnWaitForSynchronizationObjectFromCpuCb` wait for fence value 7.
+4. Requires an immediate event poll to return `WAIT_TIMEOUT`: the wait
+   must actually be pending before signaling, not an already-satisfied
+   wait mistaken for progress.
+5. Calls `pfnSignalSynchronizationObjectFromCpuCb` with value 7. Waits up to
+   10,000 ms for the event and requires the mapped fence value to equal 7.
+   The probe only reads the mapping; it never writes the read-only page.
+6. Closes the completed event and destroys the sync object through
+   `pfnDestroySynchronizationObjectCb`. Every successfully created object
+   with a valid handle is offered to destroy, including incomplete
+   mapping/initial-value and later wait/signal failure cases.
+
+Only exact `S_OK` is accepted from each callback. Exceptions, early wakeup,
+timeout, incorrect mapped values, missing outputs and failed cleanup
+cannot satisfy `--expect-monitored-fence`. If an attempted asynchronous
+wait may still be registered, the failure path explicitly retains its event
+until process exit rather than closing a potentially live registration.
+The telemetry records each attempted/returned stage, HRESULT, mapped
+values, pending/completed state, retained event, exception and Win32 error.
+See the public
+[sync object structure](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dukmdt/ns-d3dukmdt-_d3dddi_synchronizationobjectinfo2)
+and [CPU wait callback](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/nc-d3dumddi-pfnd3dddi_waitforsynchronizationobjectfromcpucb).
+
+Measured results with SDK/WDK 10.0.26100.0 on the existing ARM64 VM:
+
+| Runtime configuration | DDIs 0010 / 0022 / 0072 / 0110 |
+|---|---|
+| x64 inbox, emulated on ARM64 | All four callbacks `S_OK`; pending wait, completion and mapped 0 -> 7 verified |
+| Native ARM64 inbox | Same |
+| Native ARM64 Agility 619 | Same; executable-local `AgilitySDK\D3D12Core.dll` verified |
+
+No event is retained on success. Entry counters remain
+`Open=1 Size=1 Versions=2 Caps=1 Optional=0 Fill=0 Create=1 Close=1 Destroy=0`,
+with exact pinned DDI, WARP identity and owned-module provenance checks.
+The **device** result remains deliberate `E_NOTIMPL` after successful sync
+cleanup; the object-destroy callback above is not `DestroyDevice`.
+DDIs 0070/0071 still return `DXGI_ERROR_UNSUPPORTED` before device creation,
+with no monitored-fence attempt. No reference forwarding module is loaded.
+
+LIT-only validation, Debug assertions, disabled PCH and `/W4 /WX`:
+
+- The six-DDI matrix passed 24/24 on x64 inbox, native inbox and native
+  Agility, each repeated three times. This includes wrong-stage and
+  disabled paging/GPU-VA expectation controls.
+- Native and x64 bootstrap suites each passed 57/57: 26 new monitored-fence
+  scenarios plus the existing 31 controls. New cases cover successful
+  lifecycle, missing callbacks/device/table/outputs, misaligned mapping,
+  incorrect initial/completed values, early event, wait timeout, and
+  failure, unexpected positive status and exception at each callback.
+  The timeout fixture exercises the actual 10-second bound.
+- Reconfiguration of the x64 matrix passed default-off negotiation and
+  disabled-probe controls (28/28), paging (24/24), and exact GPU VA
+  rejection (24/24), without stale generated tests.
+- All 15 native Agility reference adapter/buffer-copy cases still pass.
+
+To reproduce, use the matching developer environment and Python with LIT
+timeout support:
+
+```powershell
+$repo = 'C:\Users\cbieneman\dev\llvm-project\feme'
+$build = 'C:\Users\cbieneman\dev\warp-monitored-fence-probe'
+$versions = @('0010', '0022', '0070', '0071', '0072', '0110')
+$ddi = ($versions | ForEach-Object { "D3D12DDI_SUPPORTED_$_" }) -join ';'
+cmake -S "$repo\utils\windows-warp-interposition" -B $build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=cl.exe `
+  -DCMAKE_SYSTEM_VERSION=10.0.26100.0 `
+  "-DCMAKE_CXX_FLAGS_DEBUG=/Z7 /Ob0 /Od /RTC1" `
+  -DFEME_PROBE_DDI_MATRIX_ONLY=ON -DFEME_PROBE_MONITORED_FENCE=ON `
+  "-DFEME_PROBE_DDI_VERSIONS=$ddi" `
+  "-DFEME_PROBE_DDI_EXPECT_UNSUPPORTED=D3D12DDI_SUPPORTED_0070;D3D12DDI_SUPPORTED_0071"
+cmake --build $build --target check-feme-windows-probes --parallel 2
+```
+
+For native Agility, use the same separate-build compiler definition and
+matching-core staging procedure as the GPU VA section above. The
+standalone `windows-adapter-bootstrap` project runs the 57 fixture/direct
+controls through `check-feme-windows-probes`. Monitored-fence probing
+requires explicit DDI versions and cannot be combined with paging or
+GPU VA probing in one variant; other variants remain default-off.
+
+This establishes a live public runtime-owned CPU fence service, not an
+`ID3D12Fence` implementation, GPU queue execution, runtime-owned allocation/
+residency or a real FeMe D3D12 device. W0(g) and W1(a) remain open.
+
 ### Reproduce the B investigation
 
 In the Windows development VM's x64 developer shell, use an SDK/WDK with the

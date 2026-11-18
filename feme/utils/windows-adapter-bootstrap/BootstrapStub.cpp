@@ -72,6 +72,13 @@
 #error "Run GPU VA reservation separately from the other callback probes."
 #endif
 
+#if defined(FEME_BOOTSTRAP_PROBE_MONITORED_FENCE) &&                           \
+    (defined(FEME_BOOTSTRAP_PROBE_CALLBACK) ||                                 \
+     defined(FEME_BOOTSTRAP_PROBE_PAGING_QUEUE) ||                             \
+     defined(FEME_BOOTSTRAP_PROBE_GPU_VA))
+#error "Run monitored-fence probing separately from the other callback probes."
+#endif
+
 namespace {
 struct Counters {
   LONG OpenAdapter12 = 0;
@@ -110,6 +117,135 @@ CreateDeviceAudit GCreateDeviceAudit;
 feme::probe::BootstrapContractAudit GContractAudit;
 feme::probe::PagingQueueProbe GPagingQueueProbe;
 feme::probe::GpuVirtualAddressProbe GGpuVirtualAddressProbe;
+feme::probe::MonitoredFenceProbe GMonitoredFenceProbe;
+
+#ifdef FEME_BOOTSTRAP_PROBE_MONITORED_FENCE
+HRESULT exerciseMonitoredFence(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
+                               D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 &Create,
+                               HANDLE Event) {
+  auto &Probe = GMonitoredFenceProbe;
+  const auto *Fence = static_cast<volatile const UINT64 *>(
+      Create.Info.MonitoredFence.FenceValueCPUVirtualAddress);
+  Probe.InitialValue = *Fence;
+  if (Probe.InitialValue != 0)
+    return E_FAIL;
+
+  UINT64 Target = feme::probe::MonitoredFenceTarget;
+  D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU Wait{};
+  Wait.ObjectCount = 1;
+  Wait.ObjectHandleArray = &Create.hSyncObject;
+  Wait.FenceValueArray = &Target;
+  Wait.hAsyncEvent = Event;
+  Probe.WaitAttempted = true;
+  Probe.WaitResult =
+      Args->pKTCallbacks->pfnWaitForSynchronizationObjectFromCpuCb(
+          Args->hRTDevice.handle, &Wait);
+  Probe.WaitReturned = true;
+  if (Probe.WaitResult != S_OK)
+    return FAILED(Probe.WaitResult) ? Probe.WaitResult : E_FAIL;
+  DWORD Before = WaitForSingleObject(Event, 0);
+  Probe.EventCompleted = Before == WAIT_OBJECT_0;
+  Probe.WaitWasPending = Before == WAIT_TIMEOUT;
+  if (!Probe.WaitWasPending) {
+    if (Before == WAIT_FAILED)
+      Probe.Win32Error = GetLastError();
+    return E_FAIL;
+  }
+
+  D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMCPU Signal{};
+  Signal.ObjectCount = 1;
+  Signal.ObjectHandleArray = &Create.hSyncObject;
+  Signal.FenceValueArray = &Target;
+  Probe.SignalAttempted = true;
+  Probe.SignalResult =
+      Args->pKTCallbacks->pfnSignalSynchronizationObjectFromCpuCb(
+          Args->hRTDevice.handle, &Signal);
+  Probe.SignalReturned = true;
+  if (Probe.SignalResult != S_OK)
+    return FAILED(Probe.SignalResult) ? Probe.SignalResult : E_FAIL;
+  DWORD After = WaitForSingleObject(Event, 10000);
+  Probe.EventCompleted = After == WAIT_OBJECT_0;
+  if (!Probe.EventCompleted) {
+    Probe.Win32Error = After == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT;
+    return HRESULT_FROM_WIN32(Probe.Win32Error);
+  }
+  Probe.CompletedValue = *Fence;
+  return Probe.CompletedValue == Target ? S_OK : E_FAIL;
+}
+
+HRESULT probeMonitoredFence(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
+  auto &Probe = GMonitoredFenceProbe;
+  Probe.Enabled = true;
+  if (!Args || !Args->hRTDevice.handle)
+    return E_INVALIDARG;
+  if (!Args->pKTCallbacks ||
+      !Args->pKTCallbacks->pfnCreateSynchronizationObject2Cb ||
+      !Args->pKTCallbacks->pfnDestroySynchronizationObjectCb ||
+      !Args->pKTCallbacks->pfnWaitForSynchronizationObjectFromCpuCb ||
+      !Args->pKTCallbacks->pfnSignalSynchronizationObjectFromCpuCb)
+    return E_NOINTERFACE;
+
+  D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 Create{};
+  Create.Info.Type = D3DDDI_MONITORED_FENCE;
+  Create.Info.MonitoredFence.EngineAffinity = 1;
+  Probe.CreateAttempted = true;
+  DWORD Code = 0;
+  __try {
+    Probe.CreateResult = Args->pKTCallbacks->pfnCreateSynchronizationObject2Cb(
+        Args->hRTDevice.handle, &Create);
+    Probe.CreateReturned = true;
+  } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = Code;
+    return E_FAIL;
+  }
+  if (Probe.CreateResult != S_OK)
+    return FAILED(Probe.CreateResult) ? Probe.CreateResult : E_FAIL;
+
+  Probe.HasSyncObject = Create.hSyncObject != 0;
+  auto Address = reinterpret_cast<std::uintptr_t>(
+      Create.Info.MonitoredFence.FenceValueCPUVirtualAddress);
+  Probe.HasFenceMapping = Address && Address % alignof(UINT64) == 0;
+  if (!Probe.HasSyncObject)
+    return E_FAIL;
+  HRESULT Result = E_FAIL;
+  if (Probe.HasFenceMapping) {
+    HANDLE Event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!Event) {
+      Probe.Win32Error = GetLastError();
+      Result = HRESULT_FROM_WIN32(Probe.Win32Error);
+    } else {
+      __try {
+        Result = exerciseMonitoredFence(Args, Create, Event);
+      } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+        Probe.ExceptionCode = Code;
+        Result = E_FAIL;
+      }
+      if (Probe.WaitAttempted && !Probe.EventCompleted) {
+        // Keep a potentially registered async event alive until process exit.
+        Probe.EventRetained = true;
+      } else if (!CloseHandle(Event)) {
+        Probe.Win32Error = GetLastError();
+        Result = HRESULT_FROM_WIN32(Probe.Win32Error);
+      }
+    }
+  }
+
+  D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT Destroy{};
+  Destroy.hSyncObject = Create.hSyncObject;
+  Probe.DestroyAttempted = true;
+  __try {
+    Probe.DestroyResult = Args->pKTCallbacks->pfnDestroySynchronizationObjectCb(
+        Args->hRTDevice.handle, &Destroy);
+    Probe.DestroyReturned = true;
+  } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = Code;
+    return E_FAIL;
+  }
+  if (Probe.DestroyResult != S_OK)
+    return FAILED(Probe.DestroyResult) ? Probe.DestroyResult : E_FAIL;
+  return Result;
+}
+#endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_GPU_VA
 HRESULT probeGpuVirtualAddress(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
@@ -331,6 +467,11 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
   if (FAILED(GpuVaResult))
     return GpuVaResult;
 #endif
+#ifdef FEME_BOOTSTRAP_PROBE_MONITORED_FENCE
+  HRESULT FenceResult = probeMonitoredFence(Args);
+  if (FAILED(FenceResult))
+    return FenceResult;
+#endif
   // A real device table is out of scope for this experiment; fail loudly and
   // distinctly so a caller cannot mistake this for the generic rejection
   // windows-adapter-probe's RejectionStub already measures.
@@ -487,6 +628,11 @@ extern "C" __declspec(dllexport) void APIENTRY
 FeMeBootstrapGetGpuVirtualAddressProbe(
     feme::probe::GpuVirtualAddressProbe *Probe) {
   *Probe = GGpuVirtualAddressProbe;
+}
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetMonitoredFenceProbe(feme::probe::MonitoredFenceProbe *Probe) {
+  *Probe = GMonitoredFenceProbe;
 }
 
 extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(

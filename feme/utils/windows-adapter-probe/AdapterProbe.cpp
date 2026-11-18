@@ -304,8 +304,11 @@ int wmain(int Argc, wchar_t **Argv) {
   bool ExpectGpuVaRejected =
       WarpBootstrapAudit && Argc == 4 &&
       std::wcscmp(Argv[3], L"--expect-gpu-va-rejected") == 0;
-  ExpectCreateDevice |=
-      ExpectCallback || ExpectPagingQueue || ExpectGpuVa || ExpectGpuVaRejected;
+  bool ExpectMonitoredFence =
+      WarpBootstrapAudit && Argc == 4 &&
+      std::wcscmp(Argv[3], L"--expect-monitored-fence") == 0;
+  ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue || ExpectGpuVa ||
+                        ExpectGpuVaRejected || ExpectMonitoredFence;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
        !WarpBootstrapAudit && !WarpBufferCopy) ||
       (WarpBootstrapAudit && Argc == 4 && !ExpectCreateDevice &&
@@ -317,7 +320,7 @@ int wmain(int Argc, wchar_t **Argv) {
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
         L"--expect-callback | --expect-paging-queue | --expect-gpu-va | "
-        L"--expect-gpu-va-rejected]]\n",
+        L"--expect-gpu-va-rejected | --expect-monitored-fence]]\n",
         Argv[0]);
     return 1;
   }
@@ -375,6 +378,8 @@ int wmain(int Argc, wchar_t **Argv) {
   using GetPagingQueueProbe = void(APIENTRY *)(feme::probe::PagingQueueProbe *);
   using GetGpuVirtualAddressProbe =
       void(APIENTRY *)(feme::probe::GpuVirtualAddressProbe *);
+  using GetMonitoredFenceProbe =
+      void(APIENTRY *)(feme::probe::MonitoredFenceProbe *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
@@ -383,6 +388,7 @@ int wmain(int Argc, wchar_t **Argv) {
   GetContractAudit ReadContractAudit = nullptr;
   GetPagingQueueProbe ReadPagingQueueProbe = nullptr;
   GetGpuVirtualAddressProbe ReadGpuVirtualAddressProbe = nullptr;
+  GetMonitoredFenceProbe ReadMonitoredFenceProbe = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -423,6 +429,14 @@ int wmain(int Argc, wchar_t **Argv) {
         GetProcAddress(Module, "FeMeBootstrapGetPagingQueueProbe"));
     ReadGpuVirtualAddressProbe = reinterpret_cast<GetGpuVirtualAddressProbe>(
         GetProcAddress(Module, "FeMeBootstrapGetGpuVirtualAddressProbe"));
+    ReadMonitoredFenceProbe = reinterpret_cast<GetMonitoredFenceProbe>(
+        GetProcAddress(Module, "FeMeBootstrapGetMonitoredFenceProbe"));
+    if (ExpectMonitoredFence && !ReadMonitoredFenceProbe) {
+      report(L"GetProcAddress(FeMeBootstrapGetMonitoredFenceProbe)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
     if ((ExpectGpuVa || ExpectGpuVaRejected) && !ReadGpuVirtualAddressProbe) {
       report(L"GetProcAddress(FeMeBootstrapGetGpuVirtualAddressProbe)",
              HRESULT_FROM_WIN32(GetLastError()));
@@ -689,6 +703,54 @@ int wmain(int Argc, wchar_t **Argv) {
          Probe.FreeResult != S_OK || Probe.ExceptionCode)) {
       report(L"Expected kernel GPU VA reservation rejection (E_INVALIDARG)",
              E_FAIL);
+      ExpectedDDICalls = false;
+    }
+  }
+  if (ReadMonitoredFenceProbe) {
+    feme::probe::MonitoredFenceProbe Probe;
+    ReadMonitoredFenceProbe(&Probe);
+    std::wprintf(
+        L"Kernel monitored fence probe: Enabled=%u "
+        L"CreateAttempted=%u CreateReturned=%u CreateResult=0x%08lx "
+        L"HasSyncObject=%u HasFenceMapping=%u InitialValue=%llu "
+        L"WaitAttempted=%u WaitReturned=%u WaitResult=0x%08lx "
+        L"WaitWasPending=%u SignalAttempted=%u SignalReturned=%u "
+        L"SignalResult=0x%08lx EventCompleted=%u EventRetained=%u "
+        L"CompletedValue=%llu DestroyAttempted=%u DestroyReturned=%u "
+        L"DestroyResult=0x%08lx ExceptionCode=0x%08lx Win32Error=%lu\n",
+        unsigned(Probe.Enabled), unsigned(Probe.CreateAttempted),
+        unsigned(Probe.CreateReturned),
+        static_cast<unsigned long>(Probe.CreateResult),
+        unsigned(Probe.HasSyncObject), unsigned(Probe.HasFenceMapping),
+        static_cast<unsigned long long>(Probe.InitialValue),
+        unsigned(Probe.WaitAttempted), unsigned(Probe.WaitReturned),
+        static_cast<unsigned long>(Probe.WaitResult),
+        unsigned(Probe.WaitWasPending), unsigned(Probe.SignalAttempted),
+        unsigned(Probe.SignalReturned),
+        static_cast<unsigned long>(Probe.SignalResult),
+        unsigned(Probe.EventCompleted), unsigned(Probe.EventRetained),
+        static_cast<unsigned long long>(Probe.CompletedValue),
+        unsigned(Probe.DestroyAttempted), unsigned(Probe.DestroyReturned),
+        static_cast<unsigned long>(Probe.DestroyResult),
+        static_cast<unsigned long>(Probe.ExceptionCode),
+        static_cast<unsigned long>(Probe.Win32Error));
+    if (Probe.EventRetained)
+      std::wprintf(L"Retaining a potentially registered monitored-fence event "
+                   L"until process exit after failure.\n");
+    if (ExpectMonitoredFence &&
+        (!Probe.Enabled || !Probe.CreateAttempted || !Probe.CreateReturned ||
+         Probe.CreateResult != S_OK || !Probe.HasSyncObject ||
+         !Probe.HasFenceMapping || Probe.InitialValue != 0 ||
+         !Probe.WaitAttempted || !Probe.WaitReturned ||
+         Probe.WaitResult != S_OK || !Probe.WaitWasPending ||
+         !Probe.SignalAttempted || !Probe.SignalReturned ||
+         Probe.SignalResult != S_OK || !Probe.EventCompleted ||
+         Probe.EventRetained ||
+         Probe.CompletedValue != feme::probe::MonitoredFenceTarget ||
+         !Probe.DestroyAttempted || !Probe.DestroyReturned ||
+         Probe.DestroyResult != S_OK || Probe.ExceptionCode ||
+         Probe.Win32Error)) {
+      report(L"Expected successful kernel monitored-fence lifecycle", E_FAIL);
       ExpectedDDICalls = false;
     }
   }

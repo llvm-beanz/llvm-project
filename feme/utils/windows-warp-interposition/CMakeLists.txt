@@ -24,6 +24,13 @@ option(FEME_PROBE_PAGING_QUEUE
   "Exercise public kernel paging-queue create/destroy in the DDI matrix" OFF)
 option(FEME_PROBE_GPU_VA
   "Exercise public kernel GPU virtual-address reserve/free in the DDI matrix" OFF)
+option(FEME_PROBE_MONITORED_FENCE
+  "Exercise public runtime-owned monitored-fence CPU wait/signal in the DDI matrix" OFF)
+if(FEME_PROBE_MONITORED_FENCE AND
+   (FEME_PROBE_GPU_VA OR FEME_PROBE_PAGING_QUEUE))
+  message(FATAL_ERROR
+    "Run monitored-fence probing separately from the other callback probes.")
+endif()
 option(FEME_PROBE_GPU_VA_EXPECT_INVALIDARG
   "Require the measured E_INVALIDARG reservation rejection, not reserve/free success" OFF)
 if(FEME_PROBE_GPU_VA_EXPECT_INVALIDARG AND NOT FEME_PROBE_GPU_VA)
@@ -34,7 +41,8 @@ if(FEME_PROBE_GPU_VA AND FEME_PROBE_PAGING_QUEUE)
   message(FATAL_ERROR
     "Run GPU VA reservation and paging-queue probes separately.")
 endif()
-if((FEME_PROBE_PAGING_QUEUE OR FEME_PROBE_GPU_VA) AND
+if((FEME_PROBE_PAGING_QUEUE OR FEME_PROBE_GPU_VA OR
+    FEME_PROBE_MONITORED_FENCE) AND
    NOT FEME_PROBE_DDI_VERSIONS)
   message(FATAL_ERROR
     "Set FEME_PROBE_DDI_VERSIONS when enabling kernel callback probes.")
@@ -206,6 +214,10 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
     target_compile_definitions(${VARIANT}-shim PRIVATE
       FEME_BOOTSTRAP_PROBE_GPU_VA=1)
   endif()
+  if(FEME_PROBE_MONITORED_FENCE)
+    target_compile_definitions(${VARIANT}-shim PRIVATE
+      FEME_BOOTSTRAP_PROBE_MONITORED_FENCE=1)
+  endif()
   set_target_properties(${VARIANT}-shim PROPERTIES
     OUTPUT_NAME d3d10warp RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}"
     ARCHIVE_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
@@ -230,6 +242,9 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
       set(EXPECTED_STAGE --expect-gpu-va-rejected)
     endif()
   endif()
+  if(FEME_PROBE_MONITORED_FENCE)
+    set(EXPECTED_STAGE --expect-monitored-fence)
+  endif()
   if(DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
     set(EXPECTED_STAGE --expect-unsupported)
     set(UNEXPECTED_STAGE --expect-create-device)
@@ -242,6 +257,15 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
       "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
       "-DEXPECTATION=${UNEXPECTED_STAGE}"
       -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
+  if(NOT FEME_PROBE_MONITORED_FENCE AND
+     NOT DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
+    feme_add_probe_test(NAME "os-routed-${VARIANT}-monitored-fence-disabled"
+      COMMAND ${CMAKE_COMMAND}
+        "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
+        "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
+        "-DEXPECTATION=--expect-monitored-fence"
+        -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
+  endif()
   if(NOT FEME_PROBE_PAGING_QUEUE AND
      NOT DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
     feme_add_probe_test(NAME "os-routed-${VARIANT}-paging-disabled"

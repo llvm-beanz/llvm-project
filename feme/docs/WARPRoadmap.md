@@ -246,6 +246,15 @@ Strict LIT gates distinguish this measured rejection from successful
 reserve/free; only mocks exercise successful free and its failure paths.
 Do not substitute GpuMmu address-space management for an audited WARP
 CPU-memory/resource contract or infer that all public integration is blocked.
+The [runtime-owned monitored-fence lifecycle](W0WindowsIntegrationProbe.md#w0g-runtime-owned-monitored-fence-cpu-lifecycle-vm)
+now succeeds on all three configurations at DDIs 0010/0022/0072/0110:
+create an initially-zero fence, register a pending CPU event wait, signal
+value 7 through the CPU callback, observe event completion and the read-only
+mapped value, then destroy the object. Strict LIT checks and 26 mock
+scenarios cover this independent synchronization service, not a real FeMe
+fence/device or allocation. The public IoMmu contract still requires VidMm
+allocation; shared CPU addresses do not justify bypassing it with
+`VirtualAlloc` alone. W0(g)'s resource/device gate remains open.
 The negative public general-provider search and the successful WARP-specific
 route are different findings; do not classify all further research as blocked.
 Installed-path evaluation remains separate. No driver installation, signing

@@ -63,6 +63,34 @@ struct GpuVirtualAddressProbe {
   std::uint32_t ExceptionCode = 0;
 };
 
+constexpr std::uint64_t MonitoredFenceTarget = 7;
+
+/// Observations from an owned-runtime CPU monitored-fence round trip.
+struct MonitoredFenceProbe {
+  bool Enabled = false;
+  bool CreateAttempted = false;
+  bool CreateReturned = false;
+  std::int32_t CreateResult = 0;
+  bool HasSyncObject = false;
+  bool HasFenceMapping = false;
+  std::uint64_t InitialValue = 0;
+  bool WaitAttempted = false;
+  bool WaitReturned = false;
+  std::int32_t WaitResult = 0;
+  bool WaitWasPending = false;
+  bool SignalAttempted = false;
+  bool SignalReturned = false;
+  std::int32_t SignalResult = 0;
+  bool EventCompleted = false;
+  bool EventRetained = false;
+  std::uint64_t CompletedValue = 0;
+  bool DestroyAttempted = false;
+  bool DestroyReturned = false;
+  std::int32_t DestroyResult = 0;
+  std::uint32_t ExceptionCode = 0;
+  std::uint32_t Win32Error = 0;
+};
+
 } // namespace probe
 } // namespace feme
 

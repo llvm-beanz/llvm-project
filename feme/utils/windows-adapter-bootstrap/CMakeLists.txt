@@ -28,6 +28,21 @@ feme_add_probe_test(NAME direct-openadapter12 COMMAND feme-windows-adapter-direc
   $<TARGET_FILE:feme-adapter-bootstrap-stub>)
 
 if(MSVC)
+  add_executable(feme-monitored-fence-tests BootstrapStub.cpp MonitoredFenceTests.cpp)
+  target_compile_definitions(feme-monitored-fence-tests PRIVATE
+    FEME_BOOTSTRAP_PROBE_MONITORED_FENCE=1)
+  target_compile_options(feme-monitored-fence-tests PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+  foreach(SCENARIO success create-failure create-status create-exception
+                   missing-object missing-mapping misaligned-mapping initial-value
+                   wait-failure wait-status wait-exception early-event
+                   signal-failure signal-status signal-exception timeout
+                   wrong-completed destroy-failure destroy-status destroy-exception
+                   missing-create missing-destroy missing-wait missing-signal
+                   missing-device missing-table)
+    feme_add_probe_test(NAME "monitored-fence-fixture-${SCENARIO}"
+      COMMAND feme-monitored-fence-tests "${SCENARIO}")
+  endforeach()
+
   add_executable(feme-gpu-va-tests BootstrapStub.cpp GpuVirtualAddressTests.cpp)
   target_compile_definitions(feme-gpu-va-tests PRIVATE
     FEME_BOOTSTRAP_PROBE_GPU_VA=1)
