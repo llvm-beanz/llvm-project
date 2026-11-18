@@ -154,6 +154,13 @@ tools = [
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
 
+# FXC supplies real tokenized SM5 bytecode, unlike DXC's SM6 DXIL output.
+# Run from a Windows SDK developer shell to make this optional tool available.
+_fxc = shutil.which("fxc")
+if _fxc:
+    config.available_features.add("system-fxc")
+    config.substitutions.append(("%fxc", "'%s'" % _fxc))
+
 # `dxc` (the Microsoft DirectX Shader Compiler) is an external tool this tree
 # does not build, unlike every other tool above -- it is the only way this
 # tree can turn real HLSL into a SPIR-V binary carrying a *structured*

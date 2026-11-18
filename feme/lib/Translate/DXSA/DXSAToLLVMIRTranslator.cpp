@@ -842,6 +842,7 @@ private:
   llvm::DenseMap<llvm::Value *, llvm::Value *> SaturateCache;
   /// Shader stage name for `!dx.shaderModel` ("ps", "vs", ...).
   llvm::StringRef Stage = "ps";
+  dxsa::DclThreadGroup ThreadGroup;
   /// `!dx.entryPoints`' shader flags mask. `AllResourcesBound` is set for
   /// every shader: shader model 5.x binds its resources for the whole
   /// draw, which is exactly what the flag asserts.
@@ -1324,7 +1325,13 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
   for (mlir::Operation &Op : *Shader.getBodyBlock()) {
     if (auto Dcl = llvm::dyn_cast<dxsa::DclGlobalFlags>(&Op))
       ShaderFlags |= toShaderFlags(Dcl.getFlags());
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclIndexRange>(&Op)) {
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclThreadGroup>(&Op)) {
+      if (ThreadGroup) {
+        Dcl.emitError("duplicate thread-group declaration");
+        return false;
+      }
+      ThreadGroup = Dcl;
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclIndexRange>(&Op)) {
       DstOperandAttr Operand = Dcl.getOperandAttr();
       std::optional<unsigned> Start = registerNumber(Operand.getIndex());
       if (!Start || Operand.getType() != OperandType::v)
@@ -4298,17 +4305,28 @@ void Translator::emitMetadata(llvm::Function *Entry) {
 
   llvm::Metadata *Signatures[] = {emitSignature(Inputs), emitSignature(Outputs),
                                   nullptr};
-  auto *Properties = llvm::MDNode::get(
-      Context,
-      {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0)),
-       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-           llvm::Type::getInt64Ty(Context), ShaderFlags))});
+  llvm::SmallVector<llvm::Metadata *, 4> Properties = {
+      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0)),
+      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+          llvm::Type::getInt64Ty(Context), ShaderFlags))};
+  if (ThreadGroup) {
+    auto *Dimensions = llvm::MDNode::get(
+        Context, {llvm::ConstantAsMetadata::get(
+                      llvm::ConstantInt::get(i32Ty(), ThreadGroup.getX())),
+                  llvm::ConstantAsMetadata::get(
+                      llvm::ConstantInt::get(i32Ty(), ThreadGroup.getY())),
+                  llvm::ConstantAsMetadata::get(
+                      llvm::ConstantInt::get(i32Ty(), ThreadGroup.getZ()))});
+    Properties.push_back(
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 4)));
+    Properties.push_back(Dimensions);
+  }
   llvm::Metadata *EntryFields[] = {
       llvm::ConstantAsMetadata::get(Entry),
       llvm::MDString::get(Context, "main"),
       llvm::MDNode::get(Context, Signatures),
       Resources,
-      Properties,
+      llvm::MDNode::get(Context, Properties),
   };
   Module->getOrInsertNamedMetadata("dx.entryPoints")
       ->addOperand(llvm::MDNode::get(Context, EntryFields));

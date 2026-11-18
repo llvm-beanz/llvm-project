@@ -516,9 +516,12 @@ Specific reporting rules include:
   adapter must return the specified `E_INVALIDARG`/retry behavior rather than
   guessing.
 - During DXIL-only bring-up, DXBC fails pipeline-state creation explicitly.
-  The completed profile must satisfy W0's shader compatibility audit, reusing
-  and extending FeMe's existing DXBC path where required. D3D11-on-12 cannot
-  be assumed to replace that compiler work.
+  The completed profile must satisfy W0's
+  [shader compatibility audit](W0DirectXTestCorpusClassification.md#legacy-shader-compatibility-audit-vm-2026-11-18),
+  including the public SM 5.1 input requirement, reusing and extending
+  FeMe's existing DXBC path where required. Real FXC compute inputs now
+  validate import/IR translation, not full DXIL export or owned-device
+  execution. D3D11-on-12 cannot be assumed to replace that compiler work.
 - Wave lane count is pinned device-wide, and the reported
   `WaveLaneCountMin`/`WaveLaneCountMax` must match FeMe's compile-time wave
   size policy. A shader model that lets a shader request a wave size is

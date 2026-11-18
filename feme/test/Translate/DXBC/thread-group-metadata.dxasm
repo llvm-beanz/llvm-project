@@ -1,0 +1,14 @@
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin | feme-translate --dxsa-to-llvmir | FileCheck %s
+
+cs_5_0
+dcl_thread_group 16, 8, 3
+ret
+
+// CHECK: !dx.entryPoints = !{![[ENTRY:[0-9]+]]}
+// CHECK: ![[THREADS:[0-9]+]] = !{i32 16, i32 8, i32 3}
+// CHECK: ![[PROPERTIES:[0-9]+]] = !{i32 0, i64 256, i32 4, ![[THREADS]]}
+// CHECK: ![[ENTRY]] = !{ptr @main, !"main", !{{[0-9]+}}, null, ![[PROPERTIES]]}

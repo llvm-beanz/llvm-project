@@ -168,6 +168,81 @@ passthrough:
 - `src\D3D12Conf\MultiGPU`, `Multiengine`: typically require specific
   multi-adapter hardware configurations not present in a software-only VM.
 
+## Legacy-shader compatibility audit (VM, 2026-11-18)
+
+### Public contract and compiler boundary
+
+Microsoft's [Resource binding in HLSL](https://learn.microsoft.com/en-us/windows/win32/direct3d12/resource-binding-in-hlsl)
+explicitly states that all Direct3D 12 hardware supports Shader Model 5.1,
+independent of hardware feature level.
+[Shader Model 5.1](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/shader-model-5-1)
+lists the six legacy graphics/compute profiles and their descriptor-array
+binding model. Thus the selected full D3D12 contract cannot be declared
+complete with a DXIL-only application input policy. The roadmap's SM 6.5
+baseline adds requirements; it does not remove SM 5.1 compatibility.
+The corpus's older SM 4.x/5.0 inputs remain regression targets, not proof by
+themselves of which earlier profiles are mandatory.
+
+The four-byte `DXBC` container magic does not distinguish legacy shaders
+from DXIL. FeMe's `DXBCImporter` extracts tokenized `SHDR`/`SHEX` shader
+parts; `DXILImporter` handles `DXIL`/`ILDB` bitcode instead. DXC's SM 6 output
+is therefore not a substitute for testing FXC's legacy compiler output.
+The public [shader-creation DDI](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3d12umddi/ns-d3d12umddi-d3d12ddiarg_create_shader_0026)
+documents a shader-code pointer, not a promise that the runtime converts
+every legacy input into DXIL for an owned UMD. The actual owned-DDI input
+and its import policy still need verification once W1(a) supplies a device;
+neither reference WARP nor D3D11-on-12 establishes that boundary for FeMe.
+
+### LLVM-owned real-compiler regression and measured limits
+
+The original shader in
+[`fxc-legacy-compute.hlsl`](../test/Translate/DXBC/fxc-legacy-compute.hlsl)
+is compiled at test time by the installed Windows SDK FXC as both `cs_5_0`
+and `cs_5_1`. It writes a thread-ID-dependent integer expression to a raw
+UAV at `u3`; the SM 5.1 variant uses `space7`. LIT checks the decoded
+profile/declarations, generated arithmetic/store calls, resource metadata
+and compute group dimensions. In particular, range ID 0 must not replace
+register 3 or discard register space 7. No compiler blob, Microsoft shader
+source or reference-test implementation is checked in.
+
+This exposed and fixed a shared translator bug: `dcl_thread_group` was
+decoded but dropped from `!dx.entryPoints`. The translator now emits the
+DXIL NumThreads property (tag 4), preserving all three dimensions, and
+rejects duplicate declarations explicitly.
+[`thread-group-metadata.dxasm`](../test/Translate/DXBC/thread-group-metadata.dxasm)
+checks a nontrivial `(16, 8, 3)` group without requiring Windows or FXC;
+[`duplicate-thread-group.mlir`](../test/Translate/DXBC/duplicate-thread-group.mlir)
+checks the diagnostic.
+
+Validation in the Windows ARM64 VM with SDK 10.0.26100.0:
+
+- Rebuilt `feme-translate` and `feme` with two build jobs.
+- LIT DXBC importer/translator suites plus the existing DXBC-to-DXIL CLI
+  regression: **144/144 passed**, using native ARM64 FXC.
+- The three focused regressions also passed with emulated x64 FXC:
+  **3/3 passed**.
+- Without FXC on `PATH`, the real-compiler test is correctly **Unsupported**,
+  not a pass; the portable metadata tests do not depend on that feature.
+
+Use a Windows SDK developer shell with `fxc.exe` on `PATH`, then run
+`python llvm\utils\lit\lit.py -sv -j 2 --timeout=60
+build-rel\tools\feme\test\Translate\DXBC
+build-rel\tools\feme\test\Import\DXBC
+build-rel\tools\feme\test\Tools\feme\feme-dxbc-to-dxil.dxasm`
+from the checkout root (one command). Python needs `psutil` for the timeout.
+
+| Remaining compatibility work | Existing roadmap gate |
+|---|---|
+| Full DXIL export of this real raw-UAV shader still exits with `LLVM ERROR: DXIL legalization does not support integer operand for instruction 'call'`. Import and DXIL-shaped IR translation pass, but this pass has not isolated the failing call or demonstrated executable DXIL output for this shader. Investigate the raising/backend boundary rather than treating IR success as completed conversion. | W1(b) compiler/dispatch bring-up |
+| Observe the owned shader DDI inputs, wire the supported legacy import route into PSO creation, and execute/read back this shader against scalar expectations and reference WARP with device/build provenance. | W0(g), W1(a), W1(b) |
+| Exercise descriptor arrays, dynamic/non-uniform indices and root-layout binding with real SM 5.1 compiler output, beyond this one fixed raw-UAV binding. | W2(a), W2(b) |
+| Extend real-compiler coverage to all six legacy stages, signatures, stage-specific declarations and operations, then validate translated execution. Existing assembler/import tests are not end-to-end shader support. | W0(c), W3, W4 |
+
+W0(c) remains partial. This establishes the SM 5.1 input obligation and
+adds real-compiler import/translation evidence; it does not establish full
+legacy coverage, successful execution through an owned D3D12 device, or
+compliance.
+
 ## Source/test redistribution
 
 `C:\dev\Direct3D` and its `D3D12Conf` submodule carry `Copyright (c)

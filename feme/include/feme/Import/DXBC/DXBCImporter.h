@@ -7,10 +7,10 @@
 //===----------------------------------------------------------------------===//
 //
 // This file declares feme::DXBCImporter. See the "DXBC -> new MLIR `dxsa`
-// dialect" section of feme/docs/Design.md: a legacy DXBC (Shader Model 5.0
-// and earlier) module is a `DXContainer` whose tokenized shader bytecode
-// lives in an `SHEX`/`SHDR` part rather than DXIL's `DXIL`/`ILDB` bitcode
-// part; importing it is a matter of locating that part and handing its
+// dialect" section of feme/docs/Design.md: a legacy DXBC (Shader Model 4.x
+// or 5.x, including 5.1) module is a `DXContainer` whose tokenized shader
+// bytecode lives in an `SHEX`/`SHDR` part rather than DXIL's `DXIL`/`ILDB`
+// bitcode part; importing it is a matter of locating that part and handing its
 // bytes to `feme::dxsa::deserialize`.
 //
 //===----------------------------------------------------------------------===//
