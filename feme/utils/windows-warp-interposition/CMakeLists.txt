@@ -22,9 +22,22 @@ set(FEME_PROBE_DDI_EXPECT_UNSUPPORTED "" CACHE STRING
   "Subset of FEME_PROBE_DDI_VERSIONS expected to fail before CreateDevice")
 option(FEME_PROBE_PAGING_QUEUE
   "Exercise public kernel paging-queue create/destroy in the DDI matrix" OFF)
-if(FEME_PROBE_PAGING_QUEUE AND NOT FEME_PROBE_DDI_VERSIONS)
+option(FEME_PROBE_GPU_VA
+  "Exercise public kernel GPU virtual-address reserve/free in the DDI matrix" OFF)
+option(FEME_PROBE_GPU_VA_EXPECT_INVALIDARG
+  "Require the measured E_INVALIDARG reservation rejection, not reserve/free success" OFF)
+if(FEME_PROBE_GPU_VA_EXPECT_INVALIDARG AND NOT FEME_PROBE_GPU_VA)
   message(FATAL_ERROR
-    "Set FEME_PROBE_DDI_VERSIONS when FEME_PROBE_PAGING_QUEUE is enabled.")
+    "FEME_PROBE_GPU_VA_EXPECT_INVALIDARG requires FEME_PROBE_GPU_VA.")
+endif()
+if(FEME_PROBE_GPU_VA AND FEME_PROBE_PAGING_QUEUE)
+  message(FATAL_ERROR
+    "Run GPU VA reservation and paging-queue probes separately.")
+endif()
+if((FEME_PROBE_PAGING_QUEUE OR FEME_PROBE_GPU_VA) AND
+   NOT FEME_PROBE_DDI_VERSIONS)
+  message(FATAL_ERROR
+    "Set FEME_PROBE_DDI_VERSIONS when enabling kernel callback probes.")
 endif()
 if(FEME_PROBE_DDI_MATRIX_ONLY AND NOT FEME_PROBE_DDI_VERSIONS)
   message(FATAL_ERROR
@@ -189,6 +202,10 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
     target_compile_definitions(${VARIANT}-shim PRIVATE
       FEME_BOOTSTRAP_PROBE_PAGING_QUEUE=1)
   endif()
+  if(FEME_PROBE_GPU_VA)
+    target_compile_definitions(${VARIANT}-shim PRIVATE
+      FEME_BOOTSTRAP_PROBE_GPU_VA=1)
+  endif()
   set_target_properties(${VARIANT}-shim PROPERTIES
     OUTPUT_NAME d3d10warp RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}"
     ARCHIVE_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
@@ -206,6 +223,12 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
   set(UNEXPECTED_STAGE --expect-unsupported)
   if(FEME_PROBE_PAGING_QUEUE)
     set(EXPECTED_STAGE --expect-paging-queue)
+  endif()
+  if(FEME_PROBE_GPU_VA)
+    set(EXPECTED_STAGE --expect-gpu-va)
+    if(FEME_PROBE_GPU_VA_EXPECT_INVALIDARG)
+      set(EXPECTED_STAGE --expect-gpu-va-rejected)
+    endif()
   endif()
   if(DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
     set(EXPECTED_STAGE --expect-unsupported)
@@ -227,5 +250,33 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
         "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
         "-DEXPECTATION=--expect-paging-queue"
         -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
+  endif()
+  if(NOT FEME_PROBE_GPU_VA AND
+     NOT DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
+    feme_add_probe_test(NAME "os-routed-${VARIANT}-gpu-va-disabled"
+        COMMAND ${CMAKE_COMMAND}
+          "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
+          "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
+          "-DEXPECTATION=--expect-gpu-va"
+          -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
+    feme_add_probe_test(NAME "os-routed-${VARIANT}-gpu-va-rejected-disabled"
+      COMMAND ${CMAKE_COMMAND}
+          "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
+          "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
+          "-DEXPECTATION=--expect-gpu-va-rejected"
+          -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
+  endif()
+  if(FEME_PROBE_GPU_VA AND
+     NOT DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
+    set(WRONG_GPU_VA_OUTCOME --expect-gpu-va-rejected)
+    if(FEME_PROBE_GPU_VA_EXPECT_INVALIDARG)
+      set(WRONG_GPU_VA_OUTCOME --expect-gpu-va)
+    endif()
+    feme_add_probe_test(NAME "os-routed-${VARIANT}-gpu-va-wrong-outcome"
+      COMMAND ${CMAKE_COMMAND}
+          "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
+          "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
+          "-DEXPECTATION=${WRONG_GPU_VA_OUTCOME}"
+          -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
   endif()
 endforeach()

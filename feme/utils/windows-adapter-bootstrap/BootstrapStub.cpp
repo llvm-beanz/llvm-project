@@ -44,6 +44,10 @@
 // A successful round trip still ends in E_NOTIMPL, not a working device;
 // callback failures and exceptions are preserved in the probe telemetry.
 //
+// FEME_BOOTSTRAP_PROBE_GPU_VA separately reserves/frees 64 KiB of unmapped
+// GPU address space through the public KT callbacks. This is not allocation
+// or CPU memory. A rejected reservation is reported without attempting free.
+//
 //===----------------------------------------------------------------------===//
 
 #include "BootstrapAudit.h"
@@ -55,9 +59,17 @@
 #include <d3d12umddi.h>
 #include <dxgi.h>
 
+#include <limits>
+
 #if defined(FEME_BOOTSTRAP_PROBE_CALLBACK) &&                                  \
     defined(FEME_BOOTSTRAP_PROBE_PAGING_QUEUE)
 #error "Run diagnostic-error and paging-queue probes separately."
+#endif
+
+#if defined(FEME_BOOTSTRAP_PROBE_GPU_VA) &&                                    \
+    (defined(FEME_BOOTSTRAP_PROBE_CALLBACK) ||                                 \
+     defined(FEME_BOOTSTRAP_PROBE_PAGING_QUEUE))
+#error "Run GPU VA reservation separately from the other callback probes."
 #endif
 
 namespace {
@@ -97,6 +109,63 @@ struct CreateDeviceAudit {
 CreateDeviceAudit GCreateDeviceAudit;
 feme::probe::BootstrapContractAudit GContractAudit;
 feme::probe::PagingQueueProbe GPagingQueueProbe;
+feme::probe::GpuVirtualAddressProbe GGpuVirtualAddressProbe;
+
+#ifdef FEME_BOOTSTRAP_PROBE_GPU_VA
+HRESULT probeGpuVirtualAddress(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
+  using namespace feme::probe;
+  auto &Probe = GGpuVirtualAddressProbe;
+  Probe.Enabled = true;
+  if (!Args || !Args->hRTDevice.handle)
+    return E_INVALIDARG;
+  if (!Args->pKTCallbacks ||
+      !Args->pKTCallbacks->pfnReserveGpuVirtualAddressCb ||
+      !Args->pKTCallbacks->pfnFreeGpuVirtualAddressCb)
+    return E_NOINTERFACE;
+
+  // A zero hAdapter lets the runtime supply its own kernel adapter handle.
+  // This reserves address space only: no allocation, mapping or CPU access.
+  D3DDDI_RESERVEGPUVIRTUALADDRESS Reserve{};
+  Reserve.Size = GpuVaReservationBytes;
+  Probe.ReserveAttempted = true;
+  DWORD Code = 0;
+  __try {
+    Probe.ReserveResult = Args->pKTCallbacks->pfnReserveGpuVirtualAddressCb(
+        Args->hRTDevice.handle, &Reserve);
+    Probe.ReserveReturned = true;
+  } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = Code;
+    return E_FAIL;
+  }
+  Probe.Address = Reserve.VirtualAddress;
+  if (Probe.ReserveResult != S_OK)
+    return FAILED(Probe.ReserveResult) ? Probe.ReserveResult : E_FAIL;
+
+  Probe.HasValidRange =
+      Probe.Address && Probe.Address % GpuVaReservationBytes == 0 &&
+      Probe.Address <=
+          std::numeric_limits<std::uint64_t>::max() - GpuVaReservationBytes;
+  if (!Probe.Address)
+    return E_FAIL;
+
+  // Release every nonzero successful reservation, even a malformed output.
+  D3DDDICB_FREEGPUVIRTUALADDRESS Free{};
+  Free.BaseAddress = Probe.Address;
+  Free.Size = GpuVaReservationBytes;
+  Probe.FreeAttempted = true;
+  __try {
+    Probe.FreeResult = Args->pKTCallbacks->pfnFreeGpuVirtualAddressCb(
+        Args->hRTDevice.handle, &Free);
+    Probe.FreeReturned = true;
+  } __except (Code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = Code;
+    return E_FAIL;
+  }
+  if (Probe.FreeResult != S_OK)
+    return FAILED(Probe.FreeResult) ? Probe.FreeResult : E_FAIL;
+  return Probe.HasValidRange ? S_OK : E_FAIL;
+}
+#endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_PAGING_QUEUE
 HRESULT probePagingQueue(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
@@ -257,6 +326,11 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
   if (FAILED(PagingResult))
     return PagingResult;
 #endif
+#ifdef FEME_BOOTSTRAP_PROBE_GPU_VA
+  HRESULT GpuVaResult = probeGpuVirtualAddress(Args);
+  if (FAILED(GpuVaResult))
+    return GpuVaResult;
+#endif
   // A real device table is out of scope for this experiment; fail loudly and
   // distinctly so a caller cannot mistake this for the generic rejection
   // windows-adapter-probe's RejectionStub already measures.
@@ -407,6 +481,12 @@ FeMeBootstrapGetContractAudit(feme::probe::BootstrapContractAudit *Audit) {
 extern "C" __declspec(dllexport) void APIENTRY
 FeMeBootstrapGetPagingQueueProbe(feme::probe::PagingQueueProbe *Probe) {
   *Probe = GPagingQueueProbe;
+}
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetGpuVirtualAddressProbe(
+    feme::probe::GpuVirtualAddressProbe *Probe) {
+  *Probe = GGpuVirtualAddressProbe;
 }
 
 extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(

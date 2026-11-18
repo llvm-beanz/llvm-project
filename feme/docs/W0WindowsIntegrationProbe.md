@@ -1245,6 +1245,134 @@ or system change is required. W0(g) still needs an owned runtime/DDI
 resource lifecycle and a real FeMe device; this is reference-WARP coverage,
 not a FeMe pass or closure of W0(d)'s owned-device provenance gate.
 
+### W0(g) public GPU VA reservation boundary (VM)
+
+The 2026-11-18 follow-up tests a different public runtime-owned callback
+boundary, not another separate-device allocation. The default-off
+`FEME_PROBE_GPU_VA` variant calls
+`pKTCallbacks->pfnReserveGpuVirtualAddressCb(hRTDevice.handle, ...)`
+inside owned `CreateDevice`, requesting 65,536 bytes of **unmapped address
+space**, not memory. It uses zero `hAdapter` so the runtime supplies its own
+kernel adapter handle, zero base/minimum/maximum addresses so VidMm chooses
+the range, and zero reserved fields. It neither supplies an obsolete paging
+queue handle nor interprets a GPU address as a CPU pointer.
+
+The public
+[reserve callback](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/nc-d3dumddi-pfnd3dddi_reservegpuvirtualaddresscb),
+[reservation structure](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dukmdt/ns-d3dukmdt-d3dddi_reservegpuvirtualaddress)
+and
+[free callback](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/nc-d3dumddi-pfnd3dddi_freegpuvirtualaddresscb)
+define the experiment. Only exact `S_OK` establishes reservation ownership.
+A nonzero returned address is checked for 64 KiB alignment and range
+overflow, then freed with the same size, including malformed successful
+outputs. A failed reservation is never freed; its raw address/result are
+retained in telemetry. Callback exceptions, non-`S_OK` success statuses,
+missing outputs and failed cleanup cannot satisfy the success gate.
+
+**Measured result: reservation is rejected, not a working reserve/free
+lifecycle.** With SDK/WDK 10.0.26100.0 on the existing Windows 11 ARM64 VM,
+all three configurations below returned `E_INVALIDARG` (`0x80070057`) at
+DDIs 0010, 0022, 0072 and 0110:
+
+| Runtime configuration | Reserve result | Address / free |
+|---|---|---|
+| x64 inbox, emulated on ARM64 | `E_INVALIDARG` | Zero / not attempted |
+| Native ARM64 inbox | `E_INVALIDARG` | Zero / not attempted |
+| Native ARM64 Agility 619 | `E_INVALIDARG` | Zero / not attempted |
+
+The entry counters are `Open=1 Size=1 Versions=2 Caps=1 Optional=0 Fill=0
+Create=1 Close=1 Destroy=0`; negotiated DDI and owned-module identity still
+match exactly. The callback returns normally without an exception. Its
+failure propagates to `D3D12CreateDevice`, rather than being replaced with
+the usual `E_NOTIMPL`. DDIs 0070/0071 still reject before `CreateDevice` and
+never attempt this probe. Agility's recorded core path is executable-local
+`AgilitySDK\D3D12Core.dll`; no reference forwarding module is loaded.
+
+A separate, one-off native public KMT diagnostic opened the same asserted
+WARP LUID (`00000000:0000875d`) through `D3DKMTOpenAdapterFromLuid`.
+`D3DKMTQueryAdapterInfo(KMTQAITYPE_WDDM_2_0_CAPS)` returned exact success
+and `Value=0x5`, `GpuMmuSupported=0`, `IoMmuSupported=1`.
+`D3DKMTReserveGpuVirtualAddress` with that adapter, size 65,536 and otherwise
+zero inputs returned `STATUS_INVALID_PARAMETER` (`0xc000000d`), address
+zero; adapter close succeeded. This diagnostic is not an automated control
+or a runtime-device bridge. The public
+[GpuMmu and IoMmu models](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/gpu-virtual-memory-in-wddm-2-0)
+distinguish separate GPU page-table management from shared CPU address
+space. These observations support investigating the selected WARP
+CPU-memory contract rather than assuming GpuMmu reservations are a
+prerequisite. They do not prove the exact internal cause of rejection or
+that a public runtime-owned allocation path is impossible.
+
+The runner has two deliberately different strict expectations:
+
+- `--expect-gpu-va` requires exact successful reserve/free, a valid range
+  and the usual deliberate `E_NOTIMPL` device result. It **fails** on every
+  measured configuration above.
+- `--expect-gpu-va-rejected` requires enabled/attempted/returned reservation,
+  exact `E_INVALIDARG`, zero address, no free attempt and no exception,
+  alongside exact device-result, negotiation, module and cleanup checks.
+  This is a negative boundary measurement, not a resource pass.
+
+`FEME_PROBE_GPU_VA_EXPECT_INVALIDARG=ON` explicitly selects the latter
+expectation in the matrix; it is not an automatic fallback. It requires
+`FEME_PROBE_GPU_VA=ON`. GPU VA and paging-queue probes are mutually
+exclusive, and both require an explicit DDI matrix.
+
+LIT validation, Debug assertions, disabled PCH and `/W4 /WX`:
+
+- The six-DDI exact-rejection matrix passed 20/20 on each of x64 inbox,
+  native inbox and native Agility, each repeated three times. These counts
+  include wrong-stage, disabled-paging and wrong-GPU-VA-outcome controls;
+  they do not represent successful reservations.
+- Native and x64 bootstrap suites each passed 31/31: the direct adapter
+  regression, 14 existing paging fixtures and 16 new GPU VA fixtures.
+  New fixtures cover reserve/free success and failure, missing
+  device/table/callbacks, zero/misaligned/overflowing addresses, exceptions,
+  unexpected positive statuses, and `E_INVALIDARG` with zero or invalid
+  nonzero output. Successful reservation/free remains mock-only evidence.
+- Reconfiguration to default-off passed 24/24 x64 negotiation/disabled
+  controls; switching to paging passed 20/20, without stale GPU VA tests.
+- All 15 native Agility reference-WARP/buffer-copy controls still pass.
+
+To reproduce the negative boundary matrix, use the matching developer
+environment and Python with LIT timeout support, as above:
+
+```powershell
+$repo = 'C:\Users\cbieneman\dev\llvm-project\feme'
+$build = 'C:\Users\cbieneman\dev\warp-gpu-va-probe'
+$versions = @('0010', '0022', '0070', '0071', '0072', '0110')
+$ddi = ($versions | ForEach-Object { "D3D12DDI_SUPPORTED_$_" }) -join ';'
+cmake -S "$repo\utils\windows-warp-interposition" -B $build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=cl.exe `
+  -DCMAKE_SYSTEM_VERSION=10.0.26100.0 `
+  "-DCMAKE_CXX_FLAGS_DEBUG=/Z7 /Ob0 /Od /RTC1" `
+  -DFEME_PROBE_DDI_MATRIX_ONLY=ON -DFEME_PROBE_GPU_VA=ON `
+  -DFEME_PROBE_GPU_VA_EXPECT_INVALIDARG=ON `
+  "-DFEME_PROBE_DDI_VERSIONS=$ddi" `
+  "-DFEME_PROBE_DDI_EXPECT_UNSUPPORTED=D3D12DDI_SUPPORTED_0070;D3D12DDI_SUPPORTED_0071"
+cmake --build $build --target check-feme-windows-probes --parallel 2
+```
+
+For the measured native Agility matrix, use a separate native build and
+add `-DCMAKE_CXX_FLAGS=/DFEME_PROBE_AGILITY_VERSION=619` when configuring.
+Build the executables first, then stage the matching ARM64 core before
+running LIT:
+
+```powershell
+cmake --build $build --parallel 2
+foreach ($version in $versions) {
+  $dir = "$build\pinned-version-custom-$version\AgilitySDK"
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  Copy-Item C:\Users\cbieneman\dev\llvm-project\build-rel\bin\D3D12\D3D12Core.dll $dir
+}
+cmake --build $build --target check-feme-windows-probes --parallel 2
+```
+
+Keep W0(g) open: no real owned device, runtime-owned allocation,
+residency or mapped-resource lifecycle follows from this rejection.
+No private WARP ABI, system binary replacement or kernel-driver change
+was used.
+
 ### Reproduce the B investigation
 
 In the Windows development VM's x64 developer shell, use an SDK/WDK with the

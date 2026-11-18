@@ -237,6 +237,15 @@ bytes on x64 inbox, native ARM64 inbox and native Agility 619. This supplies
 W0(d)'s resource-data reference test for the future W1(a) heap/buffer path,
 not FeMe execution or a bridge from the separate KMT device. Both reference
 entry paths and nine CPU validation controls run through LIT.
+The [public GPU VA reservation investigation](W0WindowsIntegrationProbe.md#w0g-public-gpu-va-reservation-boundary-vm)
+does not supply the missing allocation path: a 64 KiB unmapped reservation
+through the runtime-owned KT callback returns `E_INVALIDARG` on x64 inbox,
+native inbox and native Agility 619. A separate public KMT diagnostic reports
+`GpuMmuSupported=0`, `IoMmuSupported=1` and also rejects the reservation.
+Strict LIT gates distinguish this measured rejection from successful
+reserve/free; only mocks exercise successful free and its failure paths.
+Do not substitute GpuMmu address-space management for an audited WARP
+CPU-memory/resource contract or infer that all public integration is blocked.
 The negative public general-provider search and the successful WARP-specific
 route are different findings; do not classify all further research as blocked.
 Installed-path evaluation remains separate. No driver installation, signing

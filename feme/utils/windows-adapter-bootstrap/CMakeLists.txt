@@ -28,6 +28,19 @@ feme_add_probe_test(NAME direct-openadapter12 COMMAND feme-windows-adapter-direc
   $<TARGET_FILE:feme-adapter-bootstrap-stub>)
 
 if(MSVC)
+  add_executable(feme-gpu-va-tests BootstrapStub.cpp GpuVirtualAddressTests.cpp)
+  target_compile_definitions(feme-gpu-va-tests PRIVATE
+    FEME_BOOTSTRAP_PROBE_GPU_VA=1)
+  target_compile_options(feme-gpu-va-tests PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+  foreach(SCENARIO success reserve-failure free-failure missing-reserve
+                   missing-free missing-device missing-table missing-address
+                   misaligned-address overflow-address reserve-exception
+                   free-exception reserve-status free-status
+                   reserve-invalid-argument reserve-invalid-output)
+    feme_add_probe_test(NAME "gpu-va-fixture-${SCENARIO}"
+      COMMAND feme-gpu-va-tests "${SCENARIO}")
+  endforeach()
+
   add_executable(feme-paging-queue-tests BootstrapStub.cpp PagingQueueTests.cpp)
   target_compile_definitions(feme-paging-queue-tests PRIVATE
     FEME_BOOTSTRAP_PROBE_PAGING_QUEUE=1)

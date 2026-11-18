@@ -47,6 +47,22 @@ struct PagingQueueProbe {
   std::uint32_t ExceptionCode = 0;
 };
 
+constexpr std::uint64_t GpuVaReservationBytes = 65536;
+
+/// Results of reserving and freeing an unmapped runtime-owned GPU VA range.
+struct GpuVirtualAddressProbe {
+  bool Enabled = false;
+  bool ReserveAttempted = false;
+  bool ReserveReturned = false;
+  std::int32_t ReserveResult = 0;
+  std::uint64_t Address = 0;
+  bool HasValidRange = false;
+  bool FreeAttempted = false;
+  bool FreeReturned = false;
+  std::int32_t FreeResult = 0;
+  std::uint32_t ExceptionCode = 0;
+};
+
 } // namespace probe
 } // namespace feme
 

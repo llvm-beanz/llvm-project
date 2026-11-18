@@ -299,7 +299,13 @@ int wmain(int Argc, wchar_t **Argv) {
                         std::wcscmp(Argv[3], L"--expect-callback") == 0;
   bool ExpectPagingQueue = WarpBootstrapAudit && Argc == 4 &&
                            std::wcscmp(Argv[3], L"--expect-paging-queue") == 0;
-  ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue;
+  bool ExpectGpuVa = WarpBootstrapAudit && Argc == 4 &&
+                     std::wcscmp(Argv[3], L"--expect-gpu-va") == 0;
+  bool ExpectGpuVaRejected =
+      WarpBootstrapAudit && Argc == 4 &&
+      std::wcscmp(Argv[3], L"--expect-gpu-va-rejected") == 0;
+  ExpectCreateDevice |=
+      ExpectCallback || ExpectPagingQueue || ExpectGpuVa || ExpectGpuVaRejected;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
        !WarpBootstrapAudit && !WarpBufferCopy) ||
       (WarpBootstrapAudit && Argc == 4 && !ExpectCreateDevice &&
@@ -310,7 +316,8 @@ int wmain(int Argc, wchar_t **Argv) {
         L"--software DLL | --stub DLL | --warp-shim DLL | "
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
-        L"--expect-callback | --expect-paging-queue]]\n",
+        L"--expect-callback | --expect-paging-queue | --expect-gpu-va | "
+        L"--expect-gpu-va-rejected]]\n",
         Argv[0]);
     return 1;
   }
@@ -366,6 +373,8 @@ int wmain(int Argc, wchar_t **Argv) {
   using GetContractAudit =
       void(APIENTRY *)(feme::probe::BootstrapContractAudit *);
   using GetPagingQueueProbe = void(APIENTRY *)(feme::probe::PagingQueueProbe *);
+  using GetGpuVirtualAddressProbe =
+      void(APIENTRY *)(feme::probe::GpuVirtualAddressProbe *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
@@ -373,6 +382,7 @@ int wmain(int Argc, wchar_t **Argv) {
   GetCallbackProbe ReadCallbackProbe = nullptr;
   GetContractAudit ReadContractAudit = nullptr;
   GetPagingQueueProbe ReadPagingQueueProbe = nullptr;
+  GetGpuVirtualAddressProbe ReadGpuVirtualAddressProbe = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -411,6 +421,14 @@ int wmain(int Argc, wchar_t **Argv) {
         GetProcAddress(Module, "FeMeBootstrapGetContractAudit"));
     ReadPagingQueueProbe = reinterpret_cast<GetPagingQueueProbe>(
         GetProcAddress(Module, "FeMeBootstrapGetPagingQueueProbe"));
+    ReadGpuVirtualAddressProbe = reinterpret_cast<GetGpuVirtualAddressProbe>(
+        GetProcAddress(Module, "FeMeBootstrapGetGpuVirtualAddressProbe"));
+    if ((ExpectGpuVa || ExpectGpuVaRejected) && !ReadGpuVirtualAddressProbe) {
+      report(L"GetProcAddress(FeMeBootstrapGetGpuVirtualAddressProbe)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
     if (ExpectPagingQueue && !ReadPagingQueueProbe) {
       report(L"GetProcAddress(FeMeBootstrapGetPagingQueueProbe)",
              HRESULT_FROM_WIN32(GetLastError()));
@@ -485,8 +503,9 @@ int wmain(int Argc, wchar_t **Argv) {
       ExpectedDDICalls =
           Open == 1 && Versions > 0 && Caps > 0 && Close == 1 && Destroy == 0;
       if (ExpectCreateDevice) {
-        HRESULT ExpectedResult =
-            ExpectCallback ? DXGI_ERROR_DEVICE_REMOVED : E_NOTIMPL;
+        HRESULT ExpectedResult = ExpectCallback ? DXGI_ERROR_DEVICE_REMOVED
+                                 : ExpectGpuVaRejected ? E_INVALIDARG
+                                                       : E_NOTIMPL;
         ExpectedDDICalls &= Size == 1 && Create == 1 && Optional == 0 &&
                             Fill == 0 && Result == ExpectedResult;
       }
@@ -635,6 +654,42 @@ int wmain(int Argc, wchar_t **Argv) {
                E_FAIL);
         ExpectedDDICalls = false;
       }
+    }
+  }
+  if (ReadGpuVirtualAddressProbe) {
+    feme::probe::GpuVirtualAddressProbe Probe;
+    ReadGpuVirtualAddressProbe(&Probe);
+    std::wprintf(
+        L"Kernel GPU VA probe: Enabled=%u "
+        L"ReserveAttempted=%u ReserveReturned=%u ReserveResult=0x%08lx "
+        L"Address=0x%016llx Bytes=%llu HasValidRange=%u "
+        L"FreeAttempted=%u FreeReturned=%u FreeResult=0x%08lx "
+        L"ExceptionCode=0x%08lx\n",
+        unsigned(Probe.Enabled), unsigned(Probe.ReserveAttempted),
+        unsigned(Probe.ReserveReturned),
+        static_cast<unsigned long>(Probe.ReserveResult),
+        static_cast<unsigned long long>(Probe.Address),
+        static_cast<unsigned long long>(feme::probe::GpuVaReservationBytes),
+        unsigned(Probe.HasValidRange), unsigned(Probe.FreeAttempted),
+        unsigned(Probe.FreeReturned),
+        static_cast<unsigned long>(Probe.FreeResult),
+        static_cast<unsigned long>(Probe.ExceptionCode));
+    if (ExpectGpuVa &&
+        (!Probe.Enabled || !Probe.ReserveAttempted || !Probe.ReserveReturned ||
+         Probe.ReserveResult != S_OK || !Probe.HasValidRange ||
+         !Probe.FreeAttempted || !Probe.FreeReturned ||
+         Probe.FreeResult != S_OK || Probe.ExceptionCode)) {
+      report(L"Expected successful kernel GPU VA reserve/free", E_FAIL);
+      ExpectedDDICalls = false;
+    }
+    if (ExpectGpuVaRejected &&
+        (!Probe.Enabled || !Probe.ReserveAttempted || !Probe.ReserveReturned ||
+         Probe.ReserveResult != E_INVALIDARG || Probe.Address ||
+         Probe.HasValidRange || Probe.FreeAttempted || Probe.FreeReturned ||
+         Probe.FreeResult != S_OK || Probe.ExceptionCode)) {
+      report(L"Expected kernel GPU VA reservation rejection (E_INVALIDARG)",
+             E_FAIL);
+      ExpectedDDICalls = false;
     }
   }
   if ((ExpectCreateDevice || ExpectUnsupported) && !ExpectedDDICalls)
