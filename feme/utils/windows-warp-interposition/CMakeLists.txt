@@ -50,7 +50,8 @@ add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 # PE forwarding preserves the reference functions' ABI without guessing private
 # signatures or importing Microsoft's implementation into this project.
-enable_testing()
+include(../windows-probe-tests/WindowsProbeTests.cmake)
+feme_initialize_probe_tests()
 if(NOT FEME_PROBE_DDI_MATRIX_ONLY)
 set(REFERENCE_EXPORTS
   D3D11RefGetLastCreation D3DLayerGetInterface OpenAdapter OpenAdapter10_2
@@ -130,33 +131,28 @@ foreach(VARIANT reference public-exports private-ordinal bare negotiation
     target_compile_options(${VARIANT}-harness PRIVATE /W4 /WX /UNDEBUG)
   endif()
   if(VARIANT STREQUAL reference)
-    add_test(NAME reference-forwarding COMMAND ${VARIANT}-harness)
+    feme_add_probe_test(NAME reference-forwarding COMMAND ${VARIANT}-harness)
   elseif(VARIANT STREQUAL negotiation)
-    add_test(NAME os-routed-negotiation COMMAND ${VARIANT}-harness
+    feme_add_probe_test(NAME os-routed-negotiation COMMAND ${VARIANT}-harness
       --warp-bootstrap $<TARGET_FILE:${VARIANT}-shim>)
   elseif(VARIANT STREQUAL pinned-version)
-    add_test(NAME os-routed-pinned-version COMMAND ${VARIANT}-harness
+    feme_add_probe_test(NAME os-routed-pinned-version COMMAND ${VARIANT}-harness
       --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>
       --expect-create-device)
   elseif(VARIANT STREQUAL pinned-version-newer)
-    add_test(NAME os-routed-pinned-version-newer COMMAND ${VARIANT}-harness
+    feme_add_probe_test(NAME os-routed-pinned-version-newer COMMAND ${VARIANT}-harness
       --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim>)
   elseif(VARIANT STREQUAL callback-probe)
-    add_test(NAME os-routed-callback-probe COMMAND ${VARIANT}-harness
+    feme_add_probe_test(NAME os-routed-callback-probe COMMAND ${VARIANT}-harness
       --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim> --expect-callback)
   else()
-    add_test(NAME ${VARIANT}-interception COMMAND ${VARIANT}-harness
+    feme_add_probe_test(NAME ${VARIANT}-interception COMMAND ${VARIANT}-harness
       --warp-shim $<TARGET_FILE:${VARIANT}-shim>)
   endif()
 endforeach()
 
-add_test(NAME generic-software-rejection COMMAND bare-harness
+feme_add_probe_test(NAME generic-software-rejection COMMAND bare-harness
   --stub $<TARGET_FILE:bare-shim>)
-set_tests_properties(reference-forwarding public-exports-interception
-  private-ordinal-interception bare-interception os-routed-negotiation
-  os-routed-pinned-version os-routed-pinned-version-newer
-  os-routed-callback-probe generic-software-rejection
-  PROPERTIES TIMEOUT 30)
 endif()
 
 # Allow the VM-first W0(g) version bisect to test an explicit set of public
@@ -215,25 +211,21 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
     set(EXPECTED_STAGE --expect-unsupported)
     set(UNEXPECTED_STAGE --expect-create-device)
   endif()
-  add_test(NAME "os-routed-${VARIANT}" COMMAND ${VARIANT}-harness
+  feme_add_probe_test(NAME "os-routed-${VARIANT}" COMMAND ${VARIANT}-harness
     --warp-bootstrap-audit $<TARGET_FILE:${VARIANT}-shim> ${EXPECTED_STAGE})
-  set_tests_properties("os-routed-${VARIANT}" PROPERTIES TIMEOUT 30)
-  add_test(NAME "os-routed-${VARIANT}-wrong-stage"
+  feme_add_probe_test(NAME "os-routed-${VARIANT}-wrong-stage"
     COMMAND ${CMAKE_COMMAND}
       "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
       "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
       "-DEXPECTATION=${UNEXPECTED_STAGE}"
       -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
-  set_tests_properties("os-routed-${VARIANT}-wrong-stage" PROPERTIES TIMEOUT 30)
   if(NOT FEME_PROBE_PAGING_QUEUE AND
      NOT DDI_VERSION IN_LIST FEME_PROBE_DDI_EXPECT_UNSUPPORTED)
-    add_test(NAME "os-routed-${VARIANT}-paging-disabled"
+    feme_add_probe_test(NAME "os-routed-${VARIANT}-paging-disabled"
       COMMAND ${CMAKE_COMMAND}
         "-DHARNESS=$<TARGET_FILE:${VARIANT}-harness>"
         "-DSHIM=$<TARGET_FILE:${VARIANT}-shim>"
         "-DEXPECTATION=--expect-paging-queue"
         -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
-    set_tests_properties("os-routed-${VARIANT}-paging-disabled"
-      PROPERTIES TIMEOUT 30)
   endif()
 endforeach()

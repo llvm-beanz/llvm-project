@@ -77,11 +77,21 @@ qualification.
 | Inbox core, executable-local stub renamed `d3d10warp.dll`, `EnumWarpAdapter` | Microsoft reference identity is still enumerated, but device creation returns `DXGI_ERROR_UNSUPPORTED`; debugger observes the stub load, and it is no longer loaded when device creation returns |
 | Nonexistent software DLL | Explicit load error `0x8007007e`, nonzero exit |
 
-CTest has four cases: `reference-warp`, `software-reference-warp`,
+The probe has four cases: `reference-warp`, `software-reference-warp`,
 `rejection-stub`, and `missing-module`. All four passed against each runtime.
 The negative stub case requires successful adapter creation/interface query
 followed by specifically `DXGI_ERROR_UNSUPPORTED`; an arbitrary earlier failure
 is not accepted as a successful experiment.
+
+**Test-runner correction (2026-11-17):** FeMe uses LIT, not CTest. The
+standalone Windows probes now generate LIT shell tests and expose
+`check-feme-windows-probes`; configure/build commands below use that target.
+Historical CTest names/counts and historical command transcripts are retained
+as evidence of what was actually run, not instructions to keep using CTest.
+Select a Python interpreter with `psutil` installed (LIT requires it for the
+30-second process-tree timeout), using `-DPython3_EXECUTABLE=<python-path>`
+when configuring if necessary. `FEME_PROBE_LIT` defaults to this checkout's
+`llvm/utils/lit/lit.py` and can select another existing LIT runner.
 
 The stub deliberately returns unsupported from its exported DDI open functions.
 Its counters distinguish rejection before those functions from rejection inside
@@ -774,7 +784,6 @@ path remains selected. Update the macro list to match the VM's `d3d12umddi.h`:
 
 ```powershell
 $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-$ctest = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe'
 $ninja = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe'
 $repo = 'C:\Users\cbieneman\dev\llvm-project\feme'
 $build = 'C:\Users\cbieneman\dev\warp-ddi-matrix'
@@ -803,9 +812,7 @@ $ddiVersions = @(
   -DFEME_PROBE_DDI_MATRIX_ONLY=ON `
   "-DFEME_PROBE_DDI_EXPECT_UNSUPPORTED=D3D12DDI_SUPPORTED_0070;D3D12DDI_SUPPORTED_0071" `
   "-DFEME_PROBE_DDI_VERSIONS=$ddiVersions"
-& $cmake --build $build
-& $ctest --test-dir $build -V `
-  -R "os-routed-pinned-version-custom-"
+& $cmake --build $build --target check-feme-windows-probes --parallel 2
 ```
 
 The custom targets are the only targets in matrix-only mode, so a default
@@ -992,7 +999,7 @@ cmake -S "$repo\utils\windows-warp-interposition" -B $build -G Ninja `
   "-DFEME_PROBE_DDI_VERSIONS=$versions" `
   "-DFEME_PROBE_DDI_EXPECT_UNSUPPORTED=D3D12DDI_SUPPORTED_0070;D3D12DDI_SUPPORTED_0071"
 cmake --build $build --parallel 2
-ctest --test-dir $build --output-on-failure --repeat until-fail:3
+cmake --build $build --target check-feme-windows-probes --parallel 2
 ```
 
 The standalone `windows-adapter-bootstrap` project builds the mock fixtures.
@@ -1006,6 +1013,151 @@ deallocation and residency lifecycle, using the version-appropriate
 callback surface, followed by a real owned device. Do not infer either from
 this paging-queue result or introduce private WARP allocation data without
 separate approval. The exact 0070/0071 rejection reason also remains unknown.
+
+### W0(g) public KMT standard-allocation and residency control (VM)
+
+The standalone LLVM-owned `utils/windows-kmt-allocation` diagnostic now
+exercises a separate public OS allocation/residency control on the current
+Windows 11 Enterprise build 26300 ARM64 VM. Both native ARM64 and emulated
+x64 builds use MSVC 19.44.35230.0 and SDK/WDK 10.0.26100.0.
+This executable uses DXGI and GDI/KMT, not D3D12: there is no inbox/Agility
+core or negotiated UMD DDI selection to infer from these results.
+
+The public UMD allocation structures (`D3DDDICB_ALLOCATE` and
+`D3D12DDICB_ALLOCATE_0022`, including their allocation-info structures)
+do not expose an allocation size or the KMT standard-allocation input.
+An optional private driver-data pointer does not document WARP's allocation
+encoding. The control therefore does **not** invent private data, cast a
+runtime device handle to a KMT device handle, or pass allocations between
+different devices.
+
+Instead, it asserts DXGI WARP identity (`1414:008c`, software flag), opens
+that adapter's LUID through `D3DKMTOpenAdapterFromLuid` and creates a
+**separate** KMT device with zero device flags. It backs a single 64 KiB
+`D3DKMT_STANDARDALLOCATIONTYPE_EXISTINGHEAP` with zero-initialized
+`VirtualAlloc` memory and uses `D3DKMTCreateAllocation2`. Following the
+[public create-allocation flag contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmthk/ns-d3dkmthk-_d3dkmt_createallocationflags),
+the flags are `StandardAllocation`, `ExistingSysMem`, `CreateShared`,
+`CrossAdapter`, `CreateResource` and `NtSecuritySharing`.
+`ExistingSection` is not combined with `ExistingSysMem`. Standard-allocation
+flags, runtime/driver private-data pointers and sizes, and other allocation
+flags are zero; in particular, **`NoKmdAccess=0`**. No shared NT handle is
+exported. The documented standard-allocation `ExistingSysMem` case
+explicitly accepts a user memory pointer; the general header comment about
+user-mode `ExistingSysMem` alone is not the standard-allocation contract.
+
+The control creates a normal-priority paging queue on that same KMT device,
+makes the allocation resident, waits for asynchronous completion when
+necessary, and evicts it. The observed outputs are:
+
+| Operation | Native ARM64 | x64 |
+|---|---|---|
+| Open adapter / create KMT device | `STATUS_SUCCESS` / `STATUS_SUCCESS` | Same |
+| Create standard allocation | `STATUS_SUCCESS`; nonzero resource/allocation handles | Same |
+| Create paging queue | `STATUS_SUCCESS`; queue, sync object and fence mapping present | Same |
+| Make resident | `STATUS_PENDING` (`0x00000103`); one allocation; paging fence `7001`; bytes to trim `0` | Same |
+| Register asynchronous CPU fence wait | `STATUS_SUCCESS` | Same |
+| Wait for paging event, 10000 ms bound | `WAIT_OBJECT_0` | Same |
+| Evict | `STATUS_SUCCESS` | Same |
+| Destroy allocation / paging queue / device / close adapter | All `STATUS_SUCCESS` | Same |
+
+Fence values and LUIDs are observations, not pinned constants. A synchronous
+`STATUS_SUCCESS` make-resident result is also accepted. All other operations
+require exact `STATUS_SUCCESS`; unexpected informational statuses fail.
+The allocation count and required handles/mapping must be present.
+The mapped fence address is not dereferenced. For pending residency,
+`D3DKMTWaitForSynchronizationObjectFromCpu` registers a process-owned event,
+then `WaitForSingleObject` has a 10-second limit; a failed registration,
+timeout or failed wait is an error, never successful residency.
+Eviction is not attempted before completion. This proves OS acceptance
+and completion of the public residency operations, not data correctness,
+physical memory migration, GPU virtual-address mapping or command execution.
+
+Cleanup attempts resource/allocation destruction, paging-queue destruction,
+device destruction, adapter close and event/backing-memory release.
+A valid resource or allocation returned with incomplete companion outputs
+is still destroyed. Device destruction is attempted even after an earlier
+cleanup failure, but the original failure still fails the test. Backing
+memory is retained until process exit if device teardown fails rather than
+freed while the device could retain it. Queue destruction owns the associated
+sync object and fence mapping; they are not reused or separately destroyed.
+All HRESULT/NTSTATUS stages and cleanup errors are reported.
+
+Before the runner migration, each architecture passed **31/31 CTests, each
+repeated three times**:
+one real public lifecycle and 30 mock-only fixtures. Fixtures check required
+flags, zero private data, same-device handles and cleanup call order;
+they cover synchronous/pending success, open/device/allocation/queue/
+residency/wait/eviction failures, incomplete outputs, unexpected positive
+statuses, wait timeout/failure, teardown failures and backing-memory
+retention. Mock fixtures never invoke KMT; their backing memory/event are
+ordinary process-owned Win32 objects.
+
+To reproduce, enter the matching Visual Studio developer environment
+(`VsDevCmd.bat -arch=arm64 -host_arch=amd64 -winsdk=10.0.26100.0` for
+native ARM64, or `-arch=amd64` for x64), then use a separate build directory:
+
+```powershell
+$repo = 'C:\Users\cbieneman\dev\llvm-project\feme'
+$build = 'C:\Users\cbieneman\dev\warp-kmt-allocation'
+cmake -S "$repo\utils\windows-kmt-allocation" -B $build -G Ninja `
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=cl.exe `
+  -DCMAKE_SYSTEM_VERSION=10.0.26100.0 `
+  "-DCMAKE_CXX_FLAGS_DEBUG=/Z7 /Ob0 /Od /RTC1"
+cmake --build $build --parallel 2
+cmake --build $build --target check-feme-windows-probes --parallel 2
+& "$build\feme-windows-kmt-allocation.exe"
+```
+
+W0(g) remains open. This control does not load the owned UMD, invoke its
+runtime allocation callbacks, implement an owned D3D12 heap/resource, create
+a working owned D3D12 device or independently trace a miniport call.
+The next integration gate is a documented resource lifecycle associated
+with the **runtime-owned** device, not reuse of these separate-device handles.
+Private WARP allocation ABI still requires separate approval. No system
+binary, kernel driver, registry, signing or installation change was made.
+
+### W0(g) LIT test-runner correction
+
+All four standalone projects (`windows-adapter-probe`,
+`windows-adapter-bootstrap`, `windows-warp-interposition` and
+`windows-kmt-allocation`) now share LIT registration through
+`utils/windows-probe-tests/WindowsProbeTests.cmake`. There are no
+`enable_testing`, `add_test`, `set_tests_properties` or CTest-module
+registrations in FeMe's CMake files. The check target builds required
+executables/DLLs before running LIT, including dependencies embedded in
+the negative-control arguments. Generated tests are configuration-specific;
+reconfiguring a DDI matrix removes obsolete generated cases.
+
+The original success/rejection assertions remain in their harnesses.
+LIT's `not` handles the missing-module case. Wrong-stage and disabled-paging
+controls retain the explicit exit-code/diagnostic check, rather than passing
+on any error. Each test has a 30-second limit through the LIT check target.
+To repeat a suite, invoke the check target repeatedly; CTest's
+`--repeat until-fail:3` is not a LIT option.
+
+LIT validation on this VM:
+
+| Suite | Result |
+|---|---|
+| Native ARM64 adapter reference/rejection/missing-module controls | 4/4 passed |
+| Native ARM64 direct adapter and paging fixtures | 15/15 passed |
+| Native ARM64 paging-enabled six-DDI matrix and wrong-stage controls | 12/12 passed |
+| x64 default-off 29-DDI matrix, wrong-stage and disabled-paging controls | 85/85 passed |
+| Public KMT allocation/residency and failure fixtures | 31/31 passed on native ARM64 and x64 |
+| Reconfigure native matrix to two DDIs, paging disabled | 5/5 passed; no stale cases from the prior matrix |
+| Shared-core LIT target | 90/90 passed |
+| Bounded fuzz LIT target | 6/6 passed |
+| Vulkan unit tests through `FeMe-Unit` LIT | 892 passed, 15 skipped, zero failures |
+
+These are LIT results, distinct from the historical CTest counts above.
+The Vulkan unit-test target already uses `add_feme_unittest` and
+the `FeMe-Unit` GoogleTest LIT suite; it requires no CTest conversion.
+The shared-core and bounded fuzz check targets also now enter through LIT,
+and seed-corpus cases are included in the regular `check-feme` suite.
+An additional full `check-feme` build reached LIT but was stopped after
+several minutes with Runtime CPU GoogleTest shards still running. No
+full-suite pass is claimed; the completed scoped results are listed above.
 
 ### Reproduce the B investigation
 
@@ -1025,7 +1177,7 @@ cmake -S C:\dev\llvm-project\feme\utils\windows-warp-interposition `
   -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
   -DFEME_WARP_REFERENCE=C:\dev\llvm-project\build\bin\d3d10warp.dll
 cmake --build C:\dev\warp-interposition
-ctest --test-dir C:\dev\warp-interposition -V --repeat until-fail:3
+cmake --build C:\dev\warp-interposition --target check-feme-windows-probes
 ```
 
 Use the VM's paths and toolchain. A previous host required a typed
@@ -1056,7 +1208,7 @@ cmake -S C:\dev\llvm-project\feme\utils\windows-adapter-probe `
   -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
   -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
 cmake --build C:\dev\adapter-probe
-ctest --test-dir C:\dev\adapter-probe -V
+cmake --build C:\dev\adapter-probe --target check-feme-windows-probes
 ```
 
 The four cases are reference WARP, software-reference WARP, pre-DDI stub
@@ -1065,7 +1217,7 @@ for these cases are recorded above; run them again in the VM for current
 validation. For the Agility-core matrix rows, reconfigure into a second build
 directory with `-DFEME_PROBE_AGILITY_VERSION=619` and
 `-DFEME_PROBE_AGILITY_CORE=<path to a VM-local D3D12Core.dll>`, then
-run that build's four CTests and `feme-windows-adapter-probe.exe` directly
+run that build's four LIT tests and `feme-windows-adapter-probe.exe` directly
 with no arguments, `--software <WARP path>`,
 or `--stub <path to feme-adapter-rejection-stub.dll>`.
 
@@ -1083,7 +1235,7 @@ cmake -S C:\Users\cbieneman\dev\llvm-project\feme\utils\windows-adapter-probe `
   -DCMAKE_CXX_COMPILER_LAUNCHER=C:\Users\cbieneman\.cargo\bin\sccache.exe `
   "-DCMAKE_MT=C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\mt.exe"
 cmake --build C:\dev\adapter-probe
-ctest --test-dir C:\dev\adapter-probe -V
+cmake --build C:\dev\adapter-probe --target check-feme-windows-probes
 C:\dev\adapter-probe\feme-windows-adapter-probe.exe --software `
   C:\Users\cbieneman\dev\offload-test-suite\build\bin\d3d10warp.dll
 ```

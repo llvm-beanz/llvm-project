@@ -11,8 +11,9 @@
 # feme-cpu-restructure-fuzzer) already ships a checked-in seed corpus, but
 # nothing runs any of them, so a fuzzer that stops compiling -- or
 # regresses to crashing on one of its own seeds -- goes unnoticed. This
-# script is the `check-feme-fuzz` CMake target's driver: for each
-# (fuzzer, corpus directory) pair, it runs the fuzzer over every file in
+# script is invoked by LIT's seed-corpus cases, including the scoped
+# `check-feme-fuzz` target: for each (fuzzer, corpus directory) pair,
+# it runs the fuzzer over every file in
 # that corpus for a bounded number of iterations, so the crash-freedom
 # claim in Design.md's "Testing Strategy" is checked for a few seconds of
 # test time on every build, without running an actual, unbounded fuzzing

@@ -48,9 +48,10 @@ Tools" sections of [Design.md](../Design.md)): they exist to exercise
 individual pipeline stages in isolation under `lit`/`FileCheck`, not as
 user-facing tools. `feme` is the only tool intended for end users.
 
-`ninja check-feme-fuzz` runs every fuzzer above for a bounded number of
+`ninja check-feme-fuzz` uses LIT to run every fuzzer above for a bounded number of
 iterations over its own checked-in seed corpus (see
 [../../utils/check-feme-fuzz.py](../../utils/check-feme-fuzz.py) and
 Roadmap.md's §1.7), so a fuzzer that stops compiling or regresses to
 crashing on one of its own seeds is caught by every build, without running
-an actual, unbounded fuzzing campaign.
+an actual, unbounded fuzzing campaign. The same seed-corpus cases also run
+in the regular `check-feme` LIT suite.

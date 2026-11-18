@@ -3038,9 +3038,10 @@ feme/
   only run added as its own CMake target (`feme/test/CMakeLists.txt`) once
   the fourth fuzzer (DXBC's) existed, so the "run in CI alongside the
   `lit`/`gtest` suites" claim above is actually checked: every fuzz target
-  is also added to `FEME_TEST_DEPENDS`, so `ninja check-feme` builds all of
-  them even without running `check-feme-fuzz` itself, catching a fuzzer
-  that stops compiling. Wiring this up immediately caught two real,
+  is also added to `FEME_TEST_DEPENDS`. The bounded seed-corpus cases now
+  run through LIT: `ninja check-feme-fuzz` selects just those cases, while
+  `ninja check-feme` builds the fuzzers and runs the same cases in the full
+  suite. Wiring this up immediately caught two real,
   previously-undetected bugs -- a bit-rotted `dxbc-as-fuzzer` call site (a
   `wrapInContainer` signature change had gone unnoticed because nothing
   built it) and a `feme-dxbc-import-fuzzer` crash on its first run (see

@@ -39,14 +39,12 @@ if(MSVC)
   target_compile_options(feme-windows-adapter-probe PRIVATE /W4 /WX /UNDEBUG)
 endif()
 
-enable_testing()
-add_test(NAME reference-warp COMMAND feme-windows-adapter-probe)
-add_test(NAME software-reference-warp COMMAND feme-windows-adapter-probe
+include(../windows-probe-tests/WindowsProbeTests.cmake)
+feme_initialize_probe_tests()
+feme_add_probe_test(NAME reference-warp COMMAND feme-windows-adapter-probe)
+feme_add_probe_test(NAME software-reference-warp COMMAND feme-windows-adapter-probe
   --software "$ENV{SystemRoot}/System32/d3d10warp.dll")
-add_test(NAME rejection-stub COMMAND feme-windows-adapter-probe
+feme_add_probe_test(NAME rejection-stub COMMAND feme-windows-adapter-probe
   --stub $<TARGET_FILE:feme-adapter-rejection-stub>)
-add_test(NAME missing-module COMMAND feme-windows-adapter-probe
+feme_add_probe_test(NAME missing-module WILL_FAIL COMMAND feme-windows-adapter-probe
   --software "${CMAKE_CURRENT_BINARY_DIR}/nonexistent-driver.dll")
-set_tests_properties(missing-module PROPERTIES WILL_FAIL TRUE)
-set_tests_properties(reference-warp software-reference-warp rejection-stub
-  missing-module PROPERTIES TIMEOUT 30)

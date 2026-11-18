@@ -2566,10 +2566,10 @@ is small enough to land on its own:
    `feme::cpu::runDispatch`, so AOT is covered by `lit`, not only by
    `gtest` (test/Tools/feme-run/feme-run-object-aot.ll).
 6. **`check-feme-fuzz` (done by R6).** Per §1.7: bounded (`-runs=N`,
-   seed-corpus-only) runs of every fuzz target, wired as a dependency of
-   nothing by default (`ninja check-feme-fuzz` runs it explicitly) but with
-   every fuzz target added to `FEME_TEST_DEPENDS` so `ninja check-feme`
-   still builds all of them.
+   seed-corpus-only) LIT tests for every fuzz target. `ninja check-feme-fuzz`
+   runs only those cases; `ninja check-feme` builds the fuzz targets through
+   `FEME_TEST_DEPENDS` and runs the same seed-corpus tests as part of the
+   regular LIT suite.
 
 ### 2.5 Corpus discipline
 
@@ -2779,7 +2779,7 @@ and with §3.2 once their prerequisites land.
 
 | # | Milestone | Depends on |
 |---|---|---|
-| W0 | Application-local WARP-compatible user-mode integration: W0(e)–W0(f) measurements and W0(h)'s bounded B routing investigation are complete. W0(b) is closed with the user's choice of Microsoft's WARP identity/device IDs and unmodified WARP kernel-mode support. Strict W0(g) gates check negotiation stage, exact DDI and owned-module identity, with paired negative controls. Builds 0070/0071 are rejected before device-size calculation on x64 inbox and native ARM64 inbox/Agility 619, while 0072 reaches the deliberate `E_NOTIMPL` stub. The public KT paging-queue create/destroy lifecycle now passes on all three configurations at DDIs 0010/0022/0072/0110, with strict and mock failure/cleanup tests. Public 0022-and-later core-layer allocation wrappers are identified but uninvoked. W0(g) still needs the rejection explanation, allocation/residency lifecycle and a real owned DDI/device; the paging-queue result is not full resource or device evidence. Installed signing/INF/reboot evaluation is outside the selected contract | — |
+| W0 | Application-local WARP-compatible user-mode integration: W0(e)–W0(f) measurements and W0(h)'s bounded B routing investigation are complete. W0(b) is closed with the user's choice of Microsoft's WARP identity/device IDs and unmodified WARP kernel-mode support. Strict W0(g) gates check negotiation stage, exact DDI and owned-module identity, with paired negative controls. Builds 0070/0071 are rejected before device-size calculation on x64 inbox and native ARM64 inbox/Agility 619, while 0072 reaches the deliberate `E_NOTIMPL` stub. The public KT paging-queue create/destroy lifecycle passes on all three configurations at DDIs 0010/0022/0072/0110. A separate [public KMT control](W0WindowsIntegrationProbe.md#w0g-public-kmt-standard-allocation-and-residency-control-vm) now passes 64 KiB standard allocation, asynchronous residency/fence wait, eviction and teardown on native ARM64 and x64 without private driver data, with mock failure/cleanup tests. That control owns a separate KMT device; public 0022-and-later runtime allocation wrappers remain uninvoked. W0(g) still needs the rejection explanation, allocation/residency integration with the runtime-owned device and a real owned DDI/device. Neither control closes that resource/device gate. Installed signing/INF/reboot evaluation is outside the selected contract | — |
 | W1 | Full-architecture objects and headless compute through existing stage APIs; device removal and truthful development capability inventory | W0(g) supported-DDI/device boundary proof, WS2; reuse R21, R22; not pending installed-driver/HLK evaluation |
 | W2 | Root signatures, descriptor heaps, general CBVs, buffers/images/samplers, committed/placed/reserved resources, copy footprints, residency, legacy synchronization, indirect commands and queries | W1, WS0–WS1; reuse R23, R25, R30 |
 | W3 | Conventional graphics over FeMeGraphics: raster/output merge, MSAA, stream output, tessellation/geometry, indirect draw, libraries/caches and cross-API differential tests | W2; reuse/complete R32–R34 |

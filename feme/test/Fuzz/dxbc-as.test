@@ -1,0 +1,1 @@
+# RUN: %python "%S/../../utils/check-feme-fuzz.py" --fuzzer="%feme_fuzz_tools/dxbc-as-fuzzer%feme_exe_ext=%S/../../tools/dxbc-as-fuzzer/seed-corpus"

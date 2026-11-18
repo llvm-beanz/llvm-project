@@ -76,7 +76,10 @@ add_lit_testsuite(check-feme "Running the feme regression tests"
   )
 set_target_properties(check-feme PROPERTIES FOLDER "Tests")
 
-add_lit_testsuites(FEME ${CMAKE_CURRENT_SOURCE_DIR} DEPENDS ${FEME_TEST_DEPENDS})
+add_lit_testsuites(FEME ${CMAKE_CURRENT_SOURCE_DIR}
+  DEPENDS ${FEME_TEST_DEPENDS}
+  SKIP "^Fuzz$"
+  )
 
 # Roadmap step R6 (see feme/docs/Roadmap.md's §1.7 P0): a bounded,
 # seed-corpus-only run of every fuzz target, so a fuzzer that stops
@@ -95,20 +98,10 @@ if(FEME_HAVE_VULKAN_HEADERS)
   list(APPEND FEME_FUZZ_TARGETS feme-vulkan-pipeline-cache-fuzzer)
 endif()
 
-set(FEME_FUZZ_ARGS "")
-foreach(fuzzer ${FEME_FUZZ_TARGETS})
-  list(APPEND FEME_FUZZ_ARGS
-    "--fuzzer=$<TARGET_FILE:${fuzzer}>=${FEME_SOURCE_DIR}/tools/${fuzzer}/seed-corpus")
-endforeach()
-
-add_custom_target(check-feme-fuzz
-  COMMAND ${Python3_EXECUTABLE}
-          ${FEME_SOURCE_DIR}/utils/check-feme-fuzz.py
-          ${FEME_FUZZ_ARGS}
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Fuzz")
+add_lit_testsuite(check-feme-fuzz "Running bounded seed-corpus fuzz checks"
+  "${CMAKE_CURRENT_BINARY_DIR}/Fuzz"
   DEPENDS ${FEME_FUZZ_TARGETS}
-  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-  COMMENT "Running bounded seed-corpus fuzz checks"
-  USES_TERMINAL
   )
 set_target_properties(check-feme-fuzz PROPERTIES FOLDER "Tests")
 
@@ -118,7 +111,7 @@ set_target_properties(check-feme-fuzz PROPERTIES FOLDER "Tests")
 # of which added its portable logic's tests directly to one of these
 # binaries. Unlike `check-feme` (which discovers thousands of unrelated
 # tests across the whole project via lit), this runs only the listed
-# gtest binaries directly and reports each one's own named failures, for
+# gtest binaries through LIT's GoogleTest format and reports named failures, for
 # a quick local check after a shared-core-only change before paying for
 # a full `check-feme`/CTS run.
 set(FEME_SHARED_CORE_TEST_TARGETS
@@ -126,19 +119,10 @@ set(FEME_SHARED_CORE_TEST_TARGETS
   FeMeImageTests
   )
 
-set(FEME_SHARED_CORE_TEST_ARGS "")
-foreach(shared_core_test ${FEME_SHARED_CORE_TEST_TARGETS})
-  list(APPEND FEME_SHARED_CORE_TEST_ARGS
-    "--gtest-binary=$<TARGET_FILE:${shared_core_test}>")
-endforeach()
-
-add_custom_target(check-feme-shared-core
-  COMMAND ${Python3_EXECUTABLE}
-          ${FEME_SOURCE_DIR}/utils/check-feme-shared-core.py
-          ${FEME_SHARED_CORE_TEST_ARGS}
+add_lit_testsuite(check-feme-shared-core
+  "Running FeMe shared-core library regression tests"
+  "${CMAKE_CURRENT_BINARY_DIR}/Unit"
+  ARGS "\"--filter=FeMe(Image|Execution)Tests\""
   DEPENDS ${FEME_SHARED_CORE_TEST_TARGETS}
-  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-  COMMENT "Running FeMe shared-core library regression tests"
-  USES_TERMINAL
   )
 set_target_properties(check-feme-shared-core PROPERTIES FOLDER "Tests")

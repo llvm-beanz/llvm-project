@@ -24,6 +24,15 @@ config.test_exec_root = os.path.join(config.feme_obj_root, "test")
 
 config.excludes = ["Inputs", "CMakeLists.txt", "README.txt", "LICENSE.txt"]
 
+config.substitutions.extend(
+    [
+        ("%feme_fuzz_tools", config.feme_tools_dir),
+        ("%feme_exe_ext", config.llvm_exe_ext),
+    ]
+)
+if config.feme_have_vulkan_headers == "ON":
+    config.available_features.add("feme-vulkan-headers")
+
 # Targets: expose a `<arch>-registered-target` feature per LLVM target
 # configured into this build, mirroring llvm/test/lit.cfg.py, so tests
 # needing a specific codegen target (e.g. the SPIR-V "null pipeline", see
