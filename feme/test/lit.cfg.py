@@ -28,6 +28,13 @@ config.substitutions.extend(
     [
         ("%feme_fuzz_tools", config.feme_tools_dir),
         ("%feme_exe_ext", config.llvm_exe_ext),
+        (
+            "%feme_runtime_cpu_bitcode",
+            "'%s'"
+            % os.path.join(
+                config.feme_obj_root, "runtime", "CPU", "FeMeRuntimeCPU.bc"
+            ),
+        ),
     ]
 )
 if config.feme_have_vulkan_headers == "ON":
@@ -145,10 +152,7 @@ tools = [
     # function-symbol disambiguation for entry points of different stages
     # sharing one `OpEntryPoint` Name).
     "mlir-translate",
-    # Compiles libFeMeRuntimeCPU's C source (see
-    # feme/runtime/CPU/FeMeRuntimeCPU.c and "Runtime Support Library" in
-    # feme/docs/FeMeCPUDesign.md) to bitcode at test time, the same way the
-    # build itself does (feme/runtime/CPU/CMakeLists.txt).
+    # Compiles HLSL fixtures and native execution harnesses.
     "clang",
 ]
 

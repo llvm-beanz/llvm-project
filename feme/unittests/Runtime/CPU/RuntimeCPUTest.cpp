@@ -20,62 +20,27 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "feme/Target/CPU/RuntimeCPU.h"
+#include "RuntimeCPUJITTest.h"
+
 #include "feme/Target/CPU/RuntimeABI.h"
 
-#include "llvm/Bitcode/BitcodeReader.h"
-#include "llvm/ExecutionEngine/ExecutionEngine.h"
-#include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
+
+feme::cpu::RuntimeCPUJITTest::~RuntimeCPUJITTest() = default;
 
 using namespace feme::cpu;
 using namespace llvm;
 
 namespace {
 
-/// Looks up \p Name in \p M, the way the target platform's mangler actually
-/// spells it. `libFeMeRuntimeCPU`'s helpers are all given their canonical
-/// dotted name via a GNU `asm` label (see FeMeRuntimeCPU.c), and on Mach-O
-/// targets Clang marks such explicit-asm-label names with a leading
-/// `GlobalValue::dropLLVMManglingEscape` byte so the backend emits them
-/// verbatim, unprefixed -- so the plain dotted name is not always the
-/// `GlobalValue`'s actual name. Try both spellings rather than assume one.
-Function *getRuntimeFunction(Module &M, StringRef Name) {
-  if (Function *F = M.getFunction(Name))
-    return F;
-  return M.getFunction(("\1" + Name).str());
-}
-
-class RuntimeCPUTest : public testing::Test {
+class RuntimeCPUTest : public RuntimeCPUJITTest {
 protected:
-  static void SetUpTestSuite() {
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
-  }
-
-  LLVMContext Ctx;
-  Module *M = nullptr; // Owned by Engine.
-  std::unique_ptr<ExecutionEngine> Engine;
-
-  void SetUp() override {
-    Expected<std::unique_ptr<Module>> ModOrErr =
-        parseBitcodeFile(getRuntimeCPUBitcode(), Ctx);
-    ASSERT_THAT_EXPECTED(ModOrErr, Succeeded());
-    auto Owner = std::move(*ModOrErr);
-    M = Owner.get();
-    std::string Error;
-    Engine.reset(EngineBuilder(std::move(Owner)).setErrorStr(&Error).create());
-    ASSERT_TRUE(Engine) << Error;
-  }
-
   /// Adds `void @<Name>(ptr heap, i32 heap_count, i32 descriptor_index, i64
   /// offset, i1 mask, ptr out)` calling the load `feme.cpu.resource.load.*`
   /// function named \p Callee and storing its result through `out`.
@@ -106,7 +71,7 @@ protected:
     Builder.CreateStore(Result, Out);
     Builder.CreateRetVoid();
     (void)ElemTy;
-    return Wrapper;
+    return keepForJIT(Wrapper);
   }
 
   /// The store counterpart of `addLoadWrapper`: `void @<Name>(ptr heap, i32
@@ -176,7 +141,7 @@ protected:
     }
     Builder.CreateCall(Target, {Heap, HeapCount, Index, Offset, Value_, Mask});
     Builder.CreateRetVoid();
-    return Wrapper;
+    return keepForJIT(Wrapper);
   }
 
   using LoadFn = void (*)(void *, uint32_t, uint32_t, uint64_t, bool, void *);
@@ -196,16 +161,6 @@ protected:
   /// addresses with `resolve`. `getLoadWrapper`/`getStoreWrapper` are the
   /// add-then-immediately-resolve shorthand for the common single-wrapper
   /// case.
-  template <typename FnTy> FnTy resolve(Function *F) {
-    uint64_t Addr = Engine->getFunctionAddress(F->getName().str());
-    // A null address means MCJIT failed to resolve/finalize this symbol;
-    // calling through it crashes with an uninformative `pc=0x0` segfault
-    // and no diagnostic at all (see ImageSamplingTest.cpp's identical
-    // helper for the specific reported failure this guards against).
-    assert(Addr && "MCJIT failed to resolve a runtime function address");
-    return reinterpret_cast<FnTy>(Addr);
-  }
-
   LoadFn getLoadWrapper(StringRef Name, StringRef Callee) {
     return resolve<LoadFn>(addLoadWrapper(Name, Callee));
   }

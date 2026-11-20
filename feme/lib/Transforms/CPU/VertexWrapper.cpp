@@ -148,13 +148,6 @@ Value *widenForStageStorageStore(IRBuilder<> &Builder, Value *Val) {
              : Val;
 }
 
-Value *getFlatInvocationIndex(IRBuilder<> &Builder, const WaveBodyEnv &WEnv,
-                              unsigned WaveSize, unsigned Lane) {
-  Value *Base = Builder.CreateMul(WEnv.WaveIndex, Builder.getInt32(WaveSize),
-                                  "flat.base");
-  return Builder.CreateAdd(Base, Builder.getInt32(Lane), "flat.index");
-}
-
 Value *loadLayoutField(IRBuilder<> &Builder, Value *LayoutArg,
                        unsigned ElementID, unsigned Field, Type *FieldTy) {
   LLVMContext &Ctx = Builder.getContext();

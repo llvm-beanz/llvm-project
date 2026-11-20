@@ -2,6 +2,7 @@ set(LLVM_LINK_COMPONENTS
   BitReader
   Core
   ExecutionEngine
+  IPO
   MCJIT
   Support
   TestingSupport

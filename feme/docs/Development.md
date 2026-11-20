@@ -68,6 +68,37 @@ translation tests. `check-feme` must build its own tools, unit tests, Vulkan
 ICD and smoke clients before running lit; do not mask missing dependencies
 by building `all` first.
 
+### Targeted LIT runs and runtime test cost
+
+FeMe's regression tests and GoogleTest unit tests both run through LIT, not
+CTest. For a focused runtime check after building the dependencies:
+
+```shell
+ninja -C build -j 8 feme-test-depends
+python3 build/bin/llvm-lit.py -sv --time-tests --timeout=60 \
+  --filter='FeMeRuntimeCPUTests|runtime-cpu-bitcode' build/tools/feme/test
+```
+
+LIT shards GoogleTest binaries by default. `--timeout` limits a whole
+shard, not each named GoogleTest case; increasing it can conceal excessive
+per-test compilation. The runtime fixtures retain fresh modules and JIT
+engines per case but discard unused helper definitions before MCJIT code
+generation. Every requested wrapper and its transitive dependencies remain,
+so tests still execute the real runtime bitcode without sharing mutable
+state. Register all wrappers before resolving any addresses.
+
+Partial graphics waves must not read or write beyond the logical batch:
+masking a value after an out-of-bounds load is not sufficient. The shared
+stage index helper maps inactive lanes to valid storage, and fragment
+wrappers guard absent quad records and result writes separately from shader
+liveness. CPU-stage guard-page regressions check invocation, input, output,
+and result buffers at wave sizes 4, 8, 16, and 32.
+
+The bitcode regression verifies the build-produced, optimized runtime
+artifact rather than recompiling the same C source during each LIT run.
+Always rebuild dependencies before invoking LIT directly so this artifact
+and the embedded runtime agree with the current sources.
+
 ## Vulkan CTS
 
 Fetch the dependencies pinned by CTS's `external/fetch_sources.py` before

@@ -16,10 +16,27 @@
 #ifndef FEME_LIB_TRANSFORMS_CPU_STAGEARGSLAYOUT_H
 #define FEME_LIB_TRANSFORMS_CPU_STAGEARGSLAYOUT_H
 
+#include "feme/Transforms/CPU/SIMDize.h"
+
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 
 namespace feme::cpu {
+
+/// Inactive tail lanes must address a valid record even when their loaded
+/// values are subsequently masked out. Every executing wave has record zero.
+inline llvm::Value *getFlatInvocationIndex(llvm::IRBuilder<> &Builder,
+                                           const WaveBodyEnv &Env,
+                                           unsigned WaveSize, unsigned Lane) {
+  llvm::Value *Base =
+      Builder.CreateMul(Env.WaveIndex, Builder.getInt32(WaveSize), "flat.base");
+  llvm::Value *Index =
+      Builder.CreateAdd(Base, Builder.getInt32(Lane), "flat.index");
+  llvm::Value *Active =
+      Builder.CreateExtractElement(Env.EntryMask, Builder.getInt32(Lane));
+  return Builder.CreateSelect(Active, Index, Builder.getInt32(0),
+                              "flat.safe.index");
+}
 
 enum StageElementField : unsigned {
   StageElementFieldElementID = 0,
@@ -274,10 +291,10 @@ inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
   // `[Lane][2]` shape).
   llvm::Type *PointCoordTy =
       llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 2), 4);
-  return llvm::StructType::get(
-      Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4, I32x4, I32x4, I32x4,
-            I32Ty, SamplePositionTy, PointCoordTy, I32Ty, I32Ty,
-            llvm::ArrayType::get(I32Ty, 3)});
+  return llvm::StructType::get(Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4,
+                                     I32x4, I32x4, I32x4, I32Ty,
+                                     SamplePositionTy, PointCoordTy, I32Ty,
+                                     I32Ty, llvm::ArrayType::get(I32Ty, 3)});
 }
 
 inline llvm::StructType *getFragmentResultType(llvm::LLVMContext &Ctx) {
@@ -315,9 +332,9 @@ inline llvm::StructType *getFragmentPrimitiveType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(
-      Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy, PtrTy,
-            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 3)});
+  return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
+                                     PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+                                     llvm::ArrayType::get(PtrTy, 3)});
 }
 
 /// Distinct from `getPatchArgsType` (see `FemePatchConstantArgs`'s own
@@ -338,9 +355,8 @@ inline llvm::StructType *getPatchConstantArgsType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getDomainInvocationType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *F32Ty = llvm::Type::getFloatTy(Ctx);
-  return llvm::StructType::get(
-      Ctx, {llvm::ArrayType::get(F32Ty, 3), I32Ty, I32Ty,
-           llvm::ArrayType::get(I32Ty, 3)});
+  return llvm::StructType::get(Ctx, {llvm::ArrayType::get(F32Ty, 3), I32Ty,
+                                     I32Ty, llvm::ArrayType::get(I32Ty, 3)});
 }
 
 /// Mirrors `FemeDomainArgs`: a vertex-shaped per-invocation batch whose
@@ -448,9 +464,9 @@ inline llvm::StructType *getTaskArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *I32x3 = llvm::ArrayType::get(I32Ty, 3);
-  return llvm::StructType::get(
-      Ctx, {getShaderResourcesType(Ctx), I32x3, I32x3, PtrTy, I32Ty, I32Ty,
-            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 2)});
+  return llvm::StructType::get(Ctx, {getShaderResourcesType(Ctx), I32x3, I32x3,
+                                     PtrTy, I32Ty, I32Ty, PtrTy, PtrTy,
+                                     llvm::ArrayType::get(PtrTy, 2)});
 }
 
 inline llvm::Value *loadStructField(llvm::IRBuilder<> &Builder,

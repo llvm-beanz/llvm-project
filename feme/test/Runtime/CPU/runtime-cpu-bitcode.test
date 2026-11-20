@@ -1,16 +1,14 @@
-; RUN: clang -c -emit-llvm -O2 -ffreestanding -fno-builtin \
-; RUN:     --target=%feme_host_triple \
-; RUN:     %S/../../../runtime/CPU/FeMeRuntimeCPU.c -o %t.bc
-; RUN: opt -passes=verify -disable-output %t.bc
-; RUN: opt -S %t.bc -o - | FileCheck %s
+; RUN: opt -passes=verify -disable-output %feme_runtime_cpu_bitcode
+; RUN: opt -S %feme_runtime_cpu_bitcode -o - | FileCheck %s
 
 ; libFeMeRuntimeCPU's shader-side helper C source (see "Runtime Support
-; Library" in feme/docs/FeMeCPUDesign.md) compiles cleanly and defines the
+; Library" in feme/docs/FeMeCPUDesign.md) is compiled by the build, which
+; check-feme depends on. Verify that exact optimized bitcode and the
 ; canonical calls `feme::cpu::ResourceCalls` creates -- see
 ; feme/unittests/Runtime/CPU/RuntimeCPUTest.cpp for the gtests that
 ; JIT-execute these and check their actual bounds-checking/format-
 ; conversion behavior; this lit test only covers that the bitcode itself
-; builds and exposes the expected external symbols.
+; exposes the expected external symbols without recompiling it per run.
 
 ; Each `asm`-labeled name below is quoted and prefixed with a literal
 ; `\01` (a `GlobalValue::dropLLVMManglingEscape` byte) on Mach-O targets,

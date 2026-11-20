@@ -28,6 +28,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
 using namespace feme;
@@ -41,6 +42,7 @@ constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
 constexpr StringLiteral InvocationsParamName = "stage_fragment_invocations";
 constexpr StringLiteral ResultsParamName = "stage_fragment_results";
+constexpr StringLiteral QuadCountParamName = "stage_fragment_quad_count";
 // (Roadmap L115(b)) Pull-model interpolation's own three new fragment-batch
 // parameters -- see `FemeFragmentArgs::Primitives`/`VertexInputs`/
 // `SamplePositions`'s own comments.
@@ -70,6 +72,7 @@ struct FragmentStageEnv {
   Value *Outputs = nullptr;
   Value *Invocations = nullptr;
   Value *Results = nullptr;
+  Value *QuadCount = nullptr;
   /// (Roadmap L115(b)) See the corresponding `FemeFragmentArgs` fields'
   /// own comments.
   Value *Primitives = nullptr;
@@ -94,6 +97,8 @@ std::optional<FragmentStageEnv> getFragmentStageEnv(Function &F) {
       Env.Invocations = &Arg, Found = true;
     else if (Arg.getName() == ResultsParamName)
       Env.Results = &Arg, Found = true;
+    else if (Arg.getName() == QuadCountParamName)
+      Env.QuadCount = &Arg, Found = true;
     else if (Arg.getName() == PrimitivesParamName)
       Env.Primitives = &Arg, Found = true;
     else if (Arg.getName() == VertexInputsParamName)
@@ -114,6 +119,7 @@ Function *appendFragmentStageParams(Function &F) {
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
   ParamTypes.append(
       {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+  ParamTypes.push_back(Type::getInt32Ty(Ctx));
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -143,6 +149,7 @@ Function *appendFragmentStageParams(Function &F) {
   (&*ArgIt++)->setName(VertexInputsParamName);
   (&*ArgIt++)->setName(VertexInputLayoutParamName);
   (&*ArgIt++)->setName(SamplePositionsParamName);
+  (&*ArgIt++)->setName(QuadCountParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -184,13 +191,6 @@ Value *widenForStageStorageStore(IRBuilder<> &Builder, Value *Val) {
   return Val->getType()->isHalfTy()
              ? Builder.CreateFPExt(Val, Type::getFloatTy(Builder.getContext()))
              : Val;
-}
-
-Value *getFlatInvocationIndex(IRBuilder<> &Builder, const WaveBodyEnv &WEnv,
-                              unsigned WaveSize, unsigned Lane) {
-  Value *Base = Builder.CreateMul(WEnv.WaveIndex, Builder.getInt32(WaveSize),
-                                  "flat.base");
-  return Builder.CreateAdd(Base, Builder.getInt32(Lane), "flat.index");
 }
 
 Value *loadLayoutField(IRBuilder<> &Builder, Value *LayoutArg,
@@ -1045,6 +1045,7 @@ void lowerReturnMasks(CallInst &CI, const WaveBodyEnv &WEnv,
       cast<FixedVectorType>(CI.getArgOperand(0)->getType())->getNumElements();
   unsigned QuadsPerWave = WaveSize / 4;
   for (unsigned Quad = 0; Quad != QuadsPerWave; ++Quad) {
+    Builder.SetInsertPoint(&CI);
     Value *LiveBits = Builder.getInt32(0);
     Value *SideBits = Builder.getInt32(0);
     for (unsigned Lane = 0; Lane != 4; ++Lane) {
@@ -1065,13 +1066,18 @@ void lowerReturnMasks(CallInst &CI, const WaveBodyEnv &WEnv,
     Value *QuadIndex = Builder.CreateAdd(
         Builder.CreateMul(WEnv.WaveIndex, Builder.getInt32(QuadsPerWave)),
         Builder.getInt32(Quad));
-    Value *ResultPtr = Builder.CreateInBoundsGEP(ResultTy, Results, QuadIndex);
-    Value *LivePtr = Builder.CreateStructGEP(ResultTy, ResultPtr,
-                                             FragmentResultFieldLiveMask);
-    Builder.CreateStore(LiveBits, LivePtr);
-    Value *SidePtr = Builder.CreateStructGEP(ResultTy, ResultPtr,
-                                             FragmentResultFieldSideEffectMask);
-    Builder.CreateStore(SideBits, SidePtr);
+    Value *Active = Builder.CreateICmpULT(QuadIndex, FEnv.QuadCount);
+    Instruction *ThenTerm =
+        SplitBlockAndInsertIfThen(Active, &CI, /*Unreachable=*/false);
+    IRBuilder<> StoreBuilder(ThenTerm);
+    Value *ResultPtr =
+        StoreBuilder.CreateInBoundsGEP(ResultTy, Results, QuadIndex);
+    Value *LivePtr = StoreBuilder.CreateStructGEP(ResultTy, ResultPtr,
+                                                  FragmentResultFieldLiveMask);
+    StoreBuilder.CreateStore(LiveBits, LivePtr);
+    Value *SidePtr = StoreBuilder.CreateStructGEP(
+        ResultTy, ResultPtr, FragmentResultFieldSideEffectMask);
+    StoreBuilder.CreateStore(SideBits, SidePtr);
   }
 }
 
@@ -1166,10 +1172,11 @@ bool lowerFragmentStageOps(Function &F) {
   if (!WEnv || !FEnv)
     return false;
 
-  for (Instruction &I : make_early_inc_range(instructions(F))) {
-    auto *CI = dyn_cast<CallInst>(&I);
-    if (!CI)
-      continue;
+  SmallVector<CallInst *, 16> Calls;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      Calls.push_back(CI);
+  for (CallInst *CI : Calls) {
     if (isReturnMasksCall(*CI)) {
       lowerReturnMasks(*CI, *WEnv, *FEnv);
       CI->eraseFromParent();
@@ -1410,11 +1417,13 @@ Function *buildWrapper(Function &Body) {
         BodyIR.CreateAdd(BodyIR.CreateMul(W, BodyIR.getInt32(QuadsPerWave)),
                          BodyIR.getInt32(QuadInWave));
     Value *QuadActive = BodyIR.CreateICmpULT(QuadIndex, Env.QuadCount);
+    Value *SafeQuadIndex =
+        BodyIR.CreateSelect(QuadActive, QuadIndex, BodyIR.getInt32(0));
     Value *LiveBits =
-        buildQuadMaskValue(BodyIR, Env.Invocations, QuadIndex,
+        buildQuadMaskValue(BodyIR, Env.Invocations, SafeQuadIndex,
                            FragmentInvocationFieldLiveMask, WaveSize);
     Value *SideBits =
-        buildQuadMaskValue(BodyIR, Env.Invocations, QuadIndex,
+        buildQuadMaskValue(BodyIR, Env.Invocations, SafeQuadIndex,
                            FragmentInvocationFieldSideEffectMask, WaveSize);
     Value *LaneLive = BodyIR.CreateAnd(
         QuadActive,
@@ -1501,6 +1510,8 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.VertexInputLayout);
     else if (Arg.getName() == SamplePositionsParamName)
       CallArgs.push_back(Env.SamplePositions);
+    else if (Arg.getName() == QuadCountParamName)
+      CallArgs.push_back(Env.QuadCount);
     else
       llvm_unreachable("unexpected parameter for FragmentWrapperPass");
   }

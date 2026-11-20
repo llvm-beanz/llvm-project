@@ -18,19 +18,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "feme/Target/CPU/RuntimeABI.h"
-#include "feme/Target/CPU/RuntimeCPU.h"
+#include "RuntimeCPUJITTest.h"
 
-#include "llvm/Bitcode/BitcodeReader.h"
-#include "llvm/ExecutionEngine/ExecutionEngine.h"
-#include "llvm/ExecutionEngine/MCJIT.h"
+#include "feme/Target/CPU/RuntimeABI.h"
+
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
 #include <cstring>
@@ -40,14 +36,6 @@ using namespace feme::cpu;
 using namespace llvm;
 
 namespace {
-
-/// See RuntimeCPUTest.cpp's identical helper for why both spellings are
-/// tried.
-Function *getRuntimeFunction(Module &M, StringRef Name) {
-  if (Function *F = M.getFunction(Name))
-    return F;
-  return M.getFunction(("\1" + Name).str());
-}
 
 /// A host-side re-implementation of `femeRTFastLog2`'s exact approximation
 /// formula (FeMeRuntimeCPU.c), used only by the `QueryLod2D*` tests below
@@ -69,28 +57,8 @@ float expectedFastLog2(float X) {
   return (float)Exp + Poly;
 }
 
-class ImageSamplingTest : public testing::Test {
+class ImageSamplingTest : public RuntimeCPUJITTest {
 protected:
-  static void SetUpTestSuite() {
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
-  }
-
-  LLVMContext Ctx;
-  Module *M = nullptr; // Owned by Engine.
-  std::unique_ptr<ExecutionEngine> Engine;
-
-  void SetUp() override {
-    Expected<std::unique_ptr<Module>> ModOrErr =
-        parseBitcodeFile(getRuntimeCPUBitcode(), Ctx);
-    ASSERT_THAT_EXPECTED(ModOrErr, Succeeded());
-    auto Owner = std::move(*ModOrErr);
-    M = Owner.get();
-    std::string Error;
-    Engine.reset(EngineBuilder(std::move(Owner)).setErrorStr(&Error).create());
-    ASSERT_TRUE(Engine) << Error;
-  }
-
   /// Adds a `void @<Name>(<Callee's own params>..., ptr out)` wrapper
   /// forwarding every argument to \p Callee and storing its result through
   /// the trailing `out` pointer -- generic over \p Callee's exact
@@ -116,20 +84,7 @@ protected:
     Value *Result = Builder.CreateCall(Target, Args);
     Builder.CreateStore(Result, Out);
     Builder.CreateRetVoid();
-    return Wrapper;
-  }
-
-  template <typename FnTy> FnTy resolve(Function *F) {
-    uint64_t Addr = Engine->getFunctionAddress(F->getName().str());
-    // A null address here means MCJIT failed to resolve/finalize this
-    // symbol; calling through it crashes with an uninformative `pc=0x0`
-    // segfault and no diagnostic at all (this is exactly what a batch of
-    // reported UBSan `StoreWritesTexelInto*` failures looked like on
-    // another host/toolchain, and which did not reproduce here -- this
-    // assert turns any recurrence into an immediate, named failure
-    // instead of a bare crash).
-    assert(Addr && "MCJIT failed to resolve a runtime function address");
-    return reinterpret_cast<FnTy>(Addr);
+    return keepForJIT(Wrapper);
   }
 
   /// Resolves \p Name directly, with no `addWrapper` IR wrapper -- for
@@ -7930,5 +7885,3 @@ TEST_F(ImageSamplingTest, Store3DOutOfBoundsZIsANoOp) {
 }
 
 } // namespace
-
-

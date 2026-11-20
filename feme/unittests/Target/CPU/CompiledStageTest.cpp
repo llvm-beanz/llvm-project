@@ -24,13 +24,24 @@
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Memory.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
+#include <cerrno>
 #include <cstring>
+#include <new>
+#include <system_error>
 #include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+#include "llvm/Support/Windows/WindowsSupport.h"
+#else
+#include <sys/mman.h>
+#endif
 
 using namespace feme;
 using namespace feme::cpu;
@@ -869,6 +880,198 @@ TEST(CompiledStageTest, InvokeDomainRunsStageAwarePath) {
   StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
   EXPECT_EQ(Artifact.Stage, ShaderStage::Domain);
   EXPECT_FALSE(Artifact.Signature.empty());
+}
+
+Expected<sys::OwningMemoryBlock> allocateWithGuardPage() {
+  unsigned PageSize = sys::Process::getPageSizeEstimate();
+  std::error_code EC;
+  sys::OwningMemoryBlock Memory(sys::Memory::allocateMappedMemory(
+      2 * PageSize, nullptr, sys::Memory::MF_READ | sys::Memory::MF_WRITE, EC));
+  if (EC)
+    return createStringError(EC, "allocating guarded stage storage");
+  void *Guard =
+      static_cast<uint8_t *>(Memory.base()) + Memory.allocatedSize() - PageSize;
+#if defined(_WIN32)
+  DWORD OldProtection;
+  if (!VirtualProtect(Guard, PageSize, PAGE_NOACCESS, &OldProtection))
+    EC = std::error_code(static_cast<int>(GetLastError()),
+                         std::system_category());
+#else
+  if (mprotect(Guard, PageSize, PROT_NONE))
+    EC = std::error_code(errno, std::generic_category());
+#endif
+  if (EC)
+    return createStringError(EC, "protecting stage storage guard page");
+  return std::move(Memory);
+}
+
+TEST(CompiledStageTest, PartialDomainWavesDoNotAccessPastGuardedStorage) {
+  constexpr char IR[] = R"(
+    define void @ds_main() #0 {
+      %u = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %p = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+      %v = call i32 @feme.stage.input.load.i32(i32 2, i32 0, i32 0, i32 0)
+      %sum = add i32 %p, %v
+      %f = uitofp i32 %sum to float
+      %r = fadd float %u, %f
+      call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %r, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="domain" }
+  )";
+  EntrySignature Sig;
+  auto PrimitiveID = makeFloatInput(1);
+  PrimitiveID.ComponentType = SignatureComponentType::UInt;
+  PrimitiveID.SystemValue = SignatureSystemValue::PrimitiveID;
+  auto ViewIndex = PrimitiveID;
+  ViewIndex.ElementID = 2;
+  ViewIndex.SystemValue = SignatureSystemValue::ViewIndex;
+  Sig.Elements = {makeDomainLocationInput(0), PrimitiveID, ViewIndex,
+                  makeFloatOutput(3)};
+  FemeStageElement OutputElements[4] = {};
+  OutputElements[3].ElementID = 3;
+  OutputElements[3].ComponentCount = 1;
+  OutputElements[3].RowCount = 1;
+  OutputElements[3].InvocationStride = sizeof(float);
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 4;
+
+  for (unsigned WaveSize : {4u, 8u, 16u, 32u}) {
+    Context Ctx;
+    auto Stage = compileGraphicsStage(Ctx, IR, "ds_main", Sig,
+                                      ShaderStage::Domain, WaveSize);
+    ASSERT_THAT_EXPECTED(Stage, Succeeded());
+    for (unsigned Count : {1u, 3u, 5u, 18u}) {
+      SCOPED_TRACE(testing::Message()
+                   << "wave=" << WaveSize << " count=" << Count);
+      auto InvocationMemory = allocateWithGuardPage();
+      auto OutputMemory = allocateWithGuardPage();
+      ASSERT_THAT_EXPECTED(InvocationMemory, Succeeded());
+      ASSERT_THAT_EXPECTED(OutputMemory, Succeeded());
+      unsigned PageSize = sys::Process::getPageSizeEstimate();
+      auto *Invocations = reinterpret_cast<FemeDomainInvocation *>(
+          static_cast<uint8_t *>(InvocationMemory->base()) +
+          InvocationMemory->allocatedSize() - PageSize -
+          Count * sizeof(FemeDomainInvocation));
+      auto *Outputs = reinterpret_cast<float *>(
+          static_cast<uint8_t *>(OutputMemory->base()) +
+          OutputMemory->allocatedSize() - PageSize - Count * sizeof(float));
+      for (unsigned I = 0; I != Count; ++I) {
+        new (&Invocations[I]) FemeDomainInvocation{};
+        Invocations[I].DomainLocation[0] = I * 0.25f;
+        Invocations[I].PrimitiveID = I + 10;
+        Invocations[I].ViewIndex = I + 100;
+        new (&Outputs[I]) float(-1.0f);
+      }
+      DomainResources Resources;
+      Resources.Invocations =
+          ArrayRef<FemeDomainInvocation>(Invocations, Count);
+      Resources.OutputLayout = &OutputLayout;
+      Resources.Outputs = Outputs;
+      auto Prepared =
+          PreparedDomainBatch::create((*Stage)->getResourceInfo(), Resources);
+      ASSERT_THAT_ERROR((*Stage)->invokeDomain(Prepared), Succeeded());
+      for (unsigned I = 0; I != Count; ++I)
+        EXPECT_FLOAT_EQ(Outputs[I], 110.0f + I * 2.25f);
+    }
+  }
+}
+
+TEST(CompiledStageTest, PartialFragmentWavesDoNotAccessPastGuardedStorage) {
+  constexpr char IR[] = R"(
+    define void @ps_main() #0 {
+      %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %in, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInput(0), makeFloatOutput(1)};
+  FemeStageElement InputElement{};
+  InputElement.ComponentCount = 1;
+  InputElement.RowCount = 1;
+  InputElement.InvocationStride = sizeof(float);
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = &InputElement;
+  InputLayout.ElementCount = 1;
+  FemeStageElement OutputElements[2] = {};
+  OutputElements[1] = InputElement;
+  OutputElements[1].ElementID = 1;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 2;
+
+  for (unsigned WaveSize : {4u, 8u, 16u, 32u}) {
+    Context Ctx;
+    auto Stage = compileGraphicsStage(Ctx, IR, "ps_main", Sig,
+                                      ShaderStage::Fragment, WaveSize);
+    ASSERT_THAT_EXPECTED(Stage, Succeeded());
+    for (unsigned QuadCount : {1u, 3u, 5u}) {
+      SCOPED_TRACE(testing::Message()
+                   << "wave=" << WaveSize << " quads=" << QuadCount);
+      auto InvocationMemory = allocateWithGuardPage();
+      auto ResultMemory = allocateWithGuardPage();
+      auto InputMemory = allocateWithGuardPage();
+      auto OutputMemory = allocateWithGuardPage();
+      ASSERT_THAT_EXPECTED(InvocationMemory, Succeeded());
+      ASSERT_THAT_EXPECTED(ResultMemory, Succeeded());
+      ASSERT_THAT_EXPECTED(InputMemory, Succeeded());
+      ASSERT_THAT_EXPECTED(OutputMemory, Succeeded());
+      auto Tail = [](const sys::OwningMemoryBlock &Memory, size_t Bytes) {
+        return static_cast<uint8_t *>(Memory.base()) + Memory.allocatedSize() -
+               sys::Process::getPageSizeEstimate() - Bytes;
+      };
+      auto *Invocations = reinterpret_cast<FemeFragmentInvocation *>(
+          Tail(*InvocationMemory, QuadCount * sizeof(FemeFragmentInvocation)));
+      auto *Results = reinterpret_cast<FemeFragmentResult *>(
+          Tail(*ResultMemory, QuadCount * sizeof(FemeFragmentResult)));
+      auto *Inputs = reinterpret_cast<float *>(
+          Tail(*InputMemory, QuadCount * 4 * sizeof(float)));
+      auto *Outputs = reinterpret_cast<float *>(
+          Tail(*OutputMemory, QuadCount * 4 * sizeof(float)));
+      for (unsigned Q = 0; Q != QuadCount; ++Q) {
+        new (&Invocations[Q]) FemeFragmentInvocation{};
+        bool Live = QuadCount == 1 || Q + 1 != QuadCount;
+        Invocations[Q].LiveMask = Live ? 0xf : 0;
+        Invocations[Q].SideEffectMask = Live ? 0x7 : 0;
+        new (&Results[Q]) FemeFragmentResult{};
+        Results[Q].LiveMask = Results[Q].SideEffectMask = 0xf;
+        for (unsigned Lane = 0; Lane != 4; ++Lane) {
+          new (&Inputs[Q * 4 + Lane]) float(Q * 20.0f + (Lane / 2) * 10.0f +
+                                            (Lane % 2));
+          new (&Outputs[Q * 4 + Lane]) float(-1.0f);
+        }
+      }
+      FragmentResources Resources;
+      Resources.InputLayout = &InputLayout;
+      Resources.Inputs = Inputs;
+      Resources.OutputLayout = &OutputLayout;
+      Resources.Outputs = Outputs;
+      Resources.Invocations =
+          ArrayRef<FemeFragmentInvocation>(Invocations, QuadCount);
+      Resources.Results =
+          MutableArrayRef<FemeFragmentResult>(Results, QuadCount);
+      auto Prepared =
+          PreparedFragmentBatch::create((*Stage)->getResourceInfo(), Resources);
+      ASSERT_THAT_ERROR((*Stage)->invokeFragments(Prepared), Succeeded());
+      for (unsigned Q = 0; Q != QuadCount; ++Q) {
+        EXPECT_EQ(Results[Q].LiveMask, Invocations[Q].LiveMask);
+        EXPECT_EQ(Results[Q].SideEffectMask, Invocations[Q].SideEffectMask);
+        for (unsigned Lane = 0; Lane != 4; ++Lane)
+          EXPECT_FLOAT_EQ(Outputs[Q * 4 + Lane],
+                          (Invocations[Q].SideEffectMask & (1u << Lane))
+                              ? Inputs[Q * 4 + Lane]
+                              : -1.0f);
+      }
+    }
+  }
 }
 
 // One input vertex per primitive (`VerticesPerPrimitive` == 1): scales that

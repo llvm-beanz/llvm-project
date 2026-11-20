@@ -30,6 +30,7 @@ set(FEME_TEST_DEPENDS
   feme-spirv-import-fuzzer
   feme-cpu-restructure-fuzzer
   FeMeUnitTests
+  FeMeRuntimeCPU
   llc
   mlir-translate
   llvm-as
