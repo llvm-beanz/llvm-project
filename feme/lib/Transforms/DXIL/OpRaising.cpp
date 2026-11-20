@@ -1757,20 +1757,30 @@ bool raiseCBufferLoadLegacy(CallInst &CI) {
   return true;
 }
 
-/// Raises a `dx.op.rawBufferStore` (opcode 140) call on an already-raised
-/// raw/structured buffer handle into `llvm.dx.resource.store.rawbuffer`.
+/// Normalizes an unused raw-buffer coordinate from DXIL's undef to the
+/// poison required by LLVM's intrinsic. Structured-buffer coordinates stay
+/// unchanged.
+Value *normalizeRawBufferCoordinate(TargetExtType *HandleTy, Value *Coord) {
+  if (!cast<dxil::RawBufferExtType>(HandleTy)->isStructured() &&
+      isa<UndefValue>(Coord))
+    return PoisonValue::get(Coord->getType());
+  return Coord;
+}
+
+/// Raises a `dx.op.rawBufferStore` (opcode 140), or a legacy
+/// `dx.op.bufferStore` (opcode 69), on an already-raised raw/structured
+/// buffer handle into `llvm.dx.resource.store.rawbuffer`.
 /// `RawBufferStore`'s `Coord0`/`Coord1` operands carry whichever of "byte
 /// offset" (a `ByteAddressBuffer`) or "element index, byte offset within
 /// element" (a `StructuredBuffer`) the handle's resource kind means -- both
 /// forward straight through to the raised intrinsic's own `Coord0`/`Coord1`
-/// operands unexamined, so this needs no resource-kind-specific handling of
-/// its own (see `int_dx_resource_store_rawbuffer`'s own operand comment).
+/// operands, except that an unused raw-buffer coordinate becomes poison.
 /// Only a single-component (mask 0b0001) store is raised, matching what
 /// `libFeMeRuntimeCPU`'s raw/structured buffer view implements today (see
 /// the "Descriptor formats" section of feme/docs/FeMeCPUDesign.md); a
 /// multi-component store is left unraised for now.
-bool raiseRawBufferStore(CallInst &CI) {
-  if (CI.arg_size() != 10)
+bool raiseRawBufferStore(CallInst &CI, bool Legacy) {
+  if (CI.arg_size() != (Legacy ? 9 : 10))
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
   auto *HandleTy =
@@ -1783,7 +1793,7 @@ bool raiseRawBufferStore(CallInst &CI) {
     return false;
 
   Value *Coord0 = CI.getArgOperand(2);
-  Value *Coord1 = CI.getArgOperand(3);
+  Value *Coord1 = normalizeRawBufferCoordinate(HandleTy, CI.getArgOperand(3));
   Value *Stored = CI.getArgOperand(4);
 
   IRBuilder<> Builder(&CI);
@@ -1932,15 +1942,16 @@ bool raiseAtomicCompareExchange(CallInst &CI) {
   return true;
 }
 
-/// Raises a `dx.op.rawBufferLoad` (opcode 139) call on an already-raised
-/// raw/structured buffer handle into `llvm.dx.resource.load.rawbuffer`,
+/// Raises a `dx.op.rawBufferLoad` (opcode 139), or a legacy
+/// `dx.op.bufferLoad` (opcode 68), on an already-raised raw/structured
+/// buffer handle into `llvm.dx.resource.load.rawbuffer`,
 /// mirroring `raiseTypedBufferLoad`: the loaded scalar's type is recovered
 /// from the `extractvalue`s reading the DXIL `%dx.types.ResRet` return
 /// struct's component 0 (the only component a single-component load ever
 /// reads), and a load consumed any other way (multiple components, or
 /// `ResRet`'s trailing status field) is left unraised.
-bool raiseRawBufferLoad(CallInst &CI) {
-  if (CI.arg_size() != 6)
+bool raiseRawBufferLoad(CallInst &CI, bool Legacy) {
+  if (CI.arg_size() != (Legacy ? 4 : 6))
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
   auto *HandleTy =
@@ -1948,9 +1959,11 @@ bool raiseRawBufferLoad(CallInst &CI) {
   if (!HandleTy || HandleTy->getName() != "dx.RawBuffer")
     return false;
 
-  std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(4));
-  if (!Mask || *Mask != 1)
-    return false;
+  if (!Legacy) {
+    std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(4));
+    if (!Mask || *Mask != 1)
+      return false;
+  }
 
   SmallVector<ExtractValueInst *, 2> Extracts;
   for (User *U : CI.users()) {
@@ -1967,7 +1980,8 @@ bool raiseRawBufferLoad(CallInst &CI) {
       CI.getModule(), Intrinsic::dx_resource_load_rawbuffer,
       {Extracts[0]->getType(), HandleTy});
   Value *Loaded = Builder.CreateCall(
-      LoadFn, {Handle, CI.getArgOperand(2), CI.getArgOperand(3)});
+      LoadFn, {Handle, CI.getArgOperand(2),
+               normalizeRawBufferCoordinate(HandleTy, CI.getArgOperand(3))});
   Value *Value0 = Builder.CreateExtractValue(Loaded, 0);
 
   for (ExtractValueInst *EV : Extracts) {
@@ -2017,16 +2031,20 @@ bool raiseResourceOps(Module &M) {
     return raiseLegacyCreateHandle(CI, MD);
   });
   Changed |= forEachDXOpCall(69, [](CallInst &CI) { // BufferStore
-    return raiseTypedBufferStore(CI);
+    if (raiseTypedBufferStore(CI))
+      return true;
+    return raiseRawBufferStore(CI, /*Legacy=*/true);
   });
   Changed |= forEachDXOpCall(68, [](CallInst &CI) { // BufferLoad
-    return raiseTypedBufferLoad(CI);
+    if (raiseTypedBufferLoad(CI))
+      return true;
+    return raiseRawBufferLoad(CI, /*Legacy=*/true);
   });
   Changed |= forEachDXOpCall(140, [](CallInst &CI) { // RawBufferStore
-    return raiseRawBufferStore(CI);
+    return raiseRawBufferStore(CI, /*Legacy=*/false);
   });
   Changed |= forEachDXOpCall(139, [](CallInst &CI) { // RawBufferLoad
-    return raiseRawBufferLoad(CI);
+    return raiseRawBufferLoad(CI, /*Legacy=*/false);
   });
   Changed |= forEachDXOpCall(59, [](CallInst &CI) { // CBufferLoadLegacy
     return raiseCBufferLoadLegacy(CI);

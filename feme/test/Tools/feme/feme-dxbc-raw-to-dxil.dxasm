@@ -1,0 +1,29 @@
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// REQUIRES: directx-registered-target
+// RUN: dxbc-as --emit=container %s -o %t.dxbc
+// RUN: feme --target=dxil %t.dxbc -o %t.dxil
+// RUN: feme-translate --import-dxil %t.dxil \
+// RUN:   | opt -S -passes=verify | FileCheck %s
+
+// A real legacy raw-buffer load/store must be raised before retargeting.
+// Checking the re-imported DXIL verifies the container's bitcode, binding
+// and group dimensions, not just its four-byte container magic.
+cs_5_0
+dcl_uav_raw u3
+dcl_input vThreadID.x
+dcl_temps 1
+dcl_thread_group 8, 1, 1
+ishl r0.y, vThreadID.x, l(2)
+ld_raw_indexable(raw_buffer)(mixed,mixed,mixed,mixed) r0.x, r0.y, u3.xxxx
+iadd r0.x, r0.x, l(23)
+store_raw u3.x, r0.y, r0.x
+ret
+
+// CHECK: define void @main()
+// CHECK: call {{.*}} @dx.op.bufferLoad.i32(i32 68,
+// CHECK: call void @dx.op.bufferStore.i32(i32 69,
+// CHECK: !{{[0-9]+}} = !{i32 0, {{.*}}, !"{{.*}}", i32 0, i32 3, i32 1, i32 11,
+// CHECK: !{{[0-9]+}} = !{i32 8, i32 1, i32 1}

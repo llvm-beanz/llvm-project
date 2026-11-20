@@ -280,10 +280,15 @@ incidental one. The [public-contract and real-FXC audit](W0DirectXTestCorpusClas
 now establishes the SM 5.1 input obligation and tests original HLSL compiled
 as `cs_5_0`/`cs_5_1`, including a nonzero register space. Import/translation
 passes and the audit fixed dropped compute thread-group metadata, with
-portable LIT regression coverage. Full DXIL export of this real raw-UAV
-shader still fails integer-operation legalization; the audit schedules that
-gap, owned-DDI/PSO execution, broader bindings and all-stage coverage under
-the existing W1/W2/W3/W4 gates. This is not completed legacy compatibility.
+portable LIT regression coverage. The
+[legacy raw-buffer export follow-up](W0DirectXTestCorpusClassification.md#legacy-raw-buffer-dxil-export-follow-up-2026-11-20)
+fixes the unraised legacy resource call and unused-coordinate encoding
+behind the legalization failure. Both FXC profiles now export DXIL, with
+LIT payload re-import/LLVM verification and arithmetic, binding and
+thread-group assertions; 171 related regressions pass. Runtime/validator
+admission, owned-DDI/PSO execution, broader bindings and all-stage coverage
+remain under the existing W1/W2/W3/W4 gates. This is not completed legacy
+compatibility.
 LLVM-owned reference tests now exist in the
 standalone probe, but FeMe execution tests still need the prototype/runner
 from `W0(g)`/`W1(a)`. The W0(b) product choice is closed, but these

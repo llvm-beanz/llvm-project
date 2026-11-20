@@ -56,7 +56,7 @@ define float @typed_buffer_srv(i32 %idx) {
 ; CHECK-LABEL: define i32 @raw_buffer_uav(
 define i32 @raw_buffer_uav(i32 %idx) {
   ; CHECK: [[HANDLE:%.*]] = call target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 0, i32 1, i32 0, ptr null)
-  ; CHECK-NEXT: [[LOAD:%.*]] = call { i32, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", i8, 1, 0) [[HANDLE]], i32 %idx, i32 undef)
+  ; CHECK-NEXT: [[LOAD:%.*]] = call { i32, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", i8, 1, 0) [[HANDLE]], i32 %idx, i32 poison)
   ; CHECK-NEXT: extractvalue { i32, i1 } [[LOAD]], 0
   ; CHECK-NOT: casthandle
   %h = call target("dx.RawBuffer", i8, 1, 0)

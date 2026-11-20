@@ -1313,9 +1313,19 @@ it now covers the two largest opcode families:
   with no accesses at all falls back to 4, DXIL's widest typed buffer
   element.
 
-Still not covered, and left for later changes: the *non-typed* buffer and
-texture load/store ops (`RawBufferLoad`/`RawBufferStore` on a struct-typed
-element, `TextureLoad`, `Sample*`, ...) -- `CBufferLoadLegacy`'s standard
+- Scalar raw/structured buffer accesses: `RawBufferLoad`/`RawBufferStore`
+  (139/140) and the legacy `BufferLoad`/`BufferStore` (68/69) encodings
+  raise to `llvm.dx.resource.load.rawbuffer`/`store.rawbuffer`. A raw
+  buffer's unused coordinate becomes `poison`; structured element indices
+  and byte offsets remain unchanged. Multi-component accesses and loads
+  consuming the status field remain unraised. The legacy encoding is
+  required for DXBC-derived DXIL 1.0 IR; treating it as typed-only left
+  raw stores and their `i8` masks in the backend's pre-lowering IR.
+  LIT covers both encodings and DXBC-to-DXIL payload round-trips, including
+  real FXC SM 5.0/5.1 output.
+
+Additional resource-op coverage and remaining limits are detailed in the
+status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard
 32-bit-per-component row shape is covered as of roadmap step R12
 (`feme::dxil::OpRaisingPass::raiseCBufferLoadLegacy`, used by the CPU
 target's root-constant support; its `.f16`/`.f64`/`.i16` overloads, 8- or

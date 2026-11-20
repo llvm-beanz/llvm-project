@@ -231,17 +231,58 @@ build-rel\tools\feme\test\Import\DXBC
 build-rel\tools\feme\test\Tools\feme\feme-dxbc-to-dxil.dxasm`
 from the checkout root (one command). Python needs `psutil` for the timeout.
 
+### Legacy raw-buffer DXIL export follow-up (2026-11-20)
+
+The export failure observed on 2026-11-18 was caused by an unraised
+resource operation, not the shader's integer arithmetic. DXBC translation emits DXIL 1.0
+`BufferStore`/`BufferLoad` (opcodes 69/68) for raw/structured buffers.
+The raising pass handled these opcodes only for typed buffers, leaving
+the raw store and its `i8` write mask for the backend's integer legalizer.
+FeMe now routes legacy raw/structured accesses through the shared scalar
+raw-buffer raisers, retaining the existing typed-buffer path and the newer
+`RawBufferStore`/`RawBufferLoad` (140/139) encodings.
+
+An unused raw-buffer coordinate is normalized from DXIL's `undef` to the
+`poison` required by LLVM's intrinsic; structured-buffer element indices
+and byte offsets remain unchanged. The portable raising regression covers
+legacy raw and structured loads/stores, float/integer values, a 20-byte
+structured stride and nonzero register space, and leaves unsupported
+multi-component stores, second-component loads and status reads unraised.
+The existing lower/raise round-trip now restores its original `poison`
+coordinate rather than the previously incorrect `undef`.
+
+The original FXC shader now exports successfully as DXIL for both legacy
+profiles. The new
+[`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)
+reuses the original HLSL and re-imports the emitted containers, verifies the
+LLVM IR, and checks the stored integer expression, byte addressing, scalar
+write mask, register/space and `(8, 1, 1)` thread group. The portable
+[`feme-dxbc-raw-to-dxil.dxasm`](../test/Tools/feme/feme-dxbc-raw-to-dxil.dxasm)
+also exports and verifies a raw-buffer load/store without requiring FXC.
+This is stronger than checking only the container magic, but is not
+execution or admission by the Windows runtime/DXIL validator.
+
+Validation: the modified `feme`/`feme-opt` consumers built successfully.
+The combined LIT DXIL-raising, DXBC-import/translation, typed/raw DXIL
+round-trip and CPU raw-resource regressions passed **171/171** with native
+ARM64 FXC. The three focused raising/export tests also passed **3/3**
+with emulated x64 FXC from SDK 10.0.26100.0. Both runs used two workers
+and 60-second per-test timeouts.
+Without FXC on `PATH`, the two portable focused tests pass and the two
+real-FXC import/export tests are explicitly **Unsupported**, not counted
+as passes.
+
 | Remaining compatibility work | Existing roadmap gate |
 |---|---|
-| Full DXIL export of this real raw-UAV shader still exits with `LLVM ERROR: DXIL legalization does not support integer operand for instruction 'call'`. Import and DXIL-shaped IR translation pass, but this pass has not isolated the failing call or demonstrated executable DXIL output for this shader. Investigate the raising/backend boundary rather than treating IR success as completed conversion. | W1(b) compiler/dispatch bring-up |
+| Admit the emitted DXIL through the selected Windows runtime/validator and validate reference-WARP dispatch/readback. LLVM verification and payload assertions are compiler evidence, not D3D12 conformance. | W0(d), W1(b) |
 | Observe the owned shader DDI inputs, wire the supported legacy import route into PSO creation, and execute/read back this shader against scalar expectations and reference WARP with device/build provenance. | W0(g), W1(a), W1(b) |
 | Exercise descriptor arrays, dynamic/non-uniform indices and root-layout binding with real SM 5.1 compiler output, beyond this one fixed raw-UAV binding. | W2(a), W2(b) |
 | Extend real-compiler coverage to all six legacy stages, signatures, stage-specific declarations and operations, then validate translated execution. Existing assembler/import tests are not end-to-end shader support. | W0(c), W3, W4 |
 
 W0(c) remains partial. This establishes the SM 5.1 input obligation and
-adds real-compiler import/translation evidence; it does not establish full
-legacy coverage, successful execution through an owned D3D12 device, or
-compliance.
+adds real-compiler import/translation and DXIL-export evidence; it does not
+establish full legacy coverage, successful execution through an owned
+D3D12 device, or compliance.
 
 ## Source/test redistribution
 

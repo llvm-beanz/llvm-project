@@ -1,0 +1,33 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# REQUIRES: system-fxc, directx-registered-target
+# RUN: %fxc /nologo /WX /T cs_5_0 /E main /D USE_REGISTER_SPACE=0 \
+# RUN:   /Fo %t.sm50.dxbc %S/../../Translate/DXBC/fxc-legacy-compute.hlsl
+# RUN: %fxc /nologo /WX /T cs_5_1 /E main /D USE_REGISTER_SPACE=1 \
+# RUN:   /Fo %t.sm51.dxbc %S/../../Translate/DXBC/fxc-legacy-compute.hlsl
+# RUN: feme --target=dxil %t.sm50.dxbc -o %t.sm50.dxil
+# RUN: feme --target=dxil %t.sm51.dxbc -o %t.sm51.dxil
+# RUN: feme-translate --import-dxil %t.sm50.dxil \
+# RUN:   | opt -S -passes=verify | FileCheck %s --check-prefixes=DXIL,SM50
+# RUN: feme-translate --import-dxil %t.sm51.dxil \
+# RUN:   | opt -S -passes=verify | FileCheck %s --check-prefixes=DXIL,SM51
+
+# The original HLSL fixture is shared with the import/translation audit.
+# Re-import the emitted DXIL containers to verify the actual shader payload,
+# preserving SM5.1's nonzero register/space and the compute group dimensions.
+# This is compiler round-trip evidence, not execution on an owned D3D12 device.
+
+# DXIL: define void @main()
+# DXIL: [[HANDLE:%.*]] = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 3, i1 false)
+# DXIL: call i32 @dx.op.threadId.i32(i32 93, i32 0)
+# DXIL-DAG: [[MAD:%.*]] = call i32 @dx.op.tertiary.i32(i32 48, i32 {{%.*}}, i32 17, i32 23)
+# DXIL-DAG: [[SHIFT:%.*]] = lshr i32 {{%.*}}, 3
+# DXIL-DAG: [[OFFSET:%.*]] = shl i32 {{%.*}}, 2
+# DXIL-DAG: [[VALUE:%.*]] = xor i32 [[SHIFT]], [[MAD]]
+# DXIL: call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle [[HANDLE]], i32 [[OFFSET]], i32 undef, i32 [[VALUE]],
+# DXIL-SAME: i32 undef, i32 undef, i32 undef, i8 1)
+# SM50: !{{[0-9]+}} = !{i32 0, {{.*}}, !"{{.*}}", i32 0, i32 3, i32 1, i32 11,
+# SM51: !{{[0-9]+}} = !{i32 0, {{.*}}, !"{{.*}}", i32 7, i32 3, i32 1, i32 11,
+# DXIL: !{{[0-9]+}} = !{i32 8, i32 1, i32 1}
