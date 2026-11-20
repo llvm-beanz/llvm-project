@@ -10,9 +10,11 @@
 # RUN: feme --target=dxil %t.sm50.dxbc -o %t.sm50.dxil
 # RUN: feme --target=dxil %t.sm51.dxbc -o %t.sm51.dxil
 # RUN: feme-translate --import-dxil %t.sm50.dxil \
-# RUN:   | opt -S -passes=verify | FileCheck %s --check-prefixes=DXIL,SM50
+# RUN:   | opt -S -passes=verify | FileCheck %s --check-prefixes=DXIL,SM50 \
+# RUN:     --implicit-check-not=feme.signature
 # RUN: feme-translate --import-dxil %t.sm51.dxil \
-# RUN:   | opt -S -passes=verify | FileCheck %s --check-prefixes=DXIL,SM51
+# RUN:   | opt -S -passes=verify | FileCheck %s --check-prefixes=DXIL,SM51 \
+# RUN:     --implicit-check-not=feme.signature
 
 # The original HLSL fixture is shared with the import/translation audit.
 # Re-import the emitted DXIL containers to verify the actual shader payload,

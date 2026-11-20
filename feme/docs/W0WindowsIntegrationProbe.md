@@ -1245,6 +1245,122 @@ or system change is required. W0(g) still needs an owned runtime/DDI
 resource lifecycle and a real FeMe device; this is reference-WARP coverage,
 not a FeMe pass or closure of W0(d)'s owned-device provenance gate.
 
+### W0(d) legacy compute dispatch/readback oracle (VM, 2026-11-20)
+
+The reference adapter probe now executes the original
+[`fxc-legacy-compute.hlsl`](../test/Translate/DXBC/fxc-legacy-compute.hlsl)
+through stock D3D12, not a private WARP interface. Its public entry paths are:
+
+- `--warp-compute-shader SHADER {0|7}`: enumerate and identity-check WARP.
+- `--software-compute-shader DLL SHADER {0|7}`: select the requested
+  software module and check WARP identity and loaded-module handle identity.
+
+Both paths create a compute PSO with a root raw-UAV descriptor at `u3`,
+using space 0 for `cs_5_0` and space 7 for `cs_5_1`. A 64 KiB placed UAV
+buffer is initialized through an upload buffer, transitioned for compute,
+dispatched as 32 groups of eight threads, transitioned for copy and copied
+to readback. Fence completion precedes mapping and verification.
+The independent scalar expectation is
+`(index * 17 + 23) ^ (index >> 3)` for 256 little-endian uints; all
+64,512 remaining bytes must retain the baseline pattern. The wrapper
+requires exit zero and the exact full-coverage completion marker.
+
+Nine CPU fixtures cover valid output, short/oversized and missing data,
+first/last result corruption, first/last guard corruption, an untouched
+buffer representing no dispatch, and independently anchored pattern values.
+Missing shader paths and invalid register spaces fail explicitly.
+Submitted resources are retained until process exit if completion or
+synchronization teardown fails, following the buffer-copy probe's policy;
+this is not device-loss recovery or failure-retention fault injection.
+
+#### DXIL admission findings and public validation
+
+The real FXC DXBC inputs executed first, but all four translated DXIL cases
+initially failed `CreateComputePipelineState` with `0x80070057`. The public
+SDK `IDxcValidator` exposed two serialization defects, fixed rather than
+reclassified as expected failures:
+
+1. FeMe's private `!feme.signature` reflection record leaked into DXIL.
+   The validator rejected metadata not used by DXIL. The shared target
+   backend now removes this record only for DXIL serialization; other
+   targets retain their signature/reflection behavior.
+2. LLVM selected the PSV ABI from the validator version only for populated
+   graphics signatures. Empty-signature compute shaders instead emitted
+   PSV v3 with a 52-byte runtime-info structure despite declaring validator
+   1.0, which requires PSV v0's 24-byte structure. PSV version selection
+   now applies independently of signatures. Portable LIT coverage checks
+   version boundaries through 1.8 and the missing/disabled-version defaults;
+   existing validator-1.7 compute fixtures now assert PSV v2.
+
+After these fixes, the SDK validator accepts the shader module. **Bare
+FeMe export still fails runtime PSO admission.** The new standalone
+`feme-dxil-validator SDK-DLL-DIRECTORY INPUT [OUTPUT]` diagnostic uses the
+public SDK factories and validation API. When output is requested, it uses
+`DxcValidatorFlags_InPlaceEdit`, requires successful operation status and
+writes the returned validated/stamped container. That container executes
+correctly on reference WARP. This is public shader validation, not driver
+signing, a fabricated checksum, disabled validation or an installation step.
+The diagnostic prints requested/loaded SDK module paths and validation
+status, checks input/output sizes and writes, and releases COM objects
+before unloading the SDK libraries.
+
+The opt-in LIT workflow compiles HLSL with FXC, exports with the explicitly
+selected FeMe executable, validates/stamps DXIL with the matching-architecture
+SDK DLLs, then demands byte-exact dispatch/readback. It does not silently
+substitute the original DXBC for translated DXIL. Separate negative controls
+require wrong-root-space DXBC and unvalidated DXIL to fail at PSO creation.
+Validator argument, missing-module, missing-input and malformed-input
+controls also run through LIT.
+
+#### Measured configurations and reproduction
+
+Windows 11 Enterprise ARM64 build 26300, MSVC 19.44.35230.0 and
+SDK/WDK 10.0.26100.0 were used. The selected SDK `dxcompiler.dll` and
+`dxil.dll` report file version **1.9.2602.17**.
+
+| Configuration | LIT outcome |
+|---|---|
+| Native ARM64 inbox core 10.0.26100.9818 | 40/40 |
+| Emulated x64 inbox core 10.0.26100.9818 | 40/40 |
+| Native ARM64 Agility 619 core 1.619.5.0.20260730.3 | 40/40 |
+| Default native ARM64 configuration, no optional shader tools | 28/28 |
+| Related LLVM PSV/container, FeMe DXIL/DXBC and backend regressions | 289 passed, 1 Unsupported |
+
+Each 40-case matrix includes eight genuine compute successes:
+two legacy profiles, DXBC/validated-DXIL input and both public adapter
+entry paths. It also includes the prior 15 adapter/buffer-copy controls,
+nine compute CPU fixtures, two input negatives, four validator negatives
+and two PSO-rejection controls. Agility reports the application-local
+`AgilitySDK\D3D12Core.dll`; inbox reports the system core. All select
+Microsoft WARP, not the owned rejection shim.
+The 28-case default does **not** run optional shader-dispatch coverage.
+Without FXC on `PATH`, the two portable focused compiler tests pass and
+the two real-FXC import/export tests are explicitly Unsupported.
+
+Starting from the existing standalone configuration and matching developer
+environment/Python with LIT timeout support:
+
+```powershell
+$sdkTools = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\arm64"
+cmake -S feme\utils\windows-adapter-probe -B $build `
+  "-DFEME_PROBE_FXC=$sdkTools\fxc.exe" `
+  "-DFEME_PROBE_FEME=$PWD\build-rel\bin\feme.exe" `
+  "-DFEME_PROBE_DXIL_VALIDATOR_DIR=$sdkTools"
+cmake --build $build --target check-feme-windows-probes --parallel 2
+```
+
+Use SDK `x64` tools for an x64 probe build. Agility additionally needs the
+existing matching-architecture core/version options. Supplying FeMe
+requires FXC and a validator directory containing both SDK DLLs; bad
+configuration fails explicitly. No shader fixture binaries are committed.
+
+This is a scoped W0(c)/W0(d) reference oracle and W1(b) compiler/runtime
+admission result. It does not close full legacy compatibility, descriptor
+array/non-uniform binding coverage or graphics-stage execution. Owned
+`CreateDevice` remains deliberately `E_NOTIMPL`; W0(g)/W1(a)'s owned
+device/resource and shader-DDI/PSO integration remain open. A FeMe-translated
+shader running on Microsoft WARP is not an owned FeMe D3D12 device pass.
+
 ### W0(g) public GPU VA reservation boundary (VM)
 
 The 2026-11-18 follow-up tests a different public runtime-owned callback

@@ -8,6 +8,7 @@
 
 #include "feme/Target/TargetMachineBackend.h"
 
+#include "llvm/IR/Function.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -44,6 +45,12 @@ llvm::Error TargetMachineBackend::run(llvm::Module &M,
 
   M.setTargetTriple(TheTriple);
   M.setDataLayout(Target->createDataLayout());
+
+  // DXIL validators reject FeMe-only reflection metadata. Other targets
+  // still need it for signature handling and compiled-stage reflection.
+  if (TheTriple.isDXIL())
+    for (llvm::Function &F : M)
+      F.setMetadata("feme.signature", nullptr);
 
   llvm::legacy::PassManager PM;
   if (Target->addPassesToEmitFile(PM, Out, /*DwoOut=*/nullptr, Opts.FileType))

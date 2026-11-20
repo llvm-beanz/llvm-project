@@ -1,6 +1,9 @@
 ; REQUIRES: directx-registered-target
 ; RUN: llc %s --filetype=obj -o %t.dxcontainer
 ; RUN: feme --target=dxil %t.dxcontainer -o %t.out.dxcontainer
+; RUN: feme-translate --import-dxil %t.out.dxcontainer \
+; RUN:   | FileCheck %s --check-prefix=METADATA \
+; RUN:     --implicit-check-not=feme.signature
 ; RUN: od -An -c -N4 %t.out.dxcontainer | FileCheck %s
 
 ; Round-trips a DXContainer all the way back out to a DXContainer through the
@@ -37,3 +40,4 @@ attributes #0 = { "hlsl.numthreads"="8,1,1" "hlsl.shader"="compute" }
 !0 = !{i32 1, i32 8}
 
 ; CHECK: D   X   B   C
+; METADATA: define void @main()

@@ -520,9 +520,13 @@ Specific reporting rules include:
   [shader compatibility audit](W0DirectXTestCorpusClassification.md#legacy-shader-compatibility-audit-vm-2026-11-18),
   including the public SM 5.1 input requirement, reusing and extending
   FeMe's existing DXBC path where required. Real FXC compute inputs now
-  validate import/IR translation and DXIL export with payload re-import,
-  not runtime/validator admission or owned-device execution. The legacy
-  raw-buffer raising path preserves bindings and compute group dimensions;
+  validate import/IR translation and DXIL export with payload re-import.
+  The scoped [reference compute oracle](W0WindowsIntegrationProbe.md#w0d-legacy-compute-dispatchreadback-oracle-vm-2026-11-20)
+  also proves public SDK validation and byte-exact execution on Microsoft
+  WARP, not an owned FeMe device. Bare export remains rejected; validated
+  output comes from the public SDK validator, not bypassed validation or
+  driver signing. The legacy raw-buffer raising path preserves bindings
+  and compute group dimensions;
   broader legacy execution coverage remains required. D3D11-on-12 cannot
   be assumed to replace that compiler work.
 - Wave lane count is pinned device-wide, and the reported

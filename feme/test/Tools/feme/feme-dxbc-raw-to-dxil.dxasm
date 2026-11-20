@@ -6,7 +6,7 @@
 // RUN: dxbc-as --emit=container %s -o %t.dxbc
 // RUN: feme --target=dxil %t.dxbc -o %t.dxil
 // RUN: feme-translate --import-dxil %t.dxil \
-// RUN:   | opt -S -passes=verify | FileCheck %s
+// RUN:   | opt -S -passes=verify | FileCheck %s --implicit-check-not=feme.signature
 
 // A real legacy raw-buffer load/store must be raised before retargeting.
 // Checking the re-imported DXIL verifies the container's bitcode, binding

@@ -9,6 +9,7 @@
 
 #include "../windows-adapter-bootstrap/BootstrapAudit.h"
 #include "BufferCopyValidation.h"
+#include "ComputeShaderValidation.h"
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -237,8 +238,207 @@ static HRESULT exerciseBufferCopy(ID3D12Device *Device,
   return S_OK;
 }
 
-static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter,
-                               bool BufferCopy = false) {
+static HRESULT readShader(const wchar_t *Path,
+                          std::vector<std::uint8_t> &Code) {
+  wchar_t FullPath[32768];
+  DWORD Length = GetFullPathNameW(Path, ARRAYSIZE(FullPath), FullPath, nullptr);
+  if (!Length || Length >= ARRAYSIZE(FullPath))
+    return report(L"GetFullPathNameW(shader)",
+                  Length ? HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW)
+                         : HRESULT_FROM_WIN32(GetLastError()));
+  HANDLE File = CreateFileW(FullPath, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (File == INVALID_HANDLE_VALUE)
+    return report(L"CreateFileW(shader)", HRESULT_FROM_WIN32(GetLastError()));
+  LARGE_INTEGER Size{};
+  HRESULT Result = S_OK;
+  if (!GetFileSizeEx(File, &Size))
+    Result =
+        report(L"GetFileSizeEx(shader)", HRESULT_FROM_WIN32(GetLastError()));
+  else if (Size.QuadPart <= 0 || Size.QuadPart > 16 * 1024 * 1024) {
+    std::wprintf(L"Shader size outside (0, 16777216]: %lld\n", Size.QuadPart);
+    Result = report(L"Invalid shader size", E_INVALIDARG);
+  } else {
+    Code.resize(static_cast<std::size_t>(Size.QuadPart));
+    DWORD BytesRead = 0;
+    if (!ReadFile(File, Code.data(), static_cast<DWORD>(Code.size()),
+                  &BytesRead, nullptr))
+      Result = report(L"ReadFile(shader)", HRESULT_FROM_WIN32(GetLastError()));
+    else if (BytesRead != Code.size())
+      Result = report(L"Incomplete shader read",
+                      HRESULT_FROM_WIN32(ERROR_HANDLE_EOF));
+    else
+      std::wprintf(L"Shader input: %ls; bytes=%zu\n", FullPath, Code.size());
+  }
+  if (!CloseHandle(File)) {
+    HRESULT CloseResult =
+        report(L"CloseHandle(shader)", HRESULT_FROM_WIN32(GetLastError()));
+    if (SUCCEEDED(Result))
+      Result = CloseResult;
+  }
+  return Result;
+}
+
+static HRESULT exerciseComputeShader(ID3D12Device *Device,
+                                     ID3D12CommandQueue *Queue,
+                                     const wchar_t *Path, UINT Space) {
+  using namespace feme::probe;
+  std::vector<std::uint8_t> Code;
+  HRESULT Result = readShader(Path, Code);
+  if (FAILED(Result))
+    return Result;
+  D3D12_ROOT_PARAMETER Parameter{};
+  Parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  Parameter.Descriptor.ShaderRegister = 3;
+  Parameter.Descriptor.RegisterSpace = Space;
+  Parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  D3D12_ROOT_SIGNATURE_DESC SignatureDesc{};
+  SignatureDesc.NumParameters = 1;
+  SignatureDesc.pParameters = &Parameter;
+  ComPtr<ID3DBlob> Serialized, Errors;
+  Result = report(L"D3D12SerializeRootSignature",
+                  D3D12SerializeRootSignature(&SignatureDesc,
+                                              D3D_ROOT_SIGNATURE_VERSION_1,
+                                              &Serialized, &Errors));
+  if (FAILED(Result)) {
+    if (Errors)
+      std::fwrite(Errors->GetBufferPointer(), 1, Errors->GetBufferSize(),
+                  stderr);
+    return Result;
+  }
+  ComPtr<ID3D12RootSignature> Signature;
+  Result = report(L"CreateRootSignature",
+                  Device->CreateRootSignature(0, Serialized->GetBufferPointer(),
+                                              Serialized->GetBufferSize(),
+                                              IID_PPV_ARGS(&Signature)));
+  if (FAILED(Result))
+    return Result;
+  D3D12_COMPUTE_PIPELINE_STATE_DESC PipelineDesc{};
+  PipelineDesc.pRootSignature = Signature.Get();
+  PipelineDesc.CS = {Code.data(), Code.size()};
+  ComPtr<ID3D12PipelineState> Pipeline;
+  Result = report(L"CreateComputePipelineState",
+                  Device->CreateComputePipelineState(&PipelineDesc,
+                                                     IID_PPV_ARGS(&Pipeline)));
+  if (FAILED(Result))
+    return Result;
+
+  ComPtr<ID3D12Heap> Heap;
+  D3D12_HEAP_DESC HeapDesc{};
+  HeapDesc.SizeInBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+  HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  HeapDesc.Properties.CreationNodeMask = HeapDesc.Properties.VisibleNodeMask =
+      1;
+  HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  Result = report(L"CreateHeap(compute buffer)",
+                  Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Heap)));
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12Resource> Buffer, Upload, Readback;
+  D3D12_RESOURCE_DESC Desc = bufferDesc(BufferBytes);
+  Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  Result = report(L"CreatePlacedResource(compute buffer)",
+                  Device->CreatePlacedResource(Heap.Get(), 0, &Desc,
+                                               D3D12_RESOURCE_STATE_COPY_DEST,
+                                               nullptr, IID_PPV_ARGS(&Buffer)));
+  if (FAILED(Result))
+    return Result;
+  Result =
+      createCpuBuffer(Device, D3D12_HEAP_TYPE_UPLOAD, BufferBytes,
+                      D3D12_RESOURCE_STATE_GENERIC_READ, Upload.GetAddressOf());
+  if (FAILED(Result))
+    return Result;
+  Result =
+      createCpuBuffer(Device, D3D12_HEAP_TYPE_READBACK, BufferBytes,
+                      D3D12_RESOURCE_STATE_COPY_DEST, Readback.GetAddressOf());
+  if (FAILED(Result))
+    return Result;
+  void *Mapped = nullptr;
+  D3D12_RANGE NoAccess{0, 0};
+  Result = report(L"Map(compute upload)", Upload->Map(0, &NoAccess, &Mapped));
+  if (FAILED(Result))
+    return Result;
+  if (!Mapped) {
+    Upload->Unmap(0, &NoAccess);
+    return report(L"Missing compute upload mapping", E_FAIL);
+  }
+  for (std::size_t I = 0; I < BufferBytes; ++I)
+    static_cast<std::uint8_t *>(Mapped)[I] = baselineByte(I);
+  D3D12_RANGE FullRange{0, BufferBytes};
+  Upload->Unmap(0, &FullRange);
+
+  ComPtr<ID3D12CommandAllocator> Allocator;
+  Result =
+      report(L"CreateCommandAllocator(compute)",
+             Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                            IID_PPV_ARGS(&Allocator)));
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12GraphicsCommandList> Commands;
+  Result = report(L"CreateCommandList(compute)",
+                  Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                            Allocator.Get(), Pipeline.Get(),
+                                            IID_PPV_ARGS(&Commands)));
+  if (FAILED(Result))
+    return Result;
+  Commands->CopyBufferRegion(Buffer.Get(), 0, Upload.Get(), 0, BufferBytes);
+  D3D12_RESOURCE_BARRIER Barrier{};
+  Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  Barrier.Transition.pResource = Buffer.Get();
+  Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  Commands->ResourceBarrier(1, &Barrier);
+  Commands->SetComputeRootSignature(Signature.Get());
+  Commands->SetComputeRootUnorderedAccessView(0,
+                                              Buffer->GetGPUVirtualAddress());
+  Commands->Dispatch(static_cast<UINT>(ComputeGroups), 1, 1);
+  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  Commands->ResourceBarrier(1, &Barrier);
+  Commands->CopyBufferRegion(Readback.Get(), 0, Buffer.Get(), 0, BufferBytes);
+  Result = report(L"Close(compute list)", Commands->Close());
+  if (FAILED(Result))
+    return Result;
+  bool Submitted = false;
+  Result = signalAndWait(Device, Queue, Commands.Get(), Submitted);
+  if (FAILED(Result)) {
+    if (Submitted) {
+      std::wprintf(L"Retaining compute resources until process exit after "
+                   L"completion/teardown failure.\n");
+      Device->AddRef();
+      Queue->AddRef();
+      Signature.Detach();
+      Pipeline.Detach();
+      Heap.Detach();
+      Buffer.Detach();
+      Upload.Detach();
+      Readback.Detach();
+      Allocator.Detach();
+      Commands.Detach();
+    }
+    return Result;
+  }
+  Mapped = nullptr;
+  Result =
+      report(L"Map(compute readback)", Readback->Map(0, &FullRange, &Mapped));
+  if (FAILED(Result))
+    return Result;
+  bool Valid = validateComputeShader(static_cast<const std::uint8_t *>(Mapped),
+                                     BufferBytes);
+  Readback->Unmap(0, &NoAccess);
+  if (!Valid)
+    return report(L"Compute shader validation", E_FAIL);
+  std::wprintf(L"Compute shader verified: values=%zu bytes=%zu groups=%zu "
+               L"threads=%zu; uav-register=3 space=%u guard-bytes=%zu\n",
+               ComputeValues, BufferBytes, ComputeGroups, ComputeThreads, Space,
+               BufferBytes - ComputeOutputBytes);
+  return S_OK;
+}
+
+static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter, bool BufferCopy = false,
+                               const wchar_t *ShaderPath = nullptr,
+                               UINT ShaderSpace = 0) {
   DXGI_ADAPTER_DESC1 Desc{};
   HRESULT Result = report(L"GetDesc1", Adapter->GetDesc1(&Desc));
   if (FAILED(Result))
@@ -271,6 +471,9 @@ static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter,
     return Result;
   if (BufferCopy)
     return exerciseBufferCopy(Device.Get(), Queue.Get());
+  if (ShaderPath)
+    return exerciseComputeShader(Device.Get(), Queue.Get(), ShaderPath,
+                                 ShaderSpace);
   bool Submitted = false;
   return signalAndWait(Device.Get(), Queue.Get(), nullptr, Submitted);
 }
@@ -281,9 +484,22 @@ int wmain(int Argc, wchar_t **Argv) {
   bool SoftwareBufferCopy =
       Argc == 3 && std::wcscmp(Argv[1], L"--software-buffer-copy") == 0;
   bool BufferCopy = WarpBufferCopy || SoftwareBufferCopy;
+  bool WarpCompute =
+      Argc == 4 && std::wcscmp(Argv[1], L"--warp-compute-shader") == 0;
+  bool SoftwareCompute =
+      Argc == 5 && std::wcscmp(Argv[1], L"--software-compute-shader") == 0;
+  const wchar_t *ShaderPath = WarpCompute       ? Argv[2]
+                              : SoftwareCompute ? Argv[3]
+                                                : nullptr;
+  const wchar_t *SpaceArg = WarpCompute       ? Argv[3]
+                            : SoftwareCompute ? Argv[4]
+                                              : nullptr;
+  bool ValidSpace = !SpaceArg || std::wcscmp(SpaceArg, L"0") == 0 ||
+                    std::wcscmp(SpaceArg, L"7") == 0;
+  UINT ShaderSpace = SpaceArg && std::wcscmp(SpaceArg, L"7") == 0 ? 7 : 0;
   bool Stub = Argc == 3 && std::wcscmp(Argv[1], L"--stub") == 0;
   bool Software = (Argc == 3 && std::wcscmp(Argv[1], L"--software") == 0) ||
-                  SoftwareBufferCopy;
+                  SoftwareBufferCopy || SoftwareCompute;
   bool WarpShim = Argc == 3 && std::wcscmp(Argv[1], L"--warp-shim") == 0;
   bool WarpBootstrap =
       Argc == 3 && std::wcscmp(Argv[1], L"--warp-bootstrap") == 0;
@@ -310,12 +526,15 @@ int wmain(int Argc, wchar_t **Argv) {
   ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue || ExpectGpuVa ||
                         ExpectGpuVaRejected || ExpectMonitoredFence;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
-       !WarpBootstrapAudit && !WarpBufferCopy) ||
+       !WarpBootstrapAudit && !WarpBufferCopy && !WarpCompute) ||
+      !ValidSpace ||
       (WarpBootstrapAudit && Argc == 4 && !ExpectCreateDevice &&
        !ExpectUnsupported)) {
     std::fwprintf(
         stderr,
         L"Usage: %ls [--warp-buffer-copy | --software-buffer-copy DLL | "
+        L"--warp-compute-shader SHADER {0|7} | "
+        L"--software-compute-shader DLL SHADER {0|7} | "
         L"--software DLL | --stub DLL | --warp-shim DLL | "
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
@@ -331,17 +550,21 @@ int wmain(int Argc, wchar_t **Argv) {
                     CreateDXGIFactory1(IID_PPV_ARGS(&Factory)))))
     return 1;
   ComPtr<IDXGIAdapter1> Adapter;
-  if (Argc == 1 || WarpBufferCopy) {
+  if (Argc == 1 || WarpBufferCopy || WarpCompute) {
     if (FAILED(report(L"EnumWarpAdapter",
                       Factory->EnumWarpAdapter(IID_PPV_ARGS(&Adapter)))))
       return 1;
     if (FAILED(checkWarpIdentity(Adapter.Get())))
       return 1;
-    HRESULT Result = exerciseAdapter(Adapter.Get(), BufferCopy);
+    HRESULT Result =
+        exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath, ShaderSpace);
     Adapter.Reset();
     Factory.Reset();
     std::wprintf(
-        BufferCopy
+        WarpCompute
+            ? L"Reference WARP compute-shader probe finished; not an owned "
+              L"FeMe device.\n"
+        : BufferCopy
             ? L"Reference WARP buffer-copy probe finished; not FeMe coverage.\n"
             : L"Reference WARP objects released; not FeMe coverage.\n");
     return FAILED(Result) ? 1 : 0;
@@ -473,13 +696,14 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result)) {
     Result =
         report(L"QueryInterface(IDXGIAdapter1)", SoftwareAdapter.As(&Adapter));
-    if (SUCCEEDED(Result) &&
-        (WarpShim || WarpBootstrap || WarpBootstrapAudit || SoftwareBufferCopy))
+    if (SUCCEEDED(Result) && (WarpShim || WarpBootstrap || WarpBootstrapAudit ||
+                              SoftwareBufferCopy || SoftwareCompute))
       Result = checkWarpIdentity(Adapter.Get());
     if (SUCCEEDED(Result)) {
       Opened = true;
-      Result = exerciseAdapter(Adapter.Get(), BufferCopy);
-      if (SoftwareBufferCopy && SUCCEEDED(Result) &&
+      Result =
+          exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath, ShaderSpace);
+      if ((SoftwareBufferCopy || SoftwareCompute) && SUCCEEDED(Result) &&
           GetModuleHandleW(L"d3d10warp.dll") != Module)
         Result = report(L"Requested/selected WARP module mismatch", E_FAIL);
     }
@@ -760,7 +984,10 @@ int wmain(int Argc, wchar_t **Argv) {
   if (!Released)
     report(L"FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
   std::wprintf(
-      BufferCopy
+      SoftwareCompute
+          ? L"Software WARP compute-shader probe finished; not an owned FeMe "
+            L"device.\n"
+      : BufferCopy
           ? L"Software WARP buffer-copy probe finished; not FeMe coverage.\n"
           : L"Software adapter objects released. Stub rejection is an "
             L"experiment, not a working FeMe adapter.\n");

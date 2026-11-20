@@ -285,10 +285,16 @@ portable LIT regression coverage. The
 fixes the unraised legacy resource call and unused-coordinate encoding
 behind the legalization failure. Both FXC profiles now export DXIL, with
 LIT payload re-import/LLVM verification and arithmetic, binding and
-thread-group assertions; 171 related regressions pass. Runtime/validator
-admission, owned-DDI/PSO execution, broader bindings and all-stage coverage
+thread-group assertions; 171 related regressions pass. The
+[reference compute oracle](W0WindowsIntegrationProbe.md#w0d-legacy-compute-dispatchreadback-oracle-vm-2026-11-20)
+now executes both profiles as FXC DXBC and SDK-validated FeMe DXIL,
+checking 256 scalar results and the entire 64 KiB output/guard buffer.
+It fixed leaked private metadata and validator/PSV version mismatch;
+bare DXIL export is still rejected and requires public SDK validation.
+The ARM64 inbox, x64 inbox and ARM64 Agility 619 LIT matrices each pass
+40/40. Owned-DDI/PSO execution, broader bindings and all-stage coverage
 remain under the existing W1/W2/W3/W4 gates. This is not completed legacy
-compatibility.
+compatibility or an owned FeMe device pass.
 LLVM-owned reference tests now exist in the
 standalone probe, but FeMe execution tests still need the prototype/runner
 from `W0(g)`/`W1(a)`. The W0(b) product choice is closed, but these

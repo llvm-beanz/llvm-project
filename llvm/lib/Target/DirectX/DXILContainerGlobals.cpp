@@ -340,24 +340,20 @@ static void addPipelineStateValidationInfo(
 
   addResourcesForPSV(M, PSV, GetResourceMap, GetResourceTypeMap);
   unsigned PSVVersion = 3;
+  VersionTuple V = MMI.ValidatorVersion;
+  if (!V.empty() && V != VersionTuple(0, 0))
+    PSVVersion = V < VersionTuple(1, 1)   ? 0
+                 : V < VersionTuple(1, 6) ? 1
+                 : V < VersionTuple(1, 8) ? 2
+                                          : 3;
   if (MMI.ShaderProfile != Triple::Library &&
       MMI.EntryPropertyVec.size() == 1) {
     const Function *Entry = MMI.EntryPropertyVec[0].Entry;
     bool UsesViewID = GetModuleShaderFlags().getFunctionFlags(Entry).ViewID;
     PSV.BaseData.UsesViewID = UsesViewID;
     const ModuleSignatureInfo &Signatures = GetModuleSignatureInfo();
-    if (const auto *Sig = Signatures.get(Entry)) {
+    if (const auto *Sig = Signatures.get(Entry))
       Sig->updatePSV(PSV, MMI.ValidatorVersion, UsesViewID);
-      // Preserve the existing empty-signature path, and select an ABI version
-      // compatible with the validator for graphics signature data.
-      VersionTuple V = MMI.ValidatorVersion;
-      if ((!Sig->Inputs.empty() || !Sig->Outputs.empty()) && !V.empty() &&
-          V != VersionTuple(0, 0))
-        PSVVersion = V < VersionTuple(1, 1)   ? 0
-                     : V < VersionTuple(1, 6) ? 1
-                     : V < VersionTuple(1, 8) ? 2
-                                              : 3;
-    }
   }
 
   // Hardcoded values here to unblock loading the shader into D3D.

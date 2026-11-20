@@ -1,0 +1,82 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+foreach(tool HARNESS FXC SOURCE)
+  if(NOT EXISTS "${${tool}}")
+    message(FATAL_ERROR "Supply an existing ${tool}.")
+  endif()
+endforeach()
+if(NOT DEFINED OUTPUT_BASE)
+  message(FATAL_ERROR "Supply a per-test OUTPUT_BASE.")
+endif()
+if(PROFILE STREQUAL "cs_5_0")
+  set(use_space 0)
+  set(space 0)
+elseif(PROFILE STREQUAL "cs_5_1")
+  set(use_space 1)
+  set(space 7)
+else()
+  message(FATAL_ERROR "Expected PROFILE=cs_5_0 or cs_5_1.")
+endif()
+set(shader "${OUTPUT_BASE}.dxbc")
+execute_process(COMMAND "${FXC}" /nologo /WX /T "${PROFILE}" /E main
+  /D "USE_REGISTER_SPACE=${use_space}" /Fo "${shader}" "${SOURCE}"
+  RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 15)
+if(NOT result STREQUAL "0")
+  message(FATAL_ERROR "FXC failed (${result}):\n${output}\n${error}")
+endif()
+if(INPUT_KIND STREQUAL "dxil")
+  if(NOT EXISTS "${FEME}")
+    message(FATAL_ERROR "Supply an existing FEME for DXIL translation.")
+  endif()
+  execute_process(COMMAND "${FEME}" --target=dxil "${shader}"
+    -o "${OUTPUT_BASE}.dxil"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 15)
+  if(NOT result STREQUAL "0")
+    message(FATAL_ERROR "FeMe DXIL export failed (${result}):\n${output}\n${error}")
+  endif()
+  set(shader "${OUTPUT_BASE}.dxil")
+  if(NOT SKIP_DXIL_VALIDATION)
+    if(NOT EXISTS "${VALIDATOR}" OR
+       NOT EXISTS "${VALIDATOR_DIR}/dxcompiler.dll" OR
+       NOT EXISTS "${VALIDATOR_DIR}/dxil.dll")
+      message(FATAL_ERROR "Supply VALIDATOR and the matching SDK VALIDATOR_DIR.")
+    endif()
+    execute_process(COMMAND "${VALIDATOR}" "${VALIDATOR_DIR}" "${shader}"
+      "${OUTPUT_BASE}.validated.dxil"
+      RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 15)
+    string(FIND "${output}" "DXIL validation status: 0x00000000" validated)
+    string(FIND "${output}" "Validated DXIL written:" written)
+    if(NOT result STREQUAL "0" OR validated EQUAL -1 OR written EQUAL -1)
+      message(FATAL_ERROR
+        "SDK DXIL validation failed (${result}):\n${output}\n${error}")
+    endif()
+    message(STATUS "SDK validation:\n${output}")
+    set(shader "${OUTPUT_BASE}.validated.dxil")
+  endif()
+elseif(NOT INPUT_KIND STREQUAL "dxbc")
+  message(FATAL_ERROR "Expected INPUT_KIND=dxbc or dxil.")
+endif()
+if(DEFINED SPACE_OVERRIDE)
+  set(space "${SPACE_OVERRIDE}")
+endif()
+set(args --warp-compute-shader "${shader}" "${space}")
+if(DEFINED MODULE)
+  set(args --software-compute-shader "${MODULE}" "${shader}" "${space}")
+endif()
+execute_process(COMMAND "${HARNESS}" ${args}
+  RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 20)
+set(expected "Compute shader verified: values=256 bytes=65536 groups=32 threads=8; uav-register=3 space=${space} guard-bytes=64512")
+string(FIND "${output}" "${expected}" found)
+if(EXPECT_PSO_REJECTION)
+  string(FIND "${output}" "CreateComputePipelineState: 0x80070057" rejected)
+  if(NOT result STREQUAL "1" OR rejected EQUAL -1 OR NOT found EQUAL -1)
+    message(FATAL_ERROR
+      "Expected PSO rejection (${result}):\n${output}\n${error}")
+  endif()
+elseif(NOT result STREQUAL "0" OR found EQUAL -1)
+  message(FATAL_ERROR
+    "Missing byte-exact compute completion (${result}):\n${output}\n${error}")
+endif()
+message(STATUS "Input=${INPUT_KIND} profile=${PROFILE}\n${output}")

@@ -2,7 +2,7 @@
 ; RUN: llc %s --filetype=obj -o - | obj2yaml | FileCheck %s --check-prefix=DXC
 target triple = "dxil-unknown-shadermodel6.0-compute"
 
-; CHECK: @dx.psv0 = private constant [80 x i8] c"{{.*}}", section "PSV0", align 4
+; CHECK: @dx.psv0 = private constant [68 x i8] c"{{.*}}", section "PSV0", align 4
 
 define void @cs_main() #0 {
 entry:
@@ -16,9 +16,9 @@ attributes #0 = { "hlsl.numthreads"="8,8,1" "hlsl.shader"="compute" }
 !0 = !{i32 1, i32 7}
 
 ; DXC: - Name:            PSV0
-; DXC-NEXT:   Size:            80
+; DXC-NEXT:   Size:            68
 ; DXC-NEXT:    PSVInfo:
-; DXC-NEXT:      Version:         3
+; DXC-NEXT:      Version:         2
 ; DXC-NEXT:      ShaderStage:     5
 ; DXC-NEXT:      MinimumWaveLaneCount: 0
 ; DXC-NEXT:      MaximumWaveLaneCount: 4294967295
@@ -28,12 +28,10 @@ attributes #0 = { "hlsl.numthreads"="8,8,1" "hlsl.shader"="compute" }
 ; DXC-NEXT:      NumThreadsX:     8
 ; DXC-NEXT:      NumThreadsY:     8
 ; DXC-NEXT:      NumThreadsZ:     1
-; DXC-NEXT:      EntryName:       cs_main
+; DXC-NOT:       EntryName:
 ; DXC-NEXT:      ResourceStride:  24
-; DXC-NEXT:      RuntimeInfoSize: 52
-; DXC-NEXT:      StringTable:
-; DXC-NEXT:      - String: cs_main
-; DXC-NEXT:      Offset: 1
+; DXC-NEXT:      RuntimeInfoSize: 48
+; DXC-NOT:       StringTable:
 ; DXC-NEXT:      Resources:       []
 ; DXC-NEXT:      SigInputElements: []
 ; DXC-NEXT:      SigOutputElements: []

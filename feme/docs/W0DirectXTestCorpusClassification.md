@@ -274,7 +274,7 @@ as passes.
 
 | Remaining compatibility work | Existing roadmap gate |
 |---|---|
-| Admit the emitted DXIL through the selected Windows runtime/validator and validate reference-WARP dispatch/readback. LLVM verification and payload assertions are compiler evidence, not D3D12 conformance. | W0(d), W1(b) |
+| Extend the scoped [reference compute oracle](W0WindowsIntegrationProbe.md#w0d-legacy-compute-dispatchreadback-oracle-vm-2026-11-20) beyond the fixed raw-UAV shader. Both legacy profiles now execute as FXC DXBC and SDK-validated FeMe DXIL on reference WARP; bare DXIL export remains rejected. This is not owned-device execution or D3D12 conformance. | W0(d), W1(b) |
 | Observe the owned shader DDI inputs, wire the supported legacy import route into PSO creation, and execute/read back this shader against scalar expectations and reference WARP with device/build provenance. | W0(g), W1(a), W1(b) |
 | Exercise descriptor arrays, dynamic/non-uniform indices and root-layout binding with real SM 5.1 compiler output, beyond this one fixed raw-UAV binding. | W2(a), W2(b) |
 | Extend real-compiler coverage to all six legacy stages, signatures, stage-specific declarations and operations, then validate translated execution. Existing assembler/import tests are not end-to-end shader support. | W0(c), W3, W4 |
@@ -283,6 +283,24 @@ W0(c) remains partial. This establishes the SM 5.1 input obligation and
 adds real-compiler import/translation and DXIL-export evidence; it does not
 establish full legacy coverage, successful execution through an owned
 D3D12 device, or compliance.
+
+### Legacy compute runtime admission follow-up (2026-11-20)
+
+The public reference-WARP oracle now verifies 256 scalar results and all
+64 KiB of output/guard data through both adapter entry paths, for
+`cs_5_0`/`cs_5_1` DXBC and FeMe-translated DXIL. The SDK validator exposed
+and helped fix leaked private signature metadata and an incorrect
+empty-signature compute PSV ABI version. Corrected DXIL must still pass
+through the public SDK validator to obtain a runtime-admitted container:
+unvalidated export is explicitly tested as PSO rejection, not execution.
+
+All **40/40** LIT cases pass on native ARM64 inbox, emulated x64 inbox
+and native ARM64 Agility 619; the no-tools default passes **28/28** without
+counting absent optional dispatch cases. Related LLVM/container and FeMe
+compiler/backend regressions pass **289**, with **1 Unsupported**.
+See the [integration evidence](W0WindowsIntegrationProbe.md#w0d-legacy-compute-dispatchreadback-oracle-vm-2026-11-20)
+for exact tools, module provenance, negative controls and reproduction.
+No owned device, shader-DDI or broader legacy support is implied.
 
 ## Source/test redistribution
 
