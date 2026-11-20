@@ -281,8 +281,10 @@ static HRESULT readShader(const wchar_t *Path,
 
 static HRESULT exerciseComputeShader(ID3D12Device *Device,
                                      ID3D12CommandQueue *Queue,
-                                     const wchar_t *Path, UINT Space) {
+                                     const wchar_t *Path, UINT Space,
+                                     bool Grouped) {
   using namespace feme::probe;
+  ComputeDispatch Dispatch = computeDispatch(Grouped);
   std::vector<std::uint8_t> Code;
   HRESULT Result = readShader(Path, Code);
   if (FAILED(Result))
@@ -392,7 +394,7 @@ static HRESULT exerciseComputeShader(ID3D12Device *Device,
   Commands->SetComputeRootSignature(Signature.Get());
   Commands->SetComputeRootUnorderedAccessView(0,
                                               Buffer->GetGPUVirtualAddress());
-  Commands->Dispatch(static_cast<UINT>(ComputeGroups), 1, 1);
+  Commands->Dispatch(Dispatch.X, Dispatch.Y, Dispatch.Z);
   Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
   Commands->ResourceBarrier(1, &Barrier);
@@ -425,20 +427,24 @@ static HRESULT exerciseComputeShader(ID3D12Device *Device,
   if (FAILED(Result))
     return Result;
   bool Valid = validateComputeShader(static_cast<const std::uint8_t *>(Mapped),
-                                     BufferBytes);
+                                     BufferBytes, Grouped);
   Readback->Unmap(0, &NoAccess);
   if (!Valid)
     return report(L"Compute shader validation", E_FAIL);
   std::wprintf(L"Compute shader verified: values=%zu bytes=%zu groups=%zu "
                L"threads=%zu; uav-register=3 space=%u guard-bytes=%zu\n",
-               ComputeValues, BufferBytes, ComputeGroups, ComputeThreads, Space,
-               BufferBytes - ComputeOutputBytes);
+               Dispatch.Values, BufferBytes,
+               std::size_t(Dispatch.X) * Dispatch.Y * Dispatch.Z,
+               Dispatch.Threads, Space,
+               BufferBytes - Dispatch.Values * sizeof(std::uint32_t));
+  if (Grouped)
+    std::wprintf(L"Grouped compute verified: groups=2,2,2 threads=8,4,2.\n");
   return S_OK;
 }
 
 static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter, bool BufferCopy = false,
                                const wchar_t *ShaderPath = nullptr,
-                               UINT ShaderSpace = 0) {
+                               UINT ShaderSpace = 0, bool Grouped = false) {
   DXGI_ADAPTER_DESC1 Desc{};
   HRESULT Result = report(L"GetDesc1", Adapter->GetDesc1(&Desc));
   if (FAILED(Result))
@@ -473,7 +479,7 @@ static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter, bool BufferCopy = false,
     return exerciseBufferCopy(Device.Get(), Queue.Get());
   if (ShaderPath)
     return exerciseComputeShader(Device.Get(), Queue.Get(), ShaderPath,
-                                 ShaderSpace);
+                                 ShaderSpace, Grouped);
   bool Submitted = false;
   return signalAndWait(Device.Get(), Queue.Get(), nullptr, Submitted);
 }
@@ -484,10 +490,17 @@ int wmain(int Argc, wchar_t **Argv) {
   bool SoftwareBufferCopy =
       Argc == 3 && std::wcscmp(Argv[1], L"--software-buffer-copy") == 0;
   bool BufferCopy = WarpBufferCopy || SoftwareBufferCopy;
-  bool WarpCompute =
-      Argc == 4 && std::wcscmp(Argv[1], L"--warp-compute-shader") == 0;
+  bool WarpCompute = (Argc == 4 || Argc == 5) &&
+                     std::wcscmp(Argv[1], L"--warp-compute-shader") == 0;
   bool SoftwareCompute =
-      Argc == 5 && std::wcscmp(Argv[1], L"--software-compute-shader") == 0;
+      (Argc == 5 || Argc == 6) &&
+      std::wcscmp(Argv[1], L"--software-compute-shader") == 0;
+  const wchar_t *Workload = WarpCompute && Argc == 5       ? Argv[4]
+                            : SoftwareCompute && Argc == 6 ? Argv[5]
+                                                           : nullptr;
+  bool Grouped = Workload && std::wcscmp(Workload, L"grouped") == 0;
+  bool ValidWorkload =
+      !Workload || Grouped || std::wcscmp(Workload, L"linear") == 0;
   const wchar_t *ShaderPath = WarpCompute       ? Argv[2]
                               : SoftwareCompute ? Argv[3]
                                                 : nullptr;
@@ -527,14 +540,14 @@ int wmain(int Argc, wchar_t **Argv) {
                         ExpectGpuVaRejected || ExpectMonitoredFence;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
        !WarpBootstrapAudit && !WarpBufferCopy && !WarpCompute) ||
-      !ValidSpace ||
+      !ValidSpace || !ValidWorkload ||
       (WarpBootstrapAudit && Argc == 4 && !ExpectCreateDevice &&
        !ExpectUnsupported)) {
     std::fwprintf(
         stderr,
         L"Usage: %ls [--warp-buffer-copy | --software-buffer-copy DLL | "
-        L"--warp-compute-shader SHADER {0|7} | "
-        L"--software-compute-shader DLL SHADER {0|7} | "
+        L"--warp-compute-shader SHADER {0|7} [linear|grouped] | "
+        L"--software-compute-shader DLL SHADER {0|7} [linear|grouped] | "
         L"--software DLL | --stub DLL | --warp-shim DLL | "
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
@@ -556,8 +569,8 @@ int wmain(int Argc, wchar_t **Argv) {
       return 1;
     if (FAILED(checkWarpIdentity(Adapter.Get())))
       return 1;
-    HRESULT Result =
-        exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath, ShaderSpace);
+    HRESULT Result = exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath,
+                                     ShaderSpace, Grouped);
     Adapter.Reset();
     Factory.Reset();
     std::wprintf(
@@ -701,8 +714,8 @@ int wmain(int Argc, wchar_t **Argv) {
       Result = checkWarpIdentity(Adapter.Get());
     if (SUCCEEDED(Result)) {
       Opened = true;
-      Result =
-          exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath, ShaderSpace);
+      Result = exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath,
+                               ShaderSpace, Grouped);
       if ((SoftwareBufferCopy || SoftwareCompute) && SUCCEEDED(Result) &&
           GetModuleHandleW(L"d3d10warp.dll") != Module)
         Result = report(L"Requested/selected WARP module mismatch", E_FAIL);

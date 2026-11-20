@@ -1351,7 +1351,7 @@ cmake --build $build --target check-feme-windows-probes --parallel 2
 
 Use SDK `x64` tools for an x64 probe build. Agility additionally needs the
 existing matching-architecture core/version options. Supplying FeMe
-requires FXC and a validator directory containing both SDK DLLs; bad
+requires FXC or DXC and a validator directory containing both SDK DLLs; bad
 configuration fails explicitly. No shader fixture binaries are committed.
 
 This is a scoped W0(c)/W0(d) reference oracle and W1(b) compiler/runtime
@@ -1360,6 +1360,91 @@ array/non-uniform binding coverage or graphics-stage execution. Owned
 `CreateDevice` remains deliberately `E_NOTIMPL`; W0(g)/W1(a)'s owned
 device/resource and shader-DDI/PSO integration remain open. A FeMe-translated
 shader running on Microsoft WARP is not an owned FeMe D3D12 device pass.
+
+### W1(b) grouped SM6 compute oracle (VM, 2026-11-20)
+
+The compute probe now also accepts an optional `linear|grouped` workload
+argument on both public shader modes; omission preserves the original
+linear dispatch and completion marker. Unknown workloads fail explicitly.
+The original
+[`feme-dxc-grouped-compute.hlsl`](../test/Tools/feme/feme-dxc-grouped-compute.hlsl)
+uses real DXC `cs_6_0` output and the same raw UAV `u3`, in spaces 0 and 7.
+It is **not** a legacy DXBC groupshared-support result: that translator
+does not yet handle groupshared declarations and synchronization.
+
+The grouped workload dispatches `(2,2,2)` groups of `(8,4,2)` threads,
+giving a `(16,8,4)` dispatch-ID grid and 512 distinct output words. It
+initializes 64 groupshared uints per group, synchronizes, reads the thread
+at flattened local index `local ^ 32`, synchronizes before reusing that
+storage, writes the neighbor value plus `101 * group`, synchronizes
+again and reads `local ^ 1` for output. The middle barrier protects reads
+from concurrent overwrites; this is not merely three redundant fences.
+
+The scalar checker independently reconstructs group/local indices from
+each output's 3-D coordinates. With flattened group `g`, local index `l`
+and `p = 64*g + (l ^ 33)`, the result must be
+`((p*17 + 23) ^ (p >> 3)) + 101*g`. Every byte outside the first 2,048
+must retain the baseline pattern: **63,488 guard bytes** are checked.
+The strict wrapper also requires the exact grouped-dimensions marker.
+Nine additional CPU fixtures cover the grouped oracle's size, mapping,
+result/guard corruption and no-dispatch controls, with independent anchors
+including results 0, 8, 16, 128 and 511. These are data-oracle tests, not
+device-failure injection.
+
+#### Modern-bitcode metadata admission fix
+
+Direct DXC shaders executed correctly, but all four FeMe-re-emitted
+grouped cases initially failed SDK validation with
+`All metadata must be used by dxil`, naming a `!guid` node.
+LLVM's bitcode reader upgrades older bitcode by attaching modern GUID
+metadata to definitions for linking/cloning. LLVM DXIL preparation now
+removes those attachments from global objects before frozen DXIL emission,
+without discarding other metadata or changing non-DXIL targets. The portable
+[`strip-guid-metadata.ll`](../../llvm/test/CodeGen/DirectX/strip-guid-metadata.ll)
+regression failed before the fix and now verifies GUID removal from both
+a function and a global, while retaining the function's debug scope/location.
+
+The HLSL compiler regression compiles both spaces, re-emits through FeMe,
+re-imports/verifies the actual payload, and checks shared-memory accesses,
+three ordered barriers, group/flattened IDs, bindings and dimensions.
+It uses `system-dxc-dxil`/`%dxil_dxc`, independently of the existing
+SPIR-V-capability-gated `system-dxc` feature. Without DXC the HLSL test is
+Unsupported, not a pass; the GUID regression remains portable.
+
+#### Validation and reproduction
+
+The same VM, compiler, SDK and runtime versions as the preceding oracle
+were used. All automated coverage runs through LIT, not CTest.
+
+| Configuration | LIT outcome |
+|---|---|
+| Native ARM64 inbox, FXC/DXC/FeMe enabled | 59/59 |
+| Emulated x64 inbox, FXC/DXC/FeMe enabled | 59/59 |
+| Native ARM64 Agility 619, FXC/DXC/FeMe enabled | 59/59 |
+| Native ARM64 DXC/FeMe enabled, no FXC | 49/49 |
+| Default native ARM64, no optional shader tools | 39/39 |
+| Targeted LLVM DXIL preparation and FeMe export/raising regressions | 59/59 |
+
+The full matrices retain the preceding 40 cases and add eight actual grouped
+dispatch successes (two spaces, direct-DXC/validated-FeMe input and both
+adapter paths), nine CPU controls and two invalid-workload controls.
+The default matrix runs no optional shader dispatches. SDK validation and
+runtime module paths remain visible in the workflow diagnostics.
+
+Enable grouped coverage alongside the existing configuration:
+
+```powershell
+cmake -S feme\utils\windows-adapter-probe -B $build `
+  "-DFEME_PROBE_DXC=$sdkTools\dxc.exe"
+cmake --build $build --target check-feme-windows-probes --parallel 2
+```
+
+DXC can be supplied without FXC. FeMe re-emission still requires the explicit
+FeMe executable and matching-architecture SDK validator directory; omitting
+FeMe runs only direct-DXC reference cases. The owned device is unchanged.
+This measures a 64-thread grouped workload, not an exact wave size or
+partial-wave policy. Broader barriers, repeated execution, concurrent owned
+PSO/context lifetimes and legacy groupshared translation remain open.
 
 ### W0(g) public GPU VA reservation boundary (VM)
 

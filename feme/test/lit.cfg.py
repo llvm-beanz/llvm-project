@@ -174,6 +174,10 @@ if _fxc:
 # Windows SDK's copy can be), the same way `system-vulkan-loader` gates the
 # Vulkan loader below.
 _dxc = shutil.which("dxc")
+# DXIL-only SDK builds must not depend on the SPIR-V capability probe below.
+if _dxc:
+    config.available_features.add("system-dxc-dxil")
+    config.substitutions.append(("%dxil_dxc", "'%s'" % _dxc))
 _dxc_supports_spirv = False
 if _dxc:
     try:

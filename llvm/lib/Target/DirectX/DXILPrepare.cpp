@@ -24,6 +24,7 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/Analysis.h"
 #include "llvm/IR/AttributeMask.h"
+#include "llvm/IR/GlobalObject.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Module.h"
@@ -157,6 +158,11 @@ static bool prepareModule(
   const dxil::ModuleMetadataInfo MetadataInfo = GetModuleMetadataInfo();
   VersionTuple ValVer = MetadataInfo.ValidatorVersion;
   bool AllowExperimental = ValVer.getMajor() == 0 && ValVer.getMinor() == 0;
+
+  // Reading older bitcode adds modern LLVM GUID metadata for linking/cloning.
+  // It is not part of DXIL's frozen metadata contract.
+  for (GlobalObject &GO : M.global_objects())
+    GO.setMetadata(LLVMContext::MD_guid, nullptr);
 
   for (auto &F : M.functions()) {
     F.removeFnAttrs(AttrMask);

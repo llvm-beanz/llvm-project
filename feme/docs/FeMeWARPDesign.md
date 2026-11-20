@@ -529,6 +529,11 @@ Specific reporting rules include:
   and compute group dimensions;
   broader legacy execution coverage remains required. D3D11-on-12 cannot
   be assumed to replace that compiler work.
+  The [grouped SM6 reference oracle](W0WindowsIntegrationProbe.md#w1b-grouped-sm6-compute-oracle-vm-2026-11-20)
+  additionally verifies 3-D dispatch/group IDs and three groupshared barriers
+  in real DXC and FeMe-re-emitted DXIL on Microsoft WARP. That result neither
+  implements the legacy DXBC groupshared/sync route nor establishes an owned
+  device, exact wave policy or full W1(b) lifetime/barrier coverage.
 - Wave lane count is pinned device-wide, and the reported
   `WaveLaneCountMin`/`WaveLaneCountMax` must match FeMe's compile-time wave
   size policy. A shader model that lets a shader request a wave size is

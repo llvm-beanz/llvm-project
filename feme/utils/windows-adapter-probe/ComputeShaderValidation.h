@@ -20,18 +20,40 @@ constexpr std::size_t ComputeOutputBytes =
     ComputeValues * sizeof(std::uint32_t);
 static_assert(ComputeOutputBytes < BufferBytes);
 
-constexpr std::uint32_t expectedComputeValue(std::size_t Index) {
+struct ComputeDispatch {
+  std::uint32_t X, Y, Z;
+  std::size_t Threads, Values;
+};
+
+constexpr ComputeDispatch computeDispatch(bool Grouped) {
+  return Grouped ? ComputeDispatch{2, 2, 2, 64, 512}
+                 : ComputeDispatch{32, 1, 1, ComputeThreads, ComputeValues};
+}
+static_assert(computeDispatch(true).Values * sizeof(std::uint32_t) <
+              BufferBytes);
+
+constexpr std::uint32_t expectedComputeValue(std::size_t Index,
+                                             bool Grouped = false) {
+  if (Grouped) {
+    std::size_t X = Index % 16, Y = (Index / 16) % 8, Z = Index / 128;
+    std::size_t Group = X / 8 + 2 * (Y / 4 + 2 * (Z / 2));
+    std::size_t Local = X % 8 + 8 * (Y % 4 + 4 * (Z % 2));
+    return expectedComputeValue(Group * 64 + (Local ^ 33)) +
+           static_cast<std::uint32_t>(Group * 101);
+  }
   return static_cast<std::uint32_t>((Index * 17 + 23) ^ (Index >> 3));
 }
 
-constexpr std::uint8_t expectedComputeByte(std::size_t Offset) {
-  if (Offset >= ComputeOutputBytes)
+constexpr std::uint8_t expectedComputeByte(std::size_t Offset,
+                                           bool Grouped = false) {
+  if (Offset >= computeDispatch(Grouped).Values * sizeof(std::uint32_t))
     return baselineByte(Offset);
-  return static_cast<std::uint8_t>(expectedComputeValue(Offset / 4) >>
+  return static_cast<std::uint8_t>(expectedComputeValue(Offset / 4, Grouped) >>
                                    (8 * (Offset % 4)));
 }
 
-inline bool validateComputeShader(const std::uint8_t *Data, std::size_t Size) {
+inline bool validateComputeShader(const std::uint8_t *Data, std::size_t Size,
+                                  bool Grouped = false) {
   if (!Data || Size != BufferBytes) {
     std::fwprintf(stderr,
                   L"Compute shader invalid readback: data=%ls size=%zu "
@@ -40,7 +62,7 @@ inline bool validateComputeShader(const std::uint8_t *Data, std::size_t Size) {
     return false;
   }
   for (std::size_t I = 0; I < Size; ++I) {
-    std::uint8_t Expected = expectedComputeByte(I);
+    std::uint8_t Expected = expectedComputeByte(I, Grouped);
     if (Data[I] != Expected) {
       std::fwprintf(stderr,
                     L"Compute shader mismatch: byte=%zu expected=%02x "

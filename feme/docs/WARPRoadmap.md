@@ -31,8 +31,10 @@ regression gates, `WS3(a)`/`WS3(b)`) is also fully done and closed. `W0(c)`
 (classify the local Direct3D test corpus) is partially done -- its
 classification and redistribution-review pieces are recorded in
 [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md),
-but its legacy-shader audit and FeMe execution tests still require the selected
-stock-runtime contract to be audited and a working FeMe runner, respectively.
+but broader legacy-shader coverage and owned-device execution still require
+compiler work and a working FeMe runner, respectively. The fixed raw-UAV
+legacy oracle and grouped SM6 reference oracle are measured coverage, not
+closure of that compatibility gate.
 
 This is the implementation checklist for [FeMeWARPDesign.md](FeMeWARPDesign.md),
 not a claim that FeMe is a Direct3D adapter today. The product remains a
@@ -326,6 +328,19 @@ user-mode headless W1 once the selected boundary is proven.
 | W1(a) | Optional Windows build/export target, device and direct/compute/copy queues, allocators/lists, buffers/heaps, fences, PSOs, allocation accounting, and device-removal propagation. Keep runtime/DDI handles outside portable execution code. Check the export set and coexistence with DXC and the Vulkan ICD in one process. Test invalid handles/sizes, OOM, close/reset/replay, and teardown with pending work. |
 | W1(b) | Resource-free DXIL dispatch, then one structured/raw-buffer write, copy/readback and fence. Validate IDs, partial waves, multi-wave groupshared barriers, concurrent PSO compilation, context/code lifetime, and repeated execution against scalar expectations and WARP. |
 | W1(c) | Build a versioned capability inventory tied to named tests and normative SDK requirements. Early partial execution is an internal harness, not a falsely advertised lower feature level: even FL 11_0 requires graphics. Pin/query actual wave policy; test requested wave sizes separately. |
+
+Reference-only W1(b) progress (2026-11-20): the
+[grouped SM6 oracle](W0WindowsIntegrationProbe.md#w1b-grouped-sm6-compute-oracle-vm-2026-11-20)
+executes original DXC and SDK-validated FeMe-re-emitted DXIL with
+`(8,4,2)` threads across `(2,2,2)` groups, 3-D IDs, shared-memory exchange
+and three group barriers. It verifies 512 results and every byte of the
+64 KiB output/guard buffer. LLVM DXIL preparation now removes the modern
+GUID metadata added when reading older bitcode, with a portable regression
+that preserves debug information. The three reference-runtime LIT matrices
+pass 59/59. The legacy DXBC translator's groupshared/sync route remains
+unimplemented; actual wave policy, partial waves, repeated execution and
+concurrent owned PSO/context lifetimes remain unproven. W1(b) stays open,
+and owned `CreateDevice` remains deliberately `E_NOTIMPL`.
 
 ### W2: Binding, resources, and synchronization
 

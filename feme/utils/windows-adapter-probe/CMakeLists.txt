@@ -71,7 +71,16 @@ foreach(scenario success wrong-size missing-data first-byte last-value
                  guard-first guard-last no-dispatch patterns)
   feme_add_probe_test(NAME compute-shader-fixture-${scenario}
     COMMAND feme-compute-shader-tests "${scenario}")
+  feme_add_probe_test(NAME grouped-compute-fixture-${scenario}
+    COMMAND feme-compute-shader-tests "${scenario}" grouped)
 endforeach()
+feme_add_probe_test(NAME compute-shader-invalid-workload WILL_FAIL
+  COMMAND feme-windows-adapter-probe --warp-compute-shader
+  "${CMAKE_CURRENT_BINARY_DIR}/missing-shader.dxil" 0 unknown)
+feme_add_probe_test(NAME software-compute-shader-invalid-workload WILL_FAIL
+  COMMAND feme-windows-adapter-probe --software-compute-shader
+  "$ENV{SystemRoot}/System32/d3d10warp.dll"
+  "${CMAKE_CURRENT_BINARY_DIR}/missing-shader.dxil" 0 unknown)
 feme_add_probe_test(NAME compute-shader-missing-file WILL_FAIL
   COMMAND feme-windows-adapter-probe --warp-compute-shader
   "${CMAKE_CURRENT_BINARY_DIR}/missing-shader.dxil" 0)
@@ -85,11 +94,12 @@ feme_add_probe_test(NAME dxil-validator-missing-module WILL_FAIL
   "${CMAKE_CURRENT_BINARY_DIR}/missing-shader.dxil")
 
 set(FEME_PROBE_FXC "" CACHE FILEPATH "SDK FXC for original legacy HLSL tests")
+set(FEME_PROBE_DXC "" CACHE FILEPATH "SDK DXC for SM6 grouped compute tests")
 set(FEME_PROBE_FEME "" CACHE FILEPATH "FeMe CLI for translated DXIL dispatch tests")
 set(FEME_PROBE_DXIL_VALIDATOR_DIR "" CACHE PATH
   "Matching-architecture SDK directory containing dxcompiler.dll and dxil.dll")
-if(FEME_PROBE_FEME AND NOT FEME_PROBE_FXC)
-  message(FATAL_ERROR "Supply FEME_PROBE_FXC with FEME_PROBE_FEME.")
+if(FEME_PROBE_FEME AND NOT FEME_PROBE_FXC AND NOT FEME_PROBE_DXC)
+  message(FATAL_ERROR "Supply FEME_PROBE_FXC or FEME_PROBE_DXC with FEME_PROBE_FEME.")
 endif()
 if(FEME_PROBE_FEME OR FEME_PROBE_DXIL_VALIDATOR_DIR)
   foreach(module dxcompiler.dll dxil.dll)
@@ -104,11 +114,37 @@ if(FEME_PROBE_FEME OR FEME_PROBE_DXIL_VALIDATOR_DIR)
     COMMAND feme-dxil-validator "${FEME_PROBE_DXIL_VALIDATOR_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/ExpectComputeShader.cmake" "%t.dxil")
 endif()
-foreach(tool FEME_PROBE_FXC FEME_PROBE_FEME)
+foreach(tool FEME_PROBE_FXC FEME_PROBE_DXC FEME_PROBE_FEME)
   if(${tool} AND NOT EXISTS "${${tool}}")
     message(FATAL_ERROR "${tool} must name an existing executable.")
   endif()
 endforeach()
+if(FEME_PROBE_DXC)
+  set(grouped_kinds dxc)
+  if(FEME_PROBE_FEME)
+    list(APPEND grouped_kinds dxil)
+  endif()
+  foreach(space 0 7)
+    foreach(kind IN LISTS grouped_kinds)
+      foreach(entry warp software)
+        set(module_args)
+        if(entry STREQUAL "software")
+          list(APPEND module_args "-DMODULE=$ENV{SystemRoot}/System32/d3d10warp.dll")
+        endif()
+        feme_add_probe_test(NAME grouped-compute-space${space}-${kind}-${entry}
+          COMMAND "${CMAKE_COMMAND}"
+          "-DHARNESS=$<TARGET_FILE:feme-windows-adapter-probe>"
+          "-DDXC=${FEME_PROBE_DXC}" "-DFEME=${FEME_PROBE_FEME}"
+          "-DVALIDATOR=$<TARGET_FILE:feme-dxil-validator>"
+          "-DVALIDATOR_DIR=${FEME_PROBE_DXIL_VALIDATOR_DIR}"
+          "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/feme/feme-dxc-grouped-compute.hlsl"
+          "-DREGISTER_SPACE=${space}" -DPROFILE=cs_6_0 -DGROUPED=ON
+          "-DINPUT_KIND=${kind}" "-DOUTPUT_BASE=%t" ${module_args}
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectComputeShader.cmake")
+      endforeach()
+    endforeach()
+  endforeach()
+endif()
 if(FEME_PROBE_FXC)
   set(input_kinds dxbc)
   if(FEME_PROBE_FEME)
