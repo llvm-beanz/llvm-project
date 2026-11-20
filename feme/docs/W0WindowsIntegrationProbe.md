@@ -1736,6 +1736,91 @@ repeated dispatch remain open under W0(g)/W1. This milestone proves
 portable compute behavior needed by that future frontend; it does not
 close those device gates.
 
+### W1(b) retained CPU dispatch and compilation-context lifetimes (VM, 2026-11-20)
+
+The [preceding CPU comparison](#w1b-feme-cpu-partial-wave-execution-vm-2026-11-20)
+now exercises retained code and resources rather than only one dispatch
+per fresh process. `feme-run --repeat=N` compiles the JIT shader or loads
+the AOT object once, runs N completed dispatches, and prints a complete
+heap snapshot after **each** dispatch. The same executable, JIT worker
+pool and buffer/image/sampler storage stay alive. The positive default
+is 1, preserving existing single-dispatch output. Zero is rejected with
+an explicit diagnostic before input loading. Resource contents are not
+reset between iterations; `--reference` and `--object` use the same
+repeat contract.
+
+`ExpectFeMePartialWave.cmake` requests **three** dispatches in every
+existing CPU case: original/re-emitted SM6 DXIL, spaces 0/7 and widths
+4/8/16/32. It requires exactly three binding dumps and invokes the strict
+oracle independently for every snapshot, not merely the last. Each
+snapshot verifies 180 records, six partial waves, the exact
+48/24/12/6 wave count for its selected width, and all 59,776 guard bytes.
+The full-buffer baseline is initialized once and retained; unlike the
+reference command-list probe, this CLI does not copy it again before each
+dispatch.
+
+Two stateful regression fixtures make actual replay observable:
+
+- [`repeat-dispatch.ll`](../test/Tools/feme-run/repeat-dispatch.ll)
+  increments six independent buffer words over two partial-wave groups.
+  It checks three distinct full output lines and unchanged guard words,
+  as well as default/explicit single-dispatch output and invalid zero
+  repetition. The same fixture runs through normal JIT, scalar reference
+  execution and the AOT object loader.
+- [`repeat-partial-wave.test`](../test/Tools/feme-run/HLSL/repeat-partial-wave.test)
+  compiles real DXC SM6.0 HLSL with seven threads in each of two groups,
+  four-lane waves, group-shared storage, a group barrier, wave reduction
+  and first-active-lane reads. Every iteration publishes its previous
+  output into shared memory, then rotates it across full/partial waves.
+  All fourteen results follow a checked three-step recurrence, with two
+  guard words unchanged. The barrier separates all old-output reads from
+  new writes. Skipped dispatches, stale snapshots, implicit resets and
+  stale shared-memory phases cannot reproduce the expected sequence.
+
+[`CompiledStageTest.ConcurrentCompilationAndRepeatedExecutionOutliveContexts`](../unittests/Target/CPU/CompiledStageTest.cpp)
+adds a separate portable ownership test. Two independent compilation
+contexts concurrently create stages at widths 4 and 8; both contexts and
+their source modules are destroyed before execution. Each retained stage
+then builds one prepared dispatch and reuses its arguments for three
+rounds of four group invocations, concurrently with the other stage.
+Per-round buffer reinitialization requires fresh stores, and both bounds
+guards are checked. Errors from worker threads are captured and asserted
+after joining. This tests independent contexts, not concurrent use of
+one mutable LLVM context.
+
+All tests run through **LIT**, never CTest. On the same Windows VM:
+
+| Configuration | LIT outcome |
+|---|---|
+| ARM64 inbox reference/oracle + native ARM64 FeMe runner | 130/130, including 48 CPU dispatch readbacks |
+| Emulated x64 inbox reference/oracle + native ARM64 FeMe runner | 130/130, including 48 CPU dispatch readbacks |
+| ARM64 Agility 619 reference/oracle + native ARM64 FeMe runner | 130/130, including 48 CPU dispatch readbacks |
+| Default ARM64 configuration after removing optional tools | 78/78 |
+| Complete FeMe suite | 4,003 passed, 15 skipped, 13 unsupported; zero failures; 74.05 s |
+
+The full suite discovers 4,031 tests. The three strengthened exact-output
+fixtures also pass a focused rerun. Test-count changes are two new
+source fixtures and one helper unit case; the existing AOT test receives
+additional commands. The Windows matrix test count is unchanged because
+each existing CPU case now performs three dispatches rather than one.
+Reconfiguration still removes stale optional tests. LIT's standalone
+per-test timeout needs `psutil`; it was installed in a task-local Python
+environment after the system interpreter reported that missing dependency.
+
+The [CPU CLI contract](FeMeCPUDesign.md#command-line) documents the option.
+No shared compiler/runtime implementation, ABI or Vulkan advertisement is
+changed by this follow-up; the existing ICD/graphics regression suite
+passes. The [CTS scope note](VulkanCTSReport.md#w1b-retained-cpu-execution-regression-scope-2026-11-20)
+does not claim external CTS coverage.
+
+This remains internal portable-executor evidence. The x64 matrix does
+not exercise an x64 FeMe backend, and Agility still applies only to the
+reference D3D12 process. Owned `CreateDevice` is unchanged at `E_NOTIMPL`.
+Real D3D12 PSO compilation/context lifetime, teardown with pending work,
+resource retention across recorded commands, command-list replay and
+fence semantics remain open under W0(g)/W1. The contexts in the unit test
+are compiler contexts, not runtime-owned D3D12 command contexts.
+
 ### W0(g) public GPU VA reservation boundary (VM)
 
 The 2026-11-18 follow-up tests a different public runtime-owned callback

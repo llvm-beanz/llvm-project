@@ -1,0 +1,40 @@
+// REQUIRES: system-dxc-dxil, directx-registered-target
+// RUN: split-file %s %t
+// RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/shader.dxil %t/shader.hlsl
+// RUN: feme-run --wave-size=4 --repeat=3 --groups=2,1,1 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+// Every iteration publishes the previous output into groupshared memory before
+// rotating it across full/partial waves. Stale output, skipped dispatches and
+// resource resets cannot reproduce the three distinct snapshots.
+
+// CHECK: binding[0:0][0]: 15 16 17 18 24 25 26 115 116 117 118 124 125 126 123456789 987654321{{$}}
+// CHECK-NEXT: binding[0:0][0]: 33 40 42 44 39 41 43 233 240 242 244 239 241 243 123456789 987654321{{$}}
+// CHECK-NEXT: binding[0:0][0]: 59 55 58 61 57 65 68 359 355 358 361 357 365 368 123456789 987654321{{$}}
+// CHECK-NOT: binding[
+
+//--- shader.hlsl
+RWStructuredBuffer<uint> Output : register(u0);
+groupshared uint Scratch[7];
+[numthreads(7, 1, 1)]
+void main(uint3 ID : SV_DispatchThreadID, uint Local : SV_GroupIndex,
+          uint3 Group : SV_GroupID) {
+  Scratch[Local] = Output[ID.x] + Local + 1 + Group.x * 100;
+  GroupMemoryBarrierWithGroupSync();
+  Output[ID.x] = Scratch[(Local + 3) % 7] + WaveActiveSum(Local + 1) +
+                 WaveReadLaneFirst(Local + 1);
+}
+
+//--- heap.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 64
+        kind: structured-buffer
+        stride: 4
+        data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 123456789, 987654321]

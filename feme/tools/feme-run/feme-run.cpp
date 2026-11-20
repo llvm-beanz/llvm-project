@@ -1321,7 +1321,8 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
 Error runObjectMode(StringRef Filename, StringRef EntryPoint,
                     const HeapFile &Heap, std::array<uint32_t, 3> GroupCount,
                     const HeapStorage &Storage, const ImageStorage &Images,
-                    ArrayRef<FemeSamplerDescriptor> Samplers) {
+                    ArrayRef<FemeSamplerDescriptor> Samplers,
+                    unsigned RepeatCount) {
   if (!Heap.Bindings.empty())
     return createStringError(
         inconvertibleErrorCode(),
@@ -1359,8 +1360,12 @@ Error runObjectMode(StringRef Filename, StringRef EntryPoint,
   Resources.ResourceHeap = Storage.Descriptors;
   Resources.ImageHeap = Images.Descriptors;
   Resources.SamplerHeap = Samplers;
-  runDispatch(EntryAddr->toPtr<EntryPointFn>(), ResourceInfo{}, Resources,
-              GroupCount);
+  for (unsigned I = 0; I != RepeatCount; ++I) {
+    runDispatch(EntryAddr->toPtr<EntryPointFn>(), ResourceInfo{}, Resources,
+                GroupCount);
+    printHeapContents(outs(), Heap, Storage, /*BindingsStorage=*/{}, Images,
+                      Samplers);
+  }
   return Error::success();
 }
 
@@ -1383,6 +1388,11 @@ int main(int argc, char **argv) {
   cl::opt<std::string> GroupCountStr(
       "groups", cl::init("1,1,1"),
       cl::desc("The dispatch's group count, as 'X,Y,Z'"));
+  cl::opt<unsigned> RepeatCount(
+      "repeat", cl::init(1),
+      cl::desc("Run this many completed dispatches using the same compiled "
+               "code and resources, printing the heap after each (must be "
+               "positive; resources are not reset)"));
   cl::opt<std::string> EntryPoint(
       "entry-point",
       cl::desc("The compute entry point to run, if the module has more "
@@ -1411,6 +1421,11 @@ int main(int argc, char **argv) {
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe CPU target JIT/dispatch runner\n");
+
+  if (RepeatCount == 0) {
+    errs() << "feme-run: '--repeat' must be positive\n";
+    return 1;
+  }
 
   std::optional<CodeGenOptLevel> ResolvedOptLevel =
       CodeGenOpt::parseLevel(OptLevel);
@@ -1464,12 +1479,10 @@ int main(int argc, char **argv) {
 
   if (ObjectMode) {
     if (Error E = runObjectMode(InputFilename, EntryPoint, Heap, GroupCount,
-                                *Storage, *Images, *Samplers)) {
+                                *Storage, *Images, *Samplers, RepeatCount)) {
       errs() << "feme-run: " << toString(std::move(E)) << "\n";
       return 1;
     }
-    printHeapContents(outs(), Heap, *Storage, /*BindingsStorage=*/{}, *Images,
-                      *Samplers);
     return 0;
   }
 
@@ -1545,12 +1558,14 @@ int main(int argc, char **argv) {
   Resources.ImageHeap = Images->Descriptors;
   Resources.SamplerHeap = *Samplers;
 
-  if (Error E = (*Engine)->dispatch(Resources, GroupCount)) {
-    errs() << "feme-run: " << toString(std::move(E)) << "\n";
-    return 1;
+  for (unsigned I = 0; I != RepeatCount; ++I) {
+    if (Error E = (*Engine)->dispatch(Resources, GroupCount)) {
+      errs() << "feme-run: " << toString(std::move(E)) << "\n";
+      return 1;
+    }
+    printHeapContents(outs(), Heap, *Storage, *BindingsStorage, *Images,
+                      *Samplers, *ImageBindingsStorage,
+                      *SamplerBindingsStorage);
   }
-
-  printHeapContents(outs(), Heap, *Storage, *BindingsStorage, *Images,
-                    *Samplers, *ImageBindingsStorage, *SamplerBindingsStorage);
   return 0;
 }

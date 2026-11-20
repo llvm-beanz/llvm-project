@@ -3,6 +3,10 @@
 ; RUN: llc %t/shader.ll --filetype=obj -o %t/shader.dxcontainer
 ; RUN: feme --target=%feme_host_triple %t/shader.dxcontainer -o %t/shader.o
 ; RUN: feme-run --object --groups=1,1,1 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+; RUN: split-file %S/repeat-dispatch.ll %t/repeat
+; RUN: llc %t/repeat/shader.ll --filetype=obj -o %t/repeat/shader.dxcontainer
+; RUN: feme --target=%feme_host_triple %t/repeat/shader.dxcontainer -o %t/repeat/shader.o
+; RUN: feme-run --object --repeat=3 --groups=2,1,1 --heap=%t/repeat/object-heap.yaml %t/repeat/shader.o | FileCheck %S/repeat-dispatch.ll --check-prefix=AOT
 
 ; Roadmap step R8's AOT lit recipe (feme/docs/Roadmap.md's §2.4.5): every
 ; other end-to-end execution test JITs a raised shader with

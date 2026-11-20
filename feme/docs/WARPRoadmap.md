@@ -298,7 +298,7 @@ The ARM64 inbox, x64 inbox and ARM64 Agility 619 LIT matrices each pass
 remain under the existing W1/W2/W3/W4 gates. This is not completed legacy
 compatibility or an owned FeMe device pass.
 LLVM-owned reference tests now exist in the
-standalone probe, but FeMe execution tests still need the prototype/runner
+standalone probe, but owned-DDI FeMe execution tests still need the prototype/runner
 from `W0(g)`/`W1(a)`. The W0(b) product choice is closed, but these
 implementation dependencies still block execution evidence, not a
 blanket host/VM blocker. `W0(c)` is left unstruck rather than
@@ -329,7 +329,7 @@ user-mode headless W1 once the selected boundary is proven.
 | W1(b) | Resource-free DXIL dispatch, then one structured/raw-buffer write, copy/readback and fence. Validate IDs, partial waves, multi-wave groupshared barriers, concurrent PSO compilation, context/code lifetime, and repeated execution against scalar expectations and WARP. |
 | W1(c) | Build a versioned capability inventory tied to named tests and normative SDK requirements. Early partial execution is an internal harness, not a falsely advertised lower feature level: even FL 11_0 requires graphics. Pin/query actual wave policy; test requested wave sizes separately. |
 
-Reference-only W1(b) progress (2026-11-20): the
+W1(b) prerequisite progress (2026-11-20): the
 [grouped SM6 oracle](W0WindowsIntegrationProbe.md#w1b-grouped-sm6-compute-oracle-vm-2026-11-20)
 executes original DXC and SDK-validated FeMe-re-emitted DXIL with
 `(8,4,2)` threads across `(2,2,2)` groups, 3-D IDs, shared-memory exchange
@@ -370,6 +370,21 @@ failures. This proves FeMe's portable compiler/executor behavior, not an
 owned D3D12 PSO/device, requested D3D wave-size attributes or concurrent
 owned lifetimes. W1(b) stays open, and owned `CreateDevice` remains
 deliberately `E_NOTIMPL`.
+
+The [retained CPU execution follow-up](W0WindowsIntegrationProbe.md#w1b-retained-cpu-dispatch-and-compilation-context-lifetimes-vm-2026-11-20)
+adds `feme-run --repeat=3`: each of those sixteen CPU cases now compiles
+once and validates all three completed dispatches, keeping code, the
+worker pool and resource storage alive. Stateful JIT/reference/AOT tests
+reject skipped dispatches, stale snapshots and implicit resource resets;
+a real DXC seven-thread shader checks previous-output exchange across
+full/partial waves with a load-bearing group barrier. Independent stages
+also compile concurrently at widths 4/8, outlive their compilation
+contexts, and reuse prepared arguments for concurrent guarded execution.
+All three Windows LIT matrices still pass 130/130, now including 48 CPU
+dispatch readbacks each; the full suite passes 4,003 tests with zero
+failures. These are portable compiled-stage lifetime/reuse prerequisites,
+not concurrent D3D12 PSO compilation, pending-command teardown or owned
+command-list/fence replay. W1(a)/W1(b) and owned `CreateDevice` remain open.
 
 ### W2: Binding, resources, and synchronization
 

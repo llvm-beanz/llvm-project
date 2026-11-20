@@ -2950,6 +2950,14 @@ because it is a separate project that happens to reuse this one.
   ```
 
   and the output heap entries are printed for `FileCheck` to match.
+
+  `--repeat=N` (positive, default 1) compiles or loads the executable once
+  and runs N completed dispatches against the same resources, printing a
+  complete heap snapshot after each. Resources are not reinitialized:
+  stateful shaders accumulate changes across dispatches. This applies to
+  normal JIT, `--reference` and `--object` modes; default single-dispatch
+  output is unchanged. It tests retained CPU execution, not D3D12
+  command-list replay or GPU fence semantics.
   `--reference` runs the shader one invocation at a time through the
   unwidened module instead (see "CFG restructurization test suite"), which
   is the ground truth that suite diffs against.

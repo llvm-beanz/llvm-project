@@ -44,19 +44,29 @@ if(NOT result STREQUAL "0")
   message(FATAL_ERROR "Heap generation failed (${result}):\n${error}")
 endif()
 execute_process(COMMAND "${FEME_RUN}" "--wave-size=${WAVE_SIZE}"
-  --groups=3,2,1 "--heap=${OUTPUT_BASE}.yaml" "${shader}"
+  --repeat=3 --groups=3,2,1 "--heap=${OUTPUT_BASE}.yaml" "${shader}"
   RESULT_VARIABLE result OUTPUT_FILE "${OUTPUT_BASE}.txt"
   ERROR_VARIABLE error TIMEOUT 20)
 if(NOT result STREQUAL "0")
   message(FATAL_ERROR "FeMe CPU execution failed (${result}):\n${error}")
 endif()
-execute_process(COMMAND "${ORACLE}" --output "${OUTPUT_BASE}.txt"
-  "${REGISTER_SPACE}" "${WAVE_SIZE}"
-  RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
 math(EXPR waves "6 * ((30 + ${WAVE_SIZE} - 1) / ${WAVE_SIZE})")
 set(expected "FeMe CPU partial-wave verified: space=${REGISTER_SPACE} lanes=${WAVE_SIZE} waves=${waves} partial-waves=6 records=180 guard-bytes=59776")
-string(FIND "${output}" "${expected}" found)
-if(NOT result STREQUAL "0" OR found EQUAL -1)
-  message(FATAL_ERROR "FeMe CPU oracle failed (${result}):\n${output}\n${error}")
+file(STRINGS "${OUTPUT_BASE}.txt" dispatches)
+list(LENGTH dispatches dispatch_count)
+if(NOT dispatch_count EQUAL 3)
+  message(FATAL_ERROR "Expected three complete retained-dispatch dumps, got ${dispatch_count}.")
 endif()
-message(STATUS "Input=${INPUT_KIND} CPU execution (not a D3D12 device):\n${output}")
+set(dispatch_index 0)
+foreach(dump IN LISTS dispatches)
+  math(EXPR dispatch_index "${dispatch_index} + 1")
+  file(WRITE "${OUTPUT_BASE}.dispatch-${dispatch_index}.txt" "${dump}\n")
+  execute_process(COMMAND "${ORACLE}" --output
+    "${OUTPUT_BASE}.dispatch-${dispatch_index}.txt" "${REGISTER_SPACE}" "${WAVE_SIZE}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
+  string(FIND "${output}" "${expected}" found)
+  if(NOT result STREQUAL "0" OR found EQUAL -1)
+    message(FATAL_ERROR "FeMe CPU oracle dispatch ${dispatch_index} failed (${result}):\n${output}\n${error}")
+  endif()
+  message(STATUS "Input=${INPUT_KIND} retained CPU dispatch ${dispatch_index}/3 (not a D3D12 device):\n${output}")
+endforeach()

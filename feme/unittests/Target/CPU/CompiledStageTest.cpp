@@ -30,6 +30,7 @@
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <new>
@@ -167,6 +168,68 @@ TEST(CompiledStageTest, GetArtifactInfoReflectsResolvedExecutionShape) {
   EXPECT_EQ(Artifact.GroupSize[2], 1u);
   // `ShaderIR` declares no `addrspace(3)` global.
   EXPECT_EQ(Artifact.GroupSharedSize, 0u);
+}
+
+TEST(CompiledStageTest,
+     ConcurrentCompilationAndRepeatedExecutionOutliveContexts) {
+  constexpr unsigned StageCount = 2;
+  constexpr unsigned RepeatCount = 3;
+  std::array<std::unique_ptr<CompiledStage>, StageCount> Stages;
+  std::array<std::string, StageCount> Errors;
+  std::array<std::thread, StageCount> Threads;
+  for (unsigned I = 0; I != StageCount; ++I)
+    Threads[I] = std::thread([&, I] {
+      Context Ctx;
+      auto Stage = compile(Ctx, I == 0 ? 4 : 8);
+      if (!Stage) {
+        Errors[I] = toString(Stage.takeError());
+        return;
+      }
+      Stages[I] = std::move(*Stage);
+    });
+  for (auto &Thread : Threads)
+    Thread.join();
+  for (unsigned I = 0; I != StageCount; ++I) {
+    ASSERT_TRUE(Errors[I].empty()) << Errors[I];
+    ASSERT_NE(Stages[I], nullptr);
+    EXPECT_EQ(Stages[I]->getWaveSize(), I == 0 ? 4u : 8u);
+  }
+
+  std::array<std::array<std::vector<int32_t>, RepeatCount>, StageCount>
+      Snapshots;
+  for (unsigned I = 0; I != StageCount; ++I)
+    Threads[I] = std::thread([&, I] {
+      std::vector<int32_t> Buffer(6);
+      FemeDescriptor Desc{};
+      Desc.Data = Buffer.data() + 1;
+      Desc.SizeInBytes = 4 * sizeof(int32_t);
+      Desc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+      Desc.Flags = FEME_DESCRIPTOR_UAV;
+      DispatchResources Resources;
+      Resources.ResourceHeap = ArrayRef<FemeDescriptor>(&Desc, 1);
+      PreparedDispatch Prepared = PreparedDispatch::create(
+          Stages[I]->getResourceInfo(), Resources, {4, 1, 1});
+      for (unsigned Repeat = 0; Repeat != RepeatCount; ++Repeat) {
+        std::fill(Buffer.begin(), Buffer.end(),
+                  -static_cast<int32_t>(Repeat) - 1);
+        for (uint32_t Group = 0; Group != 4; ++Group)
+          if (Error E = Stages[I]->invokeGroup(Prepared, {Group, 0, 0}, {})) {
+            Errors[I] = toString(std::move(E));
+            return;
+          }
+        Snapshots[I][Repeat] = Buffer;
+      }
+    });
+  for (auto &Thread : Threads)
+    Thread.join();
+  for (unsigned I = 0; I != StageCount; ++I) {
+    ASSERT_TRUE(Errors[I].empty()) << Errors[I];
+    for (unsigned Repeat = 0; Repeat != RepeatCount; ++Repeat) {
+      int32_t Guard = -static_cast<int32_t>(Repeat) - 1;
+      EXPECT_EQ(Snapshots[I][Repeat],
+                (std::vector<int32_t>{Guard, 0, 1, 2, 3, Guard}));
+    }
+  }
 }
 
 constexpr char GroupSharedShaderIR[] = R"(

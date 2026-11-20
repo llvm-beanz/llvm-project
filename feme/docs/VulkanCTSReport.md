@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W1(b) retained CPU execution regression scope (2026-11-20)
+
+The [retained CPU follow-up](W0WindowsIntegrationProbe.md#w1b-retained-cpu-dispatch-and-compilation-context-lifetimes-vm-2026-11-20)
+adds compile/load-once repeat dispatch to `feme-run`, stateful JIT/
+reference/AOT readback tests, a real DXC partial-wave shared-memory
+recurrence, and independent compiled-stage/context lifetime coverage.
+It changes CLI scheduling and tests, not shared compiler/runtime
+lowering, the artifact ABI, ICD command execution or capability inventory
+inputs. The preceding pinned capability-inventory result remains
+unchanged; no generated tables or advertisements are edited.
+
+The complete FeMe LIT suite passes **4,003**, with **15 Skipped,
+13 Unsupported and zero failures**, from 4,031 discovered tests in
+**74.05 seconds**. Existing Vulkan unit/real-loader/graphics coverage
+continues to pass. The two new source fixtures and one new unit case add
+three passing tests; strengthened exact output assertions also pass
+their focused rerun.
+
+All three Windows reference/oracle matrices pass **130/130**, now checking
+48 native ARM64 CPU dispatch readbacks per configuration. The default
+no-optional-tools matrix remains **78/78**. These are LIT results, not
+CTest or external CTS results. **No new real Vulkan CTS pass is claimed**;
+the external runner remains unavailable and the bounded CTS comparison
+remains outstanding.
+
 ## W1(b) FeMe CPU first-active-lane regression scope (2026-11-20)
 
 The [FeMe CPU partial-wave follow-up](W0WindowsIntegrationProbe.md#w1b-feme-cpu-partial-wave-execution-vm-2026-11-20)
