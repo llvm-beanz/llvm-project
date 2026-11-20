@@ -1618,6 +1618,124 @@ deliberately `E_NOTIMPL`. This does not establish requested `[WaveSize]`
 support, owned PSO compilation/context/code concurrency, owned resource
 allocation, or all-stage D3D12 compatibility.
 
+### W1(b) FeMe CPU partial-wave execution (VM, 2026-11-20)
+
+The preceding partial-wave reference shader now executes through FeMe's
+own DXIL import, CPU compiler and `feme-run` executor. Original DXC
+SM6.0 input and FeMe-re-emitted DXIL are each tested at widths
+**4, 8, 16 and 32**, in register spaces **0 and 7**: sixteen CPU dispatch
+cases using the same `(5,3,2)` threads and `(3,2,1)` groups as WARP.
+This is actual FeMe CPU execution, not a reference-only validator result,
+but it is still an internal CLI path rather than an owned D3D12 device.
+
+[`ExpectFeMePartialWave.cmake`](../utils/windows-adapter-probe/ExpectFeMePartialWave.cmake)
+compiles the original shader, optionally re-emits DXIL, generates a heap
+initialized with the same 64 KiB baseline, executes the CPU dispatch and
+passes the complete binding dump to the existing strict
+[`PartialWaveValidation.h`](../utils/windows-adapter-probe/PartialWaveValidation.h)
+oracle. Each run checks all 180 eight-word records and all 59,776 guard
+bytes. Scalar shared-memory/3-D-ID results have the same expectations as
+WARP; wave-dependent fields are checked against the requested CPU width,
+not forced to match WARP's measured four-lane policy.
+
+| CPU width | Observed waves per dispatch | Partial waves per dispatch |
+|---|---|---|
+| 4 | 48 | 6 |
+| 8 | 24 | 6 |
+| 16 | 12 | 6 |
+| 32 | 6 | 6 |
+
+The completion wrapper requires these exact counts as well as the register
+space, 180 records and 59,776 guard bytes. CPU widths 64/128 remain covered
+by synthetic validator fixtures, not by this bounded real-execution matrix.
+These CLI width selections are not HLSL `[WaveSize]` attribute support or
+advertised owned-D3D capabilities.
+
+#### First-active-lane CPU support
+
+The initial real CPU pilot failed with `unsupported divergent call to
+'llvm.dx.wave.readlane.first.i32'`. The DXIL importer already raised
+opcode 118, but the CPU pipeline did not classify or lower its dedicated
+intrinsic. It now classifies the result as wave-uniform, represents it
+as `feme.cpu.wave.readfirst` with a widened value and explicit active mask,
+and extracts the lowest active lane's value without inventing a lane-index
+operand. Vector values are decomposed component-wise. Linearization
+preserves the call's operands and attaches the region's divergence mask;
+widening combines that with the entry mask. Empty masks clamp the
+extraction index and return zero, rather than introducing poison.
+
+Portable LIT regressions check i16/i32/i64, f16/f32/f64 and Boolean
+lowering, floating-point negative-zero bit preservation, inactive poison
+values, empty masks and vector widening. A real DXC divergent-region
+shader checks first-active lanes 2 and 6, not a hardcoded lane zero.
+The named `WaveCallsTest.ReadFirstLaneIsScalarAndHasNoLaneIndex` helper
+test also runs through LIT. No separate rasterizer, Vulkan-command
+translation or D3D COM implementation is added.
+
+#### Strict interchange controls
+
+[`PartialWaveIO.h`](../utils/windows-adapter-probe/PartialWaveIO.h) provides
+the baseline heap writer and exact runner-dump parser. Parsing accepts one
+complete `binding[space:3][0]` dump with precisely 16,384 unsigned 32-bit
+words. It rejects incorrect bindings, missing separators/words, overflow,
+negative/non-numeric tokens, extra output and read errors. Partial parses
+cannot become zero-filled success-shaped readbacks.
+
+Eleven additional fixture scenarios exercise successful bit-exact parsing,
+incorrect headers, truncation, extra words, overflow, negative/invalid
+tokens, size/null arguments, and payload/guard corruption. Four CLI
+controls reject invalid spaces/widths and missing output files. These
+fifteen cases run even without shader tools.
+
+#### Validation and reproduction
+
+The VM, SDK and reference-runtime versions are unchanged from the
+preceding measurement. All automated testing uses LIT, not CTest.
+
+| Configuration | LIT outcome |
+|---|---|
+| ARM64 oracle, inbox WARP, all shader tools and CPU runner enabled | 130/130 |
+| x64 oracle, inbox WARP, all shader tools and CPU runner enabled | 130/130 |
+| ARM64 oracle, Agility 619 WARP, all shader tools and CPU runner enabled | 130/130 |
+| Default ARM64, no optional shader tools/CPU runner | 78/78 |
+| Complete rebuilt FeMe suite | 4,000 passed, 15 skipped, 13 unsupported; zero failures; 75.58 s |
+
+The FeMe compiler/CPU runner is **native ARM64 in all three matrices**.
+The x64 configuration exercises an emulated x64 validator/reference
+harness, not an x64 FeMe backend. Agility applies to the reference D3D12
+probe, not to the CPU executor process. Reconfiguration removes stale
+optional CPU/shader tests.
+
+Enable the CPU comparison alongside the existing probe configuration:
+
+```powershell
+cmake -S feme\utils\windows-adapter-probe -B $build `
+  "-DFEME_PROBE_DXC=$dxc" `
+  "-DFEME_PROBE_FEME_RUN=$llvmBuild\bin\feme-run.exe"
+cmake --build $build --target check-feme-windows-probes --parallel 2
+```
+
+With `FEME_PROBE_FEME` also supplied, both original and re-emitted input
+cases run; without it, only original DXC CPU cases are generated. The
+existing public-runtime re-emission matrix still requires its matching
+SDK validator. CPU execution imports FeMe's bare re-emitted container
+directly; it does not claim that this unstamped file is admitted as a PSO.
+For bounded parallel validation, the same generated suite can be run
+through LIT with `-j2 --timeout=30`.
+
+The rebuilt Vulkan ICD passes the complete FeMe unit/loader/graphics
+suite. Both capability tables reproduce unchanged against pinned
+Vulkan-Docs registry `f84d432d5b89`; no advertisements change.
+Real CTS remains unavailable and is not counted as passing coverage.
+The [scoped regression note](VulkanCTSReport.md#w1b-feme-cpu-first-active-lane-regression-scope-2026-11-20)
+keeps that limit separate from the passing tests.
+
+Owned `CreateDevice` remains deliberately `E_NOTIMPL`. Owned resource
+allocation, D3D12 PSO/context/code lifetime and concurrency, and owned
+repeated dispatch remain open under W0(g)/W1. This milestone proves
+portable compute behavior needed by that future frontend; it does not
+close those device gates.
+
 ### W0(g) public GPU VA reservation boundary (VM)
 
 The 2026-11-18 follow-up tests a different public runtime-owned callback

@@ -1608,8 +1608,10 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // sharing this call's single widened lane index). Only the value
         // operand qualifies here too: the lane index is always scalar.
         if (Callee &&
-            classifyWaveCall(Callee->getIntrinsicID()) ==
-                WaveCallKind::Broadcast &&
+            (classifyWaveCall(Callee->getIntrinsicID()) ==
+                 WaveCallKind::Broadcast ||
+             classifyWaveCall(Callee->getIntrinsicID()) ==
+                 WaveCallKind::ReadFirstLane) &&
             UserCI->getArgOperand(0) == &I)
           continue;
         // (roadmap H124a) A vector-typed `WaveActiveSum`/`Max`/`BitAnd`/
@@ -2475,7 +2477,8 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   // subgroupbroadcast_nonconst_*`'s own "lane id that is only uniform
   // across active lanes" case), so `Linearize.cpp` attaches the same
   // bundle to a `Broadcast` call too.
-  if (Kind == WaveCallKind::IsFirstLane || Kind == WaveCallKind::Broadcast) {
+  if (Kind == WaveCallKind::IsFirstLane || Kind == WaveCallKind::Broadcast ||
+      Kind == WaveCallKind::ReadFirstLane) {
     if (auto Bundle = CI.getOperandBundle("feme.divergence.mask"))
       WideMask = Builder.CreateAnd(WideMask,
                                    getWidened(Bundle->Inputs[0], Builder),
@@ -2581,6 +2584,7 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
     return;
   }
 
+  // Read-first shares this uniform, component-wise path without a lane index.
   // (Roadmap L148) The `Broadcast` counterpart of the `ReadLane` branch
   // just above, for a vector-operand `subgroupBroadcast`/
   // `OpGroupNonUniformBroadcast` (the group's `vec2`/`vec3`/`vec4` cases).
@@ -2590,10 +2594,14 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   // result is already the scalar `T` `createWaveCall` now builds for this
   // kind (see its `RetTy` switch), reassembled directly into the `<N x T>`
   // vector `CI`'s users expect, exactly like the `AllEqual` branch above.
-  if (Kind == WaveCallKind::Broadcast && CI.getType()->isVectorTy()) {
+  if ((Kind == WaveCallKind::Broadcast ||
+       Kind == WaveCallKind::ReadFirstLane) &&
+      CI.getType()->isVectorTy()) {
     SmallVector<Value *, 4> Components =
         getVectorComponents(CI.getArgOperand(0), Builder);
-    Value *WideIndex = getWidened(CI.getArgOperand(1), Builder);
+    Value *WideIndex = Kind == WaveCallKind::Broadcast
+                           ? getWidened(CI.getArgOperand(1), Builder)
+                           : nullptr;
 
     Value *Result = PoisonValue::get(CI.getType());
     for (auto [Idx, Component] : llvm::enumerate(Components)) {

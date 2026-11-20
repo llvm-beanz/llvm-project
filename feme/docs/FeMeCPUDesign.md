@@ -172,12 +172,12 @@ Deviation: milestone 2's implementation narrowed one thing described in
   `llvm.{dx,spv}.*` intrinsic IDs FeMe's DXIL/SPIR-V raising already
   produces (see `feme::dxil::OpRaisingPass` and
   `feme::spirv::RaisedLoweringPass`), rather than a more general
-  name/attribute-based rule. There is no separate `WaveReadLaneFirst`
-  intrinsic wired yet -- FeMe raises only `WaveReadLaneAt`
-  (`llvm.{dx,spv}.wave.readlane`), which subsumes it (reading a uniform
-  lane index) and is classified `AlwaysUniform` for the same reason the
-  design's `WaveReadLaneFirst` example is: it broadcasts a single lane's
-  value to the whole wave. The list grows as new raised wave intrinsics are
+  name/attribute-based rule. `WaveReadLaneFirst`
+  (`llvm.dx.wave.readlane.first`) is classified `AlwaysUniform`: it
+  broadcasts the lowest currently-active lane's value without an explicit
+  lane-index operand. `WaveReadLaneAt` remains classified uniform under
+  HLSL's uniform-index contract; SPIR-V's varying-index shuffle is separate.
+  The list grows as new raised wave intrinsics are
   added; nothing about the classification itself is expected to change.
 - The `gtest` coverage this analysis originally got (construct IR, assert
   `isDivergentAtDef` directly against `UniformityInfo`) was replaced with
@@ -859,16 +859,17 @@ it's discussed, and summarized here:
 
 - **Only the wave intrinsics DXIL raising already produces are lowered**:
   `WaveGetLaneCount`, `WaveIsFirstLane`, `WaveActiveAnyTrue`/`AllTrue`,
-  `WaveActiveAllEqual`, `WaveReadLaneAt`, `WaveAllBitCount`
+  `WaveActiveAllEqual`, `WaveReadLaneAt`, `WaveReadLaneFirst`, `WaveAllBitCount`
   (`wave.active.countbits`), `WavePrefixBitCount`, (roadmap step R3)
   `WaveActiveBallot`, and (roadmap step R4) `WaveActiveSum`/`Product`/
   `Min`/`Max`/`BitAnd`/`Or`/`Xor` and `WavePrefixSum`/`Product`. `QuadOp`'s
   `llvm.dx.quad.read.*` family is raised (roadmap step R4) but still not
   lowered here: quad ops need a fixed lane-to-quad mapping this target
   does not yet implement, an explicit v1 non-goal (see "Non-Goals" above).
-  `WaveReadLaneFirst` has no dedicated raised intrinsic to lower in the
-  first place (DXIL/SPIR-V both express it through the same
-  `WaveReadLaneAt`-family op raising already covers).
+  `WaveReadLaneFirst` uses a uniform `feme.cpu.wave.readfirst` call,
+  selecting the first active lane under the entry/divergence mask. Scalar
+  and vector operands preserve their element bit patterns; an empty mask
+  returns zero without an out-of-range extraction or poison propagation.
 - **`feme::cpu::WaveCalls` introduces the `feme.cpu.wave.*` canonical calls**
   this milestone needs, mirroring how `feme::cpu::ResourceCalls`/
   `BuiltinCalls` split canonicalization (`feme::cpu::SIMDizePass`, which

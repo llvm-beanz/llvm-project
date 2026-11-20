@@ -106,6 +106,20 @@ feme_add_probe_test(NAME dxil-validator-missing-module WILL_FAIL
 set(FEME_PROBE_FXC "" CACHE FILEPATH "SDK FXC for original legacy HLSL tests")
 set(FEME_PROBE_DXC "" CACHE FILEPATH "SDK DXC for SM6 grouped compute tests")
 set(FEME_PROBE_FEME "" CACHE FILEPATH "FeMe CLI for translated DXIL dispatch tests")
+set(FEME_PROBE_FEME_RUN "" CACHE FILEPATH "FeMe CPU runner for partial-wave comparisons")
+foreach(scenario success prefix short extra overflow negative garbage size null
+                 payload guard)
+  feme_add_probe_test(NAME partial-wave-output-fixture-${scenario}
+    COMMAND feme-partial-wave-tests "output-${scenario}")
+endforeach()
+feme_add_probe_test(NAME partial-wave-heap-invalid-space WILL_FAIL
+  COMMAND feme-partial-wave-tests --heap 1)
+feme_add_probe_test(NAME partial-wave-output-invalid-space WILL_FAIL
+  COMMAND feme-partial-wave-tests --output "%t.missing" 1 4)
+feme_add_probe_test(NAME partial-wave-output-invalid-wave WILL_FAIL
+  COMMAND feme-partial-wave-tests --output "%t.missing" 0 3)
+feme_add_probe_test(NAME partial-wave-output-missing-file WILL_FAIL
+  COMMAND feme-partial-wave-tests --output "%t.missing" 0 4)
 set(FEME_PROBE_DXIL_VALIDATOR_DIR "" CACHE PATH
   "Matching-architecture SDK directory containing dxcompiler.dll and dxil.dll")
 if(FEME_PROBE_FEME AND NOT FEME_PROBE_FXC AND NOT FEME_PROBE_DXC)
@@ -124,11 +138,35 @@ if(FEME_PROBE_FEME OR FEME_PROBE_DXIL_VALIDATOR_DIR)
     COMMAND feme-dxil-validator "${FEME_PROBE_DXIL_VALIDATOR_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/ExpectComputeShader.cmake" "%t.dxil")
 endif()
-foreach(tool FEME_PROBE_FXC FEME_PROBE_DXC FEME_PROBE_FEME)
+foreach(tool FEME_PROBE_FXC FEME_PROBE_DXC FEME_PROBE_FEME FEME_PROBE_FEME_RUN)
   if(${tool} AND NOT EXISTS "${${tool}}")
     message(FATAL_ERROR "${tool} must name an existing executable.")
   endif()
 endforeach()
+if(FEME_PROBE_FEME_RUN)
+  if(NOT FEME_PROBE_DXC)
+    message(FATAL_ERROR "Supply FEME_PROBE_DXC with FEME_PROBE_FEME_RUN.")
+  endif()
+  set(cpu_kinds dxc)
+  if(FEME_PROBE_FEME)
+    list(APPEND cpu_kinds dxil)
+  endif()
+  foreach(space 0 7)
+    foreach(kind IN LISTS cpu_kinds)
+      foreach(wave 4 8 16 32)
+        feme_add_probe_test(NAME feme-cpu-partial-space${space}-${kind}-wave${wave}
+          COMMAND "${CMAKE_COMMAND}"
+          "-DDXC=${FEME_PROBE_DXC}" "-DFEME=${FEME_PROBE_FEME}"
+          "-DFEME_RUN=${FEME_PROBE_FEME_RUN}"
+          "-DORACLE=$<TARGET_FILE:feme-partial-wave-tests>"
+          "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/feme/feme-dxc-partial-wave-compute.hlsl"
+          "-DREGISTER_SPACE=${space}" "-DWAVE_SIZE=${wave}"
+          "-DINPUT_KIND=${kind}" "-DOUTPUT_BASE=%t"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectFeMePartialWave.cmake")
+      endforeach()
+    endforeach()
+  endforeach()
+endif()
 if(FEME_PROBE_DXC)
   set(grouped_kinds dxc)
   if(FEME_PROBE_FEME)

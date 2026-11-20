@@ -11,6 +11,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -58,6 +59,7 @@ TEST(WaveCallsTest, IsDivergentWaveCallResultMatchesDesignTable) {
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::All));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::AllEqual));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::ReadLane));
+  EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::ReadFirstLane));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::Broadcast));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::ActiveCountBits));
 }
@@ -176,6 +178,23 @@ TEST(WaveCallsTest, BroadcastCarriesLaneIndexAndIsScalar) {
   EXPECT_EQ(Matched->Kind, WaveCallKind::Broadcast);
   EXPECT_EQ(Matched->WideOperand, Operand);
   EXPECT_EQ(Matched->WideLaneIndex, LaneIndex);
+  EXPECT_FALSE(verifyModule(*H.M, &errs()));
+}
+
+TEST(WaveCallsTest, ReadFirstLaneIsScalarAndHasNoLaneIndex) {
+  Harness H(4);
+  Value *Operand =
+      Constant::getNullValue(FixedVectorType::get(Type::getInt32Ty(H.Ctx), 4));
+  CallInst *CI = createWaveCall(H.Builder, WaveCallKind::ReadFirstLane, 4,
+                                H.Mask, Operand);
+  EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+  EXPECT_EQ(classifyWaveCall(Intrinsic::dx_wave_readlane_first),
+            WaveCallKind::ReadFirstLane);
+  auto Matched = matchWaveCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, WaveCallKind::ReadFirstLane);
+  EXPECT_EQ(Matched->WideOperand, Operand);
+  EXPECT_EQ(Matched->WideLaneIndex, nullptr);
   EXPECT_FALSE(verifyModule(*H.M, &errs()));
 }
 

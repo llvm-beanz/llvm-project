@@ -1201,13 +1201,16 @@ void applyStageMasks(BasicBlock::iterator Begin, BasicBlock::iterator End,
         // `Broadcast` is not a fixed-arity, zero-operand intrinsic, so its
         // existing operands are preserved on the replacement call
         // alongside the new bundle rather than dropped.
-        if (ID == Intrinsic::spv_wave_broadcast &&
+        // Read-first also depends on the lanes active in this region, but
+        // preserves only its value operand rather than a source-lane index.
+        if ((ID == Intrinsic::spv_wave_broadcast ||
+             ID == Intrinsic::dx_wave_readlane_first) &&
             !isKnownConstantMask(Masks.Live)) {
           OperandBundleDef DivergenceMask("feme.divergence.mask",
                                           ArrayRef<Value *>(Masks.Live));
+          SmallVector<Value *, 2> Args(Call->args());
           CallInst *NewCall = CallInst::Create(
-              Call->getFunctionType(), Call->getCalledOperand(),
-              {Call->getArgOperand(0), Call->getArgOperand(1)},
+              Call->getFunctionType(), Call->getCalledOperand(), Args,
               ArrayRef<OperandBundleDef>(DivergenceMask), "",
               Call->getIterator());
           NewCall->setCallingConv(Call->getCallingConv());

@@ -70,7 +70,8 @@
 //                       `X[I[L]]` if lane `I[L]` is active, else zero --
 //                       a genuine gather, since `I` is not required uniform
 //                       (see WaveCalls.h)
-//   Broadcast(X, I)  -> single guarded extract: `X[I]` if lane `I` is
+//   ReadFirstLane(X) -> extract the first active lane, or zero for an empty
+//   mask Broadcast(X, I)  -> single guarded extract: `X[I]` if lane `I` is
 //                       active, else zero -- `I` *is* spec-guaranteed
 //                       uniform (unlike `ReadLane`'s), so this is `O(1)`,
 //                       not a gather (roadmap `L148`; see `lowerBroadcast`)
@@ -385,6 +386,14 @@ Value *lowerAllEqual(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
   Value *AllOnes = Constant::getAllOnesValue(Cmp->getType());
   Value *Selected = Builder.CreateSelect(WideMask, Cmp, AllOnes);
   return Builder.CreateAndReduce(Selected);
+}
+
+Value *lowerReadFirstLane(IRBuilder<> &Builder, Value *WideMask,
+                          Value *WideOperand, unsigned WaveSize) {
+  Value *Index = getClampedFirstActiveLaneIndex(Builder, WideMask, WaveSize);
+  Value *First = Builder.CreateExtractElement(WideOperand, Index);
+  return Builder.CreateSelect(Builder.CreateOrReduce(WideMask), First,
+                              Constant::getNullValue(First->getType()));
 }
 
 /// The wave size at or above which `lowerReadLane` switches from its
@@ -759,6 +768,10 @@ void lowerWaveCall(const MatchedWaveCall &Matched) {
   case WaveCallKind::ReadLane:
     Result = lowerReadLane(Builder, Matched.WideMask, Matched.WideOperand,
                            Matched.WideLaneIndex, W);
+    break;
+  case WaveCallKind::ReadFirstLane:
+    Result =
+        lowerReadFirstLane(Builder, Matched.WideMask, Matched.WideOperand, W);
     break;
   case WaveCallKind::Broadcast:
     Result = lowerBroadcast(Builder, Matched.WideMask, Matched.WideOperand,

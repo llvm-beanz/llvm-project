@@ -1,5 +1,33 @@
 # Vulkan CTS status
 
+## W1(b) FeMe CPU first-active-lane regression scope (2026-11-20)
+
+The [FeMe CPU partial-wave follow-up](W0WindowsIntegrationProbe.md#w1b-feme-cpu-partial-wave-execution-vm-2026-11-20)
+adds dedicated `WaveReadLaneFirst` uniformity, widening, divergent-mask
+propagation and lowering. Its vector path shares the existing uniform
+broadcast decomposition; existing SPIR-V broadcast behavior is preserved.
+No Vulkan feature/extension advertisements are changed.
+
+The native ARM64 ICD and complete FeMe LIT prerequisites were rebuilt
+with assertions and disabled PCH. The complete suite passes **4,000**,
+with **15 Skipped, 13 Unsupported, zero failures**, from 4,028 discovered
+tests in **75.58 seconds**. This includes Vulkan unit coverage and real
+loader/graphics smoke selecting the development FeMe ICD. Three new
+source regressions and one new helper unit test account for the four
+additional passing tests.
+
+The capability-manifest checker ran through LIT using the exact pinned
+public Vulkan-Docs registry `f84d432d5b89`: both inventory tables are
+unchanged. No manifest-status inputs or generated tables were edited.
+The separate 130-case Windows matrices each pass, including sixteen
+native ARM64 FeMe CPU executions at widths 4/8/16/32.
+
+**No real Vulkan CTS pass is claimed.** The documented external CTS
+checkout/runner remains unavailable, so system-CTS-gated cases are
+Unsupported. These passing LIT regressions and unchanged inventories
+do not replace the outstanding bounded real-CTS comparison or modify
+the historical conformance baseline.
+
 ## W1(b) reference partial-wave oracle regression scope (2026-11-20)
 
 The [reference-WARP partial-wave oracle](W0WindowsIntegrationProbe.md#w1b-partial-wave-policy-and-repeated-compute-oracle-vm-2026-11-20)

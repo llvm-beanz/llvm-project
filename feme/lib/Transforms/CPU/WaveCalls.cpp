@@ -42,6 +42,8 @@ StringRef kindName(WaveCallKind Kind) {
     return "feme.cpu.wave.all_equal";
   case WaveCallKind::ReadLane:
     return "feme.cpu.wave.readlane";
+  case WaveCallKind::ReadFirstLane:
+    return "feme.cpu.wave.readfirst";
   case WaveCallKind::Broadcast:
     return "feme.cpu.wave.broadcast";
   case WaveCallKind::ActiveCountBits:
@@ -89,6 +91,8 @@ std::optional<WaveCallKind> parseKindName(StringRef Name) {
     return WaveCallKind::AllEqual;
   if (Name == "feme.cpu.wave.readlane")
     return WaveCallKind::ReadLane;
+  if (Name == "feme.cpu.wave.readfirst")
+    return WaveCallKind::ReadFirstLane;
   if (Name == "feme.cpu.wave.broadcast")
     return WaveCallKind::Broadcast;
   if (Name == "feme.cpu.wave.active_countbits")
@@ -123,7 +127,7 @@ std::optional<WaveCallKind> parseKindName(StringRef Name) {
 }
 
 /// Whether \p Kind's value operand is type-overloaded (`AllEqual`/
-/// `ReadLane`/`Broadcast`, which operate on whatever scalar type `T` the
+/// `ReadLane`/`Broadcast`/`ReadFirstLane`, which operate on scalar type `T` the
 /// source intrinsic was called with, plus the roadmap step R4 reduce/scan
 /// kinds -- `Active{Sum,Product,Max,UMax,Min,UMin,BitAnd,BitOr,BitXor}` and
 /// `Prefix{Sum,Product}`, all of which likewise share DXIL's `OverloadTy`)
@@ -132,6 +136,7 @@ std::optional<WaveCallKind> parseKindName(StringRef Name) {
 bool hasTypeOverloadedOperand(WaveCallKind Kind) {
   return Kind == WaveCallKind::AllEqual || Kind == WaveCallKind::ReadLane ||
          Kind == WaveCallKind::Broadcast ||
+         Kind == WaveCallKind::ReadFirstLane ||
          Kind == WaveCallKind::ActiveSum ||
          Kind == WaveCallKind::ActiveProduct ||
          Kind == WaveCallKind::ActiveMax || Kind == WaveCallKind::ActiveUMax ||
@@ -258,6 +263,9 @@ CallInst *createWaveCall(IRBuilderBase &Builder, WaveCallKind Kind,
     // `ReadLane`'s wide result forces in `WaveLowering.cpp`.
     RetTy = ElementType;
     break;
+  case WaveCallKind::ReadFirstLane:
+    RetTy = ElementType;
+    break;
   case WaveCallKind::PrefixBitCount:
     RetTy = FixedVectorType::get(I32Ty, WaveSize);
     break;
@@ -362,6 +370,8 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
     return WaveCallKind::ReadLane;
   case Intrinsic::spv_wave_broadcast:
     return WaveCallKind::Broadcast;
+  case Intrinsic::dx_wave_readlane_first:
+    return WaveCallKind::ReadFirstLane;
   case Intrinsic::dx_wave_active_countbits:
   case Intrinsic::spv_wave_active_countbits:
     return WaveCallKind::ActiveCountBits;

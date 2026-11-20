@@ -357,8 +357,19 @@ DXIL import now raises `WaveReadLaneFirst`; the expanded reference LIT
 matrices each pass 99/99. This establishes reference-only wave-policy,
 partial-wave and sequential reuse evidence, not an owned wave policy or
 requested-wave-size support. Concurrent owned PSO/context lifetimes and
-owned execution remain unproven. W1(b) stays open, and owned `CreateDevice`
-remains deliberately `E_NOTIMPL`.
+owned execution remain unproven. The
+[FeMe CPU follow-up](W0WindowsIntegrationProbe.md#w1b-feme-cpu-partial-wave-execution-vm-2026-11-20)
+now runs that same original DXC and re-emitted DXIL shader through
+`feme-run` at widths 4/8/16/32, using the identical wave-membership,
+scalar-value and full-buffer guard oracle. It fixes dedicated
+`WaveReadLaneFirst` CPU uniformity/widening/lowering, including vector
+operands, divergent-region masks and empty masks. Six partial waves are
+verified at every selected width. The combined reference/CPU LIT matrices
+pass 130/130 each; the rebuilt complete suite passes 4,000 tests with zero
+failures. This proves FeMe's portable compiler/executor behavior, not an
+owned D3D12 PSO/device, requested D3D wave-size attributes or concurrent
+owned lifetimes. W1(b) stays open, and owned `CreateDevice` remains
+deliberately `E_NOTIMPL`.
 
 ### W2: Binding, resources, and synchronization
 

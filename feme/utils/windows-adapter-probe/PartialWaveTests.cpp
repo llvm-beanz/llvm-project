@@ -7,11 +7,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "PartialWaveValidation.h"
+#include "PartialWaveIO.h"
 
 #include <iterator>
 
 using namespace feme::probe;
+
+static int fail(const wchar_t *Reason) {
+  partialWaveFailure(Reason);
+  return 1;
+}
 
 static void setWord(std::uint8_t *Data, std::size_t Index, std::size_t Word,
                     std::uint32_t Value) {
@@ -46,7 +51,103 @@ static void fillData(std::uint8_t *Data, std::uint32_t WaveSize, bool Permuted,
   }
 }
 
+static int testOutputIO(const wchar_t *Name) {
+  constexpr const wchar_t *Names[] = {
+      L"output-success", L"output-prefix",   L"output-short",
+      L"output-extra",   L"output-overflow", L"output-negative",
+      L"output-garbage", L"output-size",     L"output-null",
+      L"output-payload", L"output-guard"};
+  std::size_t Scenario = 0;
+  for (; Scenario < std::size(Names); ++Scenario)
+    if (std::wcscmp(Name, Names[Scenario]) == 0)
+      break;
+  if (Scenario == std::size(Names))
+    return fail(L"unknown output fixture scenario");
+  FILE *Input = nullptr;
+  if (tmpfile_s(&Input) != 0 || !Input)
+    return fail(L"cannot create output fixture file");
+  std::array<std::uint8_t, BufferBytes> Expected{}, Actual{};
+  fillData(Expected.data(), 8, true, true);
+  if (Scenario == 9)
+    Expected[0] ^= 1;
+  if (Scenario == 10)
+    Expected.back() ^= 1;
+  std::fprintf(Input, "binding[%u:3][0]:", Scenario == 1 ? 0 : 7);
+  std::size_t Words = BufferBytes / 4 - (Scenario == 2 ? 1 : 0);
+  for (std::size_t I = 0; I < Words; ++I) {
+    if (I == 0 && Scenario >= 4 && Scenario <= 6) {
+      const char *Bad[] = {"4294967296", "-1", "x"};
+      std::fprintf(Input, " %s", Bad[Scenario - 4]);
+    } else {
+      std::uint32_t Word;
+      std::memcpy(&Word, Expected.data() + I * 4, sizeof(Word));
+      std::fprintf(Input, " %u", Word);
+    }
+  }
+  std::fprintf(Input, Scenario == 3 ? " 0\n" : "\n");
+  if (std::ferror(Input) || std::fseek(Input, 0, SEEK_SET) != 0) {
+    std::fclose(Input);
+    return fail(L"output fixture write/seek failed");
+  }
+  bool Parsed =
+      readPartialWaveOutput(Scenario == 8 ? nullptr : Input, 7, Actual.data(),
+                            Scenario == 7 ? BufferBytes - 1 : BufferBytes);
+  WaveObservation Observed;
+  bool Passed = false;
+  if (Scenario == 0)
+    Passed = Parsed && Actual == Expected &&
+             validatePartialWave(Actual.data(), Actual.size(), {true, 8, 8},
+                                 Observed) &&
+             Observed.Waves == 24 && Observed.PartialWaves == 6;
+  else if (Scenario >= 9)
+    Passed = Parsed && !validatePartialWave(Actual.data(), Actual.size(),
+                                            {true, 8, 8}, Observed);
+  else
+    Passed = !Parsed;
+  if (std::fclose(Input) != 0)
+    return fail(L"output fixture close failed");
+  return Passed ? 0 : fail(Name);
+}
+
 int wmain(int Argc, wchar_t **Argv) {
+  if (Argc == 2 && std::wcsncmp(Argv[1], L"output-", 7) == 0)
+    return testOutputIO(Argv[1]);
+  if (Argc == 3 && std::wcscmp(Argv[1], L"--heap") == 0) {
+    if (std::wcscmp(Argv[2], L"0") != 0 && std::wcscmp(Argv[2], L"7") != 0)
+      return fail(L"expected register space 0 or 7");
+    return writePartialWaveHeap(stdout, Argv[2][0] == L'7' ? 7 : 0) ? 0 : 1;
+  }
+  if (Argc == 5 && std::wcscmp(Argv[1], L"--output") == 0) {
+    if (std::wcscmp(Argv[3], L"0") != 0 && std::wcscmp(Argv[3], L"7") != 0)
+      return fail(L"expected register space 0 or 7");
+    unsigned Wave = 0;
+    for (const wchar_t *P = Argv[4]; *P; ++P) {
+      if (*P < L'0' || *P > L'9' || Wave > 128)
+        return fail(L"invalid requested CPU wave size");
+      Wave = Wave * 10 + unsigned(*P - L'0');
+    }
+    if (!validWaveSize(Wave))
+      return fail(L"invalid requested CPU wave size");
+    FILE *Input = nullptr;
+    if (_wfopen_s(&Input, Argv[2], L"rb") != 0 || !Input)
+      return fail(L"cannot open runner output");
+    std::array<std::uint8_t, BufferBytes> Data{};
+    WaveObservation Observed;
+    unsigned Space = Argv[3][0] == L'7' ? 7 : 0;
+    bool Valid =
+        readPartialWaveOutput(Input, Space, Data.data(), Data.size()) &&
+        validatePartialWave(Data.data(), Data.size(), {true, Wave, Wave},
+                            Observed);
+    if (std::fclose(Input) != 0)
+      return fail(L"runner output close failed");
+    if (!Valid)
+      return 1;
+    std::printf("FeMe CPU partial-wave verified: space=%u lanes=%u waves=%zu "
+                "partial-waves=%zu records=%zu guard-bytes=%zu\n",
+                Space, Wave, Observed.Waves, Observed.PartialWaves,
+                PartialRecords, BufferBytes - PartialOutputBytes);
+    return 0;
+  }
   constexpr const wchar_t *Names[] = {
       L"success",     L"wrong-size",    L"missing-data",     L"value",
       L"dispatch-id", L"wave-size",     L"lane-range",       L"duplicate-lane",

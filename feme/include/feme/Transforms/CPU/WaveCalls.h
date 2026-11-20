@@ -77,6 +77,9 @@ enum class WaveCallKind : uint8_t {
   /// the case where every lane's gather happens to read the same source
   /// lane.
   ReadLane,
+  /// `WaveReadLaneFirst`: `T` operand, uniform `T` result from the lowest
+  /// currently-active lane. No explicit lane-index operand.
+  ReadFirstLane,
   /// `subgroupBroadcast`/`OpGroupNonUniformBroadcast` (roadmap `L148`): `T`
   /// operand plus an `i32` lane index the SPIR-V spec *guarantees* is
   /// dynamically uniform (unlike `ReadLane`'s own index, which may not

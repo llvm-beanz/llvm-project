@@ -1,0 +1,28 @@
+// REQUIRES: system-dxc-dxil, directx-registered-target
+// RUN: split-file %s %t
+// RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/shader.dxil %t/shader.hlsl
+// RUN: feme-run --wave-size=4 --groups=1,1,1 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// CHECK: binding[0:0][0]: 0 0 12 12 0 0 16 16
+
+//--- shader.hlsl
+RWStructuredBuffer<uint> Output : register(u0);
+[numthreads(8, 1, 1)]
+void main(uint3 ID : SV_DispatchThreadID) {
+  uint Value = 0;
+  if ((ID.x % 4) >= 2)
+    Value = WaveReadLaneFirst(ID.x + 10);
+  Output[ID.x] = Value;
+}
+
+//--- heap.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 32

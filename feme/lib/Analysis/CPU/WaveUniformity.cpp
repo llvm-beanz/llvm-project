@@ -255,6 +255,7 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   // it keeps this same `AlwaysUniform` classification rather than being
   // left at `Default` the way its `spv_wave_readlane` sibling is.
   case Intrinsic::dx_wave_readlane:
+  case Intrinsic::dx_wave_readlane_first:
   case Intrinsic::spv_wave_broadcast:
   case Intrinsic::dx_wave_get_lane_count:
   case Intrinsic::spv_subgroup_size:
