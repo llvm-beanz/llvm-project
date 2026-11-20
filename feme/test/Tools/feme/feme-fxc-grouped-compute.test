@@ -1,0 +1,29 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# REQUIRES: system-fxc, directx-registered-target
+# RUN: %fxc /nologo /WX /T cs_5_0 /E main /D USE_REGISTER_SPACE=0 /Fo %t.sm50.dxbc %S/feme-dxc-grouped-compute.hlsl
+# RUN: %fxc /nologo /WX /T cs_5_1 /E main /D USE_REGISTER_SPACE=1 /Fo %t.sm51.dxbc %S/feme-dxc-grouped-compute.hlsl
+# RUN: feme-translate --import-dxbc %t.sm50.dxbc | feme-translate --dxsa-to-llvmir | opt -S -passes=verify | FileCheck %s --check-prefix=IMPORT
+# RUN: feme --target=dxil %t.sm50.dxbc -o %t.sm50.dxil
+# RUN: feme --target=dxil %t.sm51.dxbc -o %t.sm51.dxil
+# RUN: feme-translate --import-dxil %t.sm50.dxil | opt -S -passes=verify | FileCheck %s --check-prefixes=IR,SPACE0 --implicit-check-not=feme.signature
+# RUN: feme-translate --import-dxil %t.sm51.dxil | opt -S -passes=verify | FileCheck %s --check-prefixes=IR,SPACE7 --implicit-check-not=feme.signature
+
+# IMPORT: @g0 = internal addrspace(3) global [64 x i32] undef, align 4
+# IMPORT: call void @dx.op.barrier(i32 80, i32 9)
+# IMPORT: call void @dx.op.barrier(i32 80, i32 9)
+# IMPORT: call void @dx.op.barrier(i32 80, i32 9)
+# IR: addrspace(3) global [64 x i32]
+# IR: define void @main()
+# IR: store i32 {{.*}}, ptr addrspace(3)
+# IR: call void @dx.op.barrier(i32 80, i32 9)
+# IR: load i32, ptr addrspace(3)
+# IR: call void @dx.op.barrier(i32 80, i32 9)
+# IR: store i32 {{.*}}, ptr addrspace(3)
+# IR: call void @dx.op.barrier(i32 80, i32 9)
+# IR: load i32, ptr addrspace(3)
+# SPACE0: !{{[0-9]+}} = !{i32 0, {{.*}}, !"{{.*}}", i32 0, i32 3, i32 1, i32 11,
+# SPACE7: !{{[0-9]+}} = !{i32 0, {{.*}}, !"{{.*}}", i32 7, i32 3, i32 1, i32 11,
+# IR: !{{[0-9]+}} = !{i32 8, i32 4, i32 2}

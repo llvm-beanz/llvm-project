@@ -206,6 +206,22 @@ bool raiseIsFPClassCall(CallInst &CI, unsigned Opcode) {
   return true;
 }
 
+bool raiseBitcastCall(CallInst &CI, unsigned Opcode) {
+  if (CI.arg_size() != 2)
+    return false;
+  Value *Source = CI.getArgOperand(1);
+  bool ToFloat = Opcode == 126;
+  if (ToFloat
+          ? (!Source->getType()->isIntegerTy(32) || !CI.getType()->isFloatTy())
+          : (!Source->getType()->isFloatTy() || !CI.getType()->isIntegerTy(32)))
+    return false;
+  IRBuilder<> Builder(&CI);
+  Value *Cast = Builder.CreateBitCast(Source, CI.getType(), CI.getName());
+  CI.replaceAllUsesWith(Cast);
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Maps a DXIL `dxil::ElementType` (the wire-format element type encoded in
 /// `AnnotateHandle`'s `ResourceProperties` operand, see
 /// `llvm/include/llvm/Support/DXILABI.h`) to the LLVM scalar type used as a
@@ -2107,6 +2123,11 @@ PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
       if (!OpcodeConst)
         continue;
       uint64_t Opcode = OpcodeConst->getZExtValue();
+
+      if (Opcode == 126 || Opcode == 127) {
+        Changed |= raiseBitcastCall(*CI, Opcode);
+        continue;
+      }
 
       if (Opcode == 10 || Opcode == 11) { // IsFinite, IsNormal
         Changed |= raiseIsFPClassCall(*CI, Opcode);

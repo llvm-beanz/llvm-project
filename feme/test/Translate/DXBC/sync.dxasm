@@ -1,0 +1,36 @@
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin | feme-translate --dxsa-to-llvmir | opt -S -passes=verify | FileCheck %s
+// RUN: dxbc-as --emit=container %s -o %t.dxbc
+// RUN: not feme --target=dxil %t.dxbc -o %t.dxil 2>&1 | FileCheck %s --check-prefix=EXPORT
+
+// EXPORT: unsupported unraised DXIL operation or mode: dx.op.barrier
+
+cs_5_0
+dcl_thread_group 1, 1, 1
+sync uav_global
+sync uav_group
+sync tgsm
+sync threads
+sync uav_global | tgsm
+sync uav_group | tgsm
+sync uav_global | threads
+sync uav_group | threads
+sync tgsm | threads
+sync uav_global | tgsm | threads
+sync uav_group | tgsm | threads
+ret
+
+// CHECK: call void @dx.op.barrier(i32 80, i32 2)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 4)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 8)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 1)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 10)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 12)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 3)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 5)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 9)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 11)
+// CHECK-NEXT: call void @dx.op.barrier(i32 80, i32 13)

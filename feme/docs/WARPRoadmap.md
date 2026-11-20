@@ -337,8 +337,15 @@ and three group barriers. It verifies 512 results and every byte of the
 64 KiB output/guard buffer. LLVM DXIL preparation now removes the modern
 GUID metadata added when reading older bitcode, with a portable regression
 that preserves debug information. The three reference-runtime LIT matrices
-pass 59/59. The legacy DXBC translator's groupshared/sync route remains
-unimplemented; actual wave policy, partial waves, repeated execution and
+passed 59/59 at that checkpoint. The
+[legacy grouped follow-up](W0WindowsIntegrationProbe.md#w1b-legacy-grouped-compute-follow-up-vm-2026-11-20)
+now translates raw/structured TGSM declarations and accesses plus DXBC
+synchronization flags. Original FXC `cs_5_0`/`cs_5_1` shaders and their
+SDK-validated FeMe DXIL execute the same grouped oracle through both public
+adapter paths; all three expanded reference-runtime LIT matrices pass 67/67.
+Nonstandard group-UAV/thread-only barrier modes translate to LLVM IR but
+remain explicitly unsupported for DXIL export rather than asserting.
+Actual wave policy, partial waves, repeated execution and
 concurrent owned PSO/context lifetimes remain unproven. W1(b) stays open,
 and owned `CreateDevice` remains deliberately `E_NOTIMPL`.
 

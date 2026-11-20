@@ -1369,8 +1369,9 @@ linear dispatch and completion marker. Unknown workloads fail explicitly.
 The original
 [`feme-dxc-grouped-compute.hlsl`](../test/Tools/feme/feme-dxc-grouped-compute.hlsl)
 uses real DXC `cs_6_0` output and the same raw UAV `u3`, in spaces 0 and 7.
-It is **not** a legacy DXBC groupshared-support result: that translator
-does not yet handle groupshared declarations and synchronization.
+This checkpoint measured the SM6 path only; the
+[legacy grouped follow-up](#w1b-legacy-grouped-compute-follow-up-vm-2026-11-20)
+below records the later DXBC groupshared/synchronization result.
 
 The grouped workload dispatches `(2,2,2)` groups of `(8,4,2)` threads,
 giving a `(16,8,4)` dispatch-ID grid and 512 distinct output words. It
@@ -1444,7 +1445,70 @@ FeMe executable and matching-architecture SDK validator directory; omitting
 FeMe runs only direct-DXC reference cases. The owned device is unchanged.
 This measures a 64-thread grouped workload, not an exact wave size or
 partial-wave policy. Broader barriers, repeated execution, concurrent owned
-PSO/context lifetimes and legacy groupshared translation remain open.
+PSO/context lifetimes remain open.
+
+### W1(b) legacy grouped compute follow-up (VM, 2026-11-20)
+
+The same original grouped HLSL now runs through real SDK FXC `cs_5_0`
+and `cs_5_1`, both as original DXBC and as SDK-validated/stamped FeMe DXIL.
+The SM5.0 profile uses `u3` in space 0; SM5.1 uses space 7. Each profile
+and input kind runs through default WARP and explicit software-reference
+entry paths. These eight additional cases preserve all preceding checks:
+512 scalar results, all 2,048 output bytes, all 63,488 guard bytes and
+strict dispatch/copy/fence/readback completion.
+
+DXBC translation now declares raw/structured shared regions as aligned
+32-bit arrays in address space 3, without resource handles. It preserves
+structured strides, byte offsets, load masks, view/source swizzles and
+float/integer bit patterns. Shared modules carry DXIL's data layout before
+optimization so GEP indices stay 32-bit. Duplicate regions, a combined
+allocation above 32 KiB, undeclared/mismatched accesses, invalid registers
+or stages, statically misaligned offsets, invalid store masks and mapping
+feedback produce explicit diagnostics.
+The shared DXIL raiser also reconstructs scalar i32/f32 bitcasts needed
+when typeless shared words feed floating-point arithmetic.
+The portable mixed-region export passes public SDK `IDxcValidator`
+validation (`S_OK`), including both directions of bit reinterpretation.
+
+All eleven nonempty, nonconflicting DXBC synchronization combinations
+translate to the exact DXIL barrier bits. Standard HLSL barrier modes,
+including the oracle's group-memory/thread synchronization mode 9, use
+existing raising/lowering. The remaining thread-only/group-UAV modes
+(1, 4, 5, 12, 13) are not yet raised for export or CPU execution; DXIL
+export reports unsupported unraised operations instead of reaching the
+backend assertion. No stronger fence or CPU synchronization semantics are
+silently substituted.
+
+The new portable LIT tests cover raw/structured regions, nonzero byte
+offsets and 20-byte strides, swizzles, load/store masks, bit reinterpretation,
+the exact 32-KiB boundary, diagnostics and all eleven synchronization modes.
+[`feme-fxc-grouped-compute.test`](../test/Tools/feme/feme-fxc-grouped-compute.test)
+checks actual SM5.0/5.1 import/export, shared storage, all three barriers,
+register spaces and `(8,4,2)` thread dimensions. The existing DXC fixture's
+separate register-space and thread-dimension checks are restored.
+
+Measured LIT outcomes:
+
+| Configuration | LIT outcome |
+|---|---|
+| Native ARM64 inbox, FXC/DXC/FeMe enabled | 67/67 |
+| Emulated x64 inbox, FXC/DXC/FeMe enabled | 67/67 |
+| Native ARM64 Agility 619, FXC/DXC/FeMe enabled | 67/67 |
+| Native ARM64 FXC/FeMe enabled, no DXC | 59/59 |
+| Native ARM64 FXC only, no FeMe/DXC/validator directory | 48/48 |
+| Default native ARM64, no optional shader tools | 39/39 |
+| FeMe DXBC import/translation, DXIL transforms and CLI regressions | 199/199 |
+
+With SDK FXC/DXC directories removed from `PATH`, all four new portable
+tests pass and the two real-compiler grouped fixtures are **Unsupported**,
+not counted as passes. Reconfiguration removes stale optional LIT cases.
+
+The existing opt-in FXC/FeMe configuration automatically includes the
+legacy grouped cases; no additional test runner or CTest registration is
+needed. This is still reference-WARP execution, not an owned FeMe device
+pass. W1(b), full legacy-stage coverage, actual wave policy, partial waves,
+repeated execution and concurrent owned PSO/context lifetimes stay open.
+Owned `CreateDevice` remains deliberately `E_NOTIMPL`.
 
 ### W0(g) public GPU VA reservation boundary (VM)
 

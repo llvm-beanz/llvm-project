@@ -36,6 +36,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
@@ -43,6 +44,7 @@
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
@@ -118,6 +120,7 @@ enum class DXILOp : unsigned {
   CheckAccessFullyMapped = 71,
   TextureGather = 73,
   TextureGatherCmp = 74,
+  Barrier = 80,
   CalculateLOD = 81,
   Discard = 82,
   DerivCoarseX = 83,
@@ -790,6 +793,12 @@ private:
   };
   /// Every declared resource, keyed by (class, register number).
   llvm::DenseMap<uint64_t, Resource> Resources;
+  struct SharedMemory {
+    llvm::GlobalVariable *Storage;
+    unsigned Stride;
+  };
+  llvm::DenseMap<unsigned, SharedMemory> SharedMemories;
+  unsigned SharedMemoryBytes = 0;
   /// The output signature element each registerless output -- the depth
   /// and stencil ones -- resolves to. They name no register, so they
   /// cannot be found by (row, component) the way the others are.
@@ -913,6 +922,8 @@ private:
   //===--------------------------------------------------------------------===//
 
   bool collectDeclarations(dxsa::ModuleOp Shader);
+  bool declareSharedMemory(mlir::Operation *Op, DstOperandAttr Operand,
+                           unsigned Bytes, unsigned Stride);
   /// Fills in the parts of a signature element that live in the shader's
   /// declarations rather than in a legacy signature part.
   void refineFromDeclarations(dxsa::ModuleOp Shader);
@@ -1134,6 +1145,18 @@ private:
   bool translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
                               SrcOperandAttr Address, SrcOperandAttr ByteOffset,
                               SrcOperandAttr Value);
+  llvm::Value *sharedMemoryAddress(mlir::Operation *Op, OperandIndexAttr View,
+                                   SrcOperandAttr Address,
+                                   SrcOperandAttr ByteOffset,
+                                   unsigned AddressSlot);
+  bool translateSharedMemoryLoad(mlir::Operation *Op, DstOperandAttr Dst,
+                                 SrcOperandAttr View, SrcOperandAttr Address,
+                                 SrcOperandAttr ByteOffset,
+                                 DstOperandAttr Feedback);
+  bool translateSharedMemoryStore(mlir::Operation *Op, DstOperandAttr Dst,
+                                  SrcOperandAttr Address,
+                                  SrcOperandAttr ByteOffset,
+                                  SrcOperandAttr Value);
 
   /// Translates `sincos`, whose two destinations are written from one
   /// source and either of which may be `null`.
@@ -1321,6 +1344,34 @@ uint64_t toShaderFlags(GlobalFlags Flags) {
   return Result;
 }
 
+bool Translator::declareSharedMemory(mlir::Operation *Op,
+                                     DstOperandAttr Operand, unsigned Bytes,
+                                     unsigned Stride) {
+  std::optional<unsigned> Reg = registerNumber(Operand.getIndex());
+  if (Stage != "cs" || Operand.getType() != OperandType::g || !Reg ||
+      Operand.getIndex().size() != 1) {
+    unsupported(Op) << ": expected a static groupshared register in compute";
+    return false;
+  }
+  if (SharedMemories.contains(*Reg)) {
+    Op->emitError("duplicate thread-group shared memory declaration");
+    return false;
+  }
+  if (Bytes > 32768 - SharedMemoryBytes) {
+    Op->emitError("combined thread-group shared memory exceeds 32768 bytes");
+    return false;
+  }
+  auto *Ty = llvm::ArrayType::get(i32Ty(), Bytes / 4);
+  auto *Storage = new llvm::GlobalVariable(
+      *Module, Ty, false, llvm::GlobalValue::InternalLinkage,
+      llvm::UndefValue::get(Ty), "g" + llvm::Twine(*Reg), nullptr,
+      llvm::GlobalValue::NotThreadLocal, 3);
+  Storage->setAlignment(llvm::Align(4));
+  SharedMemories.insert({*Reg, {Storage, Stride}});
+  SharedMemoryBytes += Bytes;
+  return true;
+}
+
 bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
   for (mlir::Operation &Op : *Shader.getBodyBlock()) {
     if (auto Dcl = llvm::dyn_cast<dxsa::DclGlobalFlags>(&Op))
@@ -1331,6 +1382,15 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
         return false;
       }
       ThreadGroup = Dcl;
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclTgsmRaw>(&Op)) {
+      if (!declareSharedMemory(&Op, Dcl.getOperandAttr(), Dcl.getByteCount(),
+                               0))
+        return false;
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclTgsmStructured>(&Op)) {
+      if (!declareSharedMemory(&Op, Dcl.getOperandAttr(),
+                               Dcl.getStructByteStride() * Dcl.getStructCount(),
+                               Dcl.getStructByteStride()))
+        return false;
     } else if (auto Dcl = llvm::dyn_cast<dxsa::DclIndexRange>(&Op)) {
       DstOperandAttr Operand = Dcl.getOperandAttr();
       std::optional<unsigned> Start = registerNumber(Operand.getIndex());
@@ -3157,10 +3217,118 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
   return writeFeedbackStatus(Form.Feedback, Value, Op);
 }
 
+llvm::Value *Translator::sharedMemoryAddress(mlir::Operation *Op,
+                                             OperandIndexAttr View,
+                                             SrcOperandAttr Address,
+                                             SrcOperandAttr ByteOffset,
+                                             unsigned AddressSlot) {
+  std::optional<unsigned> Reg = registerNumber(View);
+  auto It = Reg ? SharedMemories.find(*Reg) : SharedMemories.end();
+  if (It == SharedMemories.end() || View.size() != 1) {
+    unsupported(Op)
+        << ": access to an undeclared or indexed groupshared register";
+    return nullptr;
+  }
+  const SharedMemory &Memory = It->second;
+  if (bool(Memory.Stride) != bool(ByteOffset)) {
+    unsupported(Op) << ": raw/structured groupshared access mismatch";
+    return nullptr;
+  }
+  llvm::Value *Index = readSource(Address, 0, i32Ty(), Op, AddressSlot);
+  if (!Index)
+    return nullptr;
+  llvm::Value *Offset = Index;
+  if (ByteOffset) {
+    Offset = readSource(ByteOffset, 0, i32Ty(), Op, /*Slot=*/2);
+    if (!Offset)
+      return nullptr;
+  }
+  if (auto *Constant = llvm::dyn_cast<llvm::ConstantInt>(Offset))
+    if (Constant->getZExtValue() % 4) {
+      unsupported(Op) << ": groupshared byte offset must be aligned to 4";
+      return nullptr;
+    }
+  // DXBC shared accesses name aligned bytes; DXIL stores 32-bit words.
+  llvm::Value *Word = Builder.CreateLShr(Offset, 2);
+  if (Memory.Stride)
+    Word = Builder.CreateAdd(
+        Builder.CreateMul(Index,
+                          llvm::ConstantInt::get(i32Ty(), Memory.Stride / 4)),
+        Word);
+  return Builder.CreateGEP(Memory.Storage->getValueType(), Memory.Storage,
+                           {llvm::ConstantInt::get(i32Ty(), 0), Word});
+}
+
+bool Translator::translateSharedMemoryLoad(mlir::Operation *Op,
+                                           DstOperandAttr Dst,
+                                           SrcOperandAttr View,
+                                           SrcOperandAttr Address,
+                                           SrcOperandAttr ByteOffset,
+                                           DstOperandAttr Feedback) {
+  if (Feedback && Feedback.getType() != OperandType::null) {
+    unsupported(Op) << ": groupshared mapping feedback";
+    return false;
+  }
+  llvm::Value *Base =
+      sharedMemoryAddress(Op, View.getIndex(), Address, ByteOffset, 0);
+  if (!Base)
+    return false;
+  llvm::SmallVector<llvm::Value *, 4> Values;
+  for (unsigned Comp : destinationComponents(Dst)) {
+    llvm::Value *Pointer = Builder.CreateGEP(
+        i32Ty(), Base,
+        llvm::ConstantInt::get(i32Ty(), sourceComponent(View, Comp)));
+    auto *Load = Builder.CreateLoad(i32Ty(), Pointer);
+    Load->setAlignment(llvm::Align(4));
+    Values.push_back(Load);
+  }
+  return writeDestination(Dst, Values, Op);
+}
+
+bool Translator::translateSharedMemoryStore(mlir::Operation *Op,
+                                            DstOperandAttr Dst,
+                                            SrcOperandAttr Address,
+                                            SrcOperandAttr ByteOffset,
+                                            SrcOperandAttr Value) {
+  llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
+  if (Comps.empty() ||
+      !llvm::equal(Comps, llvm::seq<unsigned>(0, Comps.size()))) {
+    unsupported(Op) << ": groupshared store mask must be x, xy, xyz or xyzw";
+    return false;
+  }
+  llvm::Value *Base =
+      sharedMemoryAddress(Op, Dst.getIndex(), Address, ByteOffset, 1);
+  if (!Base)
+    return false;
+  llvm::SmallVector<llvm::Value *, 4> Values;
+  for (unsigned Comp : Comps) {
+    llvm::Value *Word = readSource(Value, Comp, i32Ty(), Op, /*Slot=*/3);
+    if (!Word)
+      return false;
+    Values.push_back(Word);
+  }
+  for (auto [I, Comp] : llvm::enumerate(Comps)) {
+    llvm::Value *Pointer =
+        Builder.CreateGEP(i32Ty(), Base, llvm::ConstantInt::get(i32Ty(), Comp));
+    Builder.CreateStore(Values[I], Pointer)->setAlignment(llvm::Align(4));
+  }
+  return true;
+}
+
 bool Translator::translateResourceLoad(
     mlir::Operation *Op, ResourceClass Class, DstOperandAttr Dst,
     SrcOperandAttr Address, SrcOperandAttr View, SampleOffsetAttr Offset,
     SrcOperandAttr SampleIndex, DstOperandAttr Feedback) {
+  if (View.getType() == OperandType::g) {
+    if (!llvm::isa<dxsa::LdRaw, dxsa::LdRawFeedback, dxsa::LdStructured,
+                   dxsa::LdStructuredFeedback>(Op)) {
+      unsupported(Op)
+          << ": groupshared memory requires a raw or structured load";
+      return false;
+    }
+    return translateSharedMemoryLoad(Op, Dst, View, Address, SampleIndex,
+                                     Feedback);
+  }
   const Resource *Texture = findResource(Class, View.getIndex(), Op);
   if (!Texture)
     return false;
@@ -3241,6 +3409,14 @@ bool Translator::translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
                                         SrcOperandAttr Address,
                                         SrcOperandAttr ByteOffset,
                                         SrcOperandAttr Value) {
+  if (UAV.getType() == OperandType::g) {
+    if (!llvm::isa<dxsa::StoreRaw, dxsa::StoreStructured>(Op)) {
+      unsupported(Op)
+          << ": groupshared memory requires a raw or structured store";
+      return false;
+    }
+    return translateSharedMemoryStore(Op, UAV, Address, ByteOffset, Value);
+  }
   const Resource *View = findResource(ResourceClass::UAV, UAV.getIndex(), Op);
   if (!View)
     return false;
@@ -3674,6 +3850,19 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
   if (Name.starts_with("dcl_"))
     return true;
 
+  if (auto Sync = llvm::dyn_cast<dxsa::Sync>(Op)) {
+    unsigned Flags = static_cast<unsigned>(Sync.getFlags());
+    if (!Flags) {
+      unsupported(Op) << ": empty synchronization flags";
+      return false;
+    }
+    // DXBC puts thread synchronization after the three memory-fence bits;
+    // DXIL puts it before them.
+    unsigned Mode = ((Flags & 7) << 1) | ((Flags & 8) >> 3);
+    emitDXOp("barrier", DXILOp::Barrier, llvm::Type::getVoidTy(Context),
+             {llvm::ConstantInt::get(i32Ty(), Mode)}, noOverload());
+    return true;
+  }
   // Consecutive `case`s share one block, so the group they name is opened
   // by the first instruction that is not itself a `case`.
   if (!Scopes.empty() && Scopes.back().K == Scope::Kind::Switch &&
@@ -4345,6 +4534,10 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
 
   if (!collectDeclarations(Shader))
     return nullptr;
+
+  // Shared addressing needs DXIL's 32-bit GEP indices during optimization.
+  if (!SharedMemories.empty())
+    Module->setDataLayout(llvm::Triple("dxil").computeDataLayout());
 
   auto *EntryTy = llvm::FunctionType::get(llvm::Type::getVoidTy(Context),
                                           /*isVarArg=*/false);

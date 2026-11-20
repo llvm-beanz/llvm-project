@@ -49,8 +49,13 @@ llvm::Error TargetMachineBackend::run(llvm::Module &M,
   // DXIL validators reject FeMe-only reflection metadata. Other targets
   // still need it for signature handling and compiled-stage reflection.
   if (TheTriple.isDXIL())
-    for (llvm::Function &F : M)
+    for (llvm::Function &F : M) {
+      if (F.getName().starts_with("dx.op.") && !F.use_empty())
+        return llvm::createStringError(
+            llvm::inconvertibleErrorCode(),
+            "unsupported unraised DXIL operation or mode: " + F.getName());
       F.setMetadata("feme.signature", nullptr);
+    }
 
   llvm::legacy::PassManager PM;
   if (Target->addPassesToEmitFile(PM, Out, /*DwoOut=*/nullptr, Opts.FileType))

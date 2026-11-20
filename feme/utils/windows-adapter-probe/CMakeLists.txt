@@ -167,6 +167,16 @@ if(FEME_PROBE_FXC)
           "-DPROFILE=${profile}" "-DINPUT_KIND=${kind}" "-DOUTPUT_BASE=%t"
           ${module_args}
           -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectComputeShader.cmake")
+        feme_add_probe_test(NAME grouped-compute-${profile}-${kind}-${entry}
+          COMMAND "${CMAKE_COMMAND}"
+          "-DHARNESS=$<TARGET_FILE:feme-windows-adapter-probe>"
+          "-DFXC=${FEME_PROBE_FXC}" "-DFEME=${FEME_PROBE_FEME}"
+          "-DVALIDATOR=$<TARGET_FILE:feme-dxil-validator>"
+          "-DVALIDATOR_DIR=${FEME_PROBE_DXIL_VALIDATOR_DIR}"
+          "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/feme/feme-dxc-grouped-compute.hlsl"
+          "-DPROFILE=${profile}" -DGROUPED=ON
+          "-DINPUT_KIND=${kind}" "-DOUTPUT_BASE=%t" ${module_args}
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectComputeShader.cmake")
       endforeach()
     endforeach()
   endforeach()

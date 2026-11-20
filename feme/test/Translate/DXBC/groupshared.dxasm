@@ -1,0 +1,61 @@
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin | feme-translate --dxsa-to-llvmir | opt -S -passes=verify | FileCheck %s
+// RUN: dxbc-as --emit=container %s -o %t.dxbc
+// RUN: feme --target=dxil %t.dxbc -o %t.dxil
+// RUN: feme-translate --import-dxil %t.dxil | opt -S -passes=verify | FileCheck %s --check-prefix=EXPORT
+
+// EXPORT: @g0 = internal addrspace(3) global [16 x i32] undef, align 4
+// EXPORT: @g1 = internal addrspace(3) global [40 x i32] undef, align 4
+// EXPORT: define void @main()
+// EXPORT: bitcast i32 {{.*}} to float
+// EXPORT: bitcast float {{.*}} to i32
+
+cs_5_0
+dcl_thread_group 8, 1, 1
+dcl_input vThreadIDInGroup.x
+dcl_tgsm_raw g0, 64
+dcl_tgsm_structured g1, 20, 8
+dcl_temps 3
+store_raw g0.xyzw, l(4), l(1, 2, 3, 4)
+store_raw g0.xy, l(4), l(1, 2, 3, 4)
+ld_raw r0.xyzw, l(4), g0.wzyx
+store_raw g0.xyzw, l(0), r0.xyzw
+store_structured g1.xy, vThreadIDInGroup.x, l(4), r0.wzxy
+ld_structured r1.xz, vThreadIDInGroup.x, l(4), g1.yxxx
+store_raw g0.xy, l(48), r1.xzzz
+add r2.x, r1.x, l(1.0)
+store_raw g0.x, l(32), r2.x
+ret
+
+// CHECK: target datalayout = "{{.*}}p:32:32{{.*}}"
+// CHECK: @g0 = internal addrspace(3) global [16 x i32] undef, align 4
+// CHECK: @g1 = internal addrspace(3) global [40 x i32] undef, align 4
+// CHECK: store i32 1, ptr addrspace(3) getelementptr (i8, ptr addrspace(3) @g0, i32 4)
+// CHECK: store i32 3, ptr addrspace(3) getelementptr (i8, ptr addrspace(3) getelementptr (i8, ptr addrspace(3) @g0, i32 4), i32 8)
+// CHECK: store i32 1, ptr addrspace(3) {{.*}}@g0, i32 4)
+// CHECK-NEXT: store i32 2, ptr addrspace(3) {{.*}}@g0, i32 4), i32 4)
+// CHECK: [[W:%.*]] = load i32, ptr addrspace(3) {{.*}}@g0, i32 4), i32 12)
+// CHECK: [[Z:%.*]] = load i32, ptr addrspace(3) {{.*}}@g0, i32 4), i32 8)
+// CHECK: [[Y:%.*]] = load i32, ptr addrspace(3) {{.*}}@g0, i32 4), i32 4)
+// CHECK: [[X:%.*]] = load i32, ptr addrspace(3) {{.*}}@g0, i32 4)
+// CHECK: store i32 [[W]], ptr addrspace(3) @g0
+// CHECK: store i32 [[Z]], ptr addrspace(3) {{.*}}@g0, i32 4)
+// CHECK: store i32 [[Y]], ptr addrspace(3) {{.*}}@g0, i32 8)
+// CHECK: store i32 [[X]], ptr addrspace(3) {{.*}}@g0, i32 12)
+// CHECK: [[GROUP:%.*]] = call i32 @dx.op.threadIdInGroup.i32(i32 95, i32 0)
+// CHECK: [[ELEMENT:%.*]] = mul i32 [[GROUP]], 5
+// CHECK: [[WORD:%.*]] = add i32 [[ELEMENT]], 1
+// CHECK: [[BASE:%.*]] = getelementptr [4 x i8], ptr addrspace(3) @g1, i32 [[WORD]]
+// CHECK: [[XPTR:%.*]] = getelementptr i8, ptr addrspace(3) [[BASE]], i32 0
+// CHECK: store i32 [[X]], ptr addrspace(3) [[XPTR]]
+// CHECK: [[YPTR:%.*]] = getelementptr i8, ptr addrspace(3) [[BASE]], i32 4
+// CHECK: store i32 [[Y]], ptr addrspace(3) [[YPTR]]
+// CHECK: getelementptr i8, ptr addrspace(3) {{.*}}, i32 4
+// CHECK: load i32, ptr addrspace(3)
+// CHECK: load i32, ptr addrspace(3)
+// CHECK: call float @dx.op.bitcastI32toF32(i32 126,
+// CHECK: fadd fast float
+// CHECK: call i32 @dx.op.bitcastF32toI32(i32 127,
