@@ -1510,6 +1510,114 @@ pass. W1(b), full legacy-stage coverage, actual wave policy, partial waves,
 repeated execution and concurrent owned PSO/context lifetimes stay open.
 Owned `CreateDevice` remains deliberately `E_NOTIMPL`.
 
+### W1(b) partial-wave policy and repeated compute oracle (VM, 2026-11-20)
+
+The new original
+[`feme-dxc-partial-wave-compute.hlsl`](../test/Tools/feme/feme-dxc-partial-wave-compute.hlsl)
+executes SM6.0 compute with **30 threads per group**, `(5,3,2)`, across
+`(3,2,1)` groups. Each of its 180 threads writes an eight-word record:
+a deterministic shared-memory neighbor value after a group barrier, the
+flattened 3-D dispatch ID, wave size/lane index, first active lane's local
+index, active count, sum of local indices plus one, and first lane's group.
+The fixture uses eight scalar raw-buffer stores per record; it does not
+add multi-component raw-store import support.
+
+[`PartialWaveValidation.h`](../utils/windows-adapter-probe/PartialWaveValidation.h)
+checks all 5,760 payload bytes and all **59,776 guard bytes**. Scalar
+values and dispatch IDs are independently reconstructed. Wave membership
+is grouped by reported first-local identity within each thread group,
+not an assumed correspondence between local thread index and lane index.
+It checks unique in-range lanes, consistent sizes/active counts/reductions,
+complete membership, the first member's lowest active lane index, and
+group isolation. Sizes must be powers of two in the public 4--128 range
+and inside the queried runtime bounds. Thirty threads cannot fill an
+integer number of such waves, so each group must contain a partial wave.
+The public [WaveGetLaneCount contract](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/wavegetlanecount)
+counts inactive lanes too; active count is measured separately.
+
+The probe queries `D3D12_FEATURE_D3D12_OPTIONS1` and rejects unsupported or
+invalid wave bounds. Each partial-wave test reuses one device, queue, PSO,
+root signature, heap and upload/default/readback buffers for **three
+completed dispatches**. It resets the allocator and command list only
+after completion. Every iteration copies the baseline into the output
+buffer before dispatch, preventing stale shader output from validating a
+missing dispatch. The default buffer's next transition accounts for
+[decay to COMMON after batch completion](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12).
+All records and guards are validated after every iteration, and the
+wrapper requires all three completion markers. Existing linear/grouped
+workloads retain single-dispatch behavior. Submitted-failure retention
+is unchanged. The wait helper still creates a separate fence per
+iteration; this is not monotonic reuse of one fence.
+
+#### DXIL admission and independent controls
+
+The real shader initially exposed a missing import mapping for
+`dx.op.waveReadLaneFirst` (opcode 118). The table-driven raiser now maps
+it to `llvm.dx.wave.readlane.first`, reusing existing export/lowering.
+[`dxil-raise-wave-read-first.ll`](../test/Transforms/DXIL/dxil-raise-wave-read-first.ll)
+checks i16/i32/i64 and f16/f32/f64 raising and LLVM verification without
+DXC. The HLSL regression checks both register spaces, re-export/re-import,
+wave operations, shared storage, barrier, bindings and thread dimensions.
+Re-emitted runtime inputs require successful public SDK validation.
+
+The standalone LIT matrix adds 24 CPU fixture scenarios and eight
+reference dispatch cases: spaces 0/7, original DXC/validated FeMe DXIL,
+and `EnumWarpAdapter`/explicit software paths. Synthetic success data
+covers wave sizes 4, 8, 16, 32, 64 and 128, both direct and permuted
+local/lane mappings, and partial waves whose first active lane is not
+lane zero. Controls reject bad readback size/null data, scalar results,
+IDs, wave ranges/consistency, duplicate lanes, missing/wrong first members,
+active counts, reductions, group markers, guard corruption, untouched
+baseline output and unsupported/incompatible runtime policies.
+
+#### Measured results and reproduction
+
+The inbox D3D12/core/WARP files are `10.0.26100.9818`; DXC is
+`1.9.0.5399`, SDK FXC/validator files come from `10.0.26100.0`, and
+Agility is the existing ARM64 619 core `1.619.5.0.20260730.3`.
+Diagnostics verify the inbox module paths and application-local Agility
+core path. All three shader-enabled configurations report `WaveOps=1`, min/max
+**4/4**, and observes four-lane waves. Each iteration reconstructs
+**48 waves, six partial**, including one two-active-lane tail per group.
+These measurements are reference-runtime facts, not a selected owned
+FeMe wave policy.
+
+| Configuration | LIT outcome |
+|---|---|
+| Native ARM64 inbox, FXC/DXC/FeMe enabled | 99/99 |
+| Emulated x64 inbox, FXC/DXC/FeMe enabled | 99/99 |
+| Native ARM64 Agility 619, FXC/DXC/FeMe enabled | 99/99 |
+| Default native ARM64, no optional shader tools | 63/63 |
+| DXIL transforms and FeMe CLI regressions | 52 passed, 2 unsupported |
+| Complete rebuilt FeMe suite | 3,996 passed, 15 skipped, 13 unsupported; zero failures; 69.29 s |
+
+Reconfiguring the full native matrix without optional tools removes its
+stale shader tests. All automated tests use LIT, including the CPU
+fixtures; no CTest registration is present. Existing DXC/FeMe probe
+configuration automatically includes these partial-wave tests.
+
+For direct reproduction with a built probe and a compiled/validated shader:
+
+```powershell
+& "$build\feme-windows-adapter-probe.exe" --warp-compute-shader `
+  $shader 7 partial
+& "$build\feme-windows-adapter-probe.exe" --software-compute-shader `
+  "$env:SystemRoot\System32\d3d10warp.dll" $shader 7 partial
+```
+
+The Vulkan ICD and all FeMe LIT prerequisites were rebuilt. Loader/graphics
+smoke, Vulkan unit tests and inventory-generator regressions pass in the
+complete suite. The capability-manifest gate also reproduces both
+committed tables using their pinned Vulkan-Docs registry `f84d432d5b89`.
+No Vulkan advertisement changes are made. No real CTS run is claimed:
+this environment has no `deqp-vk` binary/checkout at the documented path.
+See [the scoped regression note](VulkanCTSReport.md#w1b-reference-partial-wave-oracle-regression-scope-2026-11-20).
+
+W1(b) and owned W0(g) execution remain open: owned `CreateDevice` is still
+deliberately `E_NOTIMPL`. This does not establish requested `[WaveSize]`
+support, owned PSO compilation/context/code concurrency, owned resource
+allocation, or all-stage D3D12 compatibility.
+
 ### W0(g) public GPU VA reservation boundary (VM)
 
 The 2026-11-18 follow-up tests a different public runtime-owned callback

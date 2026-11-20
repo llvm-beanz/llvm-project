@@ -345,9 +345,20 @@ SDK-validated FeMe DXIL execute the same grouped oracle through both public
 adapter paths; all three expanded reference-runtime LIT matrices pass 67/67.
 Nonstandard group-UAV/thread-only barrier modes translate to LLVM IR but
 remain explicitly unsupported for DXIL export rather than asserting.
-Actual wave policy, partial waves, repeated execution and
-concurrent owned PSO/context lifetimes remain unproven. W1(b) stays open,
-and owned `CreateDevice` remains deliberately `E_NOTIMPL`.
+The [partial-wave follow-up](W0WindowsIntegrationProbe.md#w1b-partial-wave-policy-and-repeated-compute-oracle-vm-2026-11-20)
+now queries the public runtime's wave bounds and executes a 30-thread
+`(5,3,2)` group across `(3,2,1)` groups. All three reference runtimes report
+and produce four-lane waves, with six partial waves per dispatch. The
+oracle reconstructs membership without assuming local-thread/lane ordering,
+checks wave reductions/first-lane identity and every output/guard byte,
+and verifies three dispatches using the same PSO/resources and reset
+allocator/list, reinitializing output before each dispatch.
+DXIL import now raises `WaveReadLaneFirst`; the expanded reference LIT
+matrices each pass 99/99. This establishes reference-only wave-policy,
+partial-wave and sequential reuse evidence, not an owned wave policy or
+requested-wave-size support. Concurrent owned PSO/context lifetimes and
+owned execution remain unproven. W1(b) stays open, and owned `CreateDevice`
+remains deliberately `E_NOTIMPL`.
 
 ### W2: Binding, resources, and synchronization
 

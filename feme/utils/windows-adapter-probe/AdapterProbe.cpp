@@ -10,6 +10,7 @@
 #include "../windows-adapter-bootstrap/BootstrapAudit.h"
 #include "BufferCopyValidation.h"
 #include "ComputeShaderValidation.h"
+#include "PartialWaveValidation.h"
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -279,14 +280,36 @@ static HRESULT readShader(const wchar_t *Path,
   return Result;
 }
 
+enum class ComputeWorkload { Linear, Grouped, Partial };
+
 static HRESULT exerciseComputeShader(ID3D12Device *Device,
                                      ID3D12CommandQueue *Queue,
                                      const wchar_t *Path, UINT Space,
-                                     bool Grouped) {
+                                     ComputeWorkload Workload) {
   using namespace feme::probe;
-  ComputeDispatch Dispatch = computeDispatch(Grouped);
+  bool Grouped = Workload == ComputeWorkload::Grouped;
+  bool Partial = Workload == ComputeWorkload::Partial;
+  ComputeDispatch Dispatch =
+      Partial ? PartialDispatch : computeDispatch(Grouped);
+  WavePolicy Policy{};
+  HRESULT Result;
+  if (Partial) {
+    D3D12_FEATURE_DATA_D3D12_OPTIONS1 Options{};
+    Result = report(L"CheckFeatureSupport(D3D12_OPTIONS1)",
+                    Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
+                                                &Options, sizeof(Options)));
+    if (FAILED(Result))
+      return Result;
+    Policy = {Options.WaveOps != FALSE, Options.WaveLaneCountMin,
+              Options.WaveLaneCountMax};
+    std::wprintf(L"Runtime wave policy: WaveOps=%u lanes=%u..%u\n",
+                 unsigned(Policy.WaveOps), Policy.Min, Policy.Max);
+    if (!Policy.WaveOps || !validWaveSize(Policy.Min) ||
+        !validWaveSize(Policy.Max) || Policy.Min > Policy.Max)
+      return report(L"Unsupported runtime wave policy", E_FAIL);
+  }
   std::vector<std::uint8_t> Code;
-  HRESULT Result = readShader(Path, Code);
+  Result = readShader(Path, Code);
   if (FAILED(Result))
     return Result;
   D3D12_ROOT_PARAMETER Parameter{};
@@ -383,54 +406,81 @@ static HRESULT exerciseComputeShader(ID3D12Device *Device,
                                             IID_PPV_ARGS(&Commands)));
   if (FAILED(Result))
     return Result;
-  Commands->CopyBufferRegion(Buffer.Get(), 0, Upload.Get(), 0, BufferBytes);
   D3D12_RESOURCE_BARRIER Barrier{};
   Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   Barrier.Transition.pResource = Buffer.Get();
   Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  Commands->ResourceBarrier(1, &Barrier);
-  Commands->SetComputeRootSignature(Signature.Get());
-  Commands->SetComputeRootUnorderedAccessView(0,
-                                              Buffer->GetGPUVirtualAddress());
-  Commands->Dispatch(Dispatch.X, Dispatch.Y, Dispatch.Z);
-  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-  Commands->ResourceBarrier(1, &Barrier);
-  Commands->CopyBufferRegion(Readback.Get(), 0, Buffer.Get(), 0, BufferBytes);
-  Result = report(L"Close(compute list)", Commands->Close());
-  if (FAILED(Result))
-    return Result;
-  bool Submitted = false;
-  Result = signalAndWait(Device, Queue, Commands.Get(), Submitted);
-  if (FAILED(Result)) {
-    if (Submitted) {
-      std::wprintf(L"Retaining compute resources until process exit after "
-                   L"completion/teardown failure.\n");
-      Device->AddRef();
-      Queue->AddRef();
-      Signature.Detach();
-      Pipeline.Detach();
-      Heap.Detach();
-      Buffer.Detach();
-      Upload.Detach();
-      Readback.Detach();
-      Allocator.Detach();
-      Commands.Detach();
+  UINT Iterations = Partial ? 3 : 1;
+  for (UINT Iteration = 0; Iteration < Iterations; ++Iteration) {
+    if (Iteration != 0) {
+      Result = report(L"Reset(compute allocator)", Allocator->Reset());
+      if (FAILED(Result))
+        return Result;
+      Result = report(L"Reset(compute list)",
+                      Commands->Reset(Allocator.Get(), Pipeline.Get()));
+      if (FAILED(Result))
+        return Result;
+      // Buffers decay to COMMON after the previous batch completes.
+      Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+      Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+      Commands->ResourceBarrier(1, &Barrier);
     }
-    return Result;
+    // Reinitialize every time: old output must not validate a missing dispatch.
+    Commands->CopyBufferRegion(Buffer.Get(), 0, Upload.Get(), 0, BufferBytes);
+    Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    Commands->ResourceBarrier(1, &Barrier);
+    Commands->SetComputeRootSignature(Signature.Get());
+    Commands->SetComputeRootUnorderedAccessView(0,
+                                                Buffer->GetGPUVirtualAddress());
+    Commands->Dispatch(Dispatch.X, Dispatch.Y, Dispatch.Z);
+    Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    Commands->ResourceBarrier(1, &Barrier);
+    Commands->CopyBufferRegion(Readback.Get(), 0, Buffer.Get(), 0, BufferBytes);
+    Result = report(L"Close(compute list)", Commands->Close());
+    if (FAILED(Result))
+      return Result;
+    bool Submitted = false;
+    Result = signalAndWait(Device, Queue, Commands.Get(), Submitted);
+    if (FAILED(Result)) {
+      if (Submitted) {
+        std::wprintf(L"Retaining compute resources until process exit after "
+                     L"completion/teardown failure.\n");
+        Device->AddRef();
+        Queue->AddRef();
+        Signature.Detach();
+        Pipeline.Detach();
+        Heap.Detach();
+        Buffer.Detach();
+        Upload.Detach();
+        Readback.Detach();
+        Allocator.Detach();
+        Commands.Detach();
+      }
+      return Result;
+    }
+    Mapped = nullptr;
+    Result =
+        report(L"Map(compute readback)", Readback->Map(0, &FullRange, &Mapped));
+    if (FAILED(Result))
+      return Result;
+    WaveObservation Observed;
+    const auto *Data = static_cast<const std::uint8_t *>(Mapped);
+    bool Valid = Partial
+                     ? validatePartialWave(Data, BufferBytes, Policy, Observed)
+                     : validateComputeShader(Data, BufferBytes, Grouped);
+    Readback->Unmap(0, &NoAccess);
+    if (!Valid)
+      return report(L"Compute shader validation", E_FAIL);
+    if (Partial)
+      std::wprintf(
+          L"Partial-wave iteration %u/%u verified: observed-lanes=%u..%u "
+          L"waves=%zu partial-waves=%zu records=%zu guard-bytes=%zu\n",
+          Iteration + 1, Iterations, Observed.Min, Observed.Max, Observed.Waves,
+          Observed.PartialWaves, PartialRecords,
+          BufferBytes - PartialOutputBytes);
   }
-  Mapped = nullptr;
-  Result =
-      report(L"Map(compute readback)", Readback->Map(0, &FullRange, &Mapped));
-  if (FAILED(Result))
-    return Result;
-  bool Valid = validateComputeShader(static_cast<const std::uint8_t *>(Mapped),
-                                     BufferBytes, Grouped);
-  Readback->Unmap(0, &NoAccess);
-  if (!Valid)
-    return report(L"Compute shader validation", E_FAIL);
   std::wprintf(L"Compute shader verified: values=%zu bytes=%zu groups=%zu "
                L"threads=%zu; uav-register=3 space=%u guard-bytes=%zu\n",
                Dispatch.Values, BufferBytes,
@@ -439,12 +489,16 @@ static HRESULT exerciseComputeShader(ID3D12Device *Device,
                BufferBytes - Dispatch.Values * sizeof(std::uint32_t));
   if (Grouped)
     std::wprintf(L"Grouped compute verified: groups=2,2,2 threads=8,4,2.\n");
+  if (Partial)
+    std::wprintf(L"Partial-wave compute verified: groups=3,2,1 threads=5,3,2 "
+                 L"iterations=3.\n");
   return S_OK;
 }
 
-static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter, bool BufferCopy = false,
-                               const wchar_t *ShaderPath = nullptr,
-                               UINT ShaderSpace = 0, bool Grouped = false) {
+static HRESULT
+exerciseAdapter(IDXGIAdapter1 *Adapter, bool BufferCopy = false,
+                const wchar_t *ShaderPath = nullptr, UINT ShaderSpace = 0,
+                ComputeWorkload Workload = ComputeWorkload::Linear) {
   DXGI_ADAPTER_DESC1 Desc{};
   HRESULT Result = report(L"GetDesc1", Adapter->GetDesc1(&Desc));
   if (FAILED(Result))
@@ -479,7 +533,7 @@ static HRESULT exerciseAdapter(IDXGIAdapter1 *Adapter, bool BufferCopy = false,
     return exerciseBufferCopy(Device.Get(), Queue.Get());
   if (ShaderPath)
     return exerciseComputeShader(Device.Get(), Queue.Get(), ShaderPath,
-                                 ShaderSpace, Grouped);
+                                 ShaderSpace, Workload);
   bool Submitted = false;
   return signalAndWait(Device.Get(), Queue.Get(), nullptr, Submitted);
 }
@@ -499,8 +553,12 @@ int wmain(int Argc, wchar_t **Argv) {
                             : SoftwareCompute && Argc == 6 ? Argv[5]
                                                            : nullptr;
   bool Grouped = Workload && std::wcscmp(Workload, L"grouped") == 0;
+  bool Partial = Workload && std::wcscmp(Workload, L"partial") == 0;
+  ComputeWorkload SelectedWorkload = Partial   ? ComputeWorkload::Partial
+                                     : Grouped ? ComputeWorkload::Grouped
+                                               : ComputeWorkload::Linear;
   bool ValidWorkload =
-      !Workload || Grouped || std::wcscmp(Workload, L"linear") == 0;
+      !Workload || Grouped || Partial || std::wcscmp(Workload, L"linear") == 0;
   const wchar_t *ShaderPath = WarpCompute       ? Argv[2]
                               : SoftwareCompute ? Argv[3]
                                                 : nullptr;
@@ -546,8 +604,9 @@ int wmain(int Argc, wchar_t **Argv) {
     std::fwprintf(
         stderr,
         L"Usage: %ls [--warp-buffer-copy | --software-buffer-copy DLL | "
-        L"--warp-compute-shader SHADER {0|7} [linear|grouped] | "
-        L"--software-compute-shader DLL SHADER {0|7} [linear|grouped] | "
+        L"--warp-compute-shader SHADER {0|7} [linear|grouped|partial] | "
+        L"--software-compute-shader DLL SHADER {0|7} [linear|grouped|partial] "
+        L"| "
         L"--software DLL | --stub DLL | --warp-shim DLL | "
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
@@ -570,7 +629,7 @@ int wmain(int Argc, wchar_t **Argv) {
     if (FAILED(checkWarpIdentity(Adapter.Get())))
       return 1;
     HRESULT Result = exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath,
-                                     ShaderSpace, Grouped);
+                                     ShaderSpace, SelectedWorkload);
     Adapter.Reset();
     Factory.Reset();
     std::wprintf(
@@ -715,7 +774,7 @@ int wmain(int Argc, wchar_t **Argv) {
     if (SUCCEEDED(Result)) {
       Opened = true;
       Result = exerciseAdapter(Adapter.Get(), BufferCopy, ShaderPath,
-                               ShaderSpace, Grouped);
+                               ShaderSpace, SelectedWorkload);
       if ((SoftwareBufferCopy || SoftwareCompute) && SUCCEEDED(Result) &&
           GetModuleHandleW(L"d3d10warp.dll") != Module)
         Result = report(L"Requested/selected WARP module mismatch", E_FAIL);

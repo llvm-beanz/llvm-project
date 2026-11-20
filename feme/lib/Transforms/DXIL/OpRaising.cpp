@@ -161,6 +161,7 @@ static const RaisableOp DirectOps[] = {
     {114, Intrinsic::dx_wave_all, false},                     // WaveActiveAllTrue
     {115, Intrinsic::dx_wave_all_equal, true},                // WaveActiveAllEqual (overloaded on the operand, not the i1 result)
     {117, Intrinsic::dx_wave_readlane, true},                 // WaveReadLaneAt
+    {118, Intrinsic::dx_wave_readlane_first, true},           // WaveReadLaneFirst
     {130, Intrinsic::dx_legacyf32tof16, true},                // LegacyF32ToF16 (overloaded on the float operand, though DXIL only uses f32)
     {131, Intrinsic::dx_legacyf16tof32, true},                // LegacyF16ToF32 (overloaded on the int operand, though DXIL only uses i32)
     {135, Intrinsic::dx_wave_active_countbits, false},        // WaveAllBitCount

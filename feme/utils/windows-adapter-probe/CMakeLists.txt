@@ -18,6 +18,7 @@ add_library(feme-adapter-rejection-stub SHARED RejectionStub.cpp)
 add_executable(feme-windows-adapter-probe AdapterProbe.cpp)
 add_executable(feme-buffer-copy-tests BufferCopyTests.cpp)
 add_executable(feme-compute-shader-tests ComputeShaderTests.cpp)
+add_executable(feme-partial-wave-tests PartialWaveTests.cpp)
 add_executable(feme-dxil-validator DxilValidator.cpp)
 target_link_libraries(feme-windows-adapter-probe PRIVATE d3d12 dxgi)
 set(FEME_PROBE_AGILITY_CORE "" CACHE FILEPATH "Existing Agility D3D12Core.dll")
@@ -42,6 +43,7 @@ if(MSVC)
   target_compile_options(feme-windows-adapter-probe PRIVATE /W4 /WX /UNDEBUG)
   target_compile_options(feme-buffer-copy-tests PRIVATE /W4 /WX /UNDEBUG)
   target_compile_options(feme-compute-shader-tests PRIVATE /W4 /WX /UNDEBUG)
+  target_compile_options(feme-partial-wave-tests PRIVATE /W4 /WX /UNDEBUG)
   target_compile_options(feme-dxil-validator PRIVATE /W4 /WX /UNDEBUG)
 endif()
 
@@ -73,6 +75,14 @@ foreach(scenario success wrong-size missing-data first-byte last-value
     COMMAND feme-compute-shader-tests "${scenario}")
   feme_add_probe_test(NAME grouped-compute-fixture-${scenario}
     COMMAND feme-compute-shader-tests "${scenario}" grouped)
+endforeach()
+foreach(scenario success wrong-size missing-data value dispatch-id wave-size
+                 lane-range duplicate-lane first-range missing-first wrong-first
+                 active-count reduction group-marker guard-first guard-last
+                 no-dispatch unsupported policy-range policy-order policy-size
+                 wave-policy wave-consistency patterns)
+  feme_add_probe_test(NAME partial-wave-fixture-${scenario}
+    COMMAND feme-partial-wave-tests "${scenario}")
 endforeach()
 feme_add_probe_test(NAME compute-shader-invalid-workload WILL_FAIL
   COMMAND feme-windows-adapter-probe --warp-compute-shader
@@ -124,6 +134,7 @@ if(FEME_PROBE_DXC)
   if(FEME_PROBE_FEME)
     list(APPEND grouped_kinds dxil)
   endif()
+  foreach(workload grouped partial-wave)
   foreach(space 0 7)
     foreach(kind IN LISTS grouped_kinds)
       foreach(entry warp software)
@@ -131,18 +142,25 @@ if(FEME_PROBE_DXC)
         if(entry STREQUAL "software")
           list(APPEND module_args "-DMODULE=$ENV{SystemRoot}/System32/d3d10warp.dll")
         endif()
-        feme_add_probe_test(NAME grouped-compute-space${space}-${kind}-${entry}
+        set(workload_args -DGROUPED=ON)
+        set(source feme-dxc-grouped-compute.hlsl)
+        if(workload STREQUAL "partial-wave")
+          set(workload_args -DPARTIAL_WAVE=ON)
+          set(source feme-dxc-partial-wave-compute.hlsl)
+        endif()
+        feme_add_probe_test(NAME ${workload}-compute-space${space}-${kind}-${entry}
           COMMAND "${CMAKE_COMMAND}"
           "-DHARNESS=$<TARGET_FILE:feme-windows-adapter-probe>"
           "-DDXC=${FEME_PROBE_DXC}" "-DFEME=${FEME_PROBE_FEME}"
           "-DVALIDATOR=$<TARGET_FILE:feme-dxil-validator>"
           "-DVALIDATOR_DIR=${FEME_PROBE_DXIL_VALIDATOR_DIR}"
-          "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/feme/feme-dxc-grouped-compute.hlsl"
-          "-DREGISTER_SPACE=${space}" -DPROFILE=cs_6_0 -DGROUPED=ON
+          "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/feme/${source}"
+          "-DREGISTER_SPACE=${space}" -DPROFILE=cs_6_0 ${workload_args}
           "-DINPUT_KIND=${kind}" "-DOUTPUT_BASE=%t" ${module_args}
           -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectComputeShader.cmake")
       endforeach()
     endforeach()
+  endforeach()
   endforeach()
 endif()
 if(FEME_PROBE_FXC)

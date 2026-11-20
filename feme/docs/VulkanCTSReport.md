@@ -1,5 +1,33 @@
 # Vulkan CTS status
 
+## W1(b) reference partial-wave oracle regression scope (2026-11-20)
+
+The [reference-WARP partial-wave oracle](W0WindowsIntegrationProbe.md#w1b-partial-wave-policy-and-repeated-compute-oracle-vm-2026-11-20)
+adds a Windows-only validator/harness and shader tests. Its one compiler
+change adds DXIL opcode 118 (`WaveReadLaneFirst`) to the existing import
+raiser table; it does not change SPIR-V translation, CPU wave execution
+or Vulkan advertisements.
+
+The native ARM64 Vulkan ICD and all FeMe LIT prerequisites were rebuilt
+with assertions and disabled PCH. The complete LIT run passed **3,996**,
+with **15 Skipped, 13 Unsupported, zero failures**, out of 4,024 discovered
+tests in **69.29 seconds**. This includes the real-loader smoke requiring
+`FeMe CPU Vulkan Device`, vendor `0x10000`, graphics smoke, Vulkan unit
+coverage and inventory-generator regressions.
+The capability-manifest checker ran through a task-local LIT test with
+the exact pinned public Vulkan-Docs registry `f84d432d5b89` and reproduced
+both committed tables unchanged. No feature/extension status lists or
+generated inventory tables were modified.
+
+**No real Vulkan CTS result is claimed.** Neither `deqp-vk` on `PATH` nor
+the documented `C:\dev\VK-GL-CTS` checkout exists here, so the
+system-CTS-gated tests remain Unsupported. A standalone system
+`vulkaninfo --summary` also failed during default ICD discovery; that is
+not a FeMe conformance result. The passing LIT loader smoke selects the
+build-tree development manifest and explicitly asserts FeMe identity.
+This scoped note does not change the prior CTS baseline or claim new
+Vulkan capability/conformance evidence.
+
 ## Windows WARP roadmap WS2(b): PendingExecutionRefCounted retained-work-storage extraction (2026-11-06)
 
 Device check: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan
