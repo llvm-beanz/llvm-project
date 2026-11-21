@@ -91,8 +91,12 @@ coverage" in [../Design.md](../Design.md).
   handles require `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` for resources or
   `SAMPLER_HEAP_DIRECTLY_INDEXED` for samplers. This precedes normalization;
   generated heap accesses emulating traditional bindings do not require
-  these flags. Counter compatibility and descriptor promises remain
-  outside this check.
+  these flags. Visible static samplers must match the declared default/
+  comparison mode; minimum/maximum filters remain non-comparison.
+  Descriptor-table/native-heap sampler contents, counter compatibility
+  and descriptor promises remain outside this check.
+  Sampler mode checking requires canonical handles; still-unraised DXC
+  bound sampling retains its earlier unsupported-operation error.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

@@ -27,6 +27,45 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) static sampler modes (VM, 2026-11-21)
+
+Explicit-root preflight now matches visible static sampler filters to the
+mode of canonical `dx.Sampler` handles. Default declarations accept
+ordinary/minimum/maximum filters; comparison declarations require
+comparison filters. Both reduction bits are used, because maximum filters
+also set bit 7. The existing static register/space/visibility lookup is
+shared with range coverage. Helper traversal, unrelated-function and
+dead-handle handling remain unchanged. Table/native-heap sampler contents
+are not inspected.
+
+The [Direct3D functional specification](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm),
+section 22.3.34, defines mode/filter violations as undefined sampling
+behavior. The measured SDK DXC accepts the mismatched declarations without
+`/Vd`; no SDK rejection is claimed.
+
+Two unit cases cover all 36 valid filters with four declared mode values
+and both signature versions (288 combinations), unchanged table handling,
+native heaps, helpers, dead handles and stage-disjoint static samplers.
+A canonical IR fixture verifies exact function/register/space/mode/filter
+errors in normal/reference/AOT compilation. A separate native DXC fixture
+checks accepted layouts and preserves the existing unsupported bound
+sampling errors in inferred/explicit modes. These unraised DXC operations
+do not yet reach canonical sampler preflight; static sampler descriptor
+raising/materialization/execution is not established.
+
+All automated validation uses LIT. Focused coverage passes **855** in
+**10.91 seconds**; the rebuilt full suite passes **4,073**, with **15
+Skipped, 10 Unsupported and zero failures**, from **4,098** discovered
+tests in **73.94 seconds**. Four added passes are two unit cases and two
+source fixtures. Assertions, disabled PCH and the memory-safe job limit
+are retained; timings are not a controlled performance comparison.
+
+Artifact ABI remains 8, shader argument layouts and inferred behavior
+are unchanged. General CBVs, multiple inline parameters, descriptor
+preparation, counters/promises and owned D3D12 execution remain open.
+`CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)
+are not closed. No adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W2(b) native heap root flags (VM, 2026-11-21)
 
 Explicit-root preflight now validates live original native heap handles:

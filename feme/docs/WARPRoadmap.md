@@ -555,6 +555,26 @@ not a controlled performance comparison. This is root-flag admission, not full
 dynamic descriptor preparation, new sampler execution or owned D3D12
 execution; artifact ABI remains 8 and W2(a)/W2(b) stay open.
 
+W2(a) static-sampler-mode progress (2026-11-21): explicit-root preflight
+now checks visible static filters against canonical sampler declarations.
+Default mode accepts ordinary/minimum/maximum filters; comparison mode
+requires comparison filters. The complete reduction field is checked,
+not bit 7 alone. Static lookup is shared with range coverage and retains
+register/space/visibility and helper/dead-handle behavior. Two unit cases
+cover all 36 valid filters, default/comparison/unsupported modes, both
+signature versions, tables, native heaps and stage-disjoint samplers.
+Canonical IR verifies exact normal/reference/AOT mismatch diagnostics.
+Native SDK DXC accepts the mismatched declarations without `/Vd`; a
+separate fixture preserves that measurement and existing unraised bound
+sampling rejection. Those DXC shaders do not yet reach canonical sampler
+preflight, and no new sampler raising/materialization/execution is claimed.
+Focused LIT passes 855 in 10.91 seconds; full LIT passes 4,073, with
+15 skipped, 10 unsupported and zero failures, from 4,098 discovered tests
+in 73.94 seconds. Timings are not a controlled performance comparison.
+Inferred admission, artifact ABI 8 and shader argument layouts are unchanged;
+table/native-heap descriptor contents and owned D3D12 execution remain
+open, as do W2(a)/W2(b).
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

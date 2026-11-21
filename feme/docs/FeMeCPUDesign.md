@@ -2552,10 +2552,25 @@ normalization, so heap accesses generated to emulate traditional bindings
 do not require native direct-index flags. Missing flags produce a
 function-specific error before selection metadata is attached.
 
+For a visible static sampler, the declared `dx.Sampler` mode must match
+the filter's reduction mode: default samplers accept ordinary/minimum/
+maximum filters; comparison samplers require comparison filters. Both
+reduction bits are checked, because maximum filters also set bit 7.
+The [Direct3D functional specification](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm),
+section 22.3.34, defines incompatible sampler linkage as undefined.
+The measured SDK DXC accepts these mismatches without `/Vd`; FeMe rejects
+them independently for canonical handles in opt-in explicit-root
+compilation. Lookup reuses static binding coverage's register/space/
+visibility matching and the same
+helper/dead-handle traversal. Descriptor-table and native-heap sampler
+contents remain outside this check. Native DXC bound sampling operations
+that remain unraised still fail existing CPU admission without producing
+canonical sampler handles; this does not add bound-sampler raising or execution.
+
 This checks declared binding identity, root SRV/UAV resource kinds and
-native heap flags, not descriptor contents, table materialization, full
-resource-kind/counter compatibility or root-descriptor promises. It does
-not admit otherwise unsupported heap resource operations. The inferred
+native heap flags and static sampler modes, not descriptor contents, table
+materialization, full resource-kind/counter compatibility or root-descriptor
+promises. It does not admit otherwise unsupported heap resource operations. The inferred
 mode remains unchanged.
 
 That parameter's register/space selects the cbuffer, and its full DWORD

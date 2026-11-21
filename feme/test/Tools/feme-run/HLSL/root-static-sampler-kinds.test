@@ -1,0 +1,54 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /Fo %t/ordinary.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D COMPARE /D COMPARE_FILTER /Fo %t/comparison.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D COMPARE_FILTER /Fo %t/ordinary-comparison.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D COMPARE /Fo %t/comparison-ordinary.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D COMPARE /D MAX_FILTER /Fo %t/comparison-maximum.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D MAX_FILTER /Fo %t/ordinary-maximum.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D MIN_FILTER /Fo %t/ordinary-minimum.dxil %t/shader.hlsl
+# RUN: feme-run --inspect-root-signature %t/comparison.dxil | FileCheck %s --check-prefix=LAYOUT
+# RUN: not feme-run --root-signature-constants %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=ADMISSION
+# RUN: not feme-run --root-signature-constants --reference %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=ADMISSION
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/ordinary-comparison.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=ADMISSION
+# RUN: not feme-run %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=ADMISSION
+# RUN: not feme-run --root-signature-constants %t/comparison.dxil 2>&1 | FileCheck %s --check-prefix=CMP-ADMISSION
+#
+# DXC accepts mismatched states without /Vd. These bound sampling operations
+# remain unraised; root-static-sampler-modes.ll tests canonical preflight.
+# This does not test materialization or execution of static sampler descriptors.
+# LAYOUT: static-sampler[0]: space=7 register=3 visibility=0 filter=128
+# ADMISSION: unsupported raised operation: 'dx.op.sampleLevel.f32'
+# ADMISSION-NOT: static sampler mismatch
+# CMP-ADMISSION: unsupported raised operation: 'dx.op.sampleCmpLevelZero.f32'
+# CMP-ADMISSION-NOT: static sampler mismatch
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) { uint A; };
+Texture2D<float> Input : register(t3, space7);
+RWByteAddressBuffer Output : register(u3, space7);
+#if defined(COMPARE)
+SamplerComparisonState S : register(s3, space7);
+#define SAMPLE Input.SampleCmpLevelZero(S, float2(0, 0), 0.5)
+#else
+SamplerState S : register(s3, space7);
+#define SAMPLE Input.SampleLevel(S, float2(0, 0), 0)
+#endif
+#if defined(COMPARE_FILTER)
+#define FILTER "FILTER_COMPARISON_MIN_MAG_MIP_POINT"
+#elif defined(MAX_FILTER)
+#define FILTER "FILTER_MAXIMUM_MIN_MAG_MIP_POINT"
+#elif defined(MIN_FILTER)
+#define FILTER "FILTER_MINIMUM_MIN_MAG_MIP_POINT"
+#else
+#define FILTER "FILTER_MIN_MAG_MIP_POINT"
+#endif
+[RootSignature("RootConstants(num32BitConstants=1,b3,space=7),"
+               "DescriptorTable(SRV(t3,space=7)),UAV(u3,space=7),"
+               "StaticSampler(s3,space=7,filter=" FILTER ")")]
+[numthreads(1, 1, 1)]
+void main() { Output.Store(0, asuint(SAMPLE + A)); }

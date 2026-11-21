@@ -515,6 +515,86 @@ TEST(RootBindingPlanTest, NativeHeapFlagsCheckHelpersButIgnoreDeadHandles) {
       Succeeded());
 }
 
+TEST(RootBindingPlanTest, StaticSamplerModesCoverAllFilterReductionKinds) {
+  LLVMContext C;
+  const uint32_t Filters[]{
+#define FILTER(Value, Name) Value,
+#include "llvm/BinaryFormat/DXContainerConstants.def"
+  };
+  for (uint32_t Mode : {0u, 1u, 2u, 3u}) {
+    Module M("static-sampler", C);
+    auto *F = makeShaderFunction(M, "main");
+    addBinding(M, *F, TargetExtType::get(C, "dx.Sampler", {}, {Mode}));
+    for (uint32_t Version : {1u, 2u}) {
+      auto Table = RootBindingPlan::parse(root(
+          Version,
+          {table(Version, Version == 1
+                              ? std::vector<uint32_t>{3, 1, 3, 7, 0}
+                              : std::vector<uint32_t>{3, 1, 3, 7, 0, 0})}));
+      ASSERT_TRUE(bool(Table));
+      EXPECT_THAT_ERROR(
+          Table->checkShaderBindings(*F, dxbc::ShaderVisibility::All),
+          Succeeded());
+      for (uint32_t Filter : Filters) {
+        auto Static = sampler();
+        Static[0] = Filter;
+        auto Plan = RootBindingPlan::parse(root(Version, {}, {Static}));
+        ASSERT_TRUE(bool(Plan));
+        auto E = Plan->checkShaderBindings(*F, dxbc::ShaderVisibility::All);
+        bool Comparison = Filter >= 0x80 && Filter < 0x100;
+        if (Mode == (Comparison ? 1u : 0u)) {
+          EXPECT_THAT_ERROR(std::move(E), Succeeded());
+          continue;
+        }
+        std::string Message = toString(std::move(E));
+        EXPECT_TRUE(StringRef(Message).contains("static sampler mismatch"));
+        EXPECT_TRUE(
+            StringRef(Message).contains("space=7 register=3 in 'main'"));
+      }
+    }
+  }
+}
+
+TEST(RootBindingPlanTest, StaticSamplerModesRespectVisibilityAndReachability) {
+  LLVMContext C;
+  Module M("sampler-helpers", C);
+  auto *Entry = makeShaderFunction(M, "main");
+  auto *Helper = makeShaderFunction(M, "helper");
+  auto *Other = makeShaderFunction(M, "unrelated");
+  auto *Ty = TargetExtType::get(C, "dx.Sampler", {}, {1});
+  auto *Handle = addBinding(M, *Helper, Ty);
+  addBinding(M, *Other, Ty, 9);
+  IRBuilder<>(Entry->getEntryBlock().getTerminator()).CreateCall(Helper);
+  auto Comparison = sampler(3, 7, 5);
+  Comparison[0] = 0x80;
+  auto Plan =
+      RootBindingPlan::parse(root(2, {}, {sampler(3, 7, 1), Comparison}));
+  ASSERT_TRUE(bool(Plan));
+  EXPECT_THAT_ERROR(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::Pixel),
+      Succeeded());
+  auto Message = toString(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::Vertex));
+  EXPECT_TRUE(StringRef(Message).contains("static sampler mismatch"));
+  EXPECT_TRUE(StringRef(Message).contains("in 'helper'"));
+  EXPECT_THAT_ERROR(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::All), Failed());
+  cast<Instruction>(*Handle->user_begin())->eraseFromParent();
+  EXPECT_THAT_ERROR(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::Vertex),
+      Succeeded());
+
+  auto *Native = makeShaderFunction(M, "native");
+  addHeapHandle(M, *Native, Ty);
+  auto Bytes = root(2, {}, {sampler()});
+  setWord(Bytes, 5, 0x800);
+  auto NativePlan = RootBindingPlan::parse(Bytes);
+  ASSERT_TRUE(bool(NativePlan));
+  EXPECT_THAT_ERROR(
+      NativePlan->checkShaderBindings(*Native, dxbc::ShaderVisibility::All),
+      Succeeded());
+}
+
 TEST(RootBindingPlanTest, ValidatesResourceClassesFromCanonicalHandleTypes) {
   LLVMContext C;
   auto *I32 = Type::getInt32Ty(C);

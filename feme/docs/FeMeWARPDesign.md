@@ -81,6 +81,11 @@ The original compute-only baseline is no longer current:
   typed buffers and textures require tables. Live original native heap
   handles require the matching resource/sampler direct-index root flag;
   heap accesses generated for traditional bound emulation do not.
+  Visible static samplers must match the declared default/comparison mode:
+  minimum/maximum filters remain default, not comparison filters.
+  Descriptor-table and native-heap sampler contents are not validated.
+  This checks canonical handles; still-unraised native DXC bound sampling
+  retains its earlier CPU admission failure, not new sampler execution.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.

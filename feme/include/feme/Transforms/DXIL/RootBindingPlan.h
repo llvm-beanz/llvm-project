@@ -53,6 +53,10 @@ class RootBindingPlan {
 
   RootBindingPlan() = default;
 
+  const llvm::dxbc::RTS0::v1::StaticSampler *
+  findStaticSampler(uint32_t Space, uint32_t Register,
+                    llvm::dxbc::ShaderVisibility Stage) const;
+
 public:
   static llvm::Expected<RootBindingPlan> parse(llvm::ArrayRef<uint8_t> Bytes);
   /// Accepts a standalone serialized root blob or a DXBC/DXIL container's
@@ -84,7 +88,8 @@ public:
   /// including direct helper calls, before normalization discards identities.
   /// Root SRV/UAV descriptors require raw/structured buffers. Native heap
   /// handles require their resource/sampler direct-index flag; emulated bound
-  /// access does not. Heap contents, counters and other resource-kind/promise
+  /// access does not. Static sampler filters must match the declared sampler
+  /// mode. Heap contents, counters and other resource-kind/promise
   /// compatibility are separate.
   llvm::Error checkShaderBindings(const llvm::Function &Entry,
                                   llvm::dxbc::ShaderVisibility Stage) const;

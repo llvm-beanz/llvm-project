@@ -67,8 +67,13 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   original native heap handles require `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`
   for resources or `SAMPLER_HEAP_DIRECTLY_INDEXED` for samplers. Heap
   accesses generated for traditional bound emulation do not need these
-  flags. Counter compatibility and descriptor promises are not validated
-  by this check.
+  flags. Visible static sampler filters must match the declared default/
+  comparison mode. Minimum/maximum filters are non-comparison filters;
+  mismatches fail with register/space and function-specific diagnostics.
+  Descriptor-table/native-heap sampler contents, counter compatibility
+  and descriptor promises are not validated by this check.
+  The sampler check requires canonical handles; still-unraised DXC bound
+  sampling retains its earlier unsupported-operation error.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

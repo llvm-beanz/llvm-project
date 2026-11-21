@@ -289,6 +289,18 @@ RootBindingPlan::findBinding(ResourceClass Class, uint32_t Space,
   return nullptr;
 }
 
+const dxbc::RTS0::v1::StaticSampler *
+RootBindingPlan::findStaticSampler(uint32_t Space, uint32_t Register,
+                                   dxbc::ShaderVisibility Stage) const {
+  auto It = llvm::find_if(StaticSamplers, [&](const auto &Sampler) {
+    return Sampler.RegisterSpace == Space &&
+           Sampler.ShaderRegister == Register &&
+           (Sampler.ShaderVisibility == uint32_t(dxbc::ShaderVisibility::All) ||
+            Sampler.ShaderVisibility == uint32_t(Stage));
+  });
+  return It == StaticSamplers.end() ? nullptr : &*It;
+}
+
 Error RootBindingPlan::checkBindingCoverage(
     ResourceClass Class, uint32_t Space, uint32_t Register, uint32_t Count,
     dxbc::ShaderVisibility Stage) const {
@@ -314,15 +326,11 @@ Error RootBindingPlan::checkBindingCoverage(
       }
   }
   if (Class == ResourceClass::Sampler)
-    for (const auto &Sampler : StaticSamplers)
-      if (Sampler.RegisterSpace == Space &&
-          (Sampler.ShaderVisibility == uint32_t(dxbc::ShaderVisibility::All) ||
-           Sampler.ShaderVisibility == uint32_t(Stage)) &&
-          Register == Sampler.ShaderRegister) {
-        if (Count == 1)
-          return Error::success();
-        Cursor = std::max(Cursor, uint64_t(Sampler.ShaderRegister) + 1);
-      }
+    if (const auto *Sampler = findStaticSampler(Space, Register, Stage)) {
+      if (Count == 1)
+        return Error::success();
+      Cursor = std::max(Cursor, uint64_t(Sampler->ShaderRegister) + 1);
+    }
   return createStringError(
       inconvertibleErrorCode(),
       "root binding mismatch: %s space=%u register=%u count=%u is not covered "
@@ -416,6 +424,22 @@ Error RootBindingPlan::checkShaderBindings(const Function &Entry,
         return createStringError(inconvertibleErrorCode(), "in '%s': %s",
                                  F->getName().str().c_str(),
                                  toString(std::move(E)).c_str());
+      if (Class == ResourceClass::Sampler)
+        if (const auto *Sampler =
+                findStaticSampler(Values[0], Values[1], Stage)) {
+          // Maximum filters also set bit 7; compare both reduction bits.
+          bool Comparison = (Sampler->Filter & 0x180) == 0x80;
+          uint32_t Mode = static_cast<uint32_t>(
+              Comparison ? llvm::dxil::SamplerType::Comparison
+                         : llvm::dxil::SamplerType::Default);
+          if (Ty->getIntParameter(0) != Mode)
+            return createStringError(
+                inconvertibleErrorCode(),
+                "static sampler mismatch: sampler space=%u register=%u in "
+                "'%s' declares mode=%u but filter=%u requires mode=%u",
+                Values[0], Values[1], F->getName().str().c_str(),
+                Ty->getIntParameter(0), Sampler->Filter, Mode);
+        }
       if (!isa<llvm::dxil::RawBufferExtType>(Ty)) {
         const RootBinding *Matched =
             findBinding(Class, Values[0], Values[1], Stage);

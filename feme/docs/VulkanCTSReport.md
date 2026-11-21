@@ -1,5 +1,29 @@
 # Vulkan CTS status
 
+## W2(a) static-sampler-mode regression scope (2026-11-21)
+
+The [static-sampler follow-up](W0WindowsIntegrationProbe.md#w2a-static-sampler-modes-vm-2026-11-21)
+matches canonical sampler modes to visible static filters in opt-in
+explicit-root preflight. Minimum/maximum filters are non-comparison.
+Lookup shares register/space/visibility matching with range coverage.
+Two unit cases cover all valid filters, both signature versions, declared
+modes, tables/native heaps and helper/dead-handle behavior. Canonical IR
+checks exact normal/reference/AOT errors. The native DXC fixture records
+SDK acceptance without `/Vd` and preserves unraised bound-sampling
+admission errors; those shaders do not yet reach canonical sampler
+preflight. No new sampler execution or descriptor preparation is claimed.
+
+Focused LIT passes **855** in **10.91 seconds**. Full FeMe LIT passes
+**4,073**, with **15 Skipped, 10 Unsupported and zero failures**, from
+**4,098** discovered tests in **73.94 seconds**. Four new passes are two
+unit cases and two fixtures. Existing graphics and Vulkan unit/real-loader
+coverage remains passing; timings are not a controlled speedup comparison.
+
+Artifact ABI 8, shader argument layouts, inferred admission, Vulkan
+semantics/advertisements, pinned inventory and adapter-matrix results are
+unchanged. Owned D3D12 execution remains absent. **No real Vulkan CTS pass
+is claimed**; the external runner remains unavailable.
+
 ## W2(a)/W2(b) native-heap-flag regression scope (2026-11-21)
 
 The [native-heap follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-heap-root-flags-vm-2026-11-21)
