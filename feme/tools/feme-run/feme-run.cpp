@@ -107,6 +107,7 @@
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Transforms/DXIL/RootBindingPlan.h"
 #include "feme/Translate/DXSA/DXSATranslator.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 
@@ -1401,6 +1402,10 @@ int main(int argc, char **argv) {
   cl::opt<std::string> HeapFilename(
       "heap", cl::desc("The resource-heap YAML file (see feme-run's own "
                        "file comment)"));
+  cl::opt<bool> InspectRootSignature(
+      "inspect-root-signature",
+      cl::desc("Print a checked Root Signature 1.0/1.1 binding plan from a "
+               "serialized root blob or DXBC/DXIL container; do not dispatch"));
   cl::opt<unsigned> WaveSize(
       "wave-size", cl::init(0),
       cl::desc("The wave size to compile at; 0 resolves it from the "
@@ -1441,6 +1446,29 @@ int main(int argc, char **argv) {
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe CPU target JIT/dispatch runner\n");
+
+  if (InspectRootSignature) {
+    if (HeapFilename.getNumOccurrences() || WaveSize.getNumOccurrences() ||
+        GroupCountStr.getNumOccurrences() || RepeatCount.getNumOccurrences() ||
+        EntryPoint.getNumOccurrences() || Reference.getNumOccurrences() ||
+        ObjectMode.getNumOccurrences() || OptLevel.getNumOccurrences()) {
+      errs() << "feme-run: '--inspect-root-signature' cannot be combined with "
+                "dispatch options\n";
+      return 1;
+    }
+    auto Buffer = MemoryBuffer::getFile(InputFilename);
+    if (!Buffer) {
+      errs() << "feme-run: " << Buffer.getError().message() << '\n';
+      return 1;
+    }
+    auto Plan = feme::dxil::RootBindingPlan::read((*Buffer)->getBuffer());
+    if (!Plan) {
+      errs() << "feme-run: " << toString(Plan.takeError()) << '\n';
+      return 1;
+    }
+    Plan->print(outs());
+    return 0;
+  }
 
   if (RepeatCount == 0) {
     errs() << "feme-run: '--repeat' must be positive\n";

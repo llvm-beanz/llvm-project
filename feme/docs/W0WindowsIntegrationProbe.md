@@ -27,6 +27,75 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) root-signature parsing and immutable binding plans (VM, 2026-11-21)
+
+[RootBindingPlan](../include/feme/Transforms/DXIL/RootBindingPlan.h), in
+the existing portable `FeMeTransformsDXIL` library, now owns a read-only
+Root Signature 1.0/1.1 layout. It reuses LLVM's DirectX container views and
+binary-format types, not a Windows COM deserializer or a second runtime.
+Raw RTS0 payloads, root-only containers and shader DXBC/DXIL containers
+share the same parser. Missing/duplicate RTS0 parts, unsupported plan
+versions and malformed input are explicit errors.
+
+Plans retain root constants, CBV/SRV/UAV root descriptors, descriptor
+tables, static sampler state, register class/space/range, shader visibility,
+root flags and serialized descriptor/range flags. APPEND resolves relative
+to the preceding range, including explicit gaps and offsets moving back
+into unused table slots. Unbounded ranges are represented without
+allocating an unbounded heap; APPEND after one is rejected, while a
+nonoverlapping explicit following range is accepted. Tests cover:
+
+- The exact 64-DWORD root budget and overflow, empty/invalid ranges,
+  conflicting data flags and mixed resource/sampler tables.
+- Register and table-slot overlap, distinct register classes at the same
+  number, and disjoint stage visibility versus all-stage overlap.
+- Static sampler collisions and preservation of filter/address/LOD state.
+- Every truncated prefix of a complete layout, oversized counts/offsets,
+  noncontiguous/backward range payloads and samplers before root payloads.
+- Owned storage after the input bytes are overwritten, register lookup,
+  and canonical `!feme.dxil.rootsignature` metadata: absence is distinct
+  from malformed metadata or an invalid serialized layout.
+
+The shared LLVM parser needed two directly coupled fixes: complete,
+overflow-safe array/parameter bounds checks, and reading descriptor
+ranges from their serialized absolute offset rather than assuming they
+immediately follow the table header. Its old sampler fixtures were
+truncated or declared an undersized 1.2 part; these were corrected instead
+of weakening the checks. LLVM's existing 1.2 static-sampler parsing is
+preserved, but FeMe binding plans explicitly accept only 1.0/1.1.
+
+`feme-run --inspect-root-signature INPUT` prints the plan and returns
+without loading a JIT or dispatching. Combining it with any dispatch
+option is rejected. Native ARM64 SDK `10.0.26100.0` DXC and FXC compile
+the LLVM-owned HLSL fixture. Real DXC shader containers cover 1.0 and 1.1,
+and an extracted root-only container is also checked. FXC covers an
+SM5.1 shader with its default 1.1 root signature and a separately compiled
+`rootsig_1_0` container. Each reports six parameters, one static sampler
+and exactly 12 DWORDs; the oracle checks all parameter/range rows,
+spaces, APPEND offsets and serialized flags.
+
+All automated execution is through LIT:
+
+- Focused FeMe DXIL units, compiler fixtures and LLVM Object tests:
+  **173 Passed, 2 Skipped, zero failures**.
+- Rebuilt complete FeMe suite with SDK FXC on PATH:
+  **4,025 Passed, 15 Skipped, 10 Unsupported, zero failures**, from
+  4,050 discovered tests in **162.44 seconds**. This includes the twelve
+  new plan unit cases and three new source fixtures.
+- Rebuilt LLVM Object cases plus the pinned public-registry capability
+  check: **154 Passed, 2 Skipped, zero failures**. Both Vulkan inventories
+  reproduce unchanged against registry `f84d432d5b89`.
+
+This does **not** replace use-inferred cbuffer promotion, prepare
+descriptors, validate shader/root-layout compatibility, enforce 1.1
+promises, implement DXR local arguments or establish owned D3D12
+execution. The plans expose serialized flags for future frontend policy,
+not a claim that every SDK semantic rule is enforced. Artifact ABI,
+Vulkan advertisements and default CPU dispatch behavior are unchanged.
+W2(a), W1(a)/W1(b) and owned `CreateDevice` (`E_NOTIMPL`) remain open.
+The standalone Windows adapter matrices were not rerun for this
+parsing-only milestone; their preceding results are historical evidence.
+
 ## Environment and limits
 
 | Component | Measured configuration |

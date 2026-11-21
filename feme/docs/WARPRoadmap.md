@@ -414,6 +414,27 @@ compiler prerequisites, not work that a DDI wrapper can hide.
 | W2(c) | Committed/placed/reserved resources, residency/budgets, typeless view compatibility, planes/subresources, texture copy footprints and shared image/sampler preparation. Test D3D row/placement alignment separately from internal storage; exercise BC, sRGB, integer, depth/stencil and multisample operations individually. |
 | W2(d) | Queue-ordered copies/dispatch/indirect commands, legacy transitions including promotion/decay and split/alias/UAV barriers, queries/predication, and host/queue fence events. Preserve the dependency model needed by enhanced barriers. Test cross-queue progress, decreasing fence values, replay, timeout/removal wakeup, and indirect argument overflow. |
 
+W2(a) prerequisite progress (2026-11-21): the
+[root-binding-plan follow-up](W0WindowsIntegrationProbe.md#w2a-root-signature-parsing-and-immutable-binding-plans-vm-2026-11-21)
+adds owned, read-only Root Signature 1.0/1.1 reflection and
+`feme-run --inspect-root-signature`, accepting raw serialized layouts and
+DXBC/DXIL RTS0 containers without dispatch. Plans preserve parameter kinds,
+register classes/spaces/ranges, visibility, constants, root descriptors,
+static samplers and serialized 1.1 flags, and resolve APPEND offsets.
+They check register/table overlap, overflowing ranges and the 64-DWORD root
+budget. LLVM's shared container views now check complete array bounds and
+honor absolute range offsets, including noncontiguous/backward ranges and
+samplers preceding parameter payloads. Canonical root metadata has an
+error-returning plan reader that distinguishes absence from invalid input.
+Twelve new unit cases and three source fixtures include real DXC/FXC
+shader/root-only containers; the rebuilt full FeMe LIT suite passes
+4,025 tests with zero failures. Both capability inventories reproduce
+unchanged. This is a compiler/frontend parsing prerequisite, not root-driven
+CPU lowering, descriptor preparation, shader/root compatibility validation
+or enforcement of static/volatility promises. Explicit multiple-CBV,
+dynamic-index and non-32-bit execution remains open under W2(a); W1 and
+owned `CreateDevice` remain open.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

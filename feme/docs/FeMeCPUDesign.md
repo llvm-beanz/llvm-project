@@ -2973,6 +2973,18 @@ because it is a separate project that happens to reuse this one.
   Measured legacy coverage is bounded to the raw/grouped SM5.0/5.1
   [CPU oracles](W0WindowsIntegrationProbe.md#w1b-legacy-dxbc-cpu-execution-vm-2026-11-20),
   not general legacy shader compatibility.
+
+  `--inspect-root-signature INPUT` is a separate, non-dispatch mode. It
+  prints a checked Root Signature 1.0/1.1 binding plan from a raw serialized
+  layout or a DXBC/DXIL container's RTS0 part. It rejects missing/duplicate
+  parts, invalid layouts and combinations with dispatch options, and
+  returns without initializing a JIT or using a heap. Plans preserve
+  register classes/spaces/ranges, visibility, constants, root descriptors,
+  tables and static samplers, resolving APPEND offsets and retaining
+  serialized 1.1 flags. This is W2(a) reflection, not explicit root-layout
+  CPU binding, descriptor preparation or enforcement of static promises;
+  existing dispatch and use-inferred root-constant lowering are unchanged.
+
   `--reference` runs the shader one invocation at a time through the
   unwidened module instead (see "CFG restructurization test suite"), which
   is the ground truth that suite diffs against.

@@ -624,6 +624,13 @@ is valid DXIL or legal for the selected shader model.
 Direct3D maps naturally onto FeMe's CPU ABI, but the mapping must preserve
 Direct3D visibility, range, and volatility rules.
 
+The [W2(a) parsing prerequisite](W0WindowsIntegrationProbe.md#w2a-root-signature-parsing-and-immutable-binding-plans-vm-2026-11-21)
+now provides portable, owned 1.0/1.1 binding plans and a non-dispatch
+inspection path. It preserves serialized promises and resolves table
+offsets, but does not implement the runtime mapping below, enforce every
+SDK semantic rule or replace use-inferred cbuffer promotion. Explicit
+root-driven CPU binding and descriptor preparation remain pending.
+
 - Root constants become a submission-local root-constant byte block.
 - Root CBV/SRV/UAV descriptors become bounds-checked `FemeDescriptor` records.
   A root descriptor is a bare GPU virtual address with no size, so the runtime

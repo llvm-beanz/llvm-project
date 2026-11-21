@@ -693,6 +693,8 @@ Error DirectX::RootSignature::parse() {
 
   Version = support::endian::read<uint32_t, llvm::endianness::little>(Current);
   Current += sizeof(uint32_t);
+  if (Version < 1 || Version > 3)
+    return parseFailed("Invalid Root Signature version: " + Twine(Version));
 
   NumParameters =
       support::endian::read<uint32_t, llvm::endianness::little>(Current);
@@ -713,17 +715,33 @@ Error DirectX::RootSignature::parse() {
   Flags = support::endian::read<uint32_t, llvm::endianness::little>(Current);
   Current += sizeof(uint32_t);
 
-  ParametersHeaders.Data = PartData.substr(
-      RootParametersOffset,
-      NumParameters * sizeof(dxbc::RTS0::v1::RootParameterHeader));
-
   StaticSamplers.Stride = (Version <= 2)
                               ? sizeof(dxbc::RTS0::v1::StaticSampler)
                               : sizeof(dxbc::RTS0::v3::StaticSampler);
 
-  StaticSamplers.Data = PartData.substr(StaticSamplersOffset,
-                                        static_cast<size_t>(NumStaticSamplers) *
-                                            StaticSamplers.Stride);
+  auto ReadArray = [&](uint32_t Offset, uint32_t Count,
+                       uint32_t Stride) -> Expected<StringRef> {
+    if (!Count)
+      return StringRef();
+    uint64_t Bytes = uint64_t(Count) * Stride;
+    if (Offset < sizeof(dxbc::RTS0::v1::RootSignatureHeader) ||
+        Offset > PartData.size() || Bytes > PartData.size() - Offset)
+      return parseFailed("Reading root signature array out of file bounds");
+    return PartData.substr(Offset, Bytes);
+  };
+  auto Parameters = ReadArray(RootParametersOffset, NumParameters,
+                              sizeof(dxbc::RTS0::v1::RootParameterHeader));
+  if (!Parameters)
+    return Parameters.takeError();
+  auto Samplers =
+      ReadArray(StaticSamplersOffset, NumStaticSamplers, StaticSamplers.Stride);
+  if (!Samplers)
+    return Samplers.takeError();
+  ParametersHeaders.Data = *Parameters;
+  StaticSamplers.Data = *Samplers;
+  for (const auto &Header : param_headers())
+    if (auto Parameter = getParameter(Header); !Parameter)
+      return Parameter.takeError();
 
   return Error::success();
 }

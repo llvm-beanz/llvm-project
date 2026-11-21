@@ -1561,8 +1561,8 @@ TEST(RootSignature, ParseStaticSamplers) {
         0xa4, 0x70, 0x9d, 0x3f, 0x14, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x85, 0xeb, 0x91, 0x40, 0x66, 0x66, 0x0e, 0x41,
         0x1f, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00};
-    DXContainer C =
-        llvm::cantFail(DXContainer::create(getMemoryBuffer<133>(Buffer)));
+    DXContainer C = llvm::cantFail(
+        DXContainer::create(getMemoryBuffer<sizeof(Buffer)>(Buffer)));
 
     auto MaybeRS = C.getRootSignature();
     ASSERT_TRUE(MaybeRS.has_value());
@@ -1597,10 +1597,10 @@ TEST(RootSignature, ParseStaticSamplers) {
     uint8_t Buffer[] = {
         0x44, 0x58, 0x42, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-        0x90, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x00,
+        0x94, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x52, 0x54, 0x53, 0x30, 0x4c, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x52, 0x54, 0x53, 0x30, 0x50, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
         0x18, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
@@ -1608,8 +1608,8 @@ TEST(RootSignature, ParseStaticSamplers) {
         0x00, 0x00, 0x00, 0x00, 0x85, 0xeb, 0x91, 0x40, 0x66, 0x66, 0x0e, 0x41,
         0x1f, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
         0x01, 0x00, 0x00, 0x00};
-    DXContainer C =
-        llvm::cantFail(DXContainer::create(getMemoryBuffer<148>(Buffer)));
+    DXContainer C = llvm::cantFail(
+        DXContainer::create(getMemoryBuffer<sizeof(Buffer)>(Buffer)));
 
     auto MaybeRS = C.getRootSignature();
     ASSERT_TRUE(MaybeRS.has_value());
@@ -1638,6 +1638,61 @@ TEST(RootSignature, ParseStaticSamplers) {
     ASSERT_EQ(Sampler.ShaderVisibility, 7U);
     ASSERT_EQ(Sampler.Flags, 1U);
   }
+}
+
+TEST(RootSignature, RejectsTruncatedArrays) {
+  SmallVector<char> Buffer(24, 0);
+  auto SetWord = [&](unsigned Index, uint32_t Value) {
+    support::endian::write32le(Buffer.data() + Index * 4, Value);
+  };
+  SetWord(0, 2);
+  SetWord(3, 1);
+  SetWord(4, 24);
+  DirectX::RootSignature StaticSampler(StringRef(Buffer.data(), Buffer.size()));
+  ASSERT_THAT_ERROR(StaticSampler.parse(), Failed());
+  SetWord(3, 0);
+  SetWord(1, UINT32_MAX);
+  SetWord(2, 24);
+  DirectX::RootSignature Parameters(StringRef(Buffer.data(), Buffer.size()));
+  ASSERT_THAT_ERROR(Parameters.parse(), Failed());
+}
+
+TEST(RootSignature, DescriptorTableUsesSerializedOffset) {
+  SmallVector<char> Buffer(72, 0);
+  auto SetWord = [&](unsigned Index, uint32_t Value) {
+    support::endian::write32le(Buffer.data() + Index * 4, Value);
+  };
+  SetWord(0, 2);
+  SetWord(1, 1);
+  SetWord(2, 24);
+  SetWord(8, 36);
+  SetWord(9, 1);
+  SetWord(10, 48);
+  SetWord(11, UINT32_MAX);
+  SetWord(12, 2);
+  SetWord(13, 3);
+  SetWord(14, 5);
+  SetWord(15, 7);
+  SetWord(16, 4);
+  SetWord(17, 9);
+  DirectX::RootSignature Signature(StringRef(Buffer.data(), Buffer.size()));
+  ASSERT_THAT_ERROR(Signature.parse(), Succeeded());
+  auto Header = *Signature.param_headers().begin();
+  auto Parameter = Signature.getParameter(Header);
+  ASSERT_THAT_EXPECTED(Parameter, Succeeded());
+  auto Table = cast<DirectX::DescriptorTableView>(&*Parameter)
+                   ->read<dxbc::RTS0::v2::DescriptorRange>();
+  ASSERT_THAT_EXPECTED(Table, Succeeded());
+  auto Range = *Table->begin();
+  EXPECT_EQ(Range.RangeType, 2u);
+  EXPECT_EQ(Range.NumDescriptors, 3u);
+  EXPECT_EQ(Range.BaseShaderRegister, 5u);
+  EXPECT_EQ(Range.RegisterSpace, 7u);
+  EXPECT_EQ(Range.Flags, 4u);
+  EXPECT_EQ(Range.OffsetInDescriptorsFromTableStart, 9u);
+  SetWord(10, UINT32_MAX);
+  DirectX::RootSignature BadOffset(StringRef(Buffer.data(), Buffer.size()));
+  ASSERT_THAT_ERROR(BadOffset.parse(), Failed());
 }
 
 // PSVInfo:

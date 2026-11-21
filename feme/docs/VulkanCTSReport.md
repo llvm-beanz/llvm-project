@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a) root-binding-plan regression scope (2026-11-21)
+
+The [root-plan follow-up](W0WindowsIntegrationProbe.md#w2a-root-signature-parsing-and-immutable-binding-plans-vm-2026-11-21)
+adds checked, owned 1.0/1.1 reflection and a non-dispatch inspection mode.
+It fixes complete array bounds and absolute descriptor-range offsets in
+LLVM's shared DirectX container reader. It does not alter CPU binding
+normalization, descriptor preparation, the artifact ABI, Vulkan command
+execution or advertisements.
+
+All FeMe LIT prerequisites and the native ARM64 ICD were rebuilt with
+assertions and disabled PCH. The complete suite, with native SDK FXC on
+PATH, passes **4,025**, with **15 Skipped, 10 Unsupported and zero
+failures**, from 4,050 discovered tests in **162.44 seconds**. Twelve
+new root-plan unit cases and three source fixtures account for the
+fifteen additional passes. Existing CPU, Vulkan unit/real-loader and
+graphics regression coverage passes.
+
+The rebuilt LLVM Object regressions and a LIT capability check pass
+**154**, with **2 Skipped and zero failures**. Both inventories reproduce
+unchanged against pinned registry `f84d432d5b89`; no manifest inputs,
+generated tables or advertised capabilities are edited. The previous
+Windows adapter-matrix results are not new measurements for this
+parsing-only milestone. **No real Vulkan CTS pass is claimed**: the
+external runner remains unavailable, and these LIT results do not close
+the pending bounded CTS comparison.
+
 ## W1(b) legacy DXBC CPU regression scope (2026-11-20)
 
 The [legacy CPU follow-up](W0WindowsIntegrationProbe.md#w1b-legacy-dxbc-cpu-execution-vm-2026-11-20)

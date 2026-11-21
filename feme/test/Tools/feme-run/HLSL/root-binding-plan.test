@@ -1,0 +1,43 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# REQUIRES: system-dxc-dxil
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /D LEGACY_ROOT=1 /force_rootsig_ver rootsig_1_0 /Fo %t.10.dxil %S/../Inputs/root-binding-plan.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /D LEGACY_ROOT=0 /force_rootsig_ver rootsig_1_1 /Fo %t.11.dxil %S/../Inputs/root-binding-plan.hlsl
+# RUN: feme-run --inspect-root-signature %t.10.dxil | FileCheck %s --check-prefixes=V10,FLAGS0,COMMON
+# RUN: feme-run --inspect-root-signature %t.11.dxil | FileCheck %s --check-prefixes=V11,FLAGS11,COMMON
+# RUN: %dxil_dxc /dumpbin /extractrootsignature /Fo %t.root %t.11.dxil
+# RUN: feme-run --inspect-root-signature %t.root | FileCheck %s --check-prefixes=V11,FLAGS11,COMMON
+# RUN: not feme-run --inspect-root-signature --heap=does-not-exist %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+# RUN: not feme-run --inspect-root-signature --reference %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+# RUN: not feme-run --inspect-root-signature --object %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+# RUN: not feme-run --inspect-root-signature --repeat=0 %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+# RUN: not feme-run --inspect-root-signature --wave-size=4 %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+# RUN: not feme-run --inspect-root-signature --groups=1,1,1 %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+# RUN: not feme-run --inspect-root-signature --entry-point=main %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+# RUN: not feme-run --inspect-root-signature -O2 %t.root 2>&1 | FileCheck %s --check-prefix=OPTIONS
+
+# V10: root-signature: version=1.0 flags=1 dwords=12 parameters=6 static-samplers=1
+# V11: root-signature: version=1.1 flags=1 dwords=12 parameters=6 static-samplers=1
+# COMMON-NEXT: parameter[0]: kind=1 visibility=0 constants=4
+# COMMON-NEXT:   cbv: space=7 register=3 count=1 offset=0 flags=0
+# COMMON-NEXT: parameter[1]: kind=2 visibility=0 constants=0
+# FLAGS0-NEXT:   cbv: space=7 register=4 count=1 offset=0 flags=0
+# FLAGS11-NEXT:   cbv: space=7 register=4 count=1 offset=0 flags=8
+# COMMON-NEXT: parameter[2]: kind=3 visibility=0 constants=0
+# FLAGS0-NEXT:   srv: space=7 register=3 count=1 offset=0 flags=0
+# FLAGS11-NEXT:   srv: space=7 register=3 count=1 offset=0 flags=8
+# COMMON-NEXT: parameter[3]: kind=4 visibility=0 constants=0
+# FLAGS0-NEXT:   uav: space=7 register=3 count=1 offset=0 flags=0
+# FLAGS11-NEXT:   uav: space=7 register=3 count=1 offset=0 flags=8
+# COMMON-NEXT: parameter[4]: kind=0 visibility=0 constants=0
+# FLAGS0-NEXT:   cbv: space=7 register=5 count=2 offset=4 flags=0
+# FLAGS11-NEXT:   cbv: space=7 register=5 count=2 offset=4 flags=4
+# FLAGS0-NEXT:   srv: space=7 register=9 count=1 offset=6 flags=0
+# FLAGS11-NEXT:   srv: space=7 register=9 count=1 offset=6 flags=4
+# COMMON-NEXT: parameter[5]: kind=0 visibility=0 constants=0
+# COMMON-NEXT:   sampler: space=7 register=5 count=1 offset=0 flags=0
+# COMMON-NEXT: static-sampler[0]: space=7 register=3 visibility=0 filter=0 address=1,2,3
+# COMMON-NOT: parameter[
+# OPTIONS: feme-run: '--inspect-root-signature' cannot be combined with dispatch options

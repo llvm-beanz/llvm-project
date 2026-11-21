@@ -451,10 +451,16 @@ otherwise distinguish the two.
 R18 also covers an entry's root signature: DXIL's `EntryRootSigTag` (12)
 entry property, a raw serialized byte blob, is preserved verbatim as
 `!feme.dxil.rootsignature` function metadata (`setRootSignature`/
-`getRootSignature`). FeMe does not parse a root signature's contents yet --
-that is roadmap W2, tracked in feme/docs/FeMeWARPDesign.md's "Root
-Signatures and Descriptor Heaps" -- so nothing here claims to interpret it,
-only to stop it from being lost when `!dx.entryPoints` is erased.
+`getRootSignature`). This preservation remains separate from interpretation.
+W2(a)'s [RootBindingPlan](../include/feme/Transforms/DXIL/RootBindingPlan.h)
+now provides owned, checked 1.0/1.1 reflection and an error-returning
+`getRootBindingPlan` reader for that canonical metadata. It preserves
+binding/visibility/sampler state and resolves table offsets, but does not
+change stage execution or apply a root-driven CPU resource mapping.
+Descriptor preparation, shader/root compatibility and runtime promise
+enforcement remain under the
+[Root Signatures and Descriptor Heaps](FeMeWARPDesign.md#root-signatures-and-descriptor-heaps)
+design.
 
 See `feme/lib/Transforms/DXIL/SignatureImport.cpp` and
 `test/Transforms/DXIL/dxil-raise-metadata-signature.ll`/

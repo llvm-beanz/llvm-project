@@ -71,9 +71,9 @@ llvm::StringRef getRootSignatureMDKind();
 
 /// Records \p Bytes -- an entry point's serialized root signature, taken
 /// verbatim from its `EntryRootSigTag` (12) property -- as \p F's
-/// `getRootSignatureMDKind()` function metadata. FeMe does not parse the
-/// root-signature blob itself yet (that is roadmap W2); this only prevents
-/// it from being lost when `!dx.entryPoints` is erased.
+/// `getRootSignatureMDKind()` function metadata. This preserves the raw
+/// blob when `!dx.entryPoints` is erased; RootBindingPlan.h provides checked
+/// 1.0/1.1 reflection separately, without changing resource lowering.
 void setRootSignature(llvm::Function &F, llvm::ArrayRef<uint8_t> Bytes);
 
 /// Reads back the root-signature bytes `setRootSignature` attached to \p F,

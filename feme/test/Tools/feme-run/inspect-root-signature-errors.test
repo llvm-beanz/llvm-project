@@ -1,0 +1,15 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# RUN: echo DXBC > %t.container
+# RUN: not feme-run --inspect-root-signature %t.container 2>&1 | FileCheck %s --check-prefix=CONTAINER
+# RUN: echo not-a-root-signature > %t.blob
+# RUN: not feme-run --inspect-root-signature %t.blob 2>&1 | FileCheck %s --check-prefix=BLOB
+# RUN: not feme-run --inspect-root-signature %t.missing 2>&1 | FileCheck %s --check-prefix=MISSING
+# CONTAINER: feme-run:
+# CONTAINER-NOT: root-signature:
+# BLOB: feme-run: Invalid root signature, insufficient space for header.
+# BLOB-NOT: root-signature:
+# MISSING: feme-run:
+# MISSING-NOT: root-signature:

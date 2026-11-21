@@ -7,6 +7,7 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_feme_unittest(FeMeTransformsDXILTests
+  RootBindingPlanTest.cpp
   SignatureImportTest.cpp
   )
 target_link_libraries(FeMeTransformsDXILTests

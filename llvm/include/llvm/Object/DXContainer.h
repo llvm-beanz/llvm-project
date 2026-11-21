@@ -127,9 +127,11 @@ namespace DirectX {
 struct RootParameterView {
   const dxbc::RTS0::v1::RootParameterHeader &Header;
   StringRef ParamData;
+  StringRef TableRanges;
 
-  RootParameterView(const dxbc::RTS0::v1::RootParameterHeader &H, StringRef P)
-      : Header(H), ParamData(P) {}
+  RootParameterView(const dxbc::RTS0::v1::RootParameterHeader &H, StringRef P,
+                    StringRef Ranges = {})
+      : Header(H), ParamData(P), TableRanges(Ranges) {}
 
   template <typename T> Expected<T> readParameter() {
     T Struct;
@@ -198,6 +200,9 @@ struct DescriptorTableView : RootParameterView {
 
   // Define a type alias to access the template parameter from inside classof
   template <typename T> llvm::Expected<DescriptorTable<T>> read() {
+    if (ParamData.size() != 2 * sizeof(uint32_t))
+      return make_error<GenericBinaryError>(
+          "Reading structure out of file bounds", object_error::parse_failed);
     const char *Current = ParamData.begin();
     DescriptorTable<T> Table;
 
@@ -209,9 +214,11 @@ struct DescriptorTableView : RootParameterView {
         support::endian::read<uint32_t, llvm::endianness::little>(Current);
     Current += sizeof(uint32_t);
 
-    Table.Ranges.Data = ParamData.substr(2 * sizeof(uint32_t),
-                                         static_cast<size_t>(Table.NumRanges) *
-                                             Table.Ranges.Stride);
+    if (uint64_t(Table.NumRanges) * sizeof(T) != TableRanges.size())
+      return make_error<GenericBinaryError>(
+          "Reading descriptor ranges out of file bounds",
+          object_error::parse_failed);
+    Table.Ranges.Data = TableRanges;
     return Table;
   }
 };
@@ -256,10 +263,12 @@ public:
 
   llvm::Expected<RootParameterView>
   getParameter(const dxbc::RTS0::v1::RootParameterHeader &Header) const {
-    size_t DataSize;
-    size_t EndOfSectionByte = getNumStaticSamplers() == 0
-                                  ? PartData.size()
-                                  : getStaticSamplersOffset();
+    size_t DataSize = 0;
+    StringRef Ranges;
+    auto InBounds = [&](uint32_t Offset, uint64_t Size) {
+      return Offset >= sizeof(dxbc::RTS0::v1::RootSignatureHeader) &&
+             Offset <= PartData.size() && Size <= PartData.size() - Offset;
+    };
 
     if (!dxbc::isValidParameterType(Header.ParameterType))
       return parseFailed("invalid parameter type");
@@ -277,27 +286,31 @@ public:
         DataSize = sizeof(dxbc::RTS0::v2::RootDescriptor);
       break;
     case dxbc::RootParameterType::DescriptorTable:
-      if (Header.ParameterOffset + sizeof(uint32_t) > EndOfSectionByte)
+      DataSize = 2 * sizeof(uint32_t);
+      if (!InBounds(Header.ParameterOffset, DataSize))
         return parseFailed("Reading structure out of file bounds");
 
       uint32_t NumRanges =
           support::endian::read<uint32_t, llvm::endianness::little>(
               PartData.begin() + Header.ParameterOffset);
-      if (Version == 1)
-        DataSize = sizeof(dxbc::RTS0::v1::DescriptorRange) * NumRanges;
-      else
-        DataSize = sizeof(dxbc::RTS0::v2::DescriptorRange) * NumRanges;
-
-      // 4 bytes for the number of ranges in table and
-      // 4 bytes for the ranges offset
-      DataSize += 2 * sizeof(uint32_t);
+      uint32_t RangesOffset =
+          support::endian::read<uint32_t, llvm::endianness::little>(
+              PartData.begin() + Header.ParameterOffset + sizeof(uint32_t));
+      uint64_t RangeBytes =
+          uint64_t(NumRanges) * (Version == 1
+                                     ? sizeof(dxbc::RTS0::v1::DescriptorRange)
+                                     : sizeof(dxbc::RTS0::v2::DescriptorRange));
+      if (NumRanges && !InBounds(RangesOffset, RangeBytes))
+        return parseFailed("Reading descriptor ranges out of file bounds");
+      if (NumRanges)
+        Ranges = PartData.substr(RangesOffset, RangeBytes);
       break;
     }
-    if (Header.ParameterOffset + DataSize > EndOfSectionByte)
+    if (!InBounds(Header.ParameterOffset, DataSize))
       return parseFailed("Reading structure out of file bounds");
 
     StringRef Buff = PartData.substr(Header.ParameterOffset, DataSize);
-    RootParameterView View = RootParameterView(Header, Buff);
+    RootParameterView View = RootParameterView(Header, Buff, Ranges);
     return View;
   }
 };

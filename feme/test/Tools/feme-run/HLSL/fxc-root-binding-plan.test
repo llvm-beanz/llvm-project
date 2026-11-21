@@ -1,0 +1,9 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# REQUIRES: system-fxc
+# RUN: %fxc /nologo /WX /T cs_5_1 /E main /D LEGACY_ROOT=1 /Fo %t.dxbc %S/../Inputs/root-binding-plan.hlsl
+# RUN: feme-run --inspect-root-signature %t.dxbc | FileCheck %S/root-binding-plan.test --check-prefixes=V11,FLAGS0,COMMON
+# RUN: %fxc /nologo /WX /T rootsig_1_0 /E ROOT /D LEGACY_ROOT=1 /Fo %t.root %S/../Inputs/root-binding-plan.hlsl
+# RUN: feme-run --inspect-root-signature %t.root | FileCheck %S/root-binding-plan.test --check-prefixes=V10,FLAGS0,COMMON
