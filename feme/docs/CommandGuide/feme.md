@@ -87,8 +87,12 @@ coverage" in [../Design.md](../Design.md).
   declaration. Arrays cannot span adjacent ranges or individual static
   samplers; dynamic declarations and indirect calls fail validation.
   Root SRV/UAV descriptors require raw or structured buffers; typed buffers
-  and textures require descriptor tables. Counter compatibility and
-  descriptor promises remain outside this check.
+  and textures require descriptor tables. Live original native heap
+  handles require `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` for resources or
+  `SAMPLER_HEAP_DIRECTLY_INDEXED` for samplers. This precedes normalization;
+  generated heap accesses emulating traditional bindings do not require
+  these flags. Counter compatibility and descriptor promises remain
+  outside this check.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

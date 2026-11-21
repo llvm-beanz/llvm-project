@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native-heap-flag regression scope (2026-11-21)
+
+The [native-heap follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-heap-root-flags-vm-2026-11-21)
+requires matching resource/sampler direct-index flags for original native
+heap handles in opt-in explicit-root preflight. It precedes normalization;
+traditional bound emulation and default inferred behavior are unchanged.
+Two unit cases cover independent flags, both signature versions, canonical
+types and helper/dead-handle traversal. A DXC SM 6.6 fixture verifies
+nonuniform two-entry indexing, partial waves, retained normal/reference/AOT
+dispatches, complete guards and independent FeMe missing/wrong-flag errors.
+The measured SDK accepts those signatures without `/Vd`; no SDK rejection
+is claimed.
+
+Focused LIT passes **851** in **6.53 seconds**, with zero failures. Full
+FeMe LIT passes **4,069**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,094** discovered tests in **124.85 seconds**. The
+three added passes are two unit cases and one source fixture. Existing
+graphics and Vulkan unit/real-loader coverage remains passing; timings
+are not a controlled performance comparison.
+
+Artifact ABI 8, shader argument layouts, Vulkan semantics, advertisements,
+pinned inventory and adapter-matrix results are unchanged. Dynamic
+descriptor preparation, new sampler execution, general CBVs, multiple
+inline parameters and owned D3D12 execution are not established.
+**No real Vulkan CTS pass is claimed**; the external runner is unavailable.
+
 ## W2(a) unread-root-contract regression scope (2026-11-21)
 
 The [unread-parameter follow-up](W0WindowsIntegrationProbe.md#w2a-unread-inline-constant-reflection-vm-2026-11-21)

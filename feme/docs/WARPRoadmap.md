@@ -538,6 +538,23 @@ with zero failures; artifact ABI stays 8 and inferred behavior is unchanged.
 This is stable single-parameter reflection, not multiple inline parameters,
 general CBVs, descriptor materialization or owned D3D12 execution.
 
+W2(a)/W2(b) native-heap-flag progress (2026-11-21): opt-in explicit-root
+preflight now requires the matching resource/sampler direct-index root flag
+for live original heap handles in the entry/direct-helper graph. It runs
+before normalization; traditional bound emulation does not require native
+flags. Two unit cases cover both signature versions, independent flags,
+canonical resource/sampler types, helpers and dead/unrelated handles.
+A real SM 6.6 DXC fixture executes nonuniform two-entry resource-heap
+indexing on partial waves, retaining three normal/reference/AOT dispatches
+with complete guard readbacks. The measured SDK accepts missing/wrong flags
+without `/Vd`; FeMe independently rejects both in explicit-root compilation,
+while inferred execution is preserved. Focused LIT passes 851 cases in
+6.53 seconds; full LIT passes 4,069 with 15 skipped, 10 unsupported and
+zero failures, from 4,094 discovered tests in 124.85 seconds. Timings are
+not a controlled performance comparison. This is root-flag admission, not full
+dynamic descriptor preparation, new sampler execution or owned D3D12
+execution; artifact ABI remains 8 and W2(a)/W2(b) stay open.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

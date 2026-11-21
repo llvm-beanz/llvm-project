@@ -80,11 +80,12 @@ public:
                                    uint32_t Space, uint32_t Register,
                                    uint32_t Count,
                                    llvm::dxbc::ShaderVisibility Stage) const;
-  /// Checks bound-resource declarations reachable from an entry point,
+  /// Checks live resource declarations reachable from an entry point,
   /// including direct helper calls, before normalization discards identities.
-  /// Root SRV/UAV descriptors require raw/structured buffers. Dynamic heap
-  /// access, counters and other resource-kind/promise compatibility are
-  /// separate.
+  /// Root SRV/UAV descriptors require raw/structured buffers. Native heap
+  /// handles require their resource/sampler direct-index flag; emulated bound
+  /// access does not. Heap contents, counters and other resource-kind/promise
+  /// compatibility are separate.
   llvm::Error checkShaderBindings(const llvm::Function &Entry,
                                   llvm::dxbc::ShaderVisibility Stage) const;
   void print(llvm::raw_ostream &OS) const;

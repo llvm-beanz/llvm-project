@@ -1,0 +1,62 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --wave-size=8 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=3 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MISSING /Fo %t/missing.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/missing.dxil 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: not feme-run --root-signature-constants --reference --heap=%t/heap.yaml %t/missing.dxil 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/missing.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: feme-run --repeat=3 --heap=%t/heap.yaml %t/missing.dxil | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D WRONG /Fo %t/wrong.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/wrong.dxil 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: not feme-run --root-signature-constants --reference --heap=%t/heap.yaml %t/wrong.dxil 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/wrong.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: feme-run --reference --repeat=3 --heap=%t/heap.yaml %t/wrong.dxil | FileCheck %s
+# RUN: feme --target=%feme_host_triple %t/wrong.dxil -o %t/inferred.o
+# RUN: feme-run --object --repeat=3 --heap=%t/heap.yaml %t/inferred.o | FileCheck %s
+#
+# The measured SDK accepts missing/wrong flags without /Vd. FeMe must check
+# original native heap handles, not the handles created for bound emulation.
+# CHECK: heap[0]: 42 0 42 123456789 987654321{{$}}
+# CHECK-NEXT: heap[1]: 0 42 0 123456789 987654321{{$}}
+# CHECK-NEXT: heap[0]: 42 0 42 123456789 987654321{{$}}
+# CHECK-NEXT: heap[1]: 0 42 0 123456789 987654321{{$}}
+# CHECK-NEXT: heap[0]: 42 0 42 123456789 987654321{{$}}
+# CHECK-NEXT: heap[1]: 0 42 0 123456789 987654321{{$}}
+# CHECK-NOT: heap[
+# REJECT: native resource heap access in 'main' requires root flag CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) { uint A; };
+#if defined(MISSING)
+#define FLAGS ""
+#elif defined(WRONG)
+#define FLAGS "RootFlags(SAMPLER_HEAP_DIRECTLY_INDEXED),"
+#else
+#define FLAGS "RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED),"
+#endif
+[RootSignature(FLAGS "RootConstants(num32BitConstants=1,b3,space=7)")]
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+  RWByteAddressBuffer Output =
+      ResourceDescriptorHeap[NonUniformResourceIndex(TID.x % 2)];
+  Output.Store(TID.x * 4, A);
+}
+
+#--- heap.yaml
+root-constants: [42]
+resource-heap:
+  - index: 0
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]
+  - index: 1
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]

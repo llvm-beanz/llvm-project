@@ -78,9 +78,12 @@ The original compute-only baseline is no longer current:
   helper graph for class, space, visibility and complete containment in one
   root binding; adjacent ranges cannot collectively cover an array.
   Preflight also requires raw/structured buffers for root SRV/UAV descriptors;
-  typed buffers and textures require tables. Counter/promise compatibility
-  remains separate. The check does not materialize tables or establish full
-  shader/root compatibility.
+  typed buffers and textures require tables. Live original native heap
+  handles require the matching resource/sampler direct-index root flag;
+  heap accesses generated for traditional bound emulation do not.
+  Counter/promise compatibility remains separate. The check does not
+  materialize tables, prepare dynamic descriptors, enable unsupported
+  operations or establish full shader/root compatibility.
   Bound raw/typed buffers now retain separate SRV/UAV namespaces through
   normalization, reflection and host preparation, including coincident
   register numbers. Unqualified host bindings must be unambiguous.

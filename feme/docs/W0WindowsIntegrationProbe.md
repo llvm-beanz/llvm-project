@@ -27,6 +27,41 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native heap root flags (VM, 2026-11-21)
+
+Explicit-root preflight now validates live original native heap handles:
+resources require `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`, and samplers require
+`SAMPLER_HEAP_DIRECTLY_INDEXED`. The existing entry/direct-helper traversal
+ignores unrelated functions and dead handles. Checks run before bound
+normalization, so emulation of traditional bindings does not acquire a
+native-heap flag requirement. Missing flags yield function-specific errors.
+
+Two new unit cases cover 48 resource/type/flag/version combinations and
+reachable helpers, dead handles and unrelated functions. The real DXC
+SM 6.6 fixture indexes two resource descriptors nonuniformly with three
+threads. Widths 4/8, scalar reference and native AOT retain three dispatches
+and verify complete outputs and untouched guards.
+
+The measured SDK DXC accepts missing and sampler-only flags for this
+resource-heap shader without `/Vd`. FeMe independently rejects both during
+normal/reference/AOT explicit-root compilation. Inferred normal/reference/
+AOT execution remains compatible; no SDK rejection is claimed.
+
+Focused LIT passes **851** in **6.53 seconds**, with zero failures. The
+rebuilt full suite with native SDK DXC/FXC passes **4,069**, with **15
+Skipped, 10 Unsupported and zero failures**, from **4,094** discovered
+tests in **124.85 seconds**. The three added passes are two unit cases and
+one source fixture. Assertions, disabled PCH and the memory-safe build
+limit are retained.
+Timings are not a controlled performance comparison.
+
+Artifact ABI stays 8. This validates native flag admission, not dynamic
+descriptor contents/preparation, otherwise unsupported resource operations,
+new sampler execution, multiple inline parameters or general CBVs. Owned
+D3D12 execution remains absent: `CreateDevice` is still `E_NOTIMPL`.
+W0(c), W0(g), W1, W2(a) and W2(b) remain open. No new adapter-matrix or
+external Vulkan CTS result is claimed.
+
 ## W2(a) unread inline-constant reflection (VM, 2026-11-21)
 
 Explicit-root compilation now retains the selected parameter's register,

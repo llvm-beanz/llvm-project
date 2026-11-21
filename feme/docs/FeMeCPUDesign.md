@@ -2544,10 +2544,19 @@ Canonical raw and structured buffers remain admitted, and the table path
 retains existing resource-kind behavior. Checks precede normalization and
 metadata attachment in stage/JIT/reference/AOT compilation.
 
-This checks declared binding identity and root SRV/UAV resource kinds,
-not descriptor contents, table materialization, full resource-kind/counter
-compatibility or root-descriptor promises. Native dynamic-heap access is
-outside this static binding check. The inferred mode remains unchanged.
+Live original `llvm.dx.resource.handlefromheap` calls also require the
+matching root flag: `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` for resource handles
+and `SAMPLER_HEAP_DIRECTLY_INDEXED` for sampler handles. This uses the same
+entry/direct-helper traversal and ignores dead handles. It runs before
+normalization, so heap accesses generated to emulate traditional bindings
+do not require native direct-index flags. Missing flags produce a
+function-specific error before selection metadata is attached.
+
+This checks declared binding identity, root SRV/UAV resource kinds and
+native heap flags, not descriptor contents, table materialization, full
+resource-kind/counter compatibility or root-descriptor promises. It does
+not admit otherwise unsupported heap resource operations. The inferred
+mode remains unchanged.
 
 That parameter's register/space selects the cbuffer, and its full DWORD
 count sets `RootConstantSize` reflection. Reads must fit both the shader's

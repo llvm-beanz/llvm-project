@@ -440,6 +440,81 @@ Function *makeShaderFunction(Module &M, StringRef Name) {
   return F;
 }
 
+CallInst *addHeapHandle(Module &M, Function &F, TargetExtType *Ty) {
+  IRBuilder<> B(F.getEntryBlock().getTerminator());
+  auto *Decl = Intrinsic::getOrInsertDeclaration(
+      &M, Intrinsic::dx_resource_handlefromheap, {Ty});
+  auto *Handle = B.CreateCall(Decl, {B.getInt32(0)});
+  auto *Use = Function::Create(FunctionType::get(B.getVoidTy(), {Ty}, false),
+                               GlobalValue::ExternalLinkage, "consume", M);
+  B.CreateCall(Use, {Handle});
+  return Handle;
+}
+
+TEST(RootBindingPlanTest, NativeHeapFlagsDistinguishResourcesAndSamplers) {
+  LLVMContext C;
+  auto *I32 = Type::getInt32Ty(C);
+  SmallVector<TargetExtType *, 6> Types{
+      TargetExtType::get(C, "dx.RawBuffer", {Type::getInt8Ty(C)}, {1, 0}),
+      TargetExtType::get(C, "dx.TypedBuffer", {I32}, {0, 0, 0}),
+      TargetExtType::get(C, "dx.Texture", {I32}, {0, 0, 0, 2}),
+      TargetExtType::get(C, "dx.CBuffer", {ArrayType::get(I32, 4)}),
+      TargetExtType::get(C, "dx.Sampler", {}, {0}),
+      TargetExtType::get(C, "dx.Sampler", {}, {1})};
+  for (auto [Index, Ty] : enumerate(Types)) {
+    Module M("native-heap", C);
+    auto *F = makeShaderFunction(M, "main");
+    addHeapHandle(M, *F, Ty);
+    for (uint32_t Version : {1u, 2u})
+      for (uint32_t Flags : {0u, 0x400u, 0x800u, 0xc00u}) {
+        auto Bytes = root(Version, {});
+        setWord(Bytes, 5, Flags);
+        auto Plan = RootBindingPlan::parse(Bytes);
+        ASSERT_TRUE(bool(Plan));
+        auto E = Plan->checkShaderBindings(*F, dxbc::ShaderVisibility::All);
+        bool Sampler = Index >= 4;
+        if (Flags & (Sampler ? 0x800u : 0x400u)) {
+          EXPECT_THAT_ERROR(std::move(E), Succeeded());
+          continue;
+        }
+        EXPECT_TRUE(StringRef(toString(std::move(E)))
+                        .contains(Sampler
+                                      ? "SAMPLER_HEAP_DIRECTLY_INDEXED"
+                                      : "CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED"));
+      }
+  }
+}
+
+TEST(RootBindingPlanTest, NativeHeapFlagsCheckHelpersButIgnoreDeadHandles) {
+  LLVMContext C;
+  Module M("native-helpers", C);
+  auto *Entry = makeShaderFunction(M, "main");
+  auto *Helper = makeShaderFunction(M, "helper");
+  auto *Other = makeShaderFunction(M, "unrelated");
+  auto *Ty =
+      TargetExtType::get(C, "dx.RawBuffer", {Type::getInt8Ty(C)}, {1, 0});
+  auto *Handle = addHeapHandle(M, *Helper, Ty);
+  addHeapHandle(M, *Other, Ty);
+  IRBuilder<>(Entry->getEntryBlock().getTerminator()).CreateCall(Helper);
+  auto Bytes = root(2, {});
+  auto Plan = RootBindingPlan::parse(Bytes);
+  ASSERT_TRUE(bool(Plan));
+  std::string Message =
+      toString(Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::All));
+  EXPECT_TRUE(StringRef(Message).contains("native resource heap access"));
+  EXPECT_TRUE(StringRef(Message).contains("in 'helper'"));
+  setWord(Bytes, 5, 0x400);
+  auto Enabled = RootBindingPlan::parse(Bytes);
+  ASSERT_TRUE(bool(Enabled));
+  EXPECT_THAT_ERROR(
+      Enabled->checkShaderBindings(*Entry, dxbc::ShaderVisibility::All),
+      Succeeded());
+  cast<Instruction>(*Handle->user_begin())->eraseFromParent();
+  EXPECT_THAT_ERROR(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::All),
+      Succeeded());
+}
+
 TEST(RootBindingPlanTest, ValidatesResourceClassesFromCanonicalHandleTypes) {
   LLVMContext C;
   auto *I32 = Type::getInt32Ty(C);

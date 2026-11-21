@@ -55,7 +55,7 @@ declare {i32,i32,i32,i32} @llvm.dx.resource.load.cbufferrow.4.i32(target("dx.CBu
 declare target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefromheap(i32)
 declare void @llvm.dx.resource.store.rawbuffer.i32(target("dx.RawBuffer", i8, 1, 0),i32,i32,i32)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="3,1,1" }
-!0 = !{[48 x i8] c"\02\00\00\00\01\00\00\00\18\00\00\00\00\00\00\00\30\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00\24\00\00\00\03\00\00\00\07\00\00\00\02\00\00\00"}
+!0 = !{[48 x i8] c"\02\00\00\00\01\00\00\00\18\00\00\00\00\00\00\00\30\00\00\00\00\04\00\00\01\00\00\00\00\00\00\00\24\00\00\00\03\00\00\00\07\00\00\00\02\00\00\00"}
 
 ;--- heap.yaml
 root-constants: [42, 43]

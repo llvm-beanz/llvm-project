@@ -356,13 +356,27 @@ Error RootBindingPlan::checkShaderBindings(const Function &Entry,
             F->getName().str().c_str());
       if (!Callee->isDeclaration())
         Worklist.push_back(Callee);
-      if (Callee->getIntrinsicID() !=
-              Intrinsic::dx_resource_handlefrombinding ||
+      auto ID = Callee->getIntrinsicID();
+      if ((ID != Intrinsic::dx_resource_handlefrombinding &&
+           ID != Intrinsic::dx_resource_handlefromheap) ||
           Call->use_empty())
         continue;
       auto *Ty = dyn_cast<TargetExtType>(Call->getType());
       if (!Ty || !isa<llvm::dxil::AnyResourceExtType>(Ty))
         return invalid("unsupported resource type in shader binding");
+      if (ID == Intrinsic::dx_resource_handlefromheap) {
+        bool Sampler = isa<llvm::dxil::SamplerExtType>(Ty);
+        auto Required = Sampler ? dxbc::RootFlags::SamplerHeapDirectlyIndexed
+                                : dxbc::RootFlags::CBVSRVUAVHeapDirectlyIndexed;
+        if (!(Flags & uint32_t(Required)))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "native %s heap access in '%s' requires root flag %s",
+              Sampler ? "sampler" : "resource", F->getName().str().c_str(),
+              Sampler ? "SAMPLER_HEAP_DIRECTLY_INDEXED"
+                      : "CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED");
+        continue;
+      }
       ResourceClass Class;
       if (isa<llvm::dxil::CBufferExtType>(Ty)) {
         if (Ty->getNumTypeParameters() != 1)
