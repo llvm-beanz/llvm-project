@@ -24,5 +24,6 @@ add_feme_library(FeMeTargetCPU
   FeMeOptimizer
   FeMeRuntimeCPU
   FeMeTransformsCPU
+  FeMeTransformsDXIL
   FeMeTransformsGraphics
   )

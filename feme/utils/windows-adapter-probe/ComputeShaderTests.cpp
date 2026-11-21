@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "BufferIO.h"
 #include "ComputeShaderValidation.h"
 
 #include <array>
@@ -13,6 +14,41 @@
 
 int wmain(int Argc, wchar_t **Argv) {
   using namespace feme::probe;
+  auto Fail = [](const wchar_t *Reason) {
+    bufferIOFailure(Reason);
+    return 1;
+  };
+  if (Argc == 3 && std::wcscmp(Argv[1], L"--heap") == 0) {
+    if (std::wcscmp(Argv[2], L"0") != 0 && std::wcscmp(Argv[2], L"7") != 0)
+      return Fail(L"expected register space 0 or 7");
+    return writeBufferHeap(stdout, Argv[2][0] == L'7' ? 7 : 0) ? 0 : 1;
+  }
+  if (Argc == 5 && std::wcscmp(Argv[1], L"--output") == 0) {
+    if (std::wcscmp(Argv[3], L"0") != 0 && std::wcscmp(Argv[3], L"7") != 0)
+      return Fail(L"expected register space 0 or 7");
+    bool Grouped = std::wcscmp(Argv[4], L"grouped") == 0;
+    if (!Grouped && std::wcscmp(Argv[4], L"raw") != 0)
+      return Fail(L"expected workload raw or grouped");
+    FILE *Input = nullptr;
+    if (_wfopen_s(&Input, Argv[2], L"rb") != 0 || !Input)
+      return Fail(L"cannot open runner output");
+    unsigned Space = Argv[3][0] == L'7' ? 7 : 0;
+    std::array<std::uint8_t, BufferBytes> Data{};
+    bool Valid = readBufferOutput(Input, Space, Data.data(), Data.size()) &&
+                 validateComputeShader(Data.data(), Data.size(), Grouped);
+    if (std::fclose(Input) != 0)
+      return Fail(L"runner output close failed");
+    if (!Valid)
+      return 1;
+    ComputeDispatch Dispatch = computeDispatch(Grouped);
+    std::wprintf(
+        L"FeMe CPU compute verified: workload=%ls values=%zu "
+        L"bytes=%zu groups=%u,%u,%u threads=%zu space=%u guard-bytes=%zu\n",
+        Argv[4], Dispatch.Values, BufferBytes, Dispatch.X, Dispatch.Y,
+        Dispatch.Z, Dispatch.Threads, Space,
+        BufferBytes - Dispatch.Values * sizeof(std::uint32_t));
+    return 0;
+  }
   constexpr const wchar_t *Names[] = {
       L"success",    L"wrong-size",  L"missing-data",
       L"first-byte", L"last-value",  L"guard-first",

@@ -15,7 +15,7 @@
 // time.
 //
 // The input may already be idiomatic, raised LLVM IR (`.ll`/`.bc`), a DXIL
-// bitcode file/DXContainer, or (roadmap step R10, see
+// bitcode file, a DXIL/legacy DXBC DXContainer, or (roadmap step R10, see
 // feme/docs/Roadmap.md's §2.4.2) a SPIR-V binary module: `loadModule` below
 // sniffs which, and for DXIL/SPIR-V, runs the same import
 // (`feme::DXILImporter`/`feme::SPIRVImporter`) + translation/raising
@@ -31,7 +31,8 @@
 // (see that pass's own header comment for current scope); every other
 // builtin/intrinsic the CPU pipeline lowers already accepts both formats'
 // raised vocabulary uniformly (see e.g. `feme::cpu::SIMDizePass`'s
-// `dx_thread_id`/`spv_thread_id` cases).
+// `dx_thread_id`/`spv_thread_id` cases). Legacy DXBC uses DXBCImporter and
+// DXSAToLLVMIRTranslator before the same DXIL raising passes.
 //
 // Every resource-heap/binding entry defaults to an untyped raw buffer, the
 // only kind milestone 11's heap file format described; roadmap step R8
@@ -99,12 +100,14 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Import/DXBC/DXBCImporter.h"
 #include "feme/Import/DXIL/DXILImporter.h"
 #include "feme/Import/SPIRV/SPIRVImporter.h"
 #include "feme/Target/CPU/JITEngine.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Translate/DXSA/DXSATranslator.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -1183,7 +1186,7 @@ void printHeapContents(
   }
 }
 
-/// Whether \p Buffer looks like a DXIL bitcode file or DXContainer, the same
+/// Whether \p Buffer looks like a DXIL/DXBC container or bitcode file, the same
 /// sniff `feme::Driver`'s own format detection uses (see the "DXIL" section
 /// of feme/docs/Design.md): a `DXContainer` starts with the magic "DXBC"
 /// (the format predates the DXIL name), while raw DXIL is plain LLVM
@@ -1235,12 +1238,14 @@ void clearHostAgnosticMetadata(llvm::Module &M) {
 /// raised, idiomatic LLVM IR (`.ll`/`.bc`) is parsed directly, matching
 /// `feme-run`'s original, milestone-4 scope; a DXIL bitcode file or
 /// DXContainer is imported and raised the same way `feme::Driver` raises
-/// one before any target-specific lowering (`feme::dxil::OpRaisingPass`
+/// one before any target-specific lowering. Legacy DXBC first passes through
+/// DXBCImporter and DXSAToLLVMIRTranslator; both DirectX inputs then run
+/// `feme::dxil::OpRaisingPass`, which
 /// undoes the `dx.op.*` calling convention, then
 /// `feme::dxil::MetadataRaisingPass` recovers the shader model, entry
 /// points, and thread-group dimensions from `dx.*` metadata into the
 /// `hlsl.*` function attributes this tool's own pipeline reads them from --
-/// see the DXIL section of feme/docs/Design.md) -- letting a test compile
+/// see the DXIL section of feme/docs/Design.md -- letting a test compile
 /// real HLSL through `clang`/DXIL's own backend and run the result straight
 /// through this tool. A SPIR-V binary module is imported
 /// (`feme::SPIRVImporter`, reusing MLIR's own `spirv` dialect deserializer)
@@ -1262,12 +1267,27 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
                              Filename.str().c_str(), EC.message().c_str());
 
   if (looksLikeDXIL((*BufOrErr)->getMemBufferRef())) {
-    feme::DXILImporter Importer;
+    Expected<bool> Legacy =
+        feme::containsDXBCShader((*BufOrErr)->getMemBufferRef());
+    if (!Legacy)
+      return Legacy.takeError();
+    feme::DXBCImporter DXBC;
+    feme::DXILImporter DXIL;
+    const feme::Importer *Importer = &DXIL;
+    if (*Legacy)
+      Importer = &DXBC;
     feme::ImportOptions ImportOpts;
     Expected<feme::Module> Imported =
-        Importer.import((*BufOrErr)->getMemBufferRef(), ImportOpts, Ctx);
+        Importer->import((*BufOrErr)->getMemBufferRef(), ImportOpts, Ctx);
     if (!Imported)
       return Imported.takeError();
+
+    if (*Legacy) {
+      feme::dxsa::DXSAToLLVMIRTranslator ToLLVMIR;
+      Imported = ToLLVMIR.translate(std::move(*Imported), Ctx);
+      if (!Imported)
+        return Imported.takeError();
+    }
 
     llvm::Module &M = Imported->getLLVMModule();
     ModuleAnalysisManager MAM;
@@ -1376,8 +1396,8 @@ int main(int argc, char **argv) {
 
   cl::opt<std::string> InputFilename(
       cl::Positional, cl::Required,
-      cl::desc("<input .ll/.bc file, DXIL bitcode/DXContainer, or SPIR-V "
-               "binary module>"));
+      cl::desc("<input .ll/.bc file, DXIL bitcode, DXIL/legacy DXBC container, "
+               "or SPIR-V binary module>"));
   cl::opt<std::string> HeapFilename(
       "heap", cl::desc("The resource-heap YAML file (see feme-run's own "
                        "file comment)"));

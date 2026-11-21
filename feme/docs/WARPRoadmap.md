@@ -386,6 +386,22 @@ failures. These are portable compiled-stage lifetime/reuse prerequisites,
 not concurrent D3D12 PSO compilation, pending-command teardown or owned
 command-list/fence replay. W1(a)/W1(b) and owned `CreateDevice` remain open.
 
+The [legacy CPU follow-up](W0WindowsIntegrationProbe.md#w1b-legacy-dxbc-cpu-execution-vm-2026-11-20)
+now accepts original FXC DXBC in `feme-run`, sharing container detection
+with `feme::Driver` and reusing DXSA translation plus DXIL raising. The
+real pilot exposed missing CPU integer multiply-add normalization; both
+SIMD and scalar-reference paths now reuse the shared DXIL intrinsic
+expansion, with wrapping-overflow regression coverage. Twenty-four CPU
+cases execute raw/grouped SM5.0/5.1 originals and re-emitted DXIL at widths
+4/8, including SM5.1 spaces 0/7. Every case validates three complete
+64 KiB readbacks with the same scalar/grouped WARP oracle. All three
+expanded LIT matrices pass 158/158; FXC-only and default configurations
+pass 103/103 and 82/82. The rebuilt full suite with FXC enabled passes
+4,010 tests with zero failures, and both capability inventories reproduce
+unchanged. This advances W0(c)'s mandatory legacy compute prerequisite,
+not general legacy/all-stage compatibility or owned D3D12 execution.
+W0(c), W0(g), W1(a) and W1(b) remain open.
+
 ### W2: Binding, resources, and synchronization
 
 Depends on W1 and WS0-WS1. General CBVs and unbounded/non-uniform binding are

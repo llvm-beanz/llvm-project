@@ -35,6 +35,7 @@
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/VertexWrapper.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
+#include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/Graphics/CanonicalizeStage.h"
 #include "feme/Transforms/Graphics/ValidateStage.h"
 
@@ -415,6 +416,7 @@ Expected<PipelineResult> runPipeline(Module &M,
     Normalize.addPass(VerifierPass());
 #endif
     Normalize.addPass(PreparePass(Opts.EntryPoint, Opts.Stage));
+    Normalize.addPass(dxil::IntrinsicExpansionPass());
     Normalize.addPass(BoundResourceNormalizationPass());
     // Lowers the one register-bound constant buffer "Root constants" in
     // feme/docs/FeMeCPUDesign.md carves out an exception for, before

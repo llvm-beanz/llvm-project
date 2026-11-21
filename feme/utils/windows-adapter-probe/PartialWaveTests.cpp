@@ -7,7 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "PartialWaveIO.h"
+#include "BufferIO.h"
+#include "PartialWaveValidation.h"
 
 #include <iterator>
 
@@ -90,8 +91,8 @@ static int testOutputIO(const wchar_t *Name) {
     return fail(L"output fixture write/seek failed");
   }
   bool Parsed =
-      readPartialWaveOutput(Scenario == 8 ? nullptr : Input, 7, Actual.data(),
-                            Scenario == 7 ? BufferBytes - 1 : BufferBytes);
+      readBufferOutput(Scenario == 8 ? nullptr : Input, 7, Actual.data(),
+                       Scenario == 7 ? BufferBytes - 1 : BufferBytes);
   WaveObservation Observed;
   bool Passed = false;
   if (Scenario == 0)
@@ -115,7 +116,7 @@ int wmain(int Argc, wchar_t **Argv) {
   if (Argc == 3 && std::wcscmp(Argv[1], L"--heap") == 0) {
     if (std::wcscmp(Argv[2], L"0") != 0 && std::wcscmp(Argv[2], L"7") != 0)
       return fail(L"expected register space 0 or 7");
-    return writePartialWaveHeap(stdout, Argv[2][0] == L'7' ? 7 : 0) ? 0 : 1;
+    return writeBufferHeap(stdout, Argv[2][0] == L'7' ? 7 : 0) ? 0 : 1;
   }
   if (Argc == 5 && std::wcscmp(Argv[1], L"--output") == 0) {
     if (std::wcscmp(Argv[3], L"0") != 0 && std::wcscmp(Argv[3], L"7") != 0)
@@ -134,10 +135,9 @@ int wmain(int Argc, wchar_t **Argv) {
     std::array<std::uint8_t, BufferBytes> Data{};
     WaveObservation Observed;
     unsigned Space = Argv[3][0] == L'7' ? 7 : 0;
-    bool Valid =
-        readPartialWaveOutput(Input, Space, Data.data(), Data.size()) &&
-        validatePartialWave(Data.data(), Data.size(), {true, Wave, Wave},
-                            Observed);
+    bool Valid = readBufferOutput(Input, Space, Data.data(), Data.size()) &&
+                 validatePartialWave(Data.data(), Data.size(),
+                                     {true, Wave, Wave}, Observed);
     if (std::fclose(Input) != 0)
       return fail(L"runner output close failed");
     if (!Valid)

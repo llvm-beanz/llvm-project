@@ -45,7 +45,6 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/MC/TargetRegistry.h"
-#include "llvm/Object/DXContainer.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
@@ -101,9 +100,10 @@ namespace {
 /// Tool(s)" section of feme/docs/Design.md). Returns nullptr if \p Buffer's
 /// format cannot be determined this way -- this covers input FeMe does not
 /// yet import as well as genuinely unrecognized input, since neither can be
-/// told apart from the other without actually importing it.
-const Importer *detectFormat(llvm::MemoryBufferRef Buffer,
-                             const FormatRegistry &Registry) {
+/// told apart from the other without actually importing it. Malformed
+/// containers return their parse error instead of selecting an importer.
+llvm::Expected<const Importer *> detectFormat(llvm::MemoryBufferRef Buffer,
+                                              const FormatRegistry &Registry) {
   const Importer *DXIL = Registry.lookupImporter("dxil");
   const Importer *DXBC = Registry.lookupImporter("dxbc");
   const Importer *SPIRV = Registry.lookupImporter("spirv");
@@ -119,26 +119,10 @@ const Importer *detectFormat(llvm::MemoryBufferRef Buffer,
   // container. Raw DXIL bitcode, with no container at all, is always
   // DXILImporter's: legacy DXBC is never distributed outside a container.
   if (Data.starts_with("DXBC")) {
-    llvm::Expected<llvm::object::DXContainer> Container =
-        llvm::object::DXContainer::create(Buffer);
-    if (Container) {
-      // Guard against llvm::object::DXContainer::PartIterator's
-      // constructor unconditionally reading PartOffsets.back() when
-      // begin() already equals end(), which only a zero-part container
-      // reaches (see feme::DXBCImporter's own getShaderBytecode).
-      if (Container->getHeader().PartCount != 0)
-        for (const auto &Part : *Container) {
-          llvm::StringRef Name = Part.Part.getName();
-          if (Name == "SHEX" || Name == "SHDR")
-            return DXBC;
-        }
-    } else {
-      // Consume the error: an unparseable container is still DXILImporter's
-      // to reject with its own diagnostic, matching this function's
-      // "detect, don't validate" contract.
-      llvm::consumeError(Container.takeError());
-    }
-    return DXIL;
+    llvm::Expected<bool> Legacy = containsDXBCShader(Buffer);
+    if (!Legacy)
+      return Legacy.takeError();
+    return *Legacy ? DXBC : DXIL;
   }
 
   if (llvm::isBitcode(
@@ -324,7 +308,11 @@ unsigned getHostVectorBits(const llvm::Triple &TheTriple, llvm::Module &M) {
 
 llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
                                          const DriverOptions &Opts) const {
-  const Importer *Imp = detectFormat(Input, Ctx.getFormatRegistry());
+  llvm::Expected<const Importer *> Detected =
+      detectFormat(Input, Ctx.getFormatRegistry());
+  if (!Detected)
+    return Detected.takeError();
+  const Importer *Imp = *Detected;
   if (!Imp)
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),

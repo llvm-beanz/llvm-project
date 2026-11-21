@@ -19,6 +19,8 @@
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/SourceMgr.h"
 
+#include <optional>
+
 using namespace feme;
 
 /// A legacy DXBC container stores its tokenized shader bytecode in an
@@ -28,7 +30,7 @@ using namespace feme;
 /// containers for testing" section of feme/docs/Design.md. Either name
 /// identifies the same thing `feme::dxsa::deserialize` needs: the raw
 /// tokenized instruction stream, program header included.
-static llvm::Expected<llvm::StringRef>
+static std::optional<llvm::StringRef>
 getShaderBytecode(const llvm::object::DXContainer &Container) {
   // Guard the loop below rather than calling Container.begin() on a
   // zero-part container: llvm::object::DXContainer::PartIterator's
@@ -42,10 +44,16 @@ getShaderBytecode(const llvm::object::DXContainer &Container) {
         return Part.Data;
     }
 
-  return llvm::createStringError(
-      llvm::inconvertibleErrorCode(),
-      "DXContainer does not contain a DXBC shader bytecode ('SHEX' or "
-      "'SHDR') part");
+  return std::nullopt;
+}
+
+llvm::Expected<bool> feme::containsDXBCShader(llvm::MemoryBufferRef Buffer) {
+  if (!Buffer.getBuffer().starts_with("DXBC"))
+    return false;
+  auto Container = llvm::object::DXContainer::create(Buffer);
+  if (!Container)
+    return Container.takeError();
+  return getShaderBytecode(*Container).has_value();
 }
 
 llvm::Expected<Module> DXBCImporter::import(llvm::MemoryBufferRef Buffer,
@@ -60,9 +68,12 @@ llvm::Expected<Module> DXBCImporter::import(llvm::MemoryBufferRef Buffer,
   if (!Container)
     return Container.takeError();
 
-  llvm::Expected<llvm::StringRef> Bytecode = getShaderBytecode(*Container);
+  std::optional<llvm::StringRef> Bytecode = getShaderBytecode(*Container);
   if (!Bytecode)
-    return Bytecode.takeError();
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "DXContainer does not contain a DXBC shader bytecode ('SHEX' or "
+        "'SHDR') part");
 
   llvm::SourceMgr SrcMgr;
   SrcMgr.AddNewSourceBuffer(

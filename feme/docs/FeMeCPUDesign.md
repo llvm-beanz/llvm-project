@@ -2923,7 +2923,7 @@ because it is a separate project that happens to reuse this one.
   `feme-cpu-lower-resources`, `feme-cpu-linearize`, `feme-cpu-simdize`,
   `feme-cpu-lower-wave`, `feme-cpu-wrap-entry`, plus the
   `print<feme-cpu-uniformity>` printer.
-- **`feme-run`** (new): JITs a DXIL/SPIR-V/LLVM IR input and dispatches it,
+- **`feme-run`** (new): JITs a DXIL/DXBC/SPIR-V/LLVM IR input and dispatches it,
   with resources described by a small YAML file (buffer contents in, buffer
   contents out, as text). This is the tool that turns "does this translate
   correctly?" into "does this compute the right answer?" in `lit`:
@@ -2958,6 +2958,21 @@ because it is a separate project that happens to reuse this one.
   normal JIT, `--reference` and `--object` modes; default single-dispatch
   output is unchanged. It tests retained CPU execution, not D3D12
   command-list replay or GPU fence semantics.
+
+  Legacy FXC DXBC containers are detected through the same SHEX/SHDR
+  inspection as `feme::Driver`, imported into DXSA and translated to LLVM
+  IR before the common DXIL operation/metadata raising passes. Malformed
+  containers propagate their parse errors; DXIL bitcode/containers and
+  already-raised LLVM IR retain their existing paths. The normal and
+  scalar-reference CPU pipelines now run the shared
+  `feme-dxil-expand-intrinsics` normalization before resource lowering and
+  widening. In particular, signed/unsigned integer multiply-add expand
+  into wrapping LLVM `mul`/`add`, without `nsw`/`nuw` assumptions. This
+  closes the FXC compute pilot's missing `llvm.dx.imad` lowering without a
+  second arithmetic implementation or requiring a DXIL export round trip.
+  Measured legacy coverage is bounded to the raw/grouped SM5.0/5.1
+  [CPU oracles](W0WindowsIntegrationProbe.md#w1b-legacy-dxbc-cpu-execution-vm-2026-11-20),
+  not general legacy shader compatibility.
   `--reference` runs the shader one invocation at a time through the
   unwidened module instead (see "CFG restructurization test suite"), which
   is the ground truth that suite diffs against.

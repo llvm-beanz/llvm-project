@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W1(b) legacy DXBC CPU regression scope (2026-11-20)
+
+The [legacy CPU follow-up](W0WindowsIntegrationProbe.md#w1b-legacy-dxbc-cpu-execution-vm-2026-11-20)
+shares DXBC-container detection between `feme` and `feme-run` and executes
+the existing raw/grouped FXC shaders on FeMe's CPU backend. It also fixes
+missing DirectX math normalization in both normal and scalar-reference
+CPU paths by reusing the existing intrinsic-expansion pass. This is shared
+compiler behavior, not a Vulkan-to-D3D command translation or a new
+runtime arithmetic implementation.
+
+All FeMe LIT prerequisites and the native ARM64 ICD were rebuilt with
+assertions and disabled PCH. The complete suite, with SDK FXC explicitly
+on PATH, passes **4,010**, with **15 Skipped, 10 Unsupported and zero
+failures**, from 4,035 discovered tests in **74.44 seconds**. This includes
+the existing Vulkan unit/real-loader/graphics regression coverage. Four
+new tests and three previously Unsupported FXC-dependent tests becoming
+available explain the passing-count increase.
+
+The three full Windows LIT matrices pass **158/158**, including 72 new
+legacy CPU readbacks per configuration. Original DXBC and re-emitted DXIL,
+SM5.0/5.1, widths 4/8 and SM5.1 spaces 0/7 use the same strict scalar/
+grouped full-buffer oracle as WARP. Existing SM6 partial-wave coverage is
+preserved. FXC-only/default configurations pass **103/103** and **82/82**.
+
+The capability checker runs through LIT against pinned public registry
+`f84d432d5b89`; **both inventories reproduce unchanged**. No manifest
+inputs, generated tables or advertised capabilities are edited.
+**No real Vulkan CTS pass is claimed**: the external runner remains
+unavailable, and full LIT coverage does not close the pending bounded
+CTS comparison.
+
 ## W1(b) retained CPU execution regression scope (2026-11-20)
 
 The [retained CPU follow-up](W0WindowsIntegrationProbe.md#w1b-retained-cpu-dispatch-and-compilation-context-lifetimes-vm-2026-11-20)

@@ -22,6 +22,10 @@
 
 namespace feme {
 
+/// Detects a legacy SHEX/SHDR shader part, without parsing its bytecode.
+/// Non-container inputs return false; malformed containers return an error.
+llvm::Expected<bool> containsDXBCShader(llvm::MemoryBufferRef Buffer);
+
 /// Imports a legacy DXBC module into the `dxsa` MLIR dialect. Accepts a full
 /// `DXContainer` (see `llvm/lib/BinaryFormat/DXContainer.h`) carrying an
 /// `SHEX` (Shader Model 4.1+, extended opcode tokens) or `SHDR` (Shader

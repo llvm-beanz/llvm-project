@@ -32,6 +32,35 @@ TEST(DXBCImporterTest, GetFormatName) {
   EXPECT_EQ(Importer.getFormatName(), "dxbc");
 }
 
+TEST(DXBCImporterTest, DetectsShaderPartsWithoutParsingBytecode) {
+  for (const char *Name : {"SHEX", "SHDR", "PRIV"}) {
+    llvm::DXContainerYAML::Object Obj;
+    Obj.Header.Hash.assign(16, llvm::yaml::Hex8(0));
+    Obj.Header.Version.Major = 1;
+    Obj.Header.Version.Minor = 0;
+    Obj.Header.PartCount = 1;
+    Obj.Parts.emplace_back(Name, 0);
+    llvm::SmallString<0> Binary;
+    llvm::raw_svector_ostream OS(Binary);
+    ASSERT_TRUE(llvm::yaml::yaml2dxcontainer(
+        Obj, OS, [](const llvm::Twine &Msg) { FAIL() << Msg.str(); }));
+    auto Legacy =
+        containsDXBCShader(llvm::MemoryBufferRef(OS.str(), "format-detection"));
+    ASSERT_THAT_EXPECTED(Legacy, llvm::Succeeded());
+    EXPECT_EQ(*Legacy, llvm::StringRef(Name) != "PRIV");
+  }
+}
+
+TEST(DXBCImporterTest, DetectionRejectsMalformedContainers) {
+  auto Legacy =
+      containsDXBCShader(llvm::MemoryBufferRef("DXBC", "truncated-container"));
+  EXPECT_THAT_EXPECTED(Legacy, llvm::Failed());
+  auto NonContainer = containsDXBCShader(
+      llvm::MemoryBufferRef("not a container", "format-detection"));
+  ASSERT_THAT_EXPECTED(NonContainer, llvm::Succeeded());
+  EXPECT_FALSE(*NonContainer);
+}
+
 TEST(DXBCImporterTest, RejectsDXContainerWithNoShaderBytecodePart) {
   llvm::DXContainerYAML::Object Obj;
   Obj.Header.Hash.assign(16, llvm::yaml::Hex8(0));
@@ -43,6 +72,11 @@ TEST(DXBCImporterTest, RejectsDXContainerWithNoShaderBytecodePart) {
   llvm::raw_svector_ostream OS(Binary);
   ASSERT_TRUE(llvm::yaml::yaml2dxcontainer(
       Obj, OS, [](const llvm::Twine &Msg) { FAIL() << Msg.str(); }));
+
+  auto Legacy =
+      containsDXBCShader(llvm::MemoryBufferRef(OS.str(), "empty-container"));
+  ASSERT_THAT_EXPECTED(Legacy, llvm::Succeeded());
+  EXPECT_FALSE(*Legacy);
 
   Context Ctx;
   DXBCImporter Importer;

@@ -1,0 +1,33 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# REQUIRES: system-fxc, directx-registered-target
+# RUN: split-file %s %t
+# RUN: %fxc /nologo /WX /T cs_5_0 /E main /D USE_REGISTER_SPACE=0 /Fo %t.sm50.dxbc %S/../../../Translate/DXBC/fxc-legacy-compute.hlsl
+# RUN: %fxc /nologo /WX /T cs_5_1 /E main /D USE_REGISTER_SPACE=1 /Fo %t.sm51.dxbc %S/../../../Translate/DXBC/fxc-legacy-compute.hlsl
+# RUN: feme-run --wave-size=4 --repeat=3 --heap=%t/space0.yaml %t.sm50.dxbc | FileCheck %s --check-prefix=SPACE0
+# RUN: feme-run --wave-size=4 --repeat=3 --heap=%t/space7.yaml %t.sm51.dxbc | FileCheck %s --check-prefix=SPACE7
+
+# SPACE0-COUNT-3: binding[0:3][0]: 23 40 57 74 91 108 125 142 123456789 987654321{{$}}
+# SPACE0-NOT: binding[
+# SPACE7-COUNT-3: binding[7:3][0]: 23 40 57 74 91 108 125 142 123456789 987654321{{$}}
+# SPACE7-NOT: binding[
+
+#--- space0.yaml
+bindings:
+  - space: 0
+    register: 3
+    entries:
+      - index: 0
+        size: 40
+        data: [0, 0, 0, 0, 0, 0, 0, 0, 123456789, 987654321]
+
+#--- space7.yaml
+bindings:
+  - space: 7
+    register: 3
+    entries:
+      - index: 0
+        size: 40
+        data: [0, 0, 0, 0, 0, 0, 0, 0, 123456789, 987654321]

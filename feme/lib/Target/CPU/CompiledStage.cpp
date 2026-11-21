@@ -27,6 +27,7 @@
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/SPIRVSubpassLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
+#include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
 #include "llvm/Bitcode/BitcodeReader.h"
@@ -258,6 +259,7 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
 
     ModulePassManager Normalize;
     Normalize.addPass(PreparePass(EntryPoint, Stage));
+    Normalize.addPass(dxil::IntrinsicExpansionPass());
     Normalize.addPass(BoundResourceNormalizationPass());
     // (Roadmap L319) `BoundResourceNormalizationPass` above only matches
     // `llvm.dx.resource.handlefrombinding` (DXIL): a SPIR-V-sourced

@@ -1674,7 +1674,7 @@ translation or D3D COM implementation is added.
 
 #### Strict interchange controls
 
-[`PartialWaveIO.h`](../utils/windows-adapter-probe/PartialWaveIO.h) provides
+[`BufferIO.h`](../utils/windows-adapter-probe/BufferIO.h) provides
 the baseline heap writer and exact runner-dump parser. Parsing accepts one
 complete `binding[space:3][0]` dump with precisely 16,384 unsigned 32-bit
 words. It rejects incorrect bindings, missing separators/words, overflow,
@@ -1820,6 +1820,137 @@ Real D3D12 PSO compilation/context lifetime, teardown with pending work,
 resource retention across recorded commands, command-list replay and
 fence semantics remain open under W0(g)/W1. The contexts in the unit test
 are compiler contexts, not runtime-owned D3D12 command contexts.
+
+### W1(b) legacy DXBC CPU execution (VM, 2026-11-20)
+
+The [legacy shader compatibility audit](W0DirectXTestCorpusClassification.md#legacy-shader-compatibility-audit-vm-2026-11-18)
+establishes the SM5.1 input obligation, but the earlier raw/grouped FXC
+oracles executed only on reference WARP. They now also execute through
+FeMe's own CPU compiler/executor, as **original FXC DXBC** and
+**FeMe-re-emitted DXIL**. This is measured legacy compute execution, not
+merely import/export success.
+
+#### Shared import and arithmetic normalization
+
+`feme-run` previously sent every `DXBC`-magic container to DXILImporter,
+so real FXC input could not reach execution. It now shares
+[`containsDXBCShader`](../include/feme/Import/DXBC/DXBCImporter.h) with
+`feme::Driver`: inspect SHEX/SHDR parts, safely handle zero-part containers
+and propagate malformed-container errors. Recognized legacy input goes
+through DXBCImporter and DXSAToLLVMIRTranslator, followed by the same
+DXIL operation/metadata raising as DXIL input. No second bytecode parser
+or translation pipeline is introduced. The DXIL, SPIR-V and raised-LLVM
+paths remain available.
+
+The first real pilot then failed with `unsupported divergent call to
+'llvm.dx.imad.i32'`. FXC's integer multiply-add raises to a DirectX
+intrinsic that the CPU JIT did not normalize. Both the normal
+[`CPU pipeline`](../lib/Target/CPU/Pipeline.cpp) and
+[`scalar-reference path`](../lib/Target/CPU/CompiledStage.cpp) now run the
+existing shared DXIL intrinsic-expansion pass before resource lowering
+and widening. Signed/unsigned integer multiply-add becomes LLVM
+`mul`/`add` without no-overflow assumptions; no alternate arithmetic
+implementation is added. Context-free floating-point math expansion is
+also shared with the existing non-DXIL export path. Context-dependent
+wave/resource/derivative operations remain for their existing lowerings.
+
+[`dxil-integer-mad.ll`](../test/Tools/feme-run/dxil-integer-mad.ll) checks
+signed/unsigned overflow, negative operands and partial-wave guards in
+normal and scalar-reference execution.
+[`fxc-legacy-input.test`](../test/Tools/feme-run/HLSL/fxc-legacy-input.test)
+checks real SM5.0 space0 and SM5.1 space7 inputs with three retained
+dispatches and exact output lines. Importer unit coverage distinguishes
+SHEX/SHDR from unrelated parts without parsing bytecode, checks malformed
+input and safely declines empty/non-container input.
+
+#### Real CPU matrix
+
+[`ExpectFeMeLegacyCompute.cmake`](../utils/windows-adapter-probe/ExpectFeMeLegacyCompute.cmake)
+compiles the existing LLVM-owned HLSL fixtures with SDK FXC `/WX` and
+executes:
+
+| Input profile/space | Workloads | Input encodings | CPU widths |
+|---|---|---|---|
+| SM5.0 / space0 | Raw and grouped | Original DXBC and re-emitted DXIL | 4, 8 |
+| SM5.1 / space0 | Raw and grouped | Original DXBC and re-emitted DXIL | 4, 8 |
+| SM5.1 / space7 | Raw and grouped | Original DXBC and re-emitted DXIL | 4, 8 |
+
+This is **24 CPU cases**, each compiling once and validating **three**
+completed dispatches with retained code/resources: 72 legacy readbacks
+per full configuration. SM5.0 nonzero-space cases are not generated.
+The two workload oracles are unchanged from reference WARP:
+
+| Workload | Threads per group | Dispatch groups | Checked scalar results | Checked guard bytes |
+|---|---|---|---|---|
+| Raw UAV | `(8,1,1)` | `(32,1,1)` | 256 | 64,512 |
+| Grouped UAV/shared memory | `(8,4,2)` | `(2,2,2)` | 512 | 63,488 |
+
+The grouped shader has three group barriers, cross-wave shared-memory
+exchange and flattened 3-D dispatch IDs. Every snapshot is a complete
+65,536-byte binding dump, parsed and compared byte-for-byte with the
+scalar expectations; validating only the last dispatch or only the
+payload prefix is insufficient.
+
+The former wave-only interchange is extracted as
+[`BufferIO.h`](../utils/windows-adapter-probe/BufferIO.h), retaining its
+exact register3/space0-or-7, unsigned-word, size, overflow and trailing-data
+checks. Partial-wave fixtures continue to exercise all protocol-negative
+controls. Raw/grouped validators reuse it rather than introducing a
+second parser.
+[`ValidateFeMeBufferOutput.cmake`](../utils/windows-adapter-probe/ValidateFeMeBufferOutput.cmake)
+shares the exact-three-dumps/per-snapshot completion gate with the SM6
+partial-wave matrix. Four new CLI controls reject invalid heap/output
+spaces, an unknown workload and a missing output file; all existing
+payload/guard-corruption controls remain passing.
+
+#### Validation and reproduction
+
+The reference runtimes and SDK FXC/validator versions remain those of the
+preceding VM measurements. The native ARM64 FeMe compiler/runner is used
+in **all** configurations; the x64 case exercises an emulated x64 oracle,
+FXC and reference runtime, not an x64 FeMe CPU backend. Agility changes
+the reference D3D12 process, not the CPU executor.
+
+| Configuration | LIT outcome |
+|---|---|
+| Native ARM64 inbox, all shader tools | 158/158 |
+| Emulated x64 inbox oracle/reference, all shader tools | 158/158 |
+| Native ARM64 Agility 619, all shader tools | 158/158 |
+| Native ARM64 FXC + CPU runner only, no DXC/exporter/validator | 103/103 |
+| Native ARM64 default, no optional shader tools/runner | 82/82 |
+| Complete rebuilt FeMe suite, native SDK FXC on PATH | 4,010 passed, 15 skipped, 10 unsupported; zero failures; 74.44 s |
+
+The complete suite discovers 4,035 tests. Four new tests account for
+two detection unit cases and two execution fixtures; explicitly enabling
+FXC also makes three previously Unsupported legacy source tests pass.
+Those infrastructure-dependent counts are not new conformance claims.
+The rebuilt Vulkan ICD and existing unit/real-loader/graphics coverage
+pass. The pinned Vulkan-Docs `f84d432d5b89` capability check runs through
+LIT and reproduces both inventory tables unchanged. No advertisements
+change, and no external CTS result is claimed; see the
+[regression scope](VulkanCTSReport.md#w1b-legacy-dxbc-cpu-regression-scope-2026-11-20).
+
+FXC-only CPU execution no longer requires DXC. From the LLVM checkout:
+
+```powershell
+cmake -S feme\utils\windows-adapter-probe -B $build `
+  "-DFEME_PROBE_FXC=$fxc" `
+  "-DFEME_PROBE_FEME_RUN=$llvmBuild\bin\feme-run.exe"
+cmake --build $build --target check-feme-windows-probes --parallel 2
+```
+
+Adding `FEME_PROBE_FEME` enables re-emitted CPU cases alongside the existing
+reference export matrix, which still requires its matching SDK validator.
+The CPU imports bare re-emitted DXIL internally; this does not claim stock
+runtime PSO admission without SDK validation. Optional-test removal was
+verified by reconfiguring through FXC-only and default matrices. Every
+automated result above is **LIT**, not CTest.
+
+Owned `CreateDevice` remains `E_NOTIMPL`, and no runtime-owned allocation,
+PSO/device, command-list or fence implementation is added. This bounds
+W0(c)'s legacy progress to the two named compute workloads: other bindings,
+CBVs, graphics stages and the wider legacy instruction corpus still need
+coverage. W0(c)/W0(g)/W1 remain open.
 
 ### W0(g) public GPU VA reservation boundary (VM)
 
