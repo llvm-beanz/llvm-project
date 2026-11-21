@@ -353,6 +353,8 @@ Error selectRootSignatureConstants(Function &F, ShaderStage Stage) {
     return createStringError(inconvertibleErrorCode(),
                              "root signature has no inline constant parameter "
                              "visible to the selected stage");
+  if (Error E = (*Plan)->checkShaderBindings(F, Visible))
+    return E;
   const auto &Binding = Selected->Bindings.front();
   LLVMContext &C = F.getContext();
   auto Word = [&](uint32_t Value) {

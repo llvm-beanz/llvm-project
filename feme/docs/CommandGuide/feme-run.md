@@ -55,6 +55,13 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   Its DWORD count determines the required root span and clips shader reads,
   even when extra bytes are supplied. Missing/invalid signatures, multiple
   visible parameters, local signatures and stage denial are errors.
+  Before normalization, live bound-resource declarations in the entry and
+  its directly called helpers must match the root plan's resource class,
+  register space and stage visibility. One root binding must contain each
+  complete declared range; adjacent ranges or individual static samplers
+  cannot collectively cover an array. Dynamic declarations and indirect
+  calls fail validation. This is binding preflight, not descriptor/table
+  preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in
   normal/reference compilation; pass it to `feme` when producing an AOT
   object, not to `feme-run --object`. It cannot be combined with inspection.

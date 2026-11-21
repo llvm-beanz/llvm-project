@@ -11,14 +11,21 @@
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/bit.h"
+#include "llvm/Analysis/DXILResource.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Object/DXContainer.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <type_traits>
 
 using namespace llvm;
@@ -280,6 +287,124 @@ RootBindingPlan::findBinding(ResourceClass Class, uint32_t Space,
             Binding.Register <= Register && Register < endRegister(Binding))
           return &Binding;
   return nullptr;
+}
+
+Error RootBindingPlan::checkBindingCoverage(
+    ResourceClass Class, uint32_t Space, uint32_t Register, uint32_t Count,
+    dxbc::ShaderVisibility Stage) const {
+  if (uint32_t(Class) > uint32_t(ResourceClass::LastEntry) ||
+      !dxbc::isValidShaderVisibility(uint32_t(Stage)) || !Count)
+    return invalid("invalid shader binding class, visibility or empty range");
+  uint64_t RequiredEnd =
+      Count == Unbounded ? uint64_t(1) << 32 : uint64_t(Register) + Count;
+  if (RequiredEnd > (uint64_t(1) << 32))
+    return invalid("shader binding register range overflows");
+  uint64_t Cursor = Register;
+  for (const RootParameter &Parameter : Parameters) {
+    if (Parameter.Visibility != dxbc::ShaderVisibility::All &&
+        Parameter.Visibility != Stage)
+      continue;
+    for (const RootBinding &Binding : Parameter.Bindings)
+      if (Binding.Class == Class && Binding.Space == Space &&
+          Binding.Register <= Register && Register < endRegister(Binding)) {
+        uint64_t End = endRegister(Binding);
+        if (End >= RequiredEnd)
+          return Error::success();
+        Cursor = std::max(Cursor, End);
+      }
+  }
+  if (Class == ResourceClass::Sampler)
+    for (const auto &Sampler : StaticSamplers)
+      if (Sampler.RegisterSpace == Space &&
+          (Sampler.ShaderVisibility == uint32_t(dxbc::ShaderVisibility::All) ||
+           Sampler.ShaderVisibility == uint32_t(Stage)) &&
+          Register == Sampler.ShaderRegister) {
+        if (Count == 1)
+          return Error::success();
+        Cursor = std::max(Cursor, uint64_t(Sampler.ShaderRegister) + 1);
+      }
+  return createStringError(
+      inconvertibleErrorCode(),
+      "root binding mismatch: %s space=%u register=%u count=%u is not covered "
+      "at register=%llu for visibility=%u (one root range must cover the "
+      "whole declaration)",
+      className(Class).data(), Space, Register, Count,
+      static_cast<unsigned long long>(Cursor), uint32_t(Stage));
+}
+
+Error RootBindingPlan::checkShaderBindings(const Function &Entry,
+                                           dxbc::ShaderVisibility Stage) const {
+  if (!dxbc::isValidShaderVisibility(uint32_t(Stage)))
+    return invalid("invalid shader binding visibility");
+  SmallVector<const Function *, 8> Worklist{&Entry};
+  SmallPtrSet<const Function *, 8> Seen;
+  while (!Worklist.empty()) {
+    const Function *F = Worklist.pop_back_val();
+    if (!Seen.insert(F).second)
+      continue;
+    for (const Instruction &I : instructions(F)) {
+      const auto *Call = dyn_cast<CallBase>(&I);
+      if (!Call)
+        continue;
+      const auto *Callee = dyn_cast<Function>(
+          Call->getCalledOperand()->stripPointerCastsAndAliases());
+      if (!Callee)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "cannot validate indirect call in root-signature binding mode "
+            "in '%s'",
+            F->getName().str().c_str());
+      if (!Callee->isDeclaration())
+        Worklist.push_back(Callee);
+      if (Callee->getIntrinsicID() !=
+              Intrinsic::dx_resource_handlefrombinding ||
+          Call->use_empty())
+        continue;
+      auto *Ty = dyn_cast<TargetExtType>(Call->getType());
+      if (!Ty || !isa<llvm::dxil::AnyResourceExtType>(Ty))
+        return invalid("unsupported resource type in shader binding");
+      ResourceClass Class;
+      if (isa<llvm::dxil::CBufferExtType>(Ty)) {
+        if (Ty->getNumTypeParameters() != 1)
+          return invalid("malformed cbuffer shader binding type");
+        Class = ResourceClass::CBuffer;
+      } else if (isa<llvm::dxil::SamplerExtType>(Ty)) {
+        if (!Ty->getNumIntParameters())
+          return invalid("malformed sampler shader binding type");
+        Class = ResourceClass::Sampler;
+      } else if (isa<llvm::dxil::FeedbackTextureExtType>(Ty)) {
+        if (Ty->getNumIntParameters() < 2)
+          return invalid("malformed feedback shader binding type");
+        Class = ResourceClass::UAV;
+      } else {
+        unsigned RequiredInts = isa<llvm::dxil::RawBufferExtType>(Ty)     ? 2
+                                : isa<llvm::dxil::TypedBufferExtType>(Ty) ? 3
+                                                                          : 4;
+        if (Ty->getNumTypeParameters() != 1 ||
+            Ty->getNumIntParameters() < RequiredInts ||
+            Ty->getIntParameter(0) > 1)
+          return invalid("malformed writable shader binding type");
+        Class =
+            Ty->getIntParameter(0) ? ResourceClass::UAV : ResourceClass::SRV;
+      }
+      if (Call->arg_size() < 3)
+        return invalid("malformed shader binding operands");
+      uint32_t Values[3];
+      for (unsigned N = 0; N != 3; ++N) {
+        const auto *Value = dyn_cast<ConstantInt>(Call->getArgOperand(N));
+        if (!Value || !Value->getType()->isIntegerTy(32))
+          return invalid("shader binding space, register and count must be "
+                         "constant i32 values");
+        Values[N] = Value->getZExtValue();
+      }
+      if (Error E = checkBindingCoverage(Class, Values[0], Values[1], Values[2],
+                                         Stage))
+        return createStringError(inconvertibleErrorCode(), "in '%s': %s",
+                                 F->getName().str().c_str(),
+                                 toString(std::move(E)).c_str());
+    }
+  }
+  return Error::success();
 }
 
 void RootBindingPlan::print(raw_ostream &OS) const {

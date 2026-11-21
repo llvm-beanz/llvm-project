@@ -72,7 +72,11 @@ The original compute-only baseline is no longer current:
   element and supplied root bytes, with overflow-safe offset arithmetic.
   Opt-in `--root-signature-constants` now selects one visible inline
   parameter from a checked root plan and refuses to promote descriptor-backed
-  CBVs. Multiple inline parameters, general CBVs and descriptor preparation
+  CBVs. Before normalization it checks live declarations in the entry/direct
+  helper graph for class, space, visibility and complete containment in one
+  root binding; adjacent ranges cannot collectively cover an array. This
+  does not materialize tables or establish full shader/root compatibility.
+  Multiple inline parameters, general CBVs and descriptor preparation
   still need compiler work. `BoundResourceNormalizationPass`
   currently normalizes typed/raw buffers, not general constant buffers.
 - FeMe has a DXBC importer and translation path, but its existence does not

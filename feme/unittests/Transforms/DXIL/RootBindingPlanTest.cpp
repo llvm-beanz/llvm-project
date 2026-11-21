@@ -12,6 +12,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -347,6 +348,195 @@ TEST(RootBindingPlanTest, ContainerImportDistinguishesAbsenceAndInvalidInput) {
   EXPECT_THAT_ERROR(importContainerRootSignature(M, "DXBC"), Failed());
   EXPECT_THAT_ERROR(importContainerRootSignature(M, container(Bytes, 2)),
                     Failed());
+}
+
+TEST(RootBindingPlanTest, CompleteCoverageRejectsClassSpaceVisibilityAndHoles) {
+  auto Plan = RootBindingPlan::parse(
+      root(2, {table(2, {1, 2, 3, 7, 0, 0, 1, 2, 6, 7, 0, 2}, 1)}));
+  ASSERT_TRUE(bool(Plan));
+  using Class = dxil::ResourceClass;
+  using Stage = dxbc::ShaderVisibility;
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::UAV, 7, 3, 2, Stage::Vertex),
+      Succeeded());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::UAV, 7, 3, 3, Stage::Vertex), Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::UAV, 7, 3, 5, Stage::Vertex), Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::SRV, 7, 3, 2, Stage::Vertex), Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::UAV, 8, 3, 2, Stage::Vertex), Failed());
+  EXPECT_THAT_ERROR(Plan->checkBindingCoverage(Class::UAV, 7, 3, 2, Stage::All),
+                    Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::UAV, 7, 3, 2, Stage::Pixel), Failed());
+}
+
+TEST(RootBindingPlanTest, RejectsAdjacentRangesAndChecksUnboundedEndpoints) {
+  using Class = dxil::ResourceClass;
+  using Stage = dxbc::ShaderVisibility;
+  auto Plan = RootBindingPlan::parse(
+      root(2, {table(2, {0, 1, 4, 7, 0, 0, 0, 1, 3, 7, 0, 1, 0, UINT32_MAX, 8,
+                         7, 0, 2})}));
+  ASSERT_TRUE(bool(Plan));
+  EXPECT_THAT_ERROR(Plan->checkBindingCoverage(Class::SRV, 7, 3, 2, Stage::All),
+                    Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::SRV, 7, 8, UINT32_MAX, Stage::All),
+      Succeeded());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::SRV, 7, UINT32_MAX, 1, Stage::All),
+      Succeeded());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::SRV, 7, UINT32_MAX, 2, Stage::All),
+      Failed());
+  EXPECT_THAT_ERROR(Plan->checkBindingCoverage(Class::SRV, 7, 3, 0, Stage::All),
+                    Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::SRV, 7, 3, UINT32_MAX, Stage::All),
+      Failed());
+}
+
+TEST(RootBindingPlanTest, StaticSamplersParticipateInCoverage) {
+  auto Plan =
+      RootBindingPlan::parse(root(2, {}, {sampler(3, 7, 1), sampler(4, 7, 1)}));
+  ASSERT_TRUE(bool(Plan));
+  using Class = dxil::ResourceClass;
+  using Stage = dxbc::ShaderVisibility;
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::Sampler, 7, 3, 2, Stage::Vertex),
+      Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::Sampler, 7, 3, 1, Stage::Vertex),
+      Succeeded());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::Sampler, 7, 3, 3, Stage::Vertex),
+      Failed());
+  EXPECT_THAT_ERROR(
+      Plan->checkBindingCoverage(Class::Sampler, 7, 3, 1, Stage::All),
+      Failed());
+}
+
+CallInst *addBinding(Module &M, Function &F, TargetExtType *Ty,
+                     uint32_t Register = 3) {
+  IRBuilder<> B(F.getEntryBlock().getTerminator());
+  auto *Decl = Intrinsic::getOrInsertDeclaration(
+      &M, Intrinsic::dx_resource_handlefrombinding, {Ty});
+  auto *Handle = B.CreateCall(Decl, {B.getInt32(7), B.getInt32(Register),
+                                     B.getInt32(1), B.getInt32(0),
+                                     ConstantPointerNull::get(B.getPtrTy())});
+  auto *Use = Function::Create(FunctionType::get(B.getVoidTy(), {Ty}, false),
+                               GlobalValue::ExternalLinkage, "consume", M);
+  B.CreateCall(Use, {Handle});
+  return Handle;
+}
+
+Function *makeShaderFunction(Module &M, StringRef Name) {
+  auto *F = Function::Create(
+      FunctionType::get(Type::getVoidTy(M.getContext()), false),
+      GlobalValue::ExternalLinkage, Name, M);
+  IRBuilder<>(BasicBlock::Create(M.getContext(), "entry", F)).CreateRetVoid();
+  return F;
+}
+
+TEST(RootBindingPlanTest, ValidatesResourceClassesFromCanonicalHandleTypes) {
+  LLVMContext C;
+  auto *I32 = Type::getInt32Ty(C);
+  SmallVector<TargetExtType *, 8> Types{
+      TargetExtType::get(C, "dx.RawBuffer", {I32}, {0, 0}),
+      TargetExtType::get(C, "dx.RawBuffer", {I32}, {1, 0}),
+      TargetExtType::get(C, "dx.TypedBuffer", {I32}, {0, 0, 0}),
+      TargetExtType::get(C, "dx.Texture", {I32}, {1, 0, 0, 2}),
+      TargetExtType::get(C, "dx.MSTexture", {I32}, {0, 4, 0, 3}),
+      TargetExtType::get(C, "dx.FeedbackTexture", {}, {0, 2}),
+      TargetExtType::get(C, "dx.CBuffer", {ArrayType::get(I32, 4)}),
+      TargetExtType::get(C, "dx.Sampler", {}, {0})};
+  uint32_t Classes[] = {0, 1, 0, 1, 0, 1, 2, 3};
+  for (auto [Index, Ty] : enumerate(Types)) {
+    Module M("binding", C);
+    auto *F = makeShaderFunction(M, "main");
+    addBinding(M, *F, Ty);
+    auto Plan = RootBindingPlan::parse(
+        root(2, {table(2, {Classes[Index], 1, 3, 7, 0, 0})}));
+    ASSERT_TRUE(bool(Plan));
+    EXPECT_THAT_ERROR(
+        Plan->checkShaderBindings(*F, dxbc::ShaderVisibility::All),
+        Succeeded());
+    auto Wrong = RootBindingPlan::parse(
+        root(2, {table(2, {(Classes[Index] + 1) % 4, 1, 3, 7, 0, 0})}));
+    ASSERT_TRUE(bool(Wrong));
+    EXPECT_THAT_ERROR(
+        Wrong->checkShaderBindings(*F, dxbc::ShaderVisibility::All), Failed());
+  }
+}
+
+TEST(RootBindingPlanTest, ChecksReachableHelpersButNotUnrelatedFunctions) {
+  LLVMContext C;
+  Module M("helpers", C);
+  auto *Entry = makeShaderFunction(M, "main");
+  auto *Helper = makeShaderFunction(M, "helper");
+  auto *Other = makeShaderFunction(M, "unrelated");
+  auto *Ty =
+      TargetExtType::get(C, "dx.RawBuffer", {Type::getInt8Ty(C)}, {0, 0});
+  auto *Handle = addBinding(M, *Helper, Ty);
+  addBinding(M, *Other, Ty, 9);
+  IRBuilder<> B(Entry->getEntryBlock().getTerminator());
+  B.CreateCall(Helper);
+  IRBuilder<>(Helper->getEntryBlock().getTerminator()).CreateCall(Helper);
+  auto Plan = RootBindingPlan::parse(root(2, {table(2, {0, 1, 3, 7, 0, 0})}));
+  ASSERT_TRUE(bool(Plan));
+  EXPECT_THAT_ERROR(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::All),
+      Succeeded());
+  Handle->setArgOperand(1, B.getInt32(4));
+  auto Error = Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::All);
+  ASSERT_TRUE(bool(Error));
+  EXPECT_TRUE(StringRef(toString(std::move(Error))).contains("in 'helper'"));
+}
+
+TEST(RootBindingPlanTest, RejectsDynamicDeclarationsAndIndirectCalls) {
+  LLVMContext C;
+  Module M("dynamic", C);
+  auto *F = makeShaderFunction(M, "main");
+  auto *Ty =
+      TargetExtType::get(C, "dx.RawBuffer", {Type::getInt8Ty(C)}, {0, 0});
+  auto *Handle = addBinding(M, *F, Ty);
+  Handle->setArgOperand(0, PoisonValue::get(Type::getInt32Ty(C)));
+  auto Plan = RootBindingPlan::parse(root(2, {table(2, {0, 1, 3, 7, 0, 0})}));
+  ASSERT_TRUE(bool(Plan));
+  EXPECT_THAT_ERROR(Plan->checkShaderBindings(*F, dxbc::ShaderVisibility::All),
+                    Failed());
+  auto *Indirect = makeShaderFunction(M, "indirect");
+  IRBuilder<> B(Indirect->getEntryBlock().getTerminator());
+  B.CreateCall(Indirect->getFunctionType(), PoisonValue::get(B.getPtrTy()), {});
+  EXPECT_THAT_ERROR(
+      Plan->checkShaderBindings(*Indirect, dxbc::ShaderVisibility::All),
+      Failed());
+}
+
+TEST(RootBindingPlanTest, RejectsMalformedLiveBindingsButIgnoresDeadHandles) {
+  LLVMContext C;
+  auto Plan = RootBindingPlan::parse(root(2, {table(2, {0, 1, 3, 7, 0, 0})}));
+  ASSERT_TRUE(bool(Plan));
+  auto *I8 = Type::getInt8Ty(C);
+  SmallVector<TargetExtType *, 4> Types{
+      TargetExtType::get(C, "dx.RawBuffer", {I8}, {0}),
+      TargetExtType::get(C, "dx.RawBuffer", {I8}, {3, 0}),
+      TargetExtType::get(C, "dx.Sampler"), TargetExtType::get(C, "dx.Unknown")};
+  for (auto *Ty : Types) {
+    Module M("malformed", C);
+    auto *F = makeShaderFunction(M, "main");
+    auto *Handle = addBinding(M, *F, Ty);
+    std::string Message =
+        toString(Plan->checkShaderBindings(*F, dxbc::ShaderVisibility::All));
+    EXPECT_TRUE(StringRef(Message).contains(
+        Ty == Types.back() ? "unsupported resource type" : "malformed"));
+    cast<Instruction>(*Handle->user_begin())->eraseFromParent();
+    EXPECT_THAT_ERROR(
+        Plan->checkShaderBindings(*F, dxbc::ShaderVisibility::All),
+        Succeeded());
+  }
 }
 
 TEST(RootBindingPlanTest, CanonicalMetadataDistinguishesAbsentAndInvalid) {

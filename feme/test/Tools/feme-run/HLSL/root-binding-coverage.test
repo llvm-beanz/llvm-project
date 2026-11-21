@@ -1,0 +1,88 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --wave-size=8 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object.yaml %t/shader.o | FileCheck %s --check-prefix=AOT
+# RUN: not %dxil_dxc /nologo /WX /T cs_6_2 /E main /D ADJACENT_RANGES /Fo %t/sdk-rejected.dxil %t/shader.hlsl 2>&1 | FileCheck %s --check-prefix=SDK
+# RUN: %dxil_dxc /nologo /WX /Vd /T cs_6_2 /E main /D ADJACENT_RANGES /Fo %t/adjacent.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/adjacent.dxil 2>&1 | FileCheck %s --check-prefix=TAIL
+# RUN: %dxil_dxc /nologo /WX /Vd /T cs_6_2 /E main /D WRONG_CLASS /Fo %t/class.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/class.dxil 2>&1 | FileCheck %s --check-prefix=START
+# RUN: not feme-run --root-signature-constants --reference --heap=%t/heap.yaml %t/class.dxil 2>&1 | FileCheck %s --check-prefix=START
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/class.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=START
+# RUN: feme-run --repeat=3 --heap=%t/heap.yaml %t/class.dxil | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /Vd /T cs_6_2 /E main /D WRONG_SPACE /Fo %t/space.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/space.dxil 2>&1 | FileCheck %s --check-prefix=START
+# RUN: %dxil_dxc /nologo /WX /Vd /T cs_6_2 /E main /D WRONG_VISIBILITY /Fo %t/visibility.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/visibility.dxil 2>&1 | FileCheck %s --check-prefix=START
+# RUN: %dxil_dxc /nologo /WX /Vd /T cs_6_2 /E main /D RANGE_GAP /Fo %t/gap.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/gap.dxil 2>&1 | FileCheck %s --check-prefix=TAIL
+#
+# CHECK: binding[7:3][0]: 42 0 42 123456789 987654321{{$}}
+# CHECK-NEXT: binding[7:3][1]: 0 42 0 123456789 987654321{{$}}
+# CHECK-NEXT: binding[7:3][0]: 42 0 42 123456789 987654321{{$}}
+# CHECK-NEXT: binding[7:3][1]: 0 42 0 123456789 987654321{{$}}
+# CHECK-NEXT: binding[7:3][0]: 42 0 42 123456789 987654321{{$}}
+# CHECK-NEXT: binding[7:3][1]: 0 42 0 123456789 987654321{{$}}
+# CHECK-NOT: binding[
+# AOT: heap[0]: 42 0 42 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 0 42 0 123456789 987654321{{$}}
+# AOT-NEXT: heap[0]: 42 0 42 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 0 42 0 123456789 987654321{{$}}
+# AOT-NEXT: heap[0]: 42 0 42 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 0 42 0 123456789 987654321{{$}}
+# AOT-NOT: heap[
+# START: root binding mismatch: uav space=7 register=3 count=2 is not covered at register=3 for visibility=0
+# TAIL: root binding mismatch: uav space=7 register=3 count=2 is not covered at register=4 for visibility=0
+# SDK: Shader UAV descriptor range (RegisterSpace=7, NumDescriptors=2, BaseShaderRegister=3) is not fully bound in root signature
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) { uint A; };
+RWByteAddressBuffer Output[2] : register(u3, space7);
+#if defined(WRONG_CLASS)
+#define TABLE "DescriptorTable(SRV(t3,numDescriptors=2,space=7)),"
+#elif defined(WRONG_SPACE)
+#define TABLE "DescriptorTable(UAV(u3,numDescriptors=2,space=8)),"
+#elif defined(WRONG_VISIBILITY)
+#define TABLE "DescriptorTable(UAV(u3,numDescriptors=2,space=7),visibility=SHADER_VISIBILITY_PIXEL),"
+#elif defined(RANGE_GAP)
+#define TABLE "DescriptorTable(UAV(u3,space=7),UAV(u5,space=7)),"
+#elif defined(ADJACENT_RANGES)
+#define TABLE "DescriptorTable(UAV(u3,space=7),UAV(u4,space=7)),"
+#else
+#define TABLE "DescriptorTable(UAV(u3,numDescriptors=2,space=7)),"
+#endif
+[RootSignature(TABLE "RootConstants(num32BitConstants=1,b3,space=7)")]
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+  Output[TID.x % 2].Store(TID.x * 4, A);
+}
+
+#--- heap.yaml
+root-constants: [42]
+bindings:
+  - space: 7
+    register: 3
+    entries:
+      - index: 0
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+      - index: 1
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+#--- object.yaml
+root-constants: [42]
+resource-heap:
+  - index: 0
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]
+  - index: 1
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]

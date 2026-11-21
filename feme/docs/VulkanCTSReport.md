@@ -1,5 +1,29 @@
 # Vulkan CTS status
 
+## W2(a) declared-binding regression scope (2026-11-21)
+
+The [binding-preflight follow-up](W0WindowsIntegrationProbe.md#w2a-declared-binding-preflight-vm-2026-11-21)
+checks live declarations in the entry/direct-helper graph before opt-in
+root-constant selection attaches metadata or normalizes bindings. Resource
+class, register space, visibility and full containment in one root binding
+are required. Native DXC independently rejects an array split across
+adjacent singleton ranges; `/Vd` fixtures test FeMe's rejection as well.
+Seven unit cases and one source fixture add eight passes, including exact
+normal/reference/AOT array output, repeat/guard checks, malformed types,
+dynamic declarations and indirect calls. The inferred default is unchanged.
+
+The rebuilt full FeMe LIT suite with native SDK DXC/FXC passes **4,052**,
+with **15 Skipped, 10 Unsupported and zero failures**, from **4,077**
+discovered tests in **136.86 seconds**. Focused coverage passes **827**
+in **8.04 seconds**. Assertions remain enabled and PCH disabled; these
+timings are not a controlled performance comparison.
+
+This does not prepare descriptors, remap heaps by resource class, establish
+full resource-kind/promise compatibility or close W2(a). No artifact ABI,
+Vulkan command semantics, advertisements, pinned inventory or adapter-matrix
+results change. **No real Vulkan CTS pass is claimed**; the external runner
+remains unavailable.
+
 ## W2(a) explicit root-constant regression scope (2026-11-21)
 
 The [explicit-root follow-up](W0WindowsIntegrationProbe.md#w2a-explicit-root-constant-selection-vm-2026-11-21)

@@ -72,6 +72,19 @@ public:
   const RootBinding *findBinding(llvm::dxil::ResourceClass Class,
                                  uint32_t Space, uint32_t Register,
                                  llvm::dxbc::ShaderVisibility Stage) const;
+  /// Checks that one visible binding covers a complete shader declaration;
+  /// arrays cannot span adjacent ranges or individual static samplers.
+  /// UINT32_MAX denotes an unbounded declaration. This checks binding
+  /// identity, not descriptor preparation.
+  llvm::Error checkBindingCoverage(llvm::dxil::ResourceClass Class,
+                                   uint32_t Space, uint32_t Register,
+                                   uint32_t Count,
+                                   llvm::dxbc::ShaderVisibility Stage) const;
+  /// Checks bound-resource declarations reachable from an entry point,
+  /// including direct helper calls, before normalization discards identities.
+  /// Dynamic heap access and resource-kind/promise compatibility are separate.
+  llvm::Error checkShaderBindings(const llvm::Function &Entry,
+                                  llvm::dxbc::ShaderVisibility Stage) const;
   void print(llvm::raw_ostream &OS) const;
 };
 

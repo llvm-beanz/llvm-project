@@ -79,10 +79,16 @@ coverage" in [../Design.md](../Design.md).
   constant parameter instead of inferring a cbuffer binding. The parameter's
   DWORD count determines the required root span and clips reads. Missing or
   invalid layouts, multiple visible parameters, denied stages and local
-  signatures are errors; general descriptor-backed CBVs and arrays remain
-  unsupported. This applies to DXIL and original DXBC input and native AOT
-  compilation. Other targets reject this option. The default inferred mode
-  is unchanged.
+  signatures are errors. Before normalization, live bound-resource
+  declarations in the entry and directly called helpers must match class,
+  space and stage visibility, with one root binding containing each full
+  declaration. Arrays cannot span adjacent ranges or individual static
+  samplers; dynamic declarations and indirect calls fail validation.
+  General descriptor-backed CBVs and cbuffer arrays remain unsupported.
+  This is binding preflight, not descriptor/table preparation or full
+  shader/root compatibility. This applies to DXIL and original DXBC input
+  and native AOT compilation. Other targets reject this option. The default
+  inferred mode is unchanged.
 
 * `-O0`, `-O1`, `-O2`, `-O3`
 

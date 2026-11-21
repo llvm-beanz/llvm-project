@@ -27,6 +27,51 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) declared-binding preflight (VM, 2026-11-21)
+
+Opt-in `--root-signature-constants` now checks live bound-resource
+declarations before normalization or selection metadata attachment. Each
+declaration must match the checked root plan's SRV/UAV/CBV/sampler class,
+register space and stage visibility. One root binding must contain its
+entire register range; neither adjacent ranges nor individual static
+samplers collectively satisfy an array. Finite endpoints use wide
+arithmetic; unbounded declarations extend to the end of the register domain.
+
+The selected entry and reachable direct helper definitions are checked;
+recursion terminates, unrelated functions and dead handles are ignored.
+Dynamic/malformed declarations and indirect calls fail explicitly, without
+attaching selection metadata. Dynamic-heap access is outside this static
+check. The inferred default and artifact ABI remain unchanged.
+
+Seven new unit cases cover resource classes, space/visibility, holes,
+adjacent and unbounded ranges, individual samplers, canonical handle types,
+helper reachability, malformed/dynamic declarations and indirect calls.
+The real DXC fixture checks a two-element UAV array with three threads at
+widths 4/8, scalar-reference and native AOT, retaining three dispatches and
+verifying both complete output buffers and untouched guard values.
+Wrong-class, wrong-space, wrong-visibility, gapped and adjacent layouts are
+compiled with `/Vd` and rejected by FeMe. Native SDK validation independently
+rejects the adjacent-range layout:
+
+```text
+Shader UAV descriptor range (RegisterSpace=7, NumDescriptors=2, BaseShaderRegister=3) is not fully bound in root signature
+```
+
+All automated tests run through LIT. Focused root/CPU/DXIL coverage passes
+**827**, with zero failures, in **8.04 seconds**. After rebuilding all
+prerequisites with assertions and disabled PCH, the full suite with native
+SDK DXC/FXC passes **4,052**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,077** discovered tests in **136.86 seconds**. Eight
+new passes correspond to the seven unit cases and one source fixture.
+These are measured timings, not a controlled performance comparison.
+No new Windows adapter-matrix or external Vulkan CTS result is claimed.
+
+This is declared binding preflight, not table materialization, descriptor
+contents, class-aware heap remapping, full resource-kind/counter/promise
+compatibility or general CBV execution. Multiple inline parameters and
+owned D3D12 device execution remain open; `CreateDevice` still returns
+`E_NOTIMPL`. W0(c), W0(g), W1 and W2(a) are not closed.
+
 ## W2(a) explicit root-constant selection (VM, 2026-11-21)
 
 `feme` and `feme-run` now expose opt-in `--root-signature-constants`,

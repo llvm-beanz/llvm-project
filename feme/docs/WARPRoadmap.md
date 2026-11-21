@@ -470,6 +470,23 @@ zero failures. This closes a single-parameter root-constant mapping subset,
 not W2(a): multiple inline parameters, general CBVs, table preparation,
 full shader/root compatibility and owned D3D12 execution remain open.
 
+W2(a) declared-binding preflight progress (2026-11-21): opt-in explicit
+constant selection now validates live bound-resource declarations before
+normalization and selection metadata attachment. The entry/direct-helper
+graph must match the checked root plan's class, space and stage visibility,
+with each complete declaration contained in one binding. Native DXC rejects
+an array split across adjacent singleton ranges; the regression retains
+that SDK rejection and uses `/Vd` to independently test FeMe's rejection.
+Dynamic/malformed declarations and indirect calls fail explicitly;
+unrelated functions and dead handles do not contribute bindings. Seven unit
+cases and a real DXC source fixture cover classes, holes, adjacency,
+unbounded endpoints, samplers, helper reachability and exact repeated
+normal/reference/AOT buffer-array output. The inferred default is unchanged.
+This is binding identity validation, not descriptor preparation, class-aware
+heap remapping, full resource-kind/promise compatibility or W2(a) completion.
+Focused LIT passes 827 cases; the rebuilt full suite passes 4,052, with
+15 skipped, 10 unsupported and zero failures, from 4,077 discovered tests.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

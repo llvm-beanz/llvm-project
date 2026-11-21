@@ -155,10 +155,9 @@ TEST(RootConstantLoweringTest, ExplicitModeNeverFallsBackToAnotherBinding) {
     EXPECT_TRUE(matchRootConstantAccess(F));
     setLayout(F, {{{1, 0, Range == 1 ? 4u : 3u, 7, 4}}});
     EXPECT_THAT_ERROR(
-        selectRootSignatureConstants(F, feme::ShaderStage::Compute),
-        Succeeded());
-    EXPECT_FALSE(matchRootConstantAccess(F));
-    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+        selectRootSignatureConstants(F, feme::ShaderStage::Compute), Failed());
+    EXPECT_FALSE(F.getMetadata("feme.cpu.rootconstantbinding"));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
   }
 }
 

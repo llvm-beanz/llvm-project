@@ -2523,6 +2523,23 @@ selects only all-stage parameters; graphics stages also accept their own
 visibility. Stage-denial flags, local signatures, missing/malformed layouts
 and multiple visible constant parameters are explicit errors.
 
+Before attaching selection metadata or normalizing bound handles, this mode
+checks live `llvm.dx.resource.handlefrombinding` declarations in the entry
+and reachable directly called definitions. Canonical DXIL resource types
+identify SRV/UAV/CBV/sampler classes; class, space and stage visibility must
+match, and one root binding must contain the complete declared register
+range. Adjacent table ranges and individual static samplers cannot combine
+to cover an array, matching the measured native DXC rejection. Finite spans
+use wide arithmetic; the unbounded sentinel reaches the end of the register
+domain. Dynamic/malformed declarations and indirect calls fail explicitly,
+while unrelated functions and dead handles are ignored. Validation failures
+leave selection metadata unattached.
+
+This checks declared binding identity, not descriptor contents, table
+materialization, class-aware heap remapping, full resource-kind/counter
+compatibility or root-descriptor promises. Native dynamic-heap access is
+outside this static binding check. The inferred mode remains unchanged.
+
 That parameter's register/space selects the cbuffer, and its full DWORD
 count sets `RootConstantSize` reflection. Reads must fit both the shader's
 declared cbuffer and the parameter, even if the host supplies extra bytes.
