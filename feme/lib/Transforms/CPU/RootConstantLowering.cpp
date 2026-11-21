@@ -40,13 +40,8 @@ namespace {
 constexpr uint32_t RowSizeBytes = 16;
 constexpr StringLiteral ExplicitBindingMD = "feme.cpu.rootconstantbinding";
 
-struct ExplicitBinding {
-  uint32_t Space;
-  uint32_t Register;
-  uint32_t Size;
-};
-
-std::optional<ExplicitBinding> getExplicitBinding(const Function &F) {
+std::optional<ExplicitRootConstantBinding>
+getExplicitBinding(const Function &F) {
   auto *MD = F.getMetadata(ExplicitBindingMD);
   if (!MD || MD->getNumOperands() != 3)
     return std::nullopt;
@@ -60,7 +55,7 @@ std::optional<ExplicitBinding> getExplicitBinding(const Function &F) {
   if (!Values[2] || Values[2] > 64 * sizeof(uint32_t) ||
       Values[2] % sizeof(uint32_t))
     return std::nullopt;
-  return ExplicitBinding{Values[0], Values[1], Values[2]};
+  return ExplicitRootConstantBinding{Values[0], Values[1], Values[2]};
 }
 
 /// DXIL's sentinel `RangeSize` for an unbounded array binding
@@ -273,6 +268,11 @@ Function *lowerFunctionRootConstants(Function &F) {
 
 namespace feme::cpu {
 
+std::optional<ExplicitRootConstantBinding>
+getExplicitRootConstantBinding(const Function &F) {
+  return getExplicitBinding(F);
+}
+
 Error selectRootSignatureConstants(Function &F, ShaderStage Stage) {
   using Visibility = dxbc::ShaderVisibility;
   using Flags = dxbc::RootFlags;
@@ -381,7 +381,7 @@ std::optional<RootConstantAccess> matchRootConstantAccess(Function &F) {
   if (F.isDeclaration())
     return std::nullopt;
 
-  std::optional<ExplicitBinding> Binding = getExplicitBinding(F);
+  std::optional<ExplicitRootConstantBinding> Binding = getExplicitBinding(F);
   if (F.getMetadata(ExplicitBindingMD) && !Binding)
     return std::nullopt;
   std::optional<RootConstantAccess> Access;

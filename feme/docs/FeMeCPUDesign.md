@@ -2552,6 +2552,16 @@ outside this static binding check. The inferred mode remains unchanged.
 That parameter's register/space selects the cbuffer, and its full DWORD
 count sets `RootConstantSize` reflection. Reads must fit both the shader's
 declared cbuffer and the parameter, even if the host supplies extra bytes.
+Reflection uses the selected parameter's full span and register/space even
+when optimization removes all cbuffer reads or no cbuffer handle is present.
+`ResourceInfo::fromModule` merges existing heap usage with the validated
+explicit selection contract, or creates root-only reflection when no
+use-based resource metadata exists. This shared reader keeps normal,
+reference and AOT reflection consistent without adding unused function
+parameters or changing shader argument layouts. Other heap flags, indices
+and range assignments are preserved. Unused parameters do not require
+dereferencing supplied root bytes; the existing short/empty-input policy
+is unchanged.
 The inline block starts at byte zero regardless of preceding descriptor
 parameters; it contains constants only, not serialized descriptor/table
 arguments. Cbuffer arrays, other bindings and descriptor-backed CBVs are

@@ -1,5 +1,28 @@
 # Vulkan CTS status
 
+## W2(a) unread-root-contract regression scope (2026-11-21)
+
+The [unread-parameter follow-up](W0WindowsIntegrationProbe.md#w2a-unread-inline-constant-reflection-vm-2026-11-21)
+preserves explicit inline-constant register/space and full parameter span
+when no cbuffer reads survive. The shared reflection reader covers both
+resource-free and mixed-heap compilation, preserving other heap usage.
+Three unit cases include actual native-object reflection; a DXC fixture
+verifies no cbuffer loads and repeated normal/reference/AOT execution with
+omitted unused root bytes and complete guard readbacks.
+
+The rebuilt full FeMe LIT suite passes **4,066**, with **15 Skipped,
+10 Unsupported and zero failures**, from **4,091** discovered tests in
+**74.88 seconds**. Focused coverage passes **848** in **6.28 seconds**.
+Four new passes correspond to three unit cases and one source fixture.
+Existing graphics and Vulkan unit/real-loader coverage remains passing;
+timings are not a controlled performance comparison.
+
+The inferred default, artifact ABI 8, shader argument layouts, Vulkan
+semantics, advertisements, pinned inventory and adapter-matrix results
+are unchanged. General CBVs, multiple inline parameters and owned D3D12
+execution remain open. **No real Vulkan CTS pass is claimed**; the
+external runner remains unavailable.
+
 ## W2(a) root-descriptor-kind regression scope (2026-11-21)
 
 The [resource-kind follow-up](W0WindowsIntegrationProbe.md#w2a-root-descriptor-resource-kinds-vm-2026-11-21)

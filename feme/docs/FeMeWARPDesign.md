@@ -72,7 +72,9 @@ The original compute-only baseline is no longer current:
   element and supplied root bytes, with overflow-safe offset arithmetic.
   Opt-in `--root-signature-constants` now selects one visible inline
   parameter from a checked root plan and refuses to promote descriptor-backed
-  CBVs. Before normalization it checks live declarations in the entry/direct
+  CBVs. Its full span/register/space remain reflected even if no cbuffer
+  reads survive, including resource-free and mixed-heap compilation.
+  Before normalization it checks live declarations in the entry/direct
   helper graph for class, space, visibility and complete containment in one
   root binding; adjacent ranges cannot collectively cover an array.
   Preflight also requires raw/structured buffers for root SRV/UAV descriptors;

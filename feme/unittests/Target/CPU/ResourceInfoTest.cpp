@@ -305,6 +305,31 @@ TEST(ResourceInfoTest, RejectsInvalidNamespacesAndPreviousArtifactVersion) {
   EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
 }
 
+TEST(ResourceInfoTest, UnreadExplicitContractOverridesUseBasedReflection) {
+  LLVMContext C;
+  for (bool HasUsage : {false, true}) {
+    auto M = parseIR(C, R"(
+      define void @main() !feme.cpu.rootconstantbinding !0 { ret void }
+      !0 = !{i32 7, i32 3, i32 32}
+      !feme.cpu.resources = !{!1}
+      !1 = !{!"main", i32 0, i1 true, i32 0, i32 0, i32 8, i32 5}
+    )");
+    ASSERT_TRUE(M);
+    if (!HasUsage)
+      M->eraseNamedMetadata(M->getNamedMetadata("feme.cpu.resources"));
+    auto Info = ResourceInfo::fromModule(*M, "main");
+    ASSERT_TRUE(Info);
+    EXPECT_EQ(Info->EntryName, "main");
+    EXPECT_EQ(Info->RootConstantSize, 32u);
+    EXPECT_EQ(Info->RootConstantSpace, 7u);
+    EXPECT_EQ(Info->RootConstantRegister, 3u);
+    EXPECT_EQ(Info->RootConstantMinOffset, 0u);
+    EXPECT_EQ(Info->UsesSamplerHeap, HasUsage);
+    EXPECT_EQ(Info->StaticHeapIndices,
+              HasUsage ? std::vector<uint32_t>{5} : std::vector<uint32_t>{});
+  }
+}
+
 TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

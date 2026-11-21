@@ -8,6 +8,8 @@
 
 #include "feme/Target/CPU/ResourceInfo.h"
 
+#include "feme/Transforms/CPU/RootConstantLowering.h"
+
 #include "feme/Core/StageOps.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -178,8 +180,10 @@ uint32_t feme::cpu::computeSideEffectFlags(const Function &F) {
   return Flags;
 }
 
-std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
-                                                     StringRef EntryName) {
+namespace {
+
+std::optional<ResourceInfo> readResourceUsage(const Module &M,
+                                              StringRef EntryName) {
   const NamedMDNode *MD = M.getNamedMetadata("feme.cpu.resources");
   if (!MD)
     return std::nullopt;
@@ -221,6 +225,26 @@ std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
     return Info;
   }
   return std::nullopt;
+}
+
+} // namespace
+
+std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
+                                                     StringRef EntryName) {
+  auto Info = readResourceUsage(M, EntryName);
+  const Function *F = M.getFunction(EntryName);
+  auto Binding = F ? getExplicitRootConstantBinding(*F) : std::nullopt;
+  if (!Binding)
+    return Info;
+  if (!Info) {
+    Info.emplace();
+    Info->EntryName = EntryName.str();
+  }
+  Info->RootConstantSize = Binding->Size;
+  Info->RootConstantSpace = Binding->Space;
+  Info->RootConstantRegister = Binding->Register;
+  Info->RootConstantMinOffset = 0;
+  return Info;
 }
 
 StageArtifactInfo

@@ -53,7 +53,9 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 - `--root-signature-constants`: opts into the checked root signature's sole
   visible inline-constant parameter instead of inferring a cbuffer binding.
   Its DWORD count determines the required root span and clips shader reads,
-  even when extra bytes are supplied. Missing/invalid signatures, multiple
+  even when extra bytes are supplied. Reflection retains its full span and
+  register/space when no cbuffer reads survive; unused parameters do not
+  become zero-sized inferred bindings. Missing/invalid signatures, multiple
   visible parameters, local signatures and stage denial are errors.
   Before normalization, live bound-resource declarations in the entry and
   its directly called helpers must match the root plan's resource class,

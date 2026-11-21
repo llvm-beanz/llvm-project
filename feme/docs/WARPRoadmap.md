@@ -523,6 +523,21 @@ CBVs/multiple inline parameters or close W2(a)/owned device execution.
 Focused LIT passes 844 cases; the rebuilt full suite passes 4,062, with
 15 skipped, 10 unsupported and zero failures, from 4,087 discovered tests.
 
+W2(a) unread-root-contract progress (2026-11-21): the shared reflection
+reader now retains the selected inline parameter's register/space and full
+DWORD span even if the shader has no surviving cbuffer reads. It merges
+validated selection metadata with existing resource usage, preserving heap
+flags/indices/ranges, and creates root-only reflection for resource-free
+functions. Lowering and shader argument layouts remain unchanged. Three
+unit cases cover absent/use-based metadata, both compilation backends with
+and without heap access, and actual native-object reflection bytes. A real
+DXC fixture verifies absent cbuffer loads and repeated normal/reference/AOT
+execution, partial waves and untouched guards, including resource-free
+shaders and omitted unused root bytes. Focused/full LIT pass 848/4,066 cases
+with zero failures; artifact ABI stays 8 and inferred behavior is unchanged.
+This is stable single-parameter reflection, not multiple inline parameters,
+general CBVs, descriptor materialization or owned D3D12 execution.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

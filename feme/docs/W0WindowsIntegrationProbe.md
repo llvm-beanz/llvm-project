@@ -27,6 +27,51 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) unread inline-constant reflection (VM, 2026-11-21)
+
+Explicit-root compilation now retains the selected parameter's register,
+space and full DWORD span when the shader never reads the cbuffer or
+optimization removes every read. Previously use-based lowering emitted
+zero root size for a mixed-heap shader, or no resource metadata for a
+resource-free shader, losing the root layout's contract.
+
+The shared `ResourceInfo::fromModule` reader now merges validated selection
+metadata with resource usage, or creates root-only reflection when usage
+metadata is absent. Heap flags, indices and bound ranges remain intact.
+No unused function parameters are added, shader argument layouts remain
+unchanged, and the default inferred behavior is retained. This is reflection
+of the declared parameter, not a new requirement to touch unused root bytes.
+
+Three new unit cases cover:
+
+- Full 32-byte b3/space7 reflection with or without use-based metadata,
+  preserving heap flags and static indices.
+- Normal/reference compilation of resource-free and mixed-heap stages,
+  including stage artifact reflection.
+- The actual serialized reflection global loaded from a native object
+  containing traditional and dynamic resources, not merely an IR proxy.
+
+The real DXC fixture declares an unread eight-DWORD parameter and checks
+the compiled shader has no cbuffer-load operation. Three-thread execution
+at widths 4/8, scalar-reference and native AOT retains three dispatches
+and verifies complete constant output plus untouched guard values.
+Resource-free normal/reference/AOT shaders also execute successfully.
+Unused root bytes are omitted; inferred-mode output remains unchanged.
+
+All automated tests run through LIT. Focused coverage passes **848**, with
+zero failures, in **6.28 seconds**. The rebuilt full suite with native SDK
+DXC/FXC passes **4,066**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,091** discovered tests in **74.88 seconds**. Four
+new passes correspond to three unit cases and one source fixture.
+Assertions, disabled PCH and the memory-safe build limit are retained.
+Timings are not a controlled performance comparison.
+
+Artifact ABI remains 8. Multiple inline parameters, general CBVs, descriptor
+preparation, counter/static-promise compatibility and owned D3D12 execution
+remain open. No Windows adapter-matrix or external Vulkan CTS result is
+claimed. `CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)
+are not closed.
+
 ## W2(a) root descriptor resource kinds (VM, 2026-11-21)
 
 Opt-in explicit-root preflight now checks the containing parameter kind,

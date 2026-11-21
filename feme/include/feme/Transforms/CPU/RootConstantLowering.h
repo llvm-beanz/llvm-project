@@ -89,6 +89,18 @@ llvm::Error selectRootSignatureConstants(llvm::Function &F, ShaderStage Stage);
 /// admission; malformed metadata must not fall back to inferred binding.
 llvm::Error validateRootConstantBindings(const llvm::Module &M);
 
+/// The selected inline parameter's contract, including when no reads survive.
+struct ExplicitRootConstantBinding {
+  uint32_t Space;
+  uint32_t Register;
+  uint32_t Size;
+};
+
+/// Reads compiler-generated selection metadata after
+/// validateRootConstantBindings has checked it.
+std::optional<ExplicitRootConstantBinding>
+getExplicitRootConstantBinding(const llvm::Function &F);
+
 /// One `llvm.dx.resource.load.cbufferrow.{2,4,8}.*` call reading a row of the
 /// recognized root-constant binding. \p Row is the load's own row-index
 /// operand, kept as a `Value` rather than a resolved constant: roadmap R25

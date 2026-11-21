@@ -22,7 +22,10 @@
 #include "feme/Target/CPU/JITEngine.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Memory.h"
 #include "llvm/Support/Process.h"
@@ -86,6 +89,43 @@ Expected<std::unique_ptr<CompiledStage>> compile(Context &Ctx,
   JITOptions Opts;
   Opts.WaveSize = WaveSize;
   return CompiledStage::create(Ctx, std::move(Mod), Opts);
+}
+
+TEST(CompiledStageTest, UnreadExplicitContractSurvivesBothBackends) {
+  for (bool HasHeap : {false, true})
+    for (bool Reference : {false, true}) {
+      Context Ctx;
+      SMDiagnostic Err;
+      auto M = parseAssemblyString(HasHeap ? ShaderIR : R"(
+            define void @main() #0 { ret void }
+            attributes #0 = {
+              "hlsl.shader"="compute" "hlsl.numthreads"="1,1,1"
+            }
+          )",
+                                   Err, Ctx.getLLVMContext());
+      ASSERT_TRUE(M) << Err.getMessage().str();
+      auto Word = [&](uint32_t Value) {
+        return ConstantAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(Ctx.getLLVMContext()), Value));
+      };
+      M->getFunction("main")->setMetadata(
+          "feme.cpu.rootconstantbinding",
+          MDNode::get(Ctx.getLLVMContext(), {Word(7), Word(3), Word(32)}));
+      JITOptions Opts;
+      Opts.WaveSize = 4;
+      Opts.Reference = Reference;
+      auto Stage = CompiledStage::create(
+          Ctx, feme::Module::fromLLVMIR(std::move(M)), Opts);
+      ASSERT_THAT_EXPECTED(Stage, Succeeded());
+      const auto &Info = (*Stage)->getResourceInfo();
+      EXPECT_EQ(Info.RootConstantSize, 32u);
+      EXPECT_EQ(Info.RootConstantSpace, 7u);
+      EXPECT_EQ(Info.RootConstantRegister, 3u);
+      auto Artifact = (*Stage)->getArtifactInfo();
+      EXPECT_EQ(Artifact.RootConstantSize, 32u);
+      EXPECT_EQ(Artifact.RootConstantSpace, 7u);
+      EXPECT_EQ(Artifact.RootConstantRegister, 3u);
+    }
 }
 
 TEST(CompiledStageTest, InvokeGroupRunsExactlyOneGroup) {

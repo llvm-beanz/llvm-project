@@ -34,7 +34,11 @@
 
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/SourceMgr.h"
@@ -86,6 +90,16 @@ Expected<SmallVector<char, 0>> compileToObject(llvm::Module &M) {
   Expected<PipelineResult> Result = runPipeline(M, /*EntryPoint=*/"", 4);
   if (!Result)
     return Result.takeError();
+  auto Info = ResourceInfo::fromModule(M, Result->EntryName);
+  if (!Info)
+    return createStringError(inconvertibleErrorCode(),
+                             "missing resource reflection after lowering");
+  auto Artifact = StageArtifactInfo::fromResourceInfo(*Info);
+  Artifact.WaveSize = 4;
+  auto GroupSize = getDeclaredGroupSize(*M.getFunction(Result->EntryName));
+  for (unsigned I = 0; I != 3; ++I)
+    Artifact.GroupSize[I] = GroupSize[I];
+  emitArtifactGlobal(M, Result->EntryName, Artifact);
 
   // `getDefaultTargetTriple()` reflects `LLVM_DEFAULT_TARGET_TRIPLE` (empty
   // in a build configured for multiple targets with no single default);
@@ -118,6 +132,40 @@ Expected<SmallVector<char, 0>> compileToObject(llvm::Module &M) {
   if (Error E = Backend.run(M, Opts, OS))
     return std::move(E);
   return Output;
+}
+
+TEST(AOTDispatchTest, NativeObjectPreservesUnreadExplicitContract) {
+  InitializeNativeTarget();
+  InitializeNativeTargetAsmPrinter();
+  LLVMContext C;
+  SMDiagnostic Err;
+  auto M = parseAssemblyString(MixedResourceShaderIR, Err, C);
+  ASSERT_TRUE(M) << Err.getMessage().str();
+  auto Word = [&](uint32_t Value) {
+    return ConstantAsMetadata::get(
+        ConstantInt::get(Type::getInt32Ty(C), Value));
+  };
+  M->getFunction("main")->setMetadata(
+      "feme.cpu.rootconstantbinding",
+      MDNode::get(C, {Word(7), Word(3), Word(32)}));
+  auto Object = compileToObject(*M);
+  ASSERT_THAT_EXPECTED(Object, Succeeded());
+  auto *Global = M->getGlobalVariable(getArtifactSymbolName("main"));
+  ASSERT_TRUE(Global);
+  uint64_t Size = cast<ArrayType>(Global->getValueType())->getNumElements();
+  auto JIT = cantFail(orc::LLJITBuilder().create());
+  ASSERT_THAT_ERROR(JIT->addObjectFile(MemoryBuffer::getMemBufferCopy(
+                        StringRef(Object->data(), Object->size()))),
+                    Succeeded());
+  auto Address = JIT->lookup(getArtifactSymbolName("main"));
+  ASSERT_THAT_EXPECTED(Address, Succeeded());
+  auto Artifact =
+      parseArtifact(ArrayRef<uint8_t>(Address->toPtr<const uint8_t *>(), Size));
+  ASSERT_THAT_EXPECTED(Artifact, Succeeded());
+  EXPECT_EQ(Artifact->RootConstantSize, 32u);
+  EXPECT_EQ(Artifact->RootConstantSpace, 7u);
+  EXPECT_EQ(Artifact->RootConstantRegister, 3u);
+  EXPECT_EQ(Artifact->ReservedResourceHeapSize, 1u);
 }
 
 TEST(AOTDispatchTest, MatchesJITForShaderMixingTraditionalAndDynamicResources) {

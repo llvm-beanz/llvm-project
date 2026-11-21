@@ -77,7 +77,9 @@ coverage" in [../Design.md](../Design.md).
 
   For CPU targets, select the checked root signature's sole visible inline
   constant parameter instead of inferring a cbuffer binding. The parameter's
-  DWORD count determines the required root span and clips reads. Missing or
+  DWORD count determines the required root span and clips reads. Its full
+  span and register/space remain reflected even when no cbuffer reads
+  survive. Missing or
   invalid layouts, multiple visible parameters, denied stages and local
   signatures are errors. Before normalization, live bound-resource
   declarations in the entry and directly called helpers must match class,

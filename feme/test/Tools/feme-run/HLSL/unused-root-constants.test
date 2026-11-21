@@ -1,0 +1,55 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /Fc %t/shader.asm /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: FileCheck %s --check-prefix=NOREAD --implicit-check-not=cbufferLoad < %t/shader.asm
+# RUN: feme-run --root-signature-constants --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --wave-size=8 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object.yaml %t/shader.o | FileCheck %s --check-prefix=AOT
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D NO_HEAP /Fo %t/empty.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --repeat=3 %t/empty.dxil
+# RUN: feme-run --root-signature-constants --reference --repeat=3 %t/empty.dxil
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/empty.dxil -o %t/empty.o
+# RUN: feme-run --object --repeat=3 %t/empty.o
+#
+# NOREAD: define void @main
+# CHECK-COUNT-3: binding[7:3][0]: 42 42 42 123456789 987654321{{$}}
+# CHECK-NOT: binding[
+# AOT-COUNT-3: heap[0]: 42 42 42 123456789 987654321{{$}}
+# AOT-NOT: heap[
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) { uint Unused; };
+#if defined(NO_HEAP)
+#define RESOURCES ""
+#else
+RWByteAddressBuffer Output : register(u3, space7);
+#define RESOURCES "UAV(u3,space=7),"
+#endif
+[RootSignature(RESOURCES "RootConstants(num32BitConstants=8,b3,space=7)")]
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+#if !defined(NO_HEAP)
+  Output.Store(TID.x * 4, 42);
+#endif
+}
+
+#--- heap.yaml
+bindings:
+  - space: 7
+    register: 3
+    entries:
+      - index: 0
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+#--- object.yaml
+resource-heap:
+  - index: 0
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]
