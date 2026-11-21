@@ -27,6 +27,67 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) explicit root-constant selection (VM, 2026-11-21)
+
+`feme` and `feme-run` now expose opt-in `--root-signature-constants`,
+backed by matching stage/JIT compilation options. It uses the checked
+Root Signature 1.0/1.1 plan to select exactly one visible inline-constant
+parameter, rather than treating a cbuffer's uses as its binding contract.
+Missing/malformed signatures, multiple visible constant parameters,
+unsupported stages, stage-denial flags and local signatures fail explicitly.
+Compute accepts only all-stage parameters; conventional graphics stages
+also accept their own visibility.
+
+The selected register/space and full DWORD span control root reflection.
+Each scalar is clipped against both its shader declaration and that
+parameter, even if extra bytes are supplied. Preceding descriptor parameters
+do not shift the inline byte block. Cbuffer arrays and other CBV bindings
+remain unsupported, and descriptor-only layouts cannot silently become
+inline constants. The default inferred mode is retained and tested.
+Normal, scalar-reference, mixed heap/root and native AOT compilation share
+selection metadata and guarded lowering; no artifact ABI revision is needed.
+
+The first real DXC run exposed a frontend gap: RTS0 lived in the original
+container but was lost before CPU selection. The shared DXIL/DXBC frontend
+now copies those bytes onto canonical shader entries after metadata raising,
+using the same container extraction as inspection. Per-entry signatures
+take precedence; missing RTS0 is distinct from malformed/duplicate parts.
+
+Nine new unit cases and three source fixtures cover:
+
+- Exact parameter-required spans, including shader declarations smaller or
+  larger than the inline parameter; malformed selection metadata is rejected.
+- Visibility, denial flags, local/multiple parameters, wrong registers,
+  array declarations, owned container bytes and per-entry precedence.
+- A 16-byte IR cbuffer mapped to an 8-byte root parameter, with exact
+  three-thread readbacks at widths 4/8, reference and AOT. Extra supplied
+  values remain invisible; short AOT input is guarded. Inferred mode retains
+  its original 16-byte behavior on the same shader.
+- Real DXC 1.0/1.1 layouts with a UAV table before the constant parameter,
+  overlapping b3/u3 register numbers in space 7, and native 16-/64-bit packing.
+  Normal/reference/AOT output is checked across three retained dispatches.
+- Original FXC SM5.1 DXBC with root constants, checked through normal
+  widths 4/8, reference and AOT using a weighted four-DWORD checksum.
+  Root-descriptor and table-backed CBV layouts fail in explicit mode;
+  inferred-mode compatibility remains passing.
+- Rejection of the compile option in object-dispatch/inspection modes and
+  for non-CPU `feme` targets.
+
+All automated tests run through LIT. Focused CPU/DXIL/frontend/driver/target
+and source coverage passes **839**, with zero failures, in **2.57 seconds**.
+After rebuilding all prerequisites and the native ARM64 ICD with assertions
+and PCH disabled, the full suite with native SDK DXC/FXC passes **4,044**,
+with **15 Skipped, 10 Unsupported and zero failures**, from **4,069**
+discovered tests in **67.26 seconds**. This is a measured run time, not a
+controlled performance comparison. No new Windows adapter-matrix or external
+Vulkan CTS result is claimed; advertisements are unchanged.
+
+This is a single-visible-parameter inline-constant subset of W2(a), not
+general root argument materialization. Multiple inline parameters, general
+CBVs, descriptor tables/preparation and full shader/root compatibility
+remain open. Owned device execution remains absent and `CreateDevice`
+still returns `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a) are not closed.
+
 ## W2(a) wide constant rows and bounded reads (VM, 2026-11-21)
 
 The shared CPU root-constant lowering now accepts all six canonical DXIL

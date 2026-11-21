@@ -81,6 +81,10 @@ struct StageCompileOptions {
   /// Accepted for forward compatibility with the full design. No CPU-target
   /// pipeline phase consults it yet.
   bool EnableRobustness = true;
+  /// Opt in to the sole visible root-signature constant parameter instead
+  /// of promoting a cbuffer from its uses. Descriptor-backed CBVs stay
+  /// unsupported.
+  bool UseRootSignatureForConstants = false;
 };
 
 /// The two symbol names `runPipeline` produces or consumes, needed by

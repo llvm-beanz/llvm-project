@@ -73,6 +73,17 @@ coverage" in [../Design.md](../Design.md).
   Write output to `<file>`. If omitted, output is written to standard
   output.
 
+* `--root-signature-constants`
+
+  For CPU targets, select the checked root signature's sole visible inline
+  constant parameter instead of inferring a cbuffer binding. The parameter's
+  DWORD count determines the required root span and clips reads. Missing or
+  invalid layouts, multiple visible parameters, denied stages and local
+  signatures are errors; general descriptor-backed CBVs and arrays remain
+  unsupported. This applies to DXIL and original DXBC input and native AOT
+  compilation. Other targets reject this option. The default inferred mode
+  is unchanged.
+
 * `-O0`, `-O1`, `-O2`, `-O3`
 
   Optimization level for FeMe's IR optimization pipeline (see

@@ -40,7 +40,7 @@ enum EntryPropTag : unsigned {
   // signature, stored as a byte blob (see `applyEntryProps`'s
   // `RootSignature` handling and `feme::dxil::setRootSignature`) rather
   // than by reference to a separate named metadata node. FeMe does not
-  // parse the blob itself yet (roadmap W2); this only preserves it.
+  // interpret the blob here; the separate checked binding-plan reader does.
   EntryRootSigTag = 12,
 };
 
@@ -212,8 +212,8 @@ std::optional<Triple::EnvironmentType> applyEntryProps(Function &F,
     if (*Tag == EntryRootSigTag) {
       // The blob is a single-operand `MDNode` around a `ConstantDataArray`
       // of bytes (see `feme::dxil::setRootSignature`'s comment for the
-      // matching DXC encoding); preserved verbatim, since FeMe does not
-      // parse a root signature's contents yet (roadmap W2).
+      // matching DXC encoding); preserved verbatim for the separate checked
+      // root-binding-plan reader.
       const auto *Blob = dyn_cast_or_null<MDNode>(Value);
       const auto *CAM = Blob && Blob->getNumOperands() == 1
                             ? dyn_cast_or_null<ConstantAsMetadata>(

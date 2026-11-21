@@ -117,6 +117,8 @@ struct JITOptions {
   /// this is set. A shader using a wave intrinsic (which has no meaning
   /// one invocation at a time) is rejected.
   bool Reference = false;
+  /// Select inline constants from the root signature, not cbuffer uses.
+  bool UseRootSignatureForConstants = false;
 };
 
 /// A convenience wrapper around `CompiledStage` (CompiledStage.h) that adds

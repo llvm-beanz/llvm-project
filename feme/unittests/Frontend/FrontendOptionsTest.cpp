@@ -37,6 +37,20 @@ TEST(FrontendOptionsTest, HelpDoesNotRequireInputFile) {
   EXPECT_TRUE(Opts->ShowHelp);
 }
 
+TEST(FrontendOptionsTest, RootSignatureConstantsAreOptIn) {
+  std::string Diags;
+  llvm::raw_string_ostream OS(Diags);
+  const char *Default[] = {"input.dxil"};
+  auto Inferred = parseArgs(Default, OS);
+  ASSERT_TRUE(Inferred);
+  EXPECT_FALSE(Inferred->UseRootSignatureForConstants);
+  const char *Explicit[] = {"--root-signature-constants", "input.dxil"};
+  auto Selected = parseArgs(Explicit, OS);
+  ASSERT_TRUE(Selected);
+  EXPECT_TRUE(Selected->UseRootSignatureForConstants);
+  EXPECT_TRUE(Diags.empty());
+}
+
 TEST(FrontendOptionsTest, FailsWithoutInputFile) {
   std::string Diags;
   llvm::raw_string_ostream DiagsOS(Diags);

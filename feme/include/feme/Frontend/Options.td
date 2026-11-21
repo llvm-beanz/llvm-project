@@ -30,6 +30,10 @@ def target_EQ : Joined<["--"], "target=">,
              "(e.g. dxil, spirv, or a target triple)">,
     MetaVarName<"<format>">;
 
+def root_signature_constants : Flag<["--"], "root-signature-constants">,
+    HelpText<"Select CPU inline constants from the root signature "
+             "instead of inferring a cbuffer binding">;
+
 def wave_size_EQ : Joined<["--"], "wave-size=">,
     HelpText<"Wave size (W) for the FeMe CPU target: a power of two in "
              "[4, 128]. Unset resolves from the shader's declared wave "

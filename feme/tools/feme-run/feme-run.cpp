@@ -1294,6 +1294,9 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
     ModuleAnalysisManager MAM;
     feme::dxil::OpRaisingPass().run(M, MAM);
     feme::dxil::MetadataRaisingPass().run(M, MAM);
+    if (Error E = feme::dxil::importContainerRootSignature(
+            M, (*BufOrErr)->getBuffer()))
+      return std::move(E);
 
     clearHostAgnosticMetadata(M);
     return Imported;
@@ -1438,6 +1441,10 @@ int main(int argc, char **argv) {
                "the CFG restructurization test suite diffs against (see "
                "the 'CFG restructurization test suite' section of "
                "feme/docs/FeMeCPUDesign.md). --wave-size is ignored."));
+  cl::opt<bool> RootSignatureConstants(
+      "root-signature-constants",
+      cl::desc("Select the sole visible inline-constant parameter from the "
+               "root signature, without inferred cbuffer promotion"));
   cl::opt<bool> ObjectMode(
       "object",
       cl::desc("Treat <input> as a real compiled object file (the output "
@@ -1460,7 +1467,8 @@ int main(int argc, char **argv) {
     if (HeapFilename.getNumOccurrences() || WaveSize.getNumOccurrences() ||
         GroupCountStr.getNumOccurrences() || RepeatCount.getNumOccurrences() ||
         EntryPoint.getNumOccurrences() || Reference.getNumOccurrences() ||
-        ObjectMode.getNumOccurrences() || OptLevel.getNumOccurrences()) {
+        ObjectMode.getNumOccurrences() || OptLevel.getNumOccurrences() ||
+        RootSignatureConstants.getNumOccurrences()) {
       errs() << "feme-run: '--inspect-root-signature' cannot be combined with "
                 "dispatch options\n";
       return 1;
@@ -1481,6 +1489,11 @@ int main(int argc, char **argv) {
 
   if (RepeatCount == 0) {
     errs() << "feme-run: '--repeat' must be positive\n";
+    return 1;
+  }
+  if (ObjectMode && RootSignatureConstants.getNumOccurrences()) {
+    errs() << "feme-run: '--root-signature-constants' is a compile option "
+              "and cannot be combined with '--object'\n";
     return 1;
   }
 
@@ -1563,6 +1576,7 @@ int main(int argc, char **argv) {
   Opts.WaveSize = WaveSize;
   Opts.EntryPoint = EntryPoint;
   Opts.Reference = Reference;
+  Opts.UseRootSignatureForConstants = RootSignatureConstants;
   Opts.OptLevel = *ResolvedOptLevel;
 
   Expected<std::unique_ptr<JITEngine>> Engine =

@@ -1,0 +1,68 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /enable-16bit-types /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --wave-size=8 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object.yaml %t/shader.o | FileCheck %s --check-prefix=AOT
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /enable-16bit-types /force_rootsig_ver rootsig_1_0 /Fo %t/v1.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --repeat=3 --heap=%t/heap.yaml %t/v1.dxil | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /enable-16bit-types /D DESCRIPTOR_CBV /Fo %t/cbv.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/cbv.dxil 2>&1 | FileCheck %s --check-prefix=CBV
+# RUN: not feme-run --root-signature-constants --reference --heap=%t/heap.yaml %t/cbv.dxil 2>&1 | FileCheck %s --check-prefix=CBV
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/cbv.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=CBV
+# RUN: feme-run --repeat=3 --heap=%t/heap.yaml %t/cbv.dxil | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /enable-16bit-types /D TABLE_CBV /Fo %t/table.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/table.dxil 2>&1 | FileCheck %s --check-prefix=CBV
+#
+# CHECK-COUNT-3: binding[7:3][0]: 2309737967 4045620583 60000 13 5 2309737967 4045620583 60000 13 5 2309737967 4045620583 60000 13 5 123456789 987654321{{$}}
+# CHECK-NOT: binding[
+# AOT-COUNT-3: heap[0]: 2309737967 4045620583 60000 13 5 2309737967 4045620583 60000 13 5 2309737967 4045620583 60000 13 5 123456789 987654321{{$}}
+# AOT-NOT: heap[
+# CBV: root signature has no inline constant parameter visible to the selected stage
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) {
+  double D;
+  uint64_t L;
+  half H;
+  uint16_t U;
+};
+RWByteAddressBuffer Output : register(u3, space7);
+#if defined(DESCRIPTOR_CBV)
+#define ROOT "DescriptorTable(UAV(u3,space=7)),CBV(b3,space=7)"
+#elif defined(TABLE_CBV)
+#define ROOT "DescriptorTable(CBV(b3,space=7),UAV(u3,space=7))"
+#else
+#define ROOT "DescriptorTable(UAV(u3,space=7)),RootConstants(num32BitConstants=5,b3,space=7)"
+#endif
+[RootSignature(ROOT)]
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+  Output.Store(TID.x * 20, uint(L));
+  Output.Store(TID.x * 20 + 4, uint(L >> 32));
+  Output.Store(TID.x * 20 + 8, uint(U));
+  Output.Store(TID.x * 20 + 12, uint(D * 2.0));
+  Output.Store(TID.x * 20 + 16, uint(H * half(2.0)));
+}
+
+#--- heap.yaml
+root-constants: [0, 1075445760, 2309737967, 4045620583, 3932176640]
+bindings:
+  - space: 7
+    register: 3
+    entries:
+      - index: 0
+        size: 68
+        data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 123456789, 987654321]
+#--- object.yaml
+root-constants: [0, 1075445760, 2309737967, 4045620583, 3932176640]
+resource-heap:
+  - index: 0
+    size: 68
+    data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 123456789, 987654321]

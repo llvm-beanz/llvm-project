@@ -52,13 +52,21 @@
 //    `lowerRootConstantAccess` in RootConstantLowering.h, which both this
 //    pass and that one call.
 //
+// Opt-in root-signature mode selects one visible inline-constant parameter
+// instead of inferring a binding. Its DWORD count sets the required root
+// span and clips shader accesses; other CBVs and array declarations are
+// not promoted. Compiler-generated selection metadata is validated during
+// admission, and survives function replacement in both lowering paths.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_ROOTCONSTANTLOWERING_H
 #define FEME_TRANSFORMS_CPU_ROOTCONSTANTLOWERING_H
 
+#include "feme/Core/ShaderStage.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Support/Error.h"
 
 #include <cstdint>
 #include <optional>
@@ -66,10 +74,20 @@
 namespace llvm {
 class CallInst;
 class Function;
+class Module;
 class Value;
 } // namespace llvm
 
 namespace feme::cpu {
+
+/// Selects the sole visible inline-constant parameter from canonical root
+/// metadata. Descriptor-backed CBVs are never promoted in this mode.
+/// Multiple visible constant parameters and unsupported stages are errors.
+llvm::Error selectRootSignatureConstants(llvm::Function &F, ShaderStage Stage);
+
+/// Validates compiler-generated explicit constant-binding metadata before
+/// admission; malformed metadata must not fall back to inferred binding.
+llvm::Error validateRootConstantBindings(const llvm::Module &M);
 
 /// One `llvm.dx.resource.load.cbufferrow.{2,4,8}.*` call reading a row of the
 /// recognized root-constant binding. \p Row is the load's own row-index
@@ -104,6 +122,9 @@ struct RootConstantAccess {
   /// type's own byte length, e.g. 32 for `target("dx.CBuffer", [32 x
   /// i8])`).
   uint32_t ElementSize = 0;
+  /// Explicit root layouts require their parameter's full DWORD span, even
+  /// when the shader's declared cbuffer is smaller. Absent in inferred mode.
+  std::optional<uint32_t> RequiredSize;
 };
 
 /// Returns \p F's root-constant access, if it has exactly one recognized
@@ -124,8 +145,9 @@ std::optional<RootConstantAccess> matchRootConstantAccess(llvm::Function &F);
 /// Rewrites every load in \p Access into a bounds-checked load from \p
 /// RootConstants (zero for any component outside \p RootConstantSize's
 /// declared span, see "Root constants" in feme/docs/FeMeCPUDesign.md), and
-/// erases \p Access.Handle. Returns \p Access's binding's full advertised
-/// byte span (`Access.ElementSize * Access.RangeSize`), for the caller to
+/// erases \p Access.Handle. Returns the explicit parameter's required span,
+/// or the inferred binding's full advertised byte span
+/// (`Access.ElementSize * Access.RangeSize`), for the caller to
 /// attach to whichever `!feme.cpu.resources` metadata entry it emits --
 /// not merely the span \p Access's own loads happen to statically cover,
 /// which roadmap R25 made insufficient the moment a row or array index can

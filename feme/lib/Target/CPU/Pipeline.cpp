@@ -224,6 +224,9 @@ Expected<PipelineResult> runPipeline(Module &M,
   if (!Entry)
     return Entry.takeError();
   std::string EntryName = (*Entry)->getName().str();
+  if (Opts.UseRootSignatureForConstants)
+    if (Error E = selectRootSignatureConstants(**Entry, Opts.Stage))
+      return std::move(E);
 
   // "CPU Lowering Pipeline" in feme/docs/FeMeGraphicsDesign.md draws this
   // as one "Graphics canonicalization and validation" box ahead of

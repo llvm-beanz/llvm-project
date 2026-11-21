@@ -1,5 +1,29 @@
 # Vulkan CTS status
 
+## W2(a) explicit root-constant regression scope (2026-11-21)
+
+The [explicit-root follow-up](W0WindowsIntegrationProbe.md#w2a-explicit-root-constant-selection-vm-2026-11-21)
+adds opt-in root-signature selection for a single visible inline-constant
+parameter across stage/JIT/reference/AOT compilation, and preserves
+container RTS0 bytes in the shared DXIL/DXBC frontend. Parameter bounds
+and binding identity replace inference only in that mode; general CBVs,
+multiple constant parameters and descriptor preparation remain unsupported.
+The default inferred mode and artifact ABI are unchanged.
+
+All FeMe LIT prerequisites and the native ARM64 ICD were rebuilt with
+assertions and disabled PCH. With native SDK DXC/FXC available, the full
+suite passes **4,044**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,069** discovered tests in **67.26 seconds**. Nine
+unit cases and three source fixtures add twelve passes. Focused coverage
+passes **839**, with zero failures, in **2.57 seconds**. Existing graphics
+and Vulkan unit/real-loader coverage remains passing; these timings are not
+a controlled performance comparison.
+
+No inventory inputs, generated tables, advertisements or Vulkan command
+semantics are changed. Previous pinned inventory and Windows adapter-matrix
+measurements are not new results for this milestone. **No real Vulkan CTS
+pass is claimed**; the external runner remains unavailable.
+
 ## W2(a) wide constant-row regression scope (2026-11-21)
 
 The [wide-row follow-up](W0WindowsIntegrationProbe.md#w2a-wide-constant-rows-and-bounded-reads-vm-2026-11-21)

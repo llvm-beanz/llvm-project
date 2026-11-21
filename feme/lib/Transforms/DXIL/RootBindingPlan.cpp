@@ -7,12 +7,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Transforms/DXIL/RootBindingPlan.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Object/DXContainer.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
@@ -30,6 +32,22 @@ constexpr uint32_t Unbounded = UINT32_MAX;
 Error invalid(const Twine &Message) {
   return createStringError(inconvertibleErrorCode(),
                            "invalid root signature: " + Message);
+}
+
+Expected<std::optional<StringRef>> getContainerRootSignature(StringRef Input) {
+  auto Container =
+      object::DXContainer::create(MemoryBufferRef(Input, "root signature"));
+  if (!Container)
+    return Container.takeError();
+  std::optional<StringRef> Root;
+  if (Container->getHeader().PartCount)
+    for (const auto &Part : *Container)
+      if (toStringRef(ArrayRef<uint8_t>(Part.Part.Name)) == "RTS0") {
+        if (Root)
+          return invalid("duplicate RTS0 parts");
+        Root = Part.Data;
+      }
+  return Root;
 }
 
 bool overlaps(uint64_t A, uint64_t AEnd, uint64_t B, uint64_t BEnd) {
@@ -242,21 +260,12 @@ Expected<RootBindingPlan> RootBindingPlan::parse(ArrayRef<uint8_t> Bytes) {
 Expected<RootBindingPlan> RootBindingPlan::read(StringRef Input) {
   if (!Input.starts_with("DXBC"))
     return parse(arrayRefFromStringRef(Input));
-  auto Container =
-      object::DXContainer::create(MemoryBufferRef(Input, "root signature"));
-  if (!Container)
-    return Container.takeError();
-  std::optional<StringRef> Root;
-  if (Container->getHeader().PartCount)
-    for (const auto &Part : *Container)
-      if (toStringRef(ArrayRef<uint8_t>(Part.Part.Name)) == "RTS0") {
-        if (Root)
-          return invalid("duplicate RTS0 parts");
-        Root = Part.Data;
-      }
+  auto Root = getContainerRootSignature(Input);
   if (!Root)
+    return Root.takeError();
+  if (!*Root)
     return invalid("container has no RTS0 part");
-  return parse(arrayRefFromStringRef(*Root));
+  return parse(arrayRefFromStringRef(**Root));
 }
 
 const RootBinding *
@@ -311,4 +320,18 @@ feme::dxil::getRootBindingPlan(const Function &F) {
   if (!Plan)
     return Plan.takeError();
   return std::optional<RootBindingPlan>(std::move(*Plan));
+}
+
+Error feme::dxil::importContainerRootSignature(Module &M, StringRef Input) {
+  if (!Input.starts_with("DXBC"))
+    return Error::success();
+  auto Root = getContainerRootSignature(Input);
+  if (!Root)
+    return Root.takeError();
+  if (*Root)
+    for (Function &F : M)
+      if (feme::isShaderEntryPoint(F) &&
+          !F.getMetadata(getRootSignatureMDKind()))
+        setRootSignature(F, arrayRefFromStringRef(**Root));
+  return Error::success();
 }

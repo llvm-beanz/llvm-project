@@ -22,6 +22,8 @@ using namespace llvm;
 namespace feme::cpu {
 
 Error checkSupportedRaisedOps(const Module &M) {
+  if (Error E = validateRootConstantBindings(M))
+    return E;
   // A `dx_resource_handlefrombinding` call this milestone's root-constant
   // support (`feme::cpu::RootConstantLoweringPass`/
   // `feme::cpu::ResourceLoweringPass`, see RootConstantLowering.h) accepts

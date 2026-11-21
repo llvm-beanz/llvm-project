@@ -2514,6 +2514,36 @@ declares, rather than requiring the host to point at one out of several.
 An override would only matter once more than one binding must be
 disambiguated, which remains future work (see "Limitations" below).
 
+W2(a)'s opt-in `--root-signature-constants` mode, also exposed as
+`JITOptions::UseRootSignatureForConstants` and
+`StageCompileOptions::UseRootSignatureForConstants`, replaces use inference
+for the inline-constant subset. It requires a checked 1.0/1.1 root signature
+and exactly one constant parameter visible to the selected stage. Compute
+selects only all-stage parameters; graphics stages also accept their own
+visibility. Stage-denial flags, local signatures, missing/malformed layouts
+and multiple visible constant parameters are explicit errors.
+
+That parameter's register/space selects the cbuffer, and its full DWORD
+count sets `RootConstantSize` reflection. Reads must fit both the shader's
+declared cbuffer and the parameter, even if the host supplies extra bytes.
+The inline block starts at byte zero regardless of preceding descriptor
+parameters; it contains constants only, not serialized descriptor/table
+arguments. Cbuffer arrays, other bindings and descriptor-backed CBVs are
+not promoted. They retain unsupported-operation diagnostics rather than
+falling back to inferred constants. Compiler-generated
+`!feme.cpu.rootconstantbinding` metadata records space/register/byte size,
+is validated during admission, and survives function replacement so normal,
+reference and mixed heap/root lowering share the same selection.
+
+The DXIL/DXBC frontend now preserves container RTS0 bytes on canonical
+shader entries after metadata raising; existing per-entry root metadata
+takes precedence. This shares extraction with root-plan inspection and
+retains owned bytes instead of container pointers. The opt-in mode is
+verified on real DXC and original FXC inputs and native AOT output, with no
+artifact ABI change. The inferred default is intentionally unchanged.
+Multiple inline parameters, general CBVs, descriptor preparation and full
+shader/root compatibility remain outside this subset.
+
 The block is untyped bytes on the ABI side. Accesses into it keep the
 layout the source model already fixed (HLSL `cbuffer` packing rules for
 DXIL, the `Offset` decorations the SPIR-V importer preserves), so FeMe

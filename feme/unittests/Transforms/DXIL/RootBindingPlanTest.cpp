@@ -11,11 +11,13 @@
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
 #include <algorithm>
@@ -302,6 +304,49 @@ TEST(RootBindingPlanTest, ReadsBlobsContainersAndReportsMissingParts) {
   Plan = RootBindingPlan::read("DXBC");
   ASSERT_FALSE(bool(Plan));
   consumeError(Plan.takeError());
+}
+
+TEST(RootBindingPlanTest,
+     ImportsOwnedContainerRootsAndPreservesEntryOverrides) {
+  LLVMContext C;
+  Module M("container", C);
+  auto *F = Function::Create(FunctionType::get(Type::getVoidTy(C), false),
+                             GlobalValue::ExternalLinkage, "main", M);
+  IRBuilder<> B(BasicBlock::Create(C, "entry", F));
+  B.CreateRetVoid();
+  F->addFnAttr("hlsl.shader", "compute");
+  auto *Helper = Function::Create(F->getFunctionType(),
+                                  GlobalValue::InternalLinkage, "helper", M);
+  IRBuilder<>(BasicBlock::Create(C, "entry", Helper)).CreateRetVoid();
+  auto Bytes = root(2, {{1, 0, {3, 7, 4}}});
+  std::string Input = container(Bytes, 1);
+  EXPECT_THAT_ERROR(importContainerRootSignature(M, Input), Succeeded());
+  std::fill(Input.begin(), Input.end(), '#');
+  auto Plan = getRootBindingPlan(*F);
+  ASSERT_TRUE(bool(Plan));
+  ASSERT_TRUE(*Plan);
+  EXPECT_EQ((*Plan)->getParameters()[0].ConstantCount, 4u);
+  EXPECT_FALSE(Helper->getMetadata(getRootSignatureMDKind()));
+  setRootSignature(*F, root(2, {{1, 0, {3, 7, 8}}}));
+  EXPECT_THAT_ERROR(importContainerRootSignature(M, container(Bytes, 1)),
+                    Succeeded());
+  Plan = getRootBindingPlan(*F);
+  ASSERT_TRUE(bool(Plan));
+  ASSERT_TRUE(*Plan);
+  EXPECT_EQ((*Plan)->getParameters()[0].ConstantCount, 8u);
+}
+
+TEST(RootBindingPlanTest, ContainerImportDistinguishesAbsenceAndInvalidInput) {
+  LLVMContext C;
+  Module M("container", C);
+  auto Bytes = root(2, {{1, 0, {3, 7, 4}}});
+  EXPECT_THAT_ERROR(importContainerRootSignature(M, "not a container"),
+                    Succeeded());
+  EXPECT_THAT_ERROR(importContainerRootSignature(M, container(Bytes, 0)),
+                    Succeeded());
+  EXPECT_THAT_ERROR(importContainerRootSignature(M, "DXBC"), Failed());
+  EXPECT_THAT_ERROR(importContainerRootSignature(M, container(Bytes, 2)),
+                    Failed());
 }
 
 TEST(RootBindingPlanTest, CanonicalMetadataDistinguishesAbsentAndInvalid) {

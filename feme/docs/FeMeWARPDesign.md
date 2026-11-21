@@ -70,8 +70,10 @@ The original compute-only baseline is no longer current:
   arrays, and dynamic row indices for homogeneous 16-/32-/64-bit integer
   and floating-point rows. Components are bounded against their array
   element and supplied root bytes, with overflow-safe offset arithmetic.
-  Multiple CBVs and a root-signature-driven distinction between root constants
-  and CBVs still need compiler work. `BoundResourceNormalizationPass`
+  Opt-in `--root-signature-constants` now selects one visible inline
+  parameter from a checked root plan and refuses to promote descriptor-backed
+  CBVs. Multiple inline parameters, general CBVs and descriptor preparation
+  still need compiler work. `BoundResourceNormalizationPass`
   currently normalizes typed/raw buffers, not general constant buffers.
 - FeMe has a DXBC importer and translation path, but its existence does not
   establish compatibility with the legacy shader corpus. W0 must audit the

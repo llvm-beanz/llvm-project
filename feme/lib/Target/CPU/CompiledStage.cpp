@@ -152,7 +152,8 @@ llvm::OptimizationLevel toOptimizationLevel(CodeGenOptLevel Level) {
 Expected<std::unique_ptr<CompiledStage>>
 createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
             StringRef EntryPoint, unsigned RequestedWaveSize,
-            CodeGenOptLevel OptLevel, bool Reference) {
+            CodeGenOptLevel OptLevel, bool Reference,
+            bool UseRootSignatureForConstants) {
   static llvm::once_flag InitFlag;
   llvm::call_once(InitFlag, [] {
     InitializeNativeTarget();
@@ -231,6 +232,9 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
   // of their own outlined regions are obligated to keep its name. Reading
   // this here instead avoids that dependency entirely.
   std::array<uint32_t, 3> GroupSize = getDeclaredGroupSize(**Entry);
+  if (Reference && UseRootSignatureForConstants)
+    if (Error E = selectRootSignatureConstants(**Entry, Stage))
+      return std::move(E);
 
   unsigned WaveSize = 1;
   if (!Reference) {
@@ -315,6 +319,7 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
     PipeOpts.EntryPoint = EntryPoint;
     PipeOpts.WaveSize = WaveSize;
     PipeOpts.OptLevel = OptLevel;
+    PipeOpts.UseRootSignatureForConstants = UseRootSignatureForConstants;
     Expected<PipelineResult> Result = runPipeline(Mod, PipeOpts);
     if (!Result)
       return Result.takeError();
@@ -429,17 +434,19 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   if (Opts.Reference)
     return createStage(Ctx, std::move(M), ShaderStage::Compute, Opts.EntryPoint,
                        /*RequestedWaveSize=*/0, Opts.OptLevel,
-                       /*Reference=*/true);
+                       /*Reference=*/true, Opts.UseRootSignatureForConstants);
 
   return createStage(Ctx, std::move(M), ShaderStage::Compute, Opts.EntryPoint,
-                     Opts.WaveSize, Opts.OptLevel, /*Reference=*/false);
+                     Opts.WaveSize, Opts.OptLevel, /*Reference=*/false,
+                     Opts.UseRootSignatureForConstants);
 }
 
 Expected<std::unique_ptr<CompiledStage>>
 CompiledStage::create(Context &Ctx, feme::Module M,
                       const StageCompileOptions &Opts) {
   return createStage(Ctx, std::move(M), Opts.Stage, Opts.EntryPoint,
-                     Opts.WaveSize, Opts.OptLevel, /*Reference=*/false);
+                     Opts.WaveSize, Opts.OptLevel, /*Reference=*/false,
+                     Opts.UseRootSignatureForConstants);
 }
 
 Error CompiledStage::invokeGroup(const PreparedDispatch &Prepared,

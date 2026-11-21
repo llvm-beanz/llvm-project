@@ -71,6 +71,8 @@ struct DriverOptions {
   /// Whether `--version` was requested; callers should print version
   /// information and exit successfully without inspecting the other fields.
   bool ShowVersion = false;
+  /// Select CPU inline constants from the root signature; no inferred fallback.
+  bool UseRootSignatureForConstants = false;
 };
 
 /// Parses `Args` (not including the program name) into a `DriverOptions`

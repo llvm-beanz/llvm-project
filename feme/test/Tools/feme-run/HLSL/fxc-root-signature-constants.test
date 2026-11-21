@@ -1,0 +1,51 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-fxc
+# RUN: split-file %s %t
+# RUN: %fxc /nologo /WX /T cs_5_1 /E main /Fo %t/shader.dxbc %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxbc | FileCheck %s
+# RUN: feme-run --root-signature-constants --wave-size=8 --repeat=3 --heap=%t/heap.yaml %t/shader.dxbc | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/heap.yaml %t/shader.dxbc | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/shader.dxbc -o %t/shader.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object.yaml %t/shader.o | FileCheck %s --check-prefix=AOT
+# RUN: %fxc /nologo /WX /T cs_5_1 /E main /D DESCRIPTOR_CBV /Fo %t/cbv.dxbc %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/heap.yaml %t/cbv.dxbc 2>&1 | FileCheck %s --check-prefix=CBV
+# RUN: feme-run --repeat=3 --heap=%t/heap.yaml %t/cbv.dxbc | FileCheck %s
+#
+# CHECK-COUNT-3: binding[7:3][0]: 706 706 706 123456789 987654321{{$}}
+# CHECK-NOT: binding[
+# AOT-COUNT-3: heap[0]: 706 706 706 123456789 987654321{{$}}
+# AOT-NOT: heap[
+# CBV: root signature has no inline constant parameter visible to the selected stage
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) { uint A; uint B; uint C; uint D; };
+RWByteAddressBuffer Output : register(u3, space7);
+#if defined(DESCRIPTOR_CBV)
+#define ROOT "DescriptorTable(UAV(u3,space=7)),CBV(b3,space=7)"
+#else
+#define ROOT "DescriptorTable(UAV(u3,space=7)),RootConstants(num32BitConstants=4,b3,space=7)"
+#endif
+[RootSignature(ROOT)]
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+  Output.Store(TID.x * 4, A + 3 * B + 5 * C + 7 * D);
+}
+
+#--- heap.yaml
+root-constants: [42, 43, 44, 45]
+bindings:
+  - space: 7
+    register: 3
+    entries:
+      - index: 0
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+#--- object.yaml
+root-constants: [42, 43, 44, 45]
+resource-heap:
+  - index: 0
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]

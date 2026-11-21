@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/RootConstantLowering.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Transforms/DXIL/RootBindingPlan.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -23,6 +24,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
+#include <algorithm>
 #include <limits>
 #include <optional>
 
@@ -36,6 +38,30 @@ namespace {
 /// `int_dx_resource_load_cbufferrow_4`'s TableGen comment: "The total size
 /// of the return should always be 128 bits").
 constexpr uint32_t RowSizeBytes = 16;
+constexpr StringLiteral ExplicitBindingMD = "feme.cpu.rootconstantbinding";
+
+struct ExplicitBinding {
+  uint32_t Space;
+  uint32_t Register;
+  uint32_t Size;
+};
+
+std::optional<ExplicitBinding> getExplicitBinding(const Function &F) {
+  auto *MD = F.getMetadata(ExplicitBindingMD);
+  if (!MD || MD->getNumOperands() != 3)
+    return std::nullopt;
+  uint32_t Values[3];
+  for (unsigned I = 0; I != 3; ++I) {
+    auto *Value = mdconst::dyn_extract<ConstantInt>(MD->getOperand(I));
+    if (!Value || !Value->getType()->isIntegerTy(32))
+      return std::nullopt;
+    Values[I] = Value->getZExtValue();
+  }
+  if (!Values[2] || Values[2] > 64 * sizeof(uint32_t) ||
+      Values[2] % sizeof(uint32_t))
+    return std::nullopt;
+  return ExplicitBinding{Values[0], Values[1], Values[2]};
+}
 
 /// DXIL's sentinel `RangeSize` for an unbounded array binding
 /// (`register(bN[])`, no upper bound). Such a binding has no fixed
@@ -247,10 +273,115 @@ Function *lowerFunctionRootConstants(Function &F) {
 
 namespace feme::cpu {
 
+Error selectRootSignatureConstants(Function &F, ShaderStage Stage) {
+  using Visibility = dxbc::ShaderVisibility;
+  using Flags = dxbc::RootFlags;
+  Visibility Visible;
+  Flags Denied;
+  switch (Stage) {
+  case ShaderStage::Compute:
+    Visible = Visibility::All;
+    Denied = Flags::None;
+    break;
+  case ShaderStage::Vertex:
+    Visible = Visibility::Vertex;
+    Denied = Flags::DenyVertexShaderRootAccess;
+    break;
+  case ShaderStage::Hull:
+    Visible = Visibility::Hull;
+    Denied = Flags::DenyHullShaderRootAccess;
+    break;
+  case ShaderStage::Domain:
+    Visible = Visibility::Domain;
+    Denied = Flags::DenyDomainShaderRootAccess;
+    break;
+  case ShaderStage::Geometry:
+    Visible = Visibility::Geometry;
+    Denied = Flags::DenyGeometryShaderRootAccess;
+    break;
+  case ShaderStage::Fragment:
+    Visible = Visibility::Pixel;
+    Denied = Flags::DenyPixelShaderRootAccess;
+    break;
+  case ShaderStage::Amplification:
+    Visible = Visibility::Amplification;
+    Denied = Flags::DenyAmplificationShaderRootAccess;
+    break;
+  case ShaderStage::Mesh:
+    Visible = Visibility::Mesh;
+    Denied = Flags::DenyMeshShaderRootAccess;
+    break;
+  case ShaderStage::Library:
+  case ShaderStage::RayGeneration:
+  case ShaderStage::Intersection:
+  case ShaderStage::AnyHit:
+  case ShaderStage::ClosestHit:
+  case ShaderStage::Miss:
+  case ShaderStage::Callable:
+  case ShaderStage::NumStages:
+    return createStringError(inconvertibleErrorCode(),
+                             "unsupported stage for root-signature constants");
+  }
+  auto Plan = dxil::getRootBindingPlan(F);
+  if (!Plan)
+    return Plan.takeError();
+  if (!*Plan)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "root-signature constants require a root signature");
+  if ((*Plan)->getFlags() & uint32_t(Flags::LocalRootSignature))
+    return createStringError(inconvertibleErrorCode(),
+                             "local root signatures are not supported for CPU "
+                             "root constants");
+  if ((*Plan)->getFlags() & uint32_t(Denied))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "root signature denies access for the selected stage");
+  const dxil::RootParameter *Selected = nullptr;
+  for (const auto &Parameter : (*Plan)->getParameters()) {
+    if (Parameter.Kind != dxbc::RootParameterType::Constants32Bit ||
+        (Parameter.Visibility != Visibility::All &&
+         Parameter.Visibility != Visible))
+      continue;
+    if (Selected)
+      return createStringError(inconvertibleErrorCode(),
+                               "root-signature constants support exactly one "
+                               "visible constant parameter");
+    Selected = &Parameter;
+  }
+  if (!Selected)
+    return createStringError(inconvertibleErrorCode(),
+                             "root signature has no inline constant parameter "
+                             "visible to the selected stage");
+  const auto &Binding = Selected->Bindings.front();
+  LLVMContext &C = F.getContext();
+  auto Word = [&](uint32_t Value) {
+    return ConstantAsMetadata::get(
+        ConstantInt::get(Type::getInt32Ty(C), Value));
+  };
+  F.setMetadata(ExplicitBindingMD,
+                MDNode::get(C, {Word(Binding.Space), Word(Binding.Register),
+                                Word(Selected->ConstantCount * 4)}));
+  return Error::success();
+}
+
+Error validateRootConstantBindings(const Module &M) {
+  for (const Function &F : M)
+    if (F.getMetadata(ExplicitBindingMD) && !getExplicitBinding(F))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "malformed explicit root-constant binding in '%s'",
+          F.getName().str().c_str());
+  return Error::success();
+}
+
 std::optional<RootConstantAccess> matchRootConstantAccess(Function &F) {
   if (F.isDeclaration())
     return std::nullopt;
 
+  std::optional<ExplicitBinding> Binding = getExplicitBinding(F);
+  if (F.getMetadata(ExplicitBindingMD) && !Binding)
+    return std::nullopt;
   std::optional<RootConstantAccess> Access;
   for (Instruction &I : instructions(F)) {
     auto *CI = dyn_cast<CallInst>(&I);
@@ -258,6 +389,13 @@ std::optional<RootConstantAccess> matchRootConstantAccess(Function &F) {
       continue;
     if (std::optional<RootConstantAccess> Matched =
             matchRootConstantHandle(*CI)) {
+      if (Binding) {
+        if (Matched->Space != Binding->Space ||
+            Matched->Register != Binding->Register || Matched->RangeSize != 1)
+          continue;
+        Matched->RequiredSize = Binding->Size;
+        Matched->ElementSize = std::min(Matched->ElementSize, Binding->Size);
+      }
       if (Access)
         return std::nullopt; // More than one candidate: reject both.
       Access = std::move(Matched);
@@ -280,7 +418,8 @@ uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
                                  Value *RootConstantSize) {
   LLVMContext &Ctx = Access.Handle->getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
-  uint32_t RootConstantSizeNeeded = Access.ElementSize * Access.RangeSize;
+  uint32_t RootConstantSizeNeeded =
+      Access.RequiredSize.value_or(Access.ElementSize * Access.RangeSize);
   Value *Index = Access.Handle->getArgOperand(3);
 
   for (const RootConstantRowLoad &RL : Access.Loads) {

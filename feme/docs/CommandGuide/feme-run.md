@@ -50,6 +50,15 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   Traditional `bindings`, `image-bindings` and `sampler-bindings` are
   rejected because compiled objects retain no binding-prefix reflection.
   Logical heap entries and YAML `root-constants` are supported.
+- `--root-signature-constants`: opts into the checked root signature's sole
+  visible inline-constant parameter instead of inferring a cbuffer binding.
+  Its DWORD count determines the required root span and clips shader reads,
+  even when extra bytes are supplied. Missing/invalid signatures, multiple
+  visible parameters, local signatures and stage denial are errors.
+  Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in
+  normal/reference compilation; pass it to `feme` when producing an AOT
+  object, not to `feme-run --object`. It cannot be combined with inspection.
+  The default inferred behavior is unchanged.
 - `--heap=<file>`: a YAML file describing the resource heap a dispatch runs
   against:
 

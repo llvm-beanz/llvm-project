@@ -452,6 +452,24 @@ passes 700 cases; the rebuilt full suite passes 4,032 with zero failures.
 This is not root-driven binding, general descriptor-backed CBVs, D3D12
 execution or a W2(a) completion claim.
 
+W2(a) explicit-constant selection progress (2026-11-21): the
+[explicit-root follow-up](W0WindowsIntegrationProbe.md#w2a-explicit-root-constant-selection-vm-2026-11-21)
+adds opt-in `--root-signature-constants` to `feme` and `feme-run`, with
+matching stage/JIT API options. It selects the sole visible inline-constant
+parameter from the checked 1.0/1.1 plan; missing/malformed layouts,
+multiple visible constant parameters, denied stages and local signatures
+are errors, not inferred fallbacks. The parameter's DWORD span controls
+reflection and clips reads even when additional host bytes are supplied.
+Descriptor-backed CBVs and cbuffer arrays are not promoted. Shared frontend
+RTS0 preservation fixes the container payload previously lost before CPU
+selection, including original FXC DXBC. Nine unit cases and three source
+fixtures cover normal/reference/AOT execution, real DXC 1.0/1.1 layouts,
+native 16-/64-bit packing, FXC constants, visibility, diagnostics and the
+unchanged inferred default. Focused/full LIT pass 839/4,044 cases with
+zero failures. This closes a single-parameter root-constant mapping subset,
+not W2(a): multiple inline parameters, general CBVs, table preparation,
+full shader/root compatibility and owned D3D12 execution remain open.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

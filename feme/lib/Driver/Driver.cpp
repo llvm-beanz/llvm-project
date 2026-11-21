@@ -32,6 +32,7 @@
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Transforms/DXIL/RootBindingPlan.h"
 #include "feme/Transforms/DXIL/SPIRVRaising.h"
 #include "feme/Transforms/NVPTX/RaisedLowering.h"
 #include "feme/Transforms/NVPTX/ResourceLowering.h"
@@ -352,6 +353,9 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     llvm::ModuleAnalysisManager MAM;
     feme::dxil::OpRaisingPass().run(M, MAM);
     feme::dxil::MetadataRaisingPass().run(M, MAM);
+    if (llvm::Error E =
+            feme::dxil::importContainerRootSignature(M, Input.getBuffer()))
+      return std::move(E);
   }
 
   llvm::Expected<std::string> TargetTriple = resolveTargetTriple(Opts, M);
@@ -359,6 +363,10 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     return TargetTriple.takeError();
 
   llvm::Triple TheTriple(llvm::Triple::normalize(*TargetTriple));
+  if (Opts.UseRootSignatureForConstants && !isCPUTarget(TheTriple))
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "'--root-signature-constants' requires the FeMe CPU target");
 
   // "Wave Size Selection" (feme/docs/FeMeCPUDesign.md) only has meaning for
   // the CPU target: resolve and record it there, and diagnose (without
@@ -500,8 +508,11 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
         break;
       }
 
+    feme::cpu::StageCompileOptions PipeOpts;
+    PipeOpts.WaveSize = ResolvedWaveSize;
+    PipeOpts.UseRootSignatureForConstants = Opts.UseRootSignatureForConstants;
     llvm::Expected<feme::cpu::PipelineResult> Result =
-        feme::cpu::runPipeline(M, /*EntryPoint=*/"", ResolvedWaveSize);
+        feme::cpu::runPipeline(M, PipeOpts);
     if (!Result)
       return Result.takeError();
 

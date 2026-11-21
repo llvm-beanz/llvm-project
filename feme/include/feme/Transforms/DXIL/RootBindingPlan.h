@@ -19,6 +19,7 @@
 
 namespace llvm {
 class Function;
+class Module;
 class raw_ostream;
 } // namespace llvm
 
@@ -78,6 +79,12 @@ public:
 /// from malformed metadata or an invalid serialized layout.
 llvm::Expected<std::optional<RootBindingPlan>>
 getRootBindingPlan(const llvm::Function &F);
+
+/// After entry metadata raising, preserves a container's RTS0 bytes on its
+/// shader entries. Per-entry root metadata takes precedence. Non-containers
+/// and containers without RTS0 have nothing to attach; duplicate parts fail.
+llvm::Error importContainerRootSignature(llvm::Module &M,
+                                         llvm::StringRef Input);
 
 } // namespace feme::dxil
 
