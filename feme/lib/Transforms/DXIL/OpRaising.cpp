@@ -1084,8 +1084,8 @@ unsigned inferTypedBufferWidth(const CallInst &HandleCI) {
 }
 
 /// Builds the `target("dx.")` handle type for \p Binding, or returns nullptr
-/// for resource kinds this pass doesn't yet reconstruct (samplers,
-/// multisampled/feedback textures, and the norm/packed typed buffer/texture
+/// for resource kinds this pass doesn't yet reconstruct (multisampled/
+/// feedback textures, and the norm/packed typed buffer/texture
 /// element formats -- see `getElementLLVMType`). \p VectorWidth is the typed
 /// buffer/texture element vector width recovered by `inferTypedBufferWidth`
 /// (legacy `!dx.resources` metadata records a texture's component *type* the
@@ -1116,6 +1116,11 @@ TargetExtType *buildHandleType(LLVMContext &Ctx, const ResourceBinding &Binding,
   }
 
   switch (Binding.Kind) {
+  case dxil::ResourceKind::Sampler:
+    if (Binding.Class != dxil::ResourceClass::Sampler)
+      return nullptr;
+    return TargetExtType::get(Ctx, "dx.Sampler", {},
+                              {static_cast<unsigned>(Binding.SamplerMode)});
   case dxil::ResourceKind::RawBuffer:
     return TargetExtType::get(
         Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},

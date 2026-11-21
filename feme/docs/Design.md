@@ -1280,14 +1280,12 @@ it now covers the two largest opcode families:
   alignment is recoverable or representable). That's enough to round-trip
   the binding and the exact byte size buffer indexing depends on, which is
   what matters for re-targeting the IR -- see `getOpaqueSizedType` in
-  `OpRaising.cpp`. Textures and samplers are not raised yet; the encoding
-  they need is decided in "Decision: texture and sampler handle kinds"
-  below. Since the buffer/
-  texture *load and store* ops that actually consume a resource handle
-  aren't raised yet either (see below), the reconstructed handle is bridged
+  `OpRaising.cpp`. Texture and sampler encodings follow "Decision: texture
+  and sampler handle kinds" below. The reconstructed handle is bridged
   back to the legacy `%dx.types.Handle` type via `llvm.dx.resource.
   casthandle` -- the same "temporary" cast `DXILOpLowering` itself uses for
-  this purpose -- so mixed raised/not-yet-raised IR stays valid.
+  this purpose -- so mixed raised/not-yet-raised IR stays valid. Access
+  raising removes dead bridges; not-yet-raised consumers retain them.
 
   The pre-SM6.6 spelling, `dx.op.createHandle` (57), is raised too. It is
   what `dxc` still emits by default, and unlike `CreateHandleFromBinding` it
@@ -1446,9 +1444,13 @@ DXIL/OpRaising.cpp` implements the table above exactly, for the bindless
 `createHandleFromHeap`/`createHandleFromBinding` path; the legacy
 `!dx.resources`-based `buildHandleType` now reconstructs texture handles
 too (generalizing the same access-site component-count recovery a legacy
-`TypedBuffer` already needed -- see its own comment), leaving only
-`Sampler` unraised on that path (matching R29's own bindless-first
-precedent for samplers specifically). `raiseSample`/`raiseSampleLevel`/
+`TypedBuffer` already needed -- see its own comment). The sampler-class
+metadata entry's seventh operand is its default/comparison mode, not a
+resource kind; `ResourceMetadata` now validates and preserves that mode,
+and `buildHandleType` reconstructs legacy `dx.Sampler` handles through
+the same cast bridge. Mono/unknown/malformed modes remain unraised for
+normal admission to reject, and sampler kinds mislabeled as SRVs are not
+reconstructed. `raiseSample`/`raiseSampleLevel`/
 `raiseTextureLoad`/`raiseTextureStore`/`raiseGetDimensions` cover item 3's
 "raising the access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and

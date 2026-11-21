@@ -11,8 +11,8 @@
 ; -T cs_6_5` compilation produces; see the DXIL section of
 ; feme/docs/Design.md. `load_texture2d` closes Roadmap.md's "P1 -- texture/
 ; sampler handle kinds" entry's remaining "legacy `!dx.resources`-based
-; texture/sampler path" gap for textures specifically (samplers remain
-; unraised for both the legacy and bindless paths).
+; texture/sampler path" gap for textures specifically. Legacy sampler modes
+; are covered by dxil-raise-legacy-samplers.ll.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:32-i32:32-i64:64-f16:32-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-ms-dx"
@@ -79,13 +79,12 @@ define <4 x float> @load_texture2d(i32 %x, i32 %y) {
   ret <4 x float> %v3
 }
 
-; A resource kind this pass doesn't reconstruct yet (a `Sampler`, kind 14 --
-; see `buildHandleType`'s comment) is left as an unmodified `dx.op.*` call
-; rather than being mis-raised.
+; A sampler kind mislabeled as an SRV is left unmodified rather than
+; reconstructed as a valid sampler-class binding.
 ; CHECK-LABEL: define void @unsupported_kind(
 define void @unsupported_kind() {
-  ; CHECK: call %dx.types.Handle @dx.op.createHandle(i32 57, i8 0, i32 3, i32 4, i1 false)
-  %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 0, i32 3, i32 4, i1 false)
+  ; CHECK: call %dx.types.Handle @dx.op.createHandle(i32 57, i8 0, i32 2, i32 4, i1 false)
+  %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 0, i32 2, i32 4, i1 false)
   ret void
 }
 

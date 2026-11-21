@@ -72,8 +72,10 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   mismatches fail with register/space and function-specific diagnostics.
   Descriptor-table/native-heap sampler contents, counter compatibility
   and descriptor promises are not validated by this check.
-  The sampler check requires canonical handles; still-unraised DXC bound
-  sampling retains its earlier unsupported-operation error.
+  Legacy DXC sampler handles now preserve default/comparison modes, so real
+  native shaders reach this check. Valid and inferred sampling remains
+  unsupported at bound-descriptor/comparison-access admission; this does
+  not materialize or execute static samplers.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

@@ -39,7 +39,8 @@ incremental (see the DXIL, "Raised LLVM IR -> AMDGPU", and "Raised LLVM IR
 (`Buffer`/`RWBuffer`), textures (`Texture*`/`RWTexture*` load/store, both
 the modern bindless and legacy `!dx.resources` binding paths), and cbuffer
 scalar loads (any of `CBufferLoadLegacy`'s 32-/16-/64-bit row widths) are
-covered, but samplers, raw and structured buffer accesses when retargeting
+covered, including default/comparison sampler handle modes. Raw and
+structured buffer accesses when retargeting
 to `amdgcn-*` (typed buffer/texture/cbuffer accesses alone are covered
 there; raw/structured buffers are not yet), texture sampling
 (`Sample`/`SampleLevel` raise but have no `amdgcn-*`/NVPTX lowering yet),
@@ -95,8 +96,10 @@ coverage" in [../Design.md](../Design.md).
   comparison mode; minimum/maximum filters remain non-comparison.
   Descriptor-table/native-heap sampler contents, counter compatibility
   and descriptor promises remain outside this check.
-  Sampler mode checking requires canonical handles; still-unraised DXC
-  bound sampling retains its earlier unsupported-operation error.
+  Legacy DXC sampler handles now retain default/comparison modes, so real
+  native shaders reach static-mode checking. Valid and inferred sampling
+  remains unsupported at bound-descriptor/comparison-access admission,
+  not static sampler materialization or execution.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

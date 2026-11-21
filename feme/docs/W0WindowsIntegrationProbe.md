@@ -27,6 +27,46 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) native legacy sampler handles (VM, 2026-11-22)
+
+Legacy pre-SM6.6 sampler bindings now reach static-mode preflight. The
+private `ResourceMetadata` reader interprets the sampler entry's seventh
+operand as default/comparison mode, validates it and preserves it in the
+binding. `buildHandleType` reconstructs sampler-class `dx.Sampler` handles
+through the existing `createHandle` raising/cast bridge. Registers, spaces,
+range sizes and relative indexing remain intact. Mono, unknown and malformed
+modes remain unraised for standard admission to reject; a sampler kind
+mislabeled as an SRV is not reconstructed.
+
+A new transform fixture checks both modes, finite/unbounded ranges,
+dynamic rebasing and bridges retaining opaque consumers. The prior
+unsupported-kind fixture now names its actual metadata ID, rather than
+accidentally testing a missing ID.
+
+The real SDK DXC fixture now verifies exact static-mode mismatch errors in
+normal/reference/AOT compilation, including Root Signature 1.0 and 1.1.
+The SDK accepts these layouts without `/Vd`; no SDK rejection is claimed.
+Valid comparison linkage still fails on the unraised comparison operation.
+Ordinary `Sample`/`SampleLevel` can use existing access raising, but valid
+explicit and inferred compilation still rejects unsupported bound image/
+sampler descriptors. Root-mode validation remains opt-in. This intentionally
+advances the ordinary sampling diagnostic boundary; it does not establish
+static descriptor materialization or shader sampling execution.
+
+All automated validation uses LIT. Focused coverage passes **858** in
+**4.70 seconds**. Full FeMe LIT passes **4,074**, with **15 Skipped,
+10 Unsupported and zero failures**, from **4,099** discovered tests in
+**69.15 seconds**. The new transform fixture adds one pass. Assertions,
+disabled PCH and the two-worker build limit are retained. An initial
+relink encountered executable locks during another run; retry succeeded
+without terminating its processes. Timings are not a controlled speedup.
+
+Artifact ABI remains 8 and shader argument layouts are unchanged. Bound
+descriptor preparation, static sampler materialization, comparison access,
+general CBVs, multiple inline parameters and owned D3D12 execution remain
+open. `CreateDevice` is still `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)
+are not closed. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a) static sampler modes (VM, 2026-11-21)
 
 Explicit-root preflight now matches visible static sampler filters to the

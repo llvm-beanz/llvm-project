@@ -2561,17 +2561,27 @@ section 22.3.34, defines incompatible sampler linkage as undefined.
 The measured SDK DXC accepts these mismatches without `/Vd`; FeMe rejects
 them independently for canonical handles in opt-in explicit-root
 compilation. Lookup reuses static binding coverage's register/space/
-visibility matching and the same
-helper/dead-handle traversal. Descriptor-table and native-heap sampler
-contents remain outside this check. Native DXC bound sampling operations
-that remain unraised still fail existing CPU admission without producing
-canonical sampler handles; this does not add bound-sampler raising or execution.
+visibility matching and the same helper/dead-handle traversal.
+Descriptor-table and native-heap sampler contents remain outside this check.
+
+Legacy pre-SM6.6 sampler metadata now preserves checked default/comparison
+modes in the private `ResourceMetadata` reader. `raiseLegacyCreateHandle`
+reconstructs class-qualified sampler handles through the existing cast
+bridge, retaining register/space/range and relative indexing. Invalid
+sampler modes remain unraised for explicit admission errors rather than
+being treated as default samplers. Real DXC 1.0/1.1 root layouts now reach
+static-mode preflight even when a comparison sampling consumer remains
+unsupported. Ordinary `Sample`/`SampleLevel` can reuse existing access
+raising; valid explicit linkage and inferred compilation still fail on
+unsupported bound image/sampler descriptors or comparison access. This
+does not materialize static samplers or establish sampling execution.
 
 This checks declared binding identity, root SRV/UAV resource kinds and
 native heap flags and static sampler modes, not descriptor contents, table
 materialization, full resource-kind/counter compatibility or root-descriptor
-promises. It does not admit otherwise unsupported heap resource operations. The inferred
-mode remains unchanged.
+promises. It does not admit otherwise unsupported heap resource operations.
+The inferred mode does not perform root-mode validation; ordinary sampling
+may now reach the bound-descriptor error instead of an unraised-op error.
 
 That parameter's register/space selects the cbuffer, and its full DWORD
 count sets `RootConstantSize` reflection. Reads must fit both the shader's

@@ -114,7 +114,12 @@ readEntry(const MDNode *Entry, llvm::dxil::ResourceClass Class) {
     ExtProps = dyn_cast_or_null<MDNode>(Entry->getOperand(7).get());
     break;
   case llvm::dxil::ResourceClass::Sampler:
+    // The seventh operand is the sampler mode, not the resource kind.
+    if (*KindOrSize >
+        static_cast<uint32_t>(llvm::dxil::SamplerType::Comparison))
+      return std::nullopt;
     Binding.Kind = llvm::dxil::ResourceKind::Sampler;
+    Binding.SamplerMode = static_cast<llvm::dxil::SamplerType>(*KindOrSize);
     ExtProps = dyn_cast_or_null<MDNode>(Entry->getOperand(7).get());
     break;
   }

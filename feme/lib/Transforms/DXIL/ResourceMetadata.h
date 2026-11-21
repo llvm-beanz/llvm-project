@@ -48,6 +48,8 @@ struct ResourceBinding {
   uint32_t RangeSize = 0;
   /// A structured buffer's element stride, or a cbuffer's size, in bytes.
   uint32_t StrideOrSize = 0;
+  /// Valid only for sampler-class bindings.
+  llvm::dxil::SamplerType SamplerMode = llvm::dxil::SamplerType::Default;
   bool IsROV = false;
 };
 

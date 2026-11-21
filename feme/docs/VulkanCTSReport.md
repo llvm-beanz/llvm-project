@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a) native legacy-sampler regression scope (2026-11-22)
+
+The [legacy-sampler follow-up](W0WindowsIntegrationProbe.md#w2a-native-legacy-sampler-handles-vm-2026-11-22)
+preserves validated default/comparison modes from legacy sampler metadata
+and raises canonical sampler handles through existing cast bridges. One
+transform fixture verifies range rebasing, unbounded ranges, opaque users
+and malformed/unsupported modes. The native DXC fixture now reaches real
+static-mode preflight with Root Signature 1.0/1.1 through normal/reference/
+AOT compilation. The SDK still accepts these layouts without `/Vd`.
+
+Valid comparison sampling remains unraised; ordinary sampling may now
+raise but still fails unsupported bound image/sampler descriptor admission.
+Inferred mode does not enforce root-mode compatibility. No static sampler
+materialization, sampling execution or owned D3D12 device is claimed.
+
+Focused LIT passes **858** in **4.70 seconds**. Full FeMe LIT passes
+**4,074**, with **15 Skipped, 10 Unsupported and zero failures**, from
+**4,099** discovered tests in **69.15 seconds**. One new fixture adds one
+pass; existing graphics and Vulkan unit/real-loader coverage remains
+passing. Timings are not a controlled performance comparison.
+
+Artifact ABI 8, shader argument layouts, Vulkan semantics/advertisements,
+pinned inventory and adapter-matrix results are unchanged. **No real
+Vulkan CTS pass is claimed**; the external runner remains unavailable.
+
 ## W2(a) static-sampler-mode regression scope (2026-11-21)
 
 The [static-sampler follow-up](W0WindowsIntegrationProbe.md#w2a-static-sampler-modes-vm-2026-11-21)

@@ -575,6 +575,25 @@ Inferred admission, artifact ABI 8 and shader argument layouts are unchanged;
 table/native-heap descriptor contents and owned D3D12 execution remain
 open, as do W2(a)/W2(b).
 
+W2(a) native legacy-sampler progress (2026-11-22): the private
+`!dx.resources` reader now preserves checked default/comparison sampler
+modes, and legacy `createHandle` raises class-qualified sampler handles
+through the existing cast bridge. Register/space/range and relative
+indexing are retained; malformed/unsupported modes remain unraised for
+admission to reject. A transform fixture covers modes, rebasing, unbounded
+ranges and opaque consumers, including an SRV-mislabeled sampler guard.
+The real DXC fixture now verifies static-mode mismatches through
+normal/reference/AOT compilation with Root Signature 1.0/1.1, without
+`/Vd`. Valid comparison linkage retains unsupported comparison-access
+admission; ordinary/inferred sampling now reaches the explicit unsupported
+bound-descriptor boundary. This supersedes the earlier native-shader
+preflight gap, not descriptor materialization or sampling execution.
+Focused LIT passes 858 in 4.70 seconds; full LIT passes 4,074, with
+15 skipped, 10 unsupported and zero failures, from 4,099 discovered tests
+in 69.15 seconds. One new transform fixture adds one pass. Timings are not
+a controlled performance comparison. Artifact ABI 8 and shader argument
+layouts are unchanged; W2(a)/W2(b) and owned D3D12 execution remain open.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

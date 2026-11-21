@@ -84,8 +84,11 @@ The original compute-only baseline is no longer current:
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.
-  This checks canonical handles; still-unraised native DXC bound sampling
-  retains its earlier CPU admission failure, not new sampler execution.
+  Legacy sampler metadata now preserves default/comparison modes and
+  reconstructs canonical handles through the existing cast bridge. Real
+  native DXC shaders therefore reach static-mode preflight. Valid/inferred
+  linkage still fails unsupported bound descriptors or comparison access;
+  no new sampler descriptor materialization or execution is established.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.
