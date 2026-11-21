@@ -61,7 +61,7 @@ TEST(BoundResourceNormalizationTest, LeavesModuleWithNoBoundHandlesUnchanged) {
   )");
   ASSERT_TRUE(M);
   runPass(*M);
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
 }
 
 TEST(BoundResourceNormalizationTest, RewritesFiniteRangeToHandleFromHeap) {
@@ -98,13 +98,13 @@ TEST(BoundResourceNormalizationTest, RecordsBoundResourceMetadata) {
   ASSERT_TRUE(M);
   runPass(*M);
 
-  NamedMDNode *MD = M->getNamedMetadata("feme.cpu.bound_resources");
+  NamedMDNode *MD = M->getNamedMetadata("feme.cpu.bound_resources.v2");
   ASSERT_TRUE(MD);
   ASSERT_EQ(MD->getNumOperands(), 1u);
   MDNode *Entry = MD->getOperand(0);
   // {name, resource-/image-/sampler-prefix-size,
-  //  (space, register, range-size, heap-base, class)...}.
-  ASSERT_EQ(Entry->getNumOperands(), 9u);
+  //  (space, register, range-size, heap-base, class, namespace)...}.
+  ASSERT_EQ(Entry->getNumOperands(), 10u);
   EXPECT_EQ(cast<MDString>(Entry->getOperand(0))->getString(), "main");
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue(),
             8u);
@@ -122,6 +122,62 @@ TEST(BoundResourceNormalizationTest, RecordsBoundResourceMetadata) {
             0u); // heap base
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(8))->getZExtValue(),
             static_cast<uint64_t>(feme::cpu::BoundResourceClass::Buffer));
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(9))->getZExtValue(),
+            static_cast<uint64_t>(feme::cpu::BoundResourceNamespace::UAV));
+}
+
+TEST(BoundResourceNormalizationTest, KeepsSRVAndUAVNamespacesDistinct) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %srv = call target("dx.TypedBuffer", i32, 0, 0, 0)
+        @llvm.dx.resource.handlefrombinding.srv(i32 7, i32 3, i32 2, i32 %idx, ptr null)
+      %uav = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefrombinding.uav(i32 7, i32 3, i32 2, i32 %idx, ptr null)
+      ret void
+    }
+    declare target("dx.TypedBuffer", i32, 0, 0, 0)
+      @llvm.dx.resource.handlefrombinding.srv(i32, i32, i32, i32, ptr)
+    declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefrombinding.uav(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  auto *MD = M->getNamedMetadata("feme.cpu.bound_resources.v2");
+  ASSERT_TRUE(MD);
+  auto *Entry = MD->getOperand(0);
+  ASSERT_EQ(Entry->getNumOperands(), 16u);
+  auto Get = [&](unsigned I) {
+    return mdconst::extract<ConstantInt>(Entry->getOperand(I))->getZExtValue();
+  };
+  EXPECT_EQ(Get(1), 4u);
+  EXPECT_EQ(Get(7), 0u);
+  EXPECT_EQ(Get(9), uint32_t(feme::cpu::BoundResourceNamespace::SRV));
+  EXPECT_EQ(Get(13), 2u);
+  EXPECT_EQ(Get(15), uint32_t(feme::cpu::BoundResourceNamespace::UAV));
+  EXPECT_FALSE(M->getFunction("llvm.dx.resource.handlefrombinding.srv"));
+  EXPECT_FALSE(M->getFunction("llvm.dx.resource.handlefrombinding.uav"));
+}
+
+TEST(BoundResourceNormalizationTest, RejectsOverflowingCombinedPrefix) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %srv = call target("dx.RawBuffer", i8, 0, 0)
+        @llvm.dx.resource.handlefrombinding.srv(i32 0, i32 0, i32 2147483648, i32 %idx, ptr null)
+      %uav = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefrombinding.uav(i32 0, i32 0, i32 2147483648, i32 %idx, ptr null)
+      ret void
+    }
+    declare target("dx.RawBuffer", i8, 0, 0)
+      @llvm.dx.resource.handlefrombinding.srv(i32, i32, i32, i32, ptr)
+    declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefrombinding.uav(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  EXPECT_FALSE(hasHandleFromHeapCall(*M->getFunction("main")));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
 }
 
 TEST(BoundResourceNormalizationTest, OffsetsNativeDynamicHeapIndex) {
@@ -177,7 +233,7 @@ TEST(BoundResourceNormalizationTest, LeavesUnboundedRangeUnchanged) {
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
   EXPECT_FALSE(hasHandleFromHeapCall(*F));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
 }
 
 TEST(BoundResourceNormalizationTest, LeavesConflictingDeclarationUnchanged) {
@@ -199,7 +255,7 @@ TEST(BoundResourceNormalizationTest, LeavesConflictingDeclarationUnchanged) {
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
   EXPECT_FALSE(hasHandleFromHeapCall(*F));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
 }
 
 TEST(BoundResourceNormalizationTest, LeavesUnsupportedResourceKindUnchanged) {
@@ -219,7 +275,7 @@ TEST(BoundResourceNormalizationTest, LeavesUnsupportedResourceKindUnchanged) {
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
   EXPECT_FALSE(hasHandleFromHeapCall(*F));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
 }
 
 } // namespace

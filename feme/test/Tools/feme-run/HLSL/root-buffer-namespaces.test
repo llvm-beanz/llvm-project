@@ -1,0 +1,110 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --wave-size=8 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object.yaml %t/shader.o | FileCheck %s --check-prefix=AOT
+# RUN: not feme-run --root-signature-constants --heap=%t/ambiguous.yaml %t/shader.dxil 2>&1 | FileCheck %s --check-prefix=AMBIGUOUS
+# RUN: not feme-run --reference --heap=%t/ambiguous.yaml %t/shader.dxil 2>&1 | FileCheck %s --check-prefix=AMBIGUOUS
+# RUN: not feme-run --heap=%t/invalid.yaml %t/shader.dxil 2>&1 | FileCheck %s --check-prefix=INVALID
+#
+# CHECK: binding[srv:7:3][0]: 11 13 17 123456789 987654321{{$}}
+# CHECK-NEXT: binding[srv:7:3][1]: 19 23 29 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][0]: 53 0 59 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][1]: 0 65 0 123456789 987654321{{$}}
+# CHECK-NEXT: binding[srv:7:3][0]: 11 13 17 123456789 987654321{{$}}
+# CHECK-NEXT: binding[srv:7:3][1]: 19 23 29 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][0]: 106 0 118 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][1]: 0 130 0 123456789 987654321{{$}}
+# CHECK-NEXT: binding[srv:7:3][0]: 11 13 17 123456789 987654321{{$}}
+# CHECK-NEXT: binding[srv:7:3][1]: 19 23 29 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][0]: 159 0 177 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][1]: 0 195 0 123456789 987654321{{$}}
+# CHECK-NOT: binding[
+# AOT: heap[0]: 11 13 17 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 19 23 29 123456789 987654321{{$}}
+# AOT-NEXT: heap[2]: 53 0 59 123456789 987654321{{$}}
+# AOT-NEXT: heap[3]: 0 65 0 123456789 987654321{{$}}
+# AOT-NEXT: heap[0]: 11 13 17 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 19 23 29 123456789 987654321{{$}}
+# AOT-NEXT: heap[2]: 106 0 118 123456789 987654321{{$}}
+# AOT-NEXT: heap[3]: 0 130 0 123456789 987654321{{$}}
+# AOT-NEXT: heap[0]: 11 13 17 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 19 23 29 123456789 987654321{{$}}
+# AOT-NEXT: heap[2]: 159 0 177 123456789 987654321{{$}}
+# AOT-NEXT: heap[3]: 0 195 0 123456789 987654321{{$}}
+# AOT-NOT: heap[
+# AMBIGUOUS: ambiguous buffer binding space=7 register=3: specify srv or uav
+# INVALID: unknown enumerated scalar
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) { uint A; };
+ByteAddressBuffer Input[2] : register(t3, space7);
+RWByteAddressBuffer Output[2] : register(u3, space7);
+[RootSignature("DescriptorTable(SRV(t3,numDescriptors=2,space=7),UAV(u3,numDescriptors=2,space=7)),RootConstants(num32BitConstants=1,b3,space=7)")]
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+  uint Index = TID.x % 2;
+  uint Offset = TID.x * 4;
+  Output[Index].Store(Offset, Output[Index].Load(Offset) +
+                             Input[Index].Load(Offset) + A);
+}
+
+#--- heap.yaml
+root-constants: [42]
+bindings:
+  - space: 7
+    register: 3
+    register-class: srv
+    entries:
+      - index: 0
+        size: 20
+        data: [11, 13, 17, 123456789, 987654321]
+      - index: 1
+        size: 20
+        data: [19, 23, 29, 123456789, 987654321]
+  - space: 7
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+      - index: 1
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+#--- object.yaml
+root-constants: [42]
+resource-heap:
+  - index: 0
+    size: 20
+    data: [11, 13, 17, 123456789, 987654321]
+  - index: 1
+    size: 20
+    data: [19, 23, 29, 123456789, 987654321]
+  - index: 2
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]
+  - index: 3
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]
+#--- ambiguous.yaml
+root-constants: [42]
+bindings:
+  - space: 7
+    register: 3
+    entries:
+      - index: 0
+        size: 20
+#--- invalid.yaml
+bindings:
+  - space: 7
+    register: 3
+    register-class: cbv

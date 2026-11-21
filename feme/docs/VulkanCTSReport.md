@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a) buffer-namespace regression scope (2026-11-21)
+
+The [namespace-isolation follow-up](W0WindowsIntegrationProbe.md#w2a-buffer-register-namespace-isolation-vm-2026-11-21)
+preserves distinct DXIL SRV/UAV identities through buffer normalization,
+reflection and host heap preparation. Unqualified host bindings remain
+compatible when unambiguous; namespace-qualified API/YAML bindings handle
+coincident register numbers without merging input and output storage.
+Artifact ABI 8 serializes namespace information and rejects version-7
+objects, which must be recompiled. Shader argument layouts and legacy/SPIR-V
+metadata interpretation are unchanged.
+
+Six unit cases and one native DXC source fixture add seven passes. The
+fixture checks two-element input/output arrays at b3/t3/u3 in space 7,
+partial waves, three retained dispatches, unchanged inputs and guard values,
+inferred/explicit-root/reference/AOT execution and invalid host inputs.
+The complete rebuilt FeMe LIT suite passes **4,059**, with **15 Skipped,
+10 Unsupported and zero failures**, from **4,084** discovered tests in
+**76.80 seconds**. Focused coverage passes **841** in **5.28 seconds**.
+These timings are not a controlled performance comparison.
+
+Existing graphics and Vulkan unit/real-loader coverage remains passing.
+No Vulkan command semantics, advertisements, pinned inventory or
+adapter-matrix results change. General CBVs, D3D12 descriptor preparation
+and owned device execution remain open. **No real Vulkan CTS pass is
+claimed**; the external runner remains unavailable.
+
 ## W2(a) declared-binding regression scope (2026-11-21)
 
 The [binding-preflight follow-up](W0WindowsIntegrationProbe.md#w2a-declared-binding-preflight-vm-2026-11-21)

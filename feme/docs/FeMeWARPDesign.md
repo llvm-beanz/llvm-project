@@ -57,7 +57,7 @@ The original compute-only baseline is no longer current:
 - `feme::cpu::CompiledStage` supports compute, vertex, fragment, hull,
   patch-constant, domain, geometry, mesh, and task invocation. Reuse its
   prepared resource and stage ABIs rather than inventing a Direct3D variant.
-- `StageArtifactInfo` uses artifact ABI version 7 and populated wave,
+- `StageArtifactInfo` uses artifact ABI version 8 and populated wave,
   workgroup, and groupshared reflection. Divergent groupshared indexing has
   lowering and regression coverage; remaining barrier and masking limitations
   must be assessed against individual shaders, not treated as blanket gaps.
@@ -76,6 +76,9 @@ The original compute-only baseline is no longer current:
   helper graph for class, space, visibility and complete containment in one
   root binding; adjacent ranges cannot collectively cover an array. This
   does not materialize tables or establish full shader/root compatibility.
+  Bound raw/typed buffers now retain separate SRV/UAV namespaces through
+  normalization, reflection and host preparation, including coincident
+  register numbers. Unqualified host bindings must be unambiguous.
   Multiple inline parameters, general CBVs and descriptor preparation
   still need compiler work. `BoundResourceNormalizationPass`
   currently normalizes typed/raw buffers, not general constant buffers.

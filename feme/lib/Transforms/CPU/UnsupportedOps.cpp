@@ -81,7 +81,8 @@ Error checkSupportedRaisedOps(const Module &M) {
       // A register-bound resource handle that survives to this point is
       // one `feme::cpu::BoundResourceNormalizationPass` could not (or does
       // not yet) normalize into a heap access -- an unbounded range, a
-      // conflicting re-declaration of the same binding, an unsupported
+      // conflicting re-declaration of the same binding, an overflowing
+      // combined heap prefix, an unsupported
       // resource kind, an implicit binding, or a SPIR-V binding (see
       // "Bound-resource normalization" in feme/docs/FeMeCPUDesign.md for
       // exactly which of these that pass accepts), and is not the one
@@ -106,7 +107,8 @@ Error checkSupportedRaisedOps(const Module &M) {
           "unsupported raised operation: '%s' is a register-bound resource "
           "handle the FeMe CPU target cannot normalize into a heap access "
           "or the root-constant block (an unbounded range, a conflicting "
-          "re-declaration, or an unsupported resource kind); express it as "
+          "re-declaration, an overflowing heap prefix, or an unsupported "
+          "resource kind); express it as "
           "a finite, unambiguous traditional binding, bindless "
           "(ResourceDescriptorHeap/SamplerDescriptorHeap) access, or the "
           "one recognized root-constant binding. Note that an unsupported "

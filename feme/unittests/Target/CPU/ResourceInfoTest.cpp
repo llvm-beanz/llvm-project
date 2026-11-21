@@ -259,6 +259,52 @@ TEST(ResourceInfoTest, FromModuleMergesBoundResourceMetadata) {
   EXPECT_EQ(Info->BoundRanges[0].HeapBase, 0u);
 }
 
+TEST(ResourceInfoTest, ReadsVersionedNamespacesAndLegacyEntriesTogether) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    !feme.cpu.resources = !{!0, !1}
+    !feme.cpu.bound_resources = !{!2}
+    !feme.cpu.bound_resources.v2 = !{!3}
+    !0 = !{!"legacy", i32 0, i1 false, i32 0, i32 0, i32 0}
+    !1 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 0}
+    !2 = !{!"legacy", i32 1, i32 0, i32 0,
+           i32 7, i32 3, i32 1, i32 0, i32 0}
+    !3 = !{!"main", i32 2, i32 0, i32 0,
+           i32 7, i32 3, i32 1, i32 0, i32 0, i32 1,
+           i32 7, i32 3, i32 1, i32 1, i32 0, i32 2}
+  )");
+  ASSERT_TRUE(M);
+  auto Legacy = ResourceInfo::fromModule(*M, "legacy");
+  auto Info = ResourceInfo::fromModule(*M, "main");
+  ASSERT_TRUE(Legacy);
+  ASSERT_TRUE(Info);
+  ASSERT_EQ(Legacy->BoundRanges.size(), 1u);
+  EXPECT_EQ(Legacy->BoundRanges[0].Namespace,
+            BoundResourceNamespace::Unspecified);
+  ASSERT_EQ(Info->BoundRanges.size(), 2u);
+  EXPECT_EQ(Info->BoundRanges[0].Namespace, BoundResourceNamespace::SRV);
+  EXPECT_EQ(Info->BoundRanges[1].Namespace, BoundResourceNamespace::UAV);
+  auto Artifact = StageArtifactInfo::fromResourceInfo(*Info);
+  auto Parsed = parseArtifact(serializeArtifact(Artifact));
+  ASSERT_THAT_EXPECTED(Parsed, Succeeded());
+  ASSERT_EQ(Parsed->BoundRanges.size(), 2u);
+  EXPECT_EQ(Parsed->BoundRanges[0].Namespace, BoundResourceNamespace::SRV);
+  EXPECT_EQ(Parsed->BoundRanges[1].Namespace, BoundResourceNamespace::UAV);
+}
+
+TEST(ResourceInfoTest, RejectsInvalidNamespacesAndPreviousArtifactVersion) {
+  StageArtifactInfo Info;
+  Info.BoundRanges = {{0, 0, 1, 0, BoundResourceClass::Buffer,
+                       static_cast<BoundResourceNamespace>(3)}};
+  EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
+  Info.BoundRanges[0].Namespace = BoundResourceNamespace::SRV;
+  Info.BoundRanges[0].Class = BoundResourceClass::Image;
+  EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
+  auto Bytes = serializeArtifact(StageArtifactInfo{});
+  Bytes[0] = 7;
+  EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
+}
+
 TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -273,8 +319,8 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsSeven) {
-  EXPECT_EQ(ArtifactAbiVersion, 7u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsEight) {
+  EXPECT_EQ(ArtifactAbiVersion, 8u);
 }
 
 TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {
@@ -332,9 +378,9 @@ TEST(ResourceInfoTest, ParseRejectsUnknownResourceClass) {
   StageArtifactInfo Info;
   Info.BoundRanges = {BoundResourceRange{0, 0, 1, 0}};
   std::vector<uint8_t> Bytes = serializeArtifact(Info);
-  // The class is the fifth (last) field of the sole bound range, which is
+  // The class is the fifth field of the sole bound range, which is
   // itself followed only by the four-byte signature length.
-  Bytes[Bytes.size() - sizeof(uint32_t) * 2] = 7;
+  Bytes[Bytes.size() - sizeof(uint32_t) * 3] = 7;
   EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
 }
 

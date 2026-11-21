@@ -90,6 +90,11 @@ coverage" in [../Design.md](../Design.md).
   and native AOT compilation. Other targets reject this option. The default
   inferred mode is unchanged.
 
+  Bound raw/typed buffer normalization preserves separate SRV/UAV register
+  namespaces in both modes, including coincident register numbers. AOT
+  reflection uses artifact ABI 8 with a namespace per bound range;
+  version-7 objects must be recompiled. Shader argument layouts are unchanged.
+
 * `-O0`, `-O1`, `-O2`, `-O3`
 
   Optimization level for FeMe's IR optimization pipeline (see

@@ -487,6 +487,26 @@ heap remapping, full resource-kind/promise compatibility or W2(a) completion.
 Focused LIT passes 827 cases; the rebuilt full suite passes 4,052, with
 15 skipped, 10 unsupported and zero failures, from 4,077 discovered tests.
 
+W2(a) buffer-namespace progress (2026-11-21): bound raw/typed buffers now
+retain distinct DXIL SRV/UAV identities through normalization, reflection
+and physical heap preparation. Equal register numbers no longer merge or
+conflict across classes; each array gets its own bounded prefix range.
+Host `BoundResourceBinding` and `feme-run` YAML support namespace
+qualification (`register-class: srv|uav`). Unqualified bindings remain
+compatible when unambiguous; ambiguous, invalid, duplicate qualified and
+unmatched qualified inputs fail explicitly before JIT execution. Metadata
+uses six-field `.v2` ranges while retaining legacy/SPIR-V metadata reading.
+Artifact ABI 8 preserves namespaces in AOT reflection and rejects version-7
+objects; shader argument layouts are unchanged. Combined-prefix overflow
+and unbounded declarations remain fail-closed. Six unit cases and a native
+DXC fixture cover class isolation, array output, retained dispatches,
+partial waves, reference/AOT execution and negative host inputs. This
+advances the overlapping-register acceptance subset, not descriptor/table
+materialization, multiple inline parameters, general CBVs or owned D3D12
+execution.
+Focused LIT passes 841 cases; the rebuilt full suite passes 4,059, with
+15 skipped, 10 unsupported and zero failures, from 4,084 discovered tests.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

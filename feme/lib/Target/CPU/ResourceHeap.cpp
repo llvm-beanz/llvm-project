@@ -18,6 +18,15 @@ namespace feme::cpu {
 
 namespace {
 
+template <typename BindingT>
+BoundResourceNamespace getNamespace(const BindingT &) {
+  return BoundResourceNamespace::Unspecified;
+}
+
+BoundResourceNamespace getNamespace(const BoundResourceBinding &Binding) {
+  return Binding.Namespace;
+}
+
 /// Copies each of \p Info's bound ranges of class \p Class into \p Heap from
 /// the \p Bindings entry that matches it by (Space, BaseRegister), then
 /// appends \p DynamicHeap after the reserved prefix. Shared by the three
@@ -39,8 +48,13 @@ materializeHeap(llvm::ArrayRef<BoundResourceRange> Ranges,
     for (const BindingT &Binding : Bindings)
       if (Binding.Space == Range.Space &&
           Binding.BaseRegister == Range.BaseRegister) {
-        Matched = &Binding;
-        break;
+        if (getNamespace(Binding) == Range.Namespace) {
+          Matched = &Binding;
+          break;
+        }
+        if (!Matched &&
+            getNamespace(Binding) == BoundResourceNamespace::Unspecified)
+          Matched = &Binding;
       }
     if (!Matched)
       continue;
@@ -57,10 +71,55 @@ materializeHeap(llvm::ArrayRef<BoundResourceRange> Ranges,
 
 } // namespace
 
+Error validateBoundResourceBindings(const ResourceInfo &Info,
+                                    ArrayRef<BoundResourceBinding> Bindings) {
+  for (auto [Index, Binding] : llvm::enumerate(Bindings)) {
+    if (uint32_t(Binding.Namespace) > uint32_t(BoundResourceNamespace::UAV))
+      return createStringError(inconvertibleErrorCode(),
+                               "invalid buffer binding register namespace");
+    std::optional<BoundResourceNamespace> Namespace;
+    bool Matched = false;
+    for (const BoundResourceRange &Range : Info.BoundRanges) {
+      if (Range.Class != BoundResourceClass::Buffer ||
+          Range.Space != Binding.Space ||
+          Range.BaseRegister != Binding.BaseRegister)
+        continue;
+      if (Binding.Namespace != BoundResourceNamespace::Unspecified) {
+        Matched |= Binding.Namespace == Range.Namespace;
+        continue;
+      }
+      if (Namespace && *Namespace != Range.Namespace)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "ambiguous buffer binding space=%u register=%u: specify srv or uav",
+            Binding.Space, Binding.BaseRegister);
+      Namespace = Range.Namespace;
+    }
+    if (Binding.Namespace == BoundResourceNamespace::Unspecified)
+      continue;
+    if (!Matched)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "qualified buffer binding space=%u register=%u has no matching "
+          "shader declaration",
+          Binding.Space, Binding.BaseRegister);
+    for (const BoundResourceBinding &Previous : Bindings.take_front(Index))
+      if (Previous.Space == Binding.Space &&
+          Previous.BaseRegister == Binding.BaseRegister &&
+          Previous.Namespace == Binding.Namespace)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "duplicate qualified buffer binding space=%u register=%u",
+            Binding.Space, Binding.BaseRegister);
+  }
+  return Error::success();
+}
+
 std::vector<FemeDescriptor>
 materializeResourceHeap(const ResourceInfo &Info,
                         ArrayRef<BoundResourceBinding> Bindings,
                         ArrayRef<FemeDescriptor> DynamicHeap) {
+  cantFail(validateBoundResourceBindings(Info, Bindings));
   return materializeHeap<FemeDescriptor>(
       Info.BoundRanges, BoundResourceClass::Buffer,
       Info.ReservedResourceHeapSize, Bindings, DynamicHeap);

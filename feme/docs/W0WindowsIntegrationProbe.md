@@ -27,6 +27,56 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) buffer register namespace isolation (VM, 2026-11-21)
+
+Bound raw/typed buffers now preserve SRV/UAV register namespaces from the
+canonical writable flag through CPU normalization, reflection and heap
+preparation. Previously `(space, register)` alone merged read-only and
+writable raw declarations, or rejected typed/raw declarations from different
+classes as conflicting. Distinct namespace keys now allocate separate
+bounded array ranges, while conflicts within one namespace remain rejected.
+Both zero and UINT32_MAX unbounded counts and a combined prefix exceeding
+UINT32_MAX remain unnormalized for admission to reject.
+
+`BoundResourceBinding::Namespace` and YAML `register-class: srv|uav` select
+the intended declaration. Existing unqualified bindings remain compatible
+when reflection has only one namespace at that identity. Ambiguous
+unqualified, invalid namespace, duplicate qualified and unmatched qualified
+inputs fail before JIT preparation or execution. Qualified readback labels
+include the class; existing unqualified labels are unchanged. The shared
+low-level preparation API treats invalid bindings as contract errors;
+callers needing recoverable errors can use `validateBoundResourceBindings`.
+
+DXIL publishes six-field `!feme.cpu.bound_resources.v2` ranges; the reflection
+reader still accepts legacy/SPIR-V five-field metadata with its shared
+namespace. Artifact ABI 8 serializes the namespace and rejects older objects
+and invalid namespace/class combinations. Version-7 objects must be
+recompiled; shader argument ABI layouts are unchanged.
+
+Six new unit cases cover distinct namespace ranges, overflowing prefix
+rejection, reversed host-binding order, short/null descriptors, ambiguous
+and invalid host inputs, legacy/v2 metadata coexistence, namespace
+serialization and old artifact-version rejection. The native DXC fixture
+uses b3/t3/u3 in space 7 with two-element SRV/UAV arrays and three threads.
+Widths 4/8, scalar-reference, inferred mode and AOT verify three retained
+dispatches, accumulating UAV outputs, unchanged SRV inputs and untouched
+guards on every buffer. Negative YAML tests check ambiguous bindings in
+normal/reference paths and invalid register-class parsing.
+
+All automated tests run through LIT. Focused coverage passes **841**, with
+zero failures, in **5.28 seconds**. The rebuilt complete suite with native
+SDK DXC/FXC passes **4,059**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,084** discovered tests in **76.80 seconds**. Seven
+new passes correspond to six unit cases and one source fixture. Assertions,
+disabled PCH and the memory-safe build job limit are retained. Timings are
+not a controlled performance comparison.
+
+This advances W2(a)'s overlapping-register compiler/executor subset, not
+D3D12 descriptor-table materialization, general CBVs, multiple inline
+parameters, descriptor promises or owned device execution. No adapter-matrix
+or external Vulkan CTS result is claimed. `CreateDevice` remains
+`E_NOTIMPL`; W0(c), W0(g), W1 and W2(a) remain open.
+
 ## W2(a) declared-binding preflight (VM, 2026-11-21)
 
 Opt-in `--root-signature-constants` now checks live bound-resource

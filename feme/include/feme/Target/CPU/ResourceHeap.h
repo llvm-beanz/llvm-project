@@ -32,12 +32,20 @@
 namespace feme::cpu {
 
 /// One traditionally-bound *buffer* range's host-side descriptors, matched
-/// to a `BoundResourceRange` of class `Buffer` by (Space, BaseRegister).
+/// to a `BoundResourceRange` of class `Buffer` by namespace/space/register.
 struct BoundResourceBinding {
   uint32_t Space = 0;
   uint32_t BaseRegister = 0;
   llvm::ArrayRef<FemeDescriptor> Descriptors;
+  BoundResourceNamespace Namespace = BoundResourceNamespace::Unspecified;
 };
+
+/// Rejects ambiguous unqualified bindings and invalid or duplicate qualified
+/// bindings. Unqualified bindings retain their legacy meaning when only one
+/// register namespace is reflected at that identity.
+llvm::Error
+validateBoundResourceBindings(const ResourceInfo &Info,
+                              llvm::ArrayRef<BoundResourceBinding> Bindings);
 
 /// The same, for a bound sampled/storage image range
 /// (`BoundResourceClass::Image`), whose descriptors land in the image heap.
@@ -57,6 +65,8 @@ struct BoundSamplerBinding {
 /// Builds the physical resource heap a compiled stage indexes: \p Info's
 /// reserved prefix, with each `BoundResourceClass::Buffer` range filled from
 /// the matching \p Bindings entry, followed by \p DynamicHeap.
+/// Bindings must satisfy validateBoundResourceBindings; low-level preparation
+/// treats violations as contract errors. JIT dispatch returns these errors.
 std::vector<FemeDescriptor>
 materializeResourceHeap(const ResourceInfo &Info,
                         llvm::ArrayRef<BoundResourceBinding> Bindings,

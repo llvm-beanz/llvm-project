@@ -67,7 +67,14 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   object, not to `feme-run --object`. It cannot be combined with inspection.
   The default inferred behavior is unchanged.
 - `--heap=<file>`: a YAML file describing the resource heap a dispatch runs
-  against:
+  against. Buffer `bindings` entries can specify `register-class: srv` or
+  `register-class: uav`. Omitting it (or using `unspecified`) retains legacy
+  matching only when that space/register has one reflected namespace.
+  Ambiguous unqualified bindings, invalid classes, duplicate qualified
+  bindings and unmatched qualified bindings are errors. Qualified output
+  labels include the class, e.g. `binding[srv:7:3][0]`; unqualified labels
+  are unchanged. This applies in both inferred and explicit-root modes.
+  AOT objects use artifact ABI 8; version-7 objects must be recompiled.
 
   ```yaml
   root-constants: [1, 2, 3, 4]   # optional: uint32 words
@@ -78,6 +85,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   bindings:                      # the shader's traditionally-bound resources
     - space: 0
       register: 0
+      register-class: uav         # optional: srv, uav, or unspecified
       entries:
         - index: 0              # array element within the binding's range
           size: 64

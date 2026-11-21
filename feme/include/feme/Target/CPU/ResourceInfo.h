@@ -119,13 +119,23 @@ enum class BoundResourceClass : uint32_t {
   Sampler = 2,
 };
 
+/// DXIL register namespace, separate from the physical descriptor heap.
+/// Unspecified represents shared namespaces (SPIR-V descriptor sets) and
+/// legacy unqualified host bindings.
+enum class BoundResourceNamespace : uint32_t {
+  Unspecified = 0,
+  SRV = 1,
+  UAV = 2,
+};
+
 /// One traditionally-bound resource range's assignment in the reserved heap
 /// prefix `feme::cpu::BoundResourceNormalizationPass` builds (see
 /// "Bound-resource normalization" in feme/docs/FeMeCPUDesign.md): source
 /// register space and base register, the range's declared array length, the
 /// heap its slots live in, and the contiguous base slot it was assigned
 /// there. A host materializing a physical heap for a dispatch matches its
-/// own bound resources to one of these by (Space, BaseRegister), then writes
+/// own bound resources to one of these by (Namespace, Space, BaseRegister),
+/// then writes
 /// array element `j`'s descriptor at index `HeapBase + j` of the heap
 /// `Class` names.
 struct BoundResourceRange {
@@ -134,6 +144,7 @@ struct BoundResourceRange {
   uint32_t RangeSize = 0;
   uint32_t HeapBase = 0;
   BoundResourceClass Class = BoundResourceClass::Buffer;
+  BoundResourceNamespace Namespace = BoundResourceNamespace::Unspecified;
 };
 
 /// One entry point's descriptor-heap usage, as
@@ -250,7 +261,10 @@ struct ResourceInfo {
 /// effects) apart from its own automatic optimization-only inference
 /// (which must still decline whenever either is present, see
 /// `UseEarlyDepthStencil`'s own comment).
-constexpr uint32_t ArtifactAbiVersion = 7;
+///
+/// Version 8 adds a register namespace to each bound range, so DXIL SRVs
+/// and UAVs with equal register numbers cannot alias in host preparation.
+constexpr uint32_t ArtifactAbiVersion = 8;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.

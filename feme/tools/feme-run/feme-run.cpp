@@ -170,6 +170,7 @@ struct BindingFile {
   uint32_t Space = 0;
   uint32_t Register = 0;
   std::vector<HeapEntry> Entries;
+  BoundResourceNamespace Namespace = BoundResourceNamespace::Unspecified;
 };
 
 /// One `images` entry in the heap YAML file (roadmap R31, "heap YAML image
@@ -308,6 +309,14 @@ template <> struct SequenceTraits<std::vector<float>> {
 } // namespace llvm::yaml
 
 namespace llvm::yaml {
+template <> struct ScalarEnumerationTraits<BoundResourceNamespace> {
+  static void enumeration(IO &Io, BoundResourceNamespace &Namespace) {
+    Io.enumCase(Namespace, "unspecified", BoundResourceNamespace::Unspecified);
+    Io.enumCase(Namespace, "srv", BoundResourceNamespace::SRV);
+    Io.enumCase(Namespace, "uav", BoundResourceNamespace::UAV);
+  }
+};
+
 template <> struct MappingTraits<HeapEntry> {
   static void mapping(IO &Io, HeapEntry &Entry) {
     Io.mapRequired("index", Entry.Index);
@@ -324,6 +333,8 @@ template <> struct MappingTraits<BindingFile> {
     Io.mapRequired("space", Binding.Space);
     Io.mapRequired("register", Binding.Register);
     Io.mapOptional("entries", Binding.Entries);
+    Io.mapOptional("register-class", Binding.Namespace,
+                   BoundResourceNamespace::Unspecified);
   }
 };
 
@@ -1015,6 +1026,7 @@ struct BindingStorage {
   uint32_t Space = 0;
   uint32_t Register = 0;
   HeapStorage Entries;
+  BoundResourceNamespace Namespace = BoundResourceNamespace::Unspecified;
 };
 
 Expected<std::vector<BindingStorage>>
@@ -1025,8 +1037,8 @@ buildBindingStorage(const HeapFile &File) {
     Expected<HeapStorage> Entries = buildEntryStorage(Binding.Entries);
     if (!Entries)
       return Entries.takeError();
-    Storage.push_back(
-        BindingStorage{Binding.Space, Binding.Register, std::move(*Entries)});
+    Storage.push_back(BindingStorage{Binding.Space, Binding.Register,
+                                     std::move(*Entries), Binding.Namespace});
   }
   return Storage;
 }
@@ -1040,7 +1052,8 @@ toBoundResourceBindings(const std::vector<BindingStorage> &Storage) {
   Bindings.reserve(Storage.size());
   for (const BindingStorage &Binding : Storage)
     Bindings.push_back(BoundResourceBinding{Binding.Space, Binding.Register,
-                                            Binding.Entries.Descriptors});
+                                            Binding.Entries.Descriptors,
+                                            Binding.Namespace});
   return Bindings;
 }
 
@@ -1156,8 +1169,12 @@ void printHeapContents(
   }
   for (auto [Binding, BindingFile] : zip(BindingsStorage, File.Bindings)) {
     for (const HeapEntry &Entry : BindingFile.Entries) {
-      OS << "binding[" << Binding.Space << ":" << Binding.Register << "]["
-         << Entry.Index << "]:";
+      OS << "binding[";
+      if (Binding.Namespace != BoundResourceNamespace::Unspecified)
+        OS << (Binding.Namespace == BoundResourceNamespace::SRV ? "srv:"
+                                                                : "uav:");
+      OS << Binding.Space << ":" << Binding.Register << "][" << Entry.Index
+         << "]:";
       PrintBuffer(Binding.Entries.Buffers[Entry.Index]);
     }
   }

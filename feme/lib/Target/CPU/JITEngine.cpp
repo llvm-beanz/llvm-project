@@ -51,6 +51,9 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
 
 Error JITEngine::dispatch(const DispatchResources &Resources,
                           std::array<uint32_t, 3> GroupCount) const {
+  if (Error E = validateBoundResourceBindings(Stage->getResourceInfo(),
+                                              Resources.BoundResources))
+    return E;
   PreparedDispatch Prepared =
       PreparedDispatch::create(Stage->getResourceInfo(), Resources, GroupCount);
 

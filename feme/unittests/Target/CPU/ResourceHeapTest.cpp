@@ -8,6 +8,7 @@
 
 #include "feme/Target/CPU/ResourceHeap.h"
 
+#include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
 using namespace feme::cpu;
@@ -131,6 +132,47 @@ TEST(ResourceHeapTest, MultipleRangesFillTheirOwnHeapBase) {
   EXPECT_EQ(Heap[0].Data, &A);
   EXPECT_EQ(Heap[1].Data, &B);
   EXPECT_EQ(Heap[2].Kind, static_cast<uint32_t>(ResourceKind::None));
+}
+
+TEST(ResourceHeapTest, QualifiedNamespacesFillDistinctArrayRanges) {
+  ResourceInfo Info;
+  Info.ReservedResourceHeapSize = 4;
+  Info.BoundRanges = {
+      {7, 3, 2, 0, BoundResourceClass::Buffer, BoundResourceNamespace::SRV},
+      {7, 3, 2, 2, BoundResourceClass::Buffer, BoundResourceNamespace::UAV}};
+  int A = 1, B = 2, C = 3;
+  std::vector<FemeDescriptor> Read = {makeDescriptor(&A), makeDescriptor(&B)};
+  std::vector<FemeDescriptor> Write = {makeDescriptor(&C)};
+  BoundResourceBinding SRV{7, 3, Read, BoundResourceNamespace::SRV};
+  BoundResourceBinding UAV{7, 3, Write, BoundResourceNamespace::UAV};
+  auto Heap = materializeResourceHeap(Info, {UAV, SRV}, {});
+  ASSERT_EQ(Heap.size(), 4u);
+  EXPECT_EQ(Heap[0].Data, &A);
+  EXPECT_EQ(Heap[1].Data, &B);
+  EXPECT_EQ(Heap[2].Data, &C);
+  EXPECT_EQ(Heap[3].Data, nullptr);
+  EXPECT_THAT_ERROR(validateBoundResourceBindings(Info, {{7, 3, Read}}),
+                    Failed());
+  EXPECT_THAT_ERROR(validateBoundResourceBindings(Info, {SRV, SRV}), Failed());
+  EXPECT_THAT_ERROR(validateBoundResourceBindings(
+                        Info, {{7, 4, Read, BoundResourceNamespace::SRV}}),
+                    Failed());
+  EXPECT_THAT_ERROR(
+      validateBoundResourceBindings(
+          Info, {{7, 3, Read, static_cast<BoundResourceNamespace>(3)}}),
+      Failed());
+}
+
+TEST(ResourceHeapTest, UnqualifiedBindingInfersOnlyAnUnambiguousNamespace) {
+  ResourceInfo Info;
+  Info.ReservedResourceHeapSize = 1;
+  Info.BoundRanges = {
+      {7, 3, 1, 0, BoundResourceClass::Buffer, BoundResourceNamespace::UAV}};
+  int A = 1;
+  std::vector<FemeDescriptor> Descs = {makeDescriptor(&A)};
+  auto Heap = materializeResourceHeap(Info, {{7, 3, Descs}}, {});
+  ASSERT_EQ(Heap.size(), 1u);
+  EXPECT_EQ(Heap[0].Data, &A);
 }
 
 TEST(ResourceHeapTest, ImageAndSamplerRangesFillTheirOwnHeaps) {

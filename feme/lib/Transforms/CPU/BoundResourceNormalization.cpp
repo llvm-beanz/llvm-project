@@ -41,16 +41,18 @@ namespace {
 enum class Family { Typed, Raw };
 
 /// A bound handle's identity, per "Bound-resource normalization": source
-/// model (always DXIL for now, see the header comment), register space,
+/// model (always DXIL for now, see the header comment), SRV/UAV namespace,
+/// register space,
 /// base register, and the resource kind/array length recovered from the
 /// call itself.
 struct RangeKey {
   uint32_t Space;
   uint32_t LowerBound;
+  BoundResourceNamespace Namespace;
 
   bool operator<(const RangeKey &Other) const {
-    return std::tie(Space, LowerBound) <
-           std::tie(Other.Space, Other.LowerBound);
+    return std::tie(Space, LowerBound, Namespace) <
+           std::tie(Other.Space, Other.LowerBound, Other.Namespace);
   }
 };
 
@@ -89,8 +91,8 @@ std::optional<Family> classifyFamily(const CallInst &Handle) {
 }
 
 /// Collects every normalizable `handlefrombinding` call in \p M, and folds
-/// each (space, register) identity's uses into one `RangeEntry` --
-/// unbounded (`RangeSize == 0`) or mutually-inconsistent identities are
+/// each (namespace, space, register) identity's uses into one `RangeEntry` --
+/// unbounded (zero or UINT32_MAX) or mutually-inconsistent identities are
 /// marked `Conflicting` so `rewriteBoundHandles` leaves them alone.
 void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
                          std::map<RangeKey, RangeEntry> &Ranges) {
@@ -104,6 +106,9 @@ void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
       std::optional<Family> Kind = classifyFamily(*CI);
       if (!Kind)
         continue; // Not one of the two kinds this milestone normalizes.
+      auto *Ty = cast<TargetExtType>(CI->getType());
+      if (!Ty->getNumIntParameters() || Ty->getIntParameter(0) > 1)
+        continue; // Leave malformed types for admission to reject.
 
       auto *SpaceC = dyn_cast<ConstantInt>(CI->getArgOperand(0));
       auto *LowerBoundC = dyn_cast<ConstantInt>(CI->getArgOperand(1));
@@ -112,13 +117,16 @@ void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
         continue; // Non-constant binding: not produced by any raiser today.
 
       RangeKey Key{static_cast<uint32_t>(SpaceC->getZExtValue()),
-                   static_cast<uint32_t>(LowerBoundC->getZExtValue())};
+                   static_cast<uint32_t>(LowerBoundC->getZExtValue()),
+                   Ty->getIntParameter(0) ? BoundResourceNamespace::UAV
+                                          : BoundResourceNamespace::SRV};
       uint32_t RangeSize = static_cast<uint32_t>(RangeSizeC->getZExtValue());
 
       auto It = Ranges.find(Key);
       if (It == Ranges.end()) {
         Ranges.emplace(Key, RangeEntry{*Kind, RangeSize,
-                                       /*Conflicting=*/RangeSize == 0});
+                                       /*Conflicting=*/RangeSize == 0 ||
+                                           RangeSize == UINT32_MAX});
       } else if (It->second.Kind != *Kind ||
                  It->second.RangeSize != RangeSize) {
         It->second.Conflicting = true;
@@ -130,11 +138,20 @@ void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
 }
 
 /// Assigns each non-conflicting range a contiguous base slot in the
-/// reserved heap prefix, sorted by identity (space, then register) for a
+/// reserved heap prefix, sorted by space, register and namespace for a
 /// deterministic (if not itself ABI-guaranteed) layout -- see
 /// "Bound-resource normalization"'s step 2. Returns the total reserved
 /// prefix size.
 uint32_t assignHeapBases(std::map<RangeKey, RangeEntry> &Ranges) {
+  uint64_t Total = 0;
+  for (const auto &[Key, Entry] : Ranges)
+    if (!Entry.Conflicting)
+      Total += Entry.RangeSize;
+  if (Total > std::numeric_limits<uint32_t>::max()) {
+    for (auto &[Key, Entry] : Ranges)
+      Entry.Conflicting = true;
+    return 0;
+  }
   uint32_t Base = 0;
   for (auto &[Key, Entry] : Ranges) {
     if (Entry.Conflicting)
@@ -234,7 +251,7 @@ void offsetNativeDynamicIndices(Module &M, uint32_t PrefixSize,
   }
 }
 
-/// Attaches the `!feme.cpu.bound_resources` metadata node "Publishing"
+/// Attaches the `!feme.cpu.bound_resources.v2` metadata node "Publishing"
 /// (see the design doc's "Bound-resource normalization"/"Descriptor
 /// heaps" sections) describes for \p F: its name, the reserved resource-,
 /// image- and sampler-heap prefix sizes, then each accepted range as a
@@ -265,10 +282,12 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.HeapBase)));
     Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(
         I32Ty, static_cast<uint32_t>(feme::cpu::BoundResourceClass::Buffer))));
+    Ops.push_back(ConstantAsMetadata::get(
+        ConstantInt::get(I32Ty, static_cast<uint32_t>(Key.Namespace))));
   }
 
   F.getParent()
-      ->getOrInsertNamedMetadata("feme.cpu.bound_resources")
+      ->getOrInsertNamedMetadata("feme.cpu.bound_resources.v2")
       ->addOperand(MDNode::get(Ctx, Ops));
 }
 

@@ -35,7 +35,8 @@ struct BoundResourcePrefixes {
   uint32_t Sampler = 0;
 };
 
-/// Reads \p EntryName's entry from \p M's `!feme.cpu.bound_resources`
+/// Reads \p EntryName's namespace-qualified `.v2` entry, falling back to
+/// \p M's legacy `!feme.cpu.bound_resources`
 /// metadata (see `attachBoundResourceMetadata` in
 /// BoundResourceNormalization.cpp for the node shape: {name, resource-,
 /// image- and sampler-heap prefix sizes, then (space, register, range-size,
@@ -44,31 +45,40 @@ struct BoundResourcePrefixes {
 /// bound resource, so that pass never rewrote it.
 std::optional<std::pair<BoundResourcePrefixes, std::vector<BoundResourceRange>>>
 readBoundResourceMetadata(const Module &M, StringRef EntryName) {
-  const NamedMDNode *MD = M.getNamedMetadata("feme.cpu.bound_resources");
-  if (!MD)
-    return std::nullopt;
-
-  for (const MDNode *Entry : MD->operands()) {
-    if (Entry->getNumOperands() < 4)
+  for (StringRef Name :
+       {"feme.cpu.bound_resources.v2", "feme.cpu.bound_resources"}) {
+    const NamedMDNode *MD = M.getNamedMetadata(Name);
+    if (!MD)
       continue;
-    const auto *Name = dyn_cast<MDString>(Entry->getOperand(0));
-    if (!Name || Name->getString() != EntryName)
-      continue;
+    bool HasNamespace = Name.ends_with(".v2");
+    unsigned Fields = HasNamespace ? 6 : 5;
+    for (const MDNode *Entry : MD->operands()) {
+      if (Entry->getNumOperands() < 4)
+        continue;
+      const auto *Name = dyn_cast<MDString>(Entry->getOperand(0));
+      if (!Name || Name->getString() != EntryName)
+        continue;
 
-    auto GetOperand = [&](unsigned Index) {
-      return static_cast<uint32_t>(
-          mdconst::extract<ConstantInt>(Entry->getOperand(Index))
-              ->getZExtValue());
-    };
-    BoundResourcePrefixes Prefixes{GetOperand(1), GetOperand(2), GetOperand(3)};
-    std::vector<BoundResourceRange> Ranges;
-    for (unsigned I = 4, E = Entry->getNumOperands(); I + 5 <= E; I += 5) {
-      uint32_t ClassValue = GetOperand(I + 4);
-      Ranges.push_back(BoundResourceRange{
-          GetOperand(I), GetOperand(I + 1), GetOperand(I + 2),
-          GetOperand(I + 3), static_cast<BoundResourceClass>(ClassValue)});
+      auto GetOperand = [&](unsigned Index) {
+        return static_cast<uint32_t>(
+            mdconst::extract<ConstantInt>(Entry->getOperand(Index))
+                ->getZExtValue());
+      };
+      BoundResourcePrefixes Prefixes{GetOperand(1), GetOperand(2),
+                                     GetOperand(3)};
+      std::vector<BoundResourceRange> Ranges;
+      for (unsigned I = 4, E = Entry->getNumOperands(); I + Fields <= E;
+           I += Fields) {
+        uint32_t ClassValue = GetOperand(I + 4);
+        Ranges.push_back(BoundResourceRange{
+            GetOperand(I), GetOperand(I + 1), GetOperand(I + 2),
+            GetOperand(I + 3), static_cast<BoundResourceClass>(ClassValue),
+            HasNamespace
+                ? static_cast<BoundResourceNamespace>(GetOperand(I + 5))
+                : BoundResourceNamespace::Unspecified});
+      }
+      return std::make_pair(Prefixes, std::move(Ranges));
     }
-    return std::make_pair(Prefixes, std::move(Ranges));
   }
   return std::nullopt;
 }
@@ -244,8 +254,8 @@ std::string feme::cpu::getArtifactSymbolName(StringRef EntryName) {
 constexpr size_t NumFixedFields = 19;
 
 /// The number of `uint32_t` fields one `BoundResourceRange` serializes to
-/// (its five fields, in declaration order).
-constexpr size_t FieldsPerBoundRange = 5;
+/// (its six fields, in declaration order).
+constexpr size_t FieldsPerBoundRange = 6;
 
 std::vector<uint8_t>
 feme::cpu::serializeArtifact(const StageArtifactInfo &Info) {
@@ -285,6 +295,7 @@ feme::cpu::serializeArtifact(const StageArtifactInfo &Info) {
     WriteNext(Range.RangeSize);
     WriteNext(Range.HeapBase);
     WriteNext(static_cast<uint32_t>(Range.Class));
+    WriteNext(static_cast<uint32_t>(Range.Namespace));
   }
   WriteNext(static_cast<uint32_t>(Info.Signature.size()));
   llvm::copy(Info.Signature, P);
@@ -384,6 +395,14 @@ Expected<StageArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
                                "unknown resource class (%u)",
                                ClassValue);
     Range.Class = static_cast<BoundResourceClass>(ClassValue);
+    uint32_t NamespaceValue = ReadNext();
+    if (NamespaceValue > static_cast<uint32_t>(BoundResourceNamespace::UAV) ||
+        (Range.Class != BoundResourceClass::Buffer && NamespaceValue != 0))
+      return createStringError(inconvertibleErrorCode(),
+                               "FeMe CPU artifact's bound range names an "
+                               "invalid register namespace (%u)",
+                               NamespaceValue);
+    Range.Namespace = static_cast<BoundResourceNamespace>(NamespaceValue);
     Info.BoundRanges.push_back(Range);
   }
 

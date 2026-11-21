@@ -2791,24 +2791,43 @@ Notes and constraints:
   robustness setting, not just the input hash.
 - **Deviation (milestone 11's implementation)**: the shipped type is
   `feme::cpu::BoundResourceBinding` (feme/include/feme/Target/CPU/
-  ResourceHeap.h) -- `{Space, BaseRegister, Descriptors}` -- rather than
-  the `SourceBinding`/`BoundDescriptorRange` pair sketched above; DXIL is
-  the only source model with bound-resource handling yet (see the Status
-  section's Deviation note), so there is no other namespace a `Space`/
-  `BaseRegister` pair could collide with today. Roadmap R30 added the image
+  ResourceHeap.h) -- now `{Space, BaseRegister, Descriptors, Namespace}` --
+  rather than the `SourceBinding`/`BoundDescriptorRange` pair sketched
+  above. W2(a) preserves distinct DXIL SRV/UAV register namespaces,
+  including equal register numbers in one space. Roadmap R30 added the image
   and sampler counterparts -- `BoundImageBinding`/`BoundSamplerBinding` and
   `materializeImageHeap`/`materializeSamplerHeap` -- so that a bound
   sampled image or sampler lands in the image or sampler heap rather than
   the buffer-oriented resource heap; all three share one class-filtered
   helper, and a range only ever fills the heap its `BoundResourceClass`
   names. `materializeResourceHeap`
-  matches each `ResourceInfo::BoundRanges` entry by `(Space,
-  BaseRegister)` and zero-fills an unmatched or short range, but does not
-  itself diagnose a duplicate or oversized `BoundResourceBinding`, or one
-  naming a binding `ResourceInfo` doesn't have -- it silently ignores
-  data outside a declared range's bounds rather than erroring, unlike this
-  section's original text. Making an unknown/malformed binding a host
-  error is possible future work, not required for the completion test.
+  matches each `ResourceInfo::BoundRanges` entry by namespace/space/register
+  and zero-fills an unmatched or short range. Unqualified bindings retain
+  their old behavior only when the reflected identity has one namespace.
+  `validateBoundResourceBindings` rejects ambiguous unqualified bindings,
+  invalid namespaces, duplicate qualified bindings and qualified bindings
+  without a matching declaration. JIT dispatch returns these errors before
+  preparation or execution. Low-level `materializeResourceHeap` and prepared
+  stage constructors require validated bindings and report contract failures
+  through LLVM's `cantFail`; callers needing recoverable errors should call
+  the validator first. Exact qualified matches take precedence over an
+  unqualified fallback. Legacy unmatched unqualified inputs and excess
+  descriptors retain their previous ignored/truncated behavior.
+
+  DXIL normalization publishes six-field ranges in
+  `!feme.cpu.bound_resources.v2`; legacy/SPIR-V five-field
+  `!feme.cpu.bound_resources` remains readable with the shared/unspecified
+  namespace. Physical buffer slots are assigned by space, register and
+  namespace, and native dynamic indices are shifted by the complete prefix.
+  Conflicting declarations are isolated within a namespace; zero/UINT32_MAX
+  unbounded ranges and an overflowing combined prefix remain unnormalized
+  for admission to reject.
+
+  Artifact ABI **8** serializes namespace as the sixth bound-range field.
+  Version-7 objects must be recompiled; parsing rejects older versions,
+  unknown namespaces and SRV/UAV namespaces on image/sampler ranges. Shader
+  argument ABI layouts are unchanged. This supplies buffer binding identity,
+  not D3D12 table materialization, general CBVs or descriptor promises.
 - **Object-file path**: the same helper-bitcode link and optimization
   pipeline minus the JIT, through
   `feme::TargetMachineBackend` with the host triple, producing a relocatable

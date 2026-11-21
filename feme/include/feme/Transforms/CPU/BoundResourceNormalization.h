@@ -30,9 +30,11 @@
 //    all yet (see "Resource Model"'s SPIR-V bullet). Both remain rejected
 //    by `feme::cpu::checkSupportedRaisedOps`, unchanged from before this
 //    pass existed.
-//  - An unbounded range (`handlefrombinding`'s range-size operand is 0) or
-//    two bindings that disagree about a shared (space, register) identity's
-//    family or range size are left as `handlefrombinding` calls rather than
+//  - DXIL SRV and UAV register namespaces remain distinct, even when their
+//    space/register numbers coincide. An unbounded range (range size 0 or
+//    UINT32_MAX), an overflowing total prefix, or two bindings that disagree
+//    about a shared (namespace, space, register) identity's family or range
+//    size are left as `handlefrombinding` calls rather than
 //    normalized, so `feme::cpu::checkSupportedRaisedOps` still rejects them
 //    -- see that function's diagnostic for the guidance given in each case.
 //
