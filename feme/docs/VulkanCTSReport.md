@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a) wide constant-row regression scope (2026-11-21)
+
+The [wide-row follow-up](W0WindowsIntegrationProbe.md#w2a-wide-constant-rows-and-bounded-reads-vm-2026-11-21)
+extends shared CPU root-row lowering to homogeneous 16-/32-/64-bit integer
+and floating-point components. It fixes array/row arithmetic overflow,
+cross-element borrowing and whole-row rejection of valid partial
+components, and supplies YAML root bytes to AOT execution. It does not
+introduce explicit root-layout binding, general descriptor-backed CBVs,
+an artifact ABI revision, Vulkan command changes or new advertisements.
+
+All FeMe LIT prerequisites and the native ARM64 ICD were rebuilt with
+assertions and disabled PCH. The complete suite with native SDK FXC on PATH
+passes **4,032**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,057** discovered tests in **184.88 seconds**. Four source fixtures
+and three unit cases account for seven additional passes. Focused root-row,
+CPU/DXIL units and existing AOT coverage pass **700**, with zero failures
+in **5.68 seconds**. Existing CPU, graphics and Vulkan unit/real-loader
+coverage remains passing.
+
+No inventory inputs, generated capability tables or advertisements are
+edited; the preceding pinned inventory measurements remain historical
+evidence, not a new check for this milestone. Windows adapter matrices
+were not rerun. **No real Vulkan CTS pass is claimed**: the external
+runner remains unavailable, and LIT does not close the pending CTS comparison.
+
 ## W2(a) root-binding-plan regression scope (2026-11-21)
 
 The [root-plan follow-up](W0WindowsIntegrationProbe.md#w2a-root-signature-parsing-and-immutable-binding-plans-vm-2026-11-21)

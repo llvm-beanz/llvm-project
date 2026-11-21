@@ -1688,36 +1688,6 @@ bool raiseGetDimensions(CallInst &CI) {
   return true;
 }
 
-/// Returns the `llvm.dx.resource.load.cbufferrow.*` intrinsic whose row
-/// shape matches \p RetTy (`%dx.types.CBufRet.*`, a fixed-width aggregate of
-/// same-typed fields covering DXIL's 128-bit cbuffer row -- see
-/// `CBufferLoadLegacy`'s `overloads` list in DXIL.td: 2 64-bit fields, 4
-/// 32-bit fields, or 8 16-bit fields), or `not_intrinsic` if \p RetTy is not
-/// one of those three shapes.
-Intrinsic::ID getCBufferRowIntrinsic(StructType &RetTy) {
-  Type *ElemTy = RetTy.getElementType(0);
-  for (Type *Field : RetTy.elements())
-    if (Field != ElemTy)
-      return Intrinsic::not_intrinsic; // Every field must share one type.
-
-  switch (RetTy.getNumElements()) {
-  case 2:
-    return ElemTy->isIntegerTy(64) || ElemTy->isDoubleTy()
-               ? Intrinsic::dx_resource_load_cbufferrow_2
-               : Intrinsic::not_intrinsic;
-  case 4:
-    return ElemTy->isIntegerTy(32) || ElemTy->isFloatTy()
-               ? Intrinsic::dx_resource_load_cbufferrow_4
-               : Intrinsic::not_intrinsic;
-  case 8:
-    return ElemTy->isIntegerTy(16) || ElemTy->isHalfTy()
-               ? Intrinsic::dx_resource_load_cbufferrow_8
-               : Intrinsic::not_intrinsic;
-  default:
-    return Intrinsic::not_intrinsic;
-  }
-}
-
 /// Raises a `dx.op.cbufferLoadLegacy` (opcode 59) call on an already-raised
 /// constant-buffer handle into the `llvm.dx.resource.load.cbufferrow.*`
 /// overload `getCBufferRowIntrinsic` selects for its return shape: the
@@ -2104,6 +2074,31 @@ bool raiseResourceOps(Module &M) {
 }
 
 } // namespace
+
+Intrinsic::ID feme::dxil::getCBufferRowIntrinsic(const StructType &RetTy) {
+  if (RetTy.isOpaque() || RetTy.getNumElements() == 0)
+    return Intrinsic::not_intrinsic;
+  Type *ElemTy = RetTy.getElementType(0);
+  for (Type *Field : RetTy.elements())
+    if (Field != ElemTy)
+      return Intrinsic::not_intrinsic;
+  switch (RetTy.getNumElements()) {
+  case 2:
+    return ElemTy->isIntegerTy(64) || ElemTy->isDoubleTy()
+               ? Intrinsic::dx_resource_load_cbufferrow_2
+               : Intrinsic::not_intrinsic;
+  case 4:
+    return ElemTy->isIntegerTy(32) || ElemTy->isFloatTy()
+               ? Intrinsic::dx_resource_load_cbufferrow_4
+               : Intrinsic::not_intrinsic;
+  case 8:
+    return ElemTy->isIntegerTy(16) || ElemTy->isHalfTy()
+               ? Intrinsic::dx_resource_load_cbufferrow_8
+               : Intrinsic::not_intrinsic;
+  default:
+    return Intrinsic::not_intrinsic;
+  }
+}
 
 PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
   bool Changed = raiseResourceOps(M);

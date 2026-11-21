@@ -2462,17 +2462,21 @@ for the analogous, still-open gap on that side). An array binding
 (`register(bN[K])`) is accepted too, with either a constant or dynamic
 array index; an *unbounded* range (`register(bN[])`) is not, since it has
 no fixed advertised size to bounds-check reads against. A DXIL
-`cbufferrow.4` load (32-bit components, the shape a plain
-`float`/`uint`/`int`-typed `cbuffer` member produces) is accepted with
-either a constant or dynamic row index (R25 lifted R12's constant-row-only
-restriction); `cbufferrow.2`/`.8` (64-/16-bit components) are left for
-`feme::cpu::checkSupportedRaisedOps` to reject, same as before either pass
-existed. The root-constant span a shader requires is now always the
+128-bit `cbufferrow.2`/`.4`/`.8` load is accepted with homogeneous
+64-/32-/16-bit integer or floating-point components (`i64`/`double`,
+`i32`/`float`, `i16`/`half`). Constant and dynamic row indices are supported
+(R25 lifted R12's constant-row-only restriction). The
+[W2(a) wide-row follow-up](W0WindowsIntegrationProbe.md#w2a-wide-constant-rows-and-bounded-reads-vm-2026-11-21)
+reuses the DXIL raiser's canonical row-shape matcher, rather than keeping
+a separate CPU interpretation. Malformed aggregates remain unsupported.
+The root-constant span a shader requires is always the
 binding's *full advertised size* (its declared per-element byte size times
 its array length), not merely the rows a function's own loads happen to
 touch statically -- required the moment a row or array index can be
 dynamic, since there is then no longer a fixed set of rows to inspect
-ahead of time. A function with two or more distinct bindings remains
+ahead of time. That full declared span must fit the ABI's `uint32_t` byte
+size; overflowing declarations are rejected, not truncated.
+A function with two or more distinct bindings remains
 ambiguous (there is still only one root-constant block) and is left
 entirely alone, for `checkSupportedRaisedOps` to reject as ordinary
 register-bound resources this target has no other way to address.
@@ -2490,14 +2494,18 @@ by `feme::cpu::ResourceLoweringPass` instead of this pass, reusing the
 every function it touches (`feme::cpu::RootConstantLoweringPass` adding
 its own pair would collide by name with `feme::cpu::EntryWrapperPass`'s
 by-name argument wiring); see RootConstantLowering.h's file comment for
-the exact split. Out-of-range reads (including a null, empty root-constant
-block, an out-of-range array index, or an out-of-range row) are guarded by
-a real, uniform branch around the load itself, not a `select` after an
-unconditional one — the bounds check depends only on the dispatch-wide
-`RootConstantSize` and this access's own operands, never on per-lane data,
-so introducing this narrow, always-uniform control flow this early in the
-pipeline (before `feme::cpu::LinearizePass`/`SIMDizePass` run) needs no
-divergence handling of its own.
+the exact split. Each component is guarded by a real branch around its
+load, not a `select` after an unconditional access. An independent array
+index check and 64-bit offset arithmetic prevent invalid large indices or
+rows from wrapping back into the block. Each scalar must be wholly within
+both its declared array element and the supplied root bytes; otherwise
+that scalar reads zero. Partial rows retain valid components instead of
+zeroing the entire row, and cannot borrow bytes from the next element.
+An empty/null block reads zero through the direct entry ABI. Array and
+row operands may vary per lane; subsequent `LinearizePass`/`SIMDizePass`
+handle the resulting divergence normally. Loads assume at most the root
+storage's four-byte alignment, reduced further for odd element strides
+and component offsets.
 
 The `--cpu-root-constants=bN,spaceM` CLI override the original design
 sketched is still not implemented, and is no longer needed for the reason
@@ -2515,8 +2523,8 @@ as it would on a GPU. `ResourceInfo` reports the full byte span the shader
 can read. `JITEngine::dispatch()` and the runtime dispatch API reject a null
 or undersized block before scheduling any group. The direct entry-symbol
 escape hatch retains robust behavior: root-constant accesses outside
-`RootConstantSize` read zero, using the same linked helper machinery as
-descriptor-backed constant buffers.
+`RootConstantSize` read zero through the shared root-row lowering used by
+normal and scalar-reference execution.
 
 #### Limitations, and how this compares to GPU APIs
 
@@ -3036,6 +3044,12 @@ because it is a separate project that happens to reuse this one.
   heap slot a single-binding-at-heap-base-0 shader's own compiled-in
   prefix already expects (see
   test/Tools/feme-run/feme-run-object-aot.ll's own comment).
+  YAML `root-constants` are now packed and passed through the same shared
+  helper as normal/reference execution, with their storage retained across
+  repeated dispatches. The object path has no reflected required root span
+  to validate: short or empty blocks exercise the compiled entry's guarded
+  reads directly. This does not add general traditional-binding support
+  or change the artifact ABI.
 
 ### Test strategy per phase
 

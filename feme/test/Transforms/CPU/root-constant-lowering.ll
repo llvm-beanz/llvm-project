@@ -32,7 +32,8 @@ declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer
 ; access is recorded under (see the end of this file) reports which one.
 ; CHECK-LABEL: define i32 @other_binding(
 ; CHECK-SAME: ptr %root_constants, i32 %root_constant_size)
-; CHECK: %root_const.inbounds = icmp uge i32 %root_constant_size, 16
+; CHECK: [[OTHER_SIZE:%.*]] = zext i32 %root_constant_size to i64
+; CHECK: icmp ule i64 4, [[OTHER_SIZE]]
 define i32 @other_binding() {
   %h = call target("dx.CBuffer", [16 x i8])
       @llvm.dx.resource.handlefrombinding.tdx.CBuffer_b1_a16i8t(i32 0, i32 1, i32 1, i32 0, ptr null)
@@ -52,10 +53,13 @@ declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer
 ; the one row this function's own load happens to touch.
 ; CHECK-LABEL: define i32 @array_binding(
 ; CHECK-SAME: i32 %idx, ptr %root_constants, i32 %root_constant_size)
-; CHECK: %root_const.elem_off = mul i32 %idx, 16
-; CHECK: %root_const.base_off = add i32 %root_const.elem_off, 0
-; CHECK: [[END:%.*]] = add i32 %root_const.base_off, 16
-; CHECK: %root_const.inbounds = icmp uge i32 %root_constant_size, [[END]]
+; CHECK: [[INDEX:%.*]] = zext i32 %idx to i64
+; CHECK: [[ARRAY_SIZE:%.*]] = zext i32 %root_constant_size to i64
+; CHECK: icmp ult i64 [[INDEX]], 4
+; CHECK: %root_const.elem_off = mul i64 [[INDEX]], 16
+; CHECK: [[OFFSET:%.*]] = add i64 %root_const.elem_off, 0
+; CHECK: [[END:%.*]] = add i64 [[OFFSET]], 4
+; CHECK: icmp ule i64 [[END]], [[ARRAY_SIZE]]
 define i32 @array_binding(i32 %idx) {
   %h = call target("dx.CBuffer", [16 x i8])
       @llvm.dx.resource.handlefrombinding.tdx.CBuffer_arr_a16i8t(i32 0, i32 2, i32 4, i32 %idx, ptr null)
@@ -73,8 +77,11 @@ declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer
 ; the byte offset at runtime instead of at compile time.
 ; CHECK-LABEL: define i32 @dynamic_row(
 ; CHECK-SAME: i32 %row, ptr %root_constants, i32 %root_constant_size)
-; CHECK: %root_const.row_off = mul i32 %row, 16
-; CHECK: %root_const.base_off = add i32 0, %root_const.row_off
+; CHECK: [[ROW:%.*]] = zext i32 %row to i64
+; CHECK: %root_const.row_off = mul i64 [[ROW]], 16
+; CHECK: [[RELATIVE:%.*]] = add i64 %root_const.row_off, 0
+; CHECK: [[RELATIVE_END:%.*]] = add i64 [[RELATIVE]], 4
+; CHECK: icmp ule i64 [[RELATIVE_END]], 32
 define i32 @dynamic_row(i32 %row) {
   %h = call target("dx.CBuffer", [32 x i8])
       @llvm.dx.resource.handlefrombinding.tdx.CBuffer_dyn_a32i8t(i32 0, i32 0, i32 1, i32 0, ptr null)
@@ -91,15 +98,15 @@ declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer
 ; The default `(b0, space0)` binding with a constant row index (roadmap
 ; R12's original shape) lowers a constant-row `cbufferrow.4` load into a
 ; bounds-checked load from the appended `root_constants` parameter -- zero
-; for any row wholly or partly outside `root_constant_size`'s span,
-; matching "Root constants" in feme/docs/FeMeCPUDesign.md. Row 1 reads
-; bytes [16, 32), so `root_constant_size` must be at least 32 for the real
-; load to run.
+; for each component not wholly present in the declared element and supplied
+; block, matching "Root constants" in feme/docs/FeMeCPUDesign.md. Row 1 reads
+; bytes [16, 32); its first component requires 20 bytes, not the whole row.
 
 ; CHECK-LABEL: define i32 @main(
 ; CHECK-SAME: ptr %root_constants, i32 %root_constant_size)
-; CHECK: %root_const.inbounds = icmp uge i32 %root_constant_size, 32
-; CHECK: br i1 %root_const.inbounds
+; CHECK: [[MAIN_SIZE:%.*]] = zext i32 %root_constant_size to i64
+; CHECK: icmp ule i64 20, [[MAIN_SIZE]]
+; CHECK: br i1
 ; CHECK: getelementptr inbounds i8, ptr %root_constants, i64 16
 ; CHECK: load i32, ptr {{.*}}, align 4
 ; CHECK: getelementptr inbounds i8, ptr %root_constants, i64 20

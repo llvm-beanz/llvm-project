@@ -431,9 +431,26 @@ shader/root-only containers; the rebuilt full FeMe LIT suite passes
 4,025 tests with zero failures. Both capability inventories reproduce
 unchanged. This is a compiler/frontend parsing prerequisite, not root-driven
 CPU lowering, descriptor preparation, shader/root compatibility validation
-or enforcement of static/volatility promises. Explicit multiple-CBV,
-dynamic-index and non-32-bit execution remains open under W2(a); W1 and
-owned `CreateDevice` remain open.
+or enforcement of static/volatility promises. Explicit root-layout mapping
+and multiple-CBV execution remain open under W2(a); W1 and owned
+`CreateDevice` remain open.
+
+W2(a) constant-row prerequisite progress (2026-11-21): the
+[wide-row follow-up](W0WindowsIntegrationProbe.md#w2a-wide-constant-rows-and-bounded-reads-vm-2026-11-21)
+extends the existing single use-inferred binding to homogeneous 16-/32-/64-bit
+integer and floating-point rows, sharing the DXIL canonical shape matcher.
+Array/row offsets use 64-bit arithmetic, declared spans must fit the
+32-bit ABI size, and each scalar is independently bounded against its
+array element and supplied bytes. Valid partial-row components survive;
+invalid or incomplete components read zero without cross-element borrowing.
+Odd strides use conservative alignment. AOT `feme-run --object` now receives
+YAML root bytes through the same packing helper as normal/reference execution.
+Three new unit cases and four source fixtures cover all six scalar types,
+real native-16-bit DXC packing, varying indices, arithmetic overflow,
+partial waves, repeated dispatches, and short/empty AOT input. Focused LIT
+passes 700 cases; the rebuilt full suite passes 4,032 with zero failures.
+This is not root-driven binding, general descriptor-backed CBVs, D3D12
+execution or a W2(a) completion claim.
 
 ### W3: Conventional graphics on the existing executor
 

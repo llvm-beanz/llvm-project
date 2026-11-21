@@ -30,6 +30,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   ReferenceLoweringTest.cpp
   ResourceCallsTest.cpp
   ResourceLoweringTest.cpp
+  RootConstantLoweringTest.cpp
   SIMDizeTest.cpp
   SPIRVResourceLoweringTest.cpp
   TaskPayloadWrapperTest.cpp

@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Transforms/CPU/RootConstantLowering.h"
+#include "feme/Transforms/DXIL/OpRaising.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -22,6 +23,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
+#include <limits>
 #include <optional>
 
 using namespace llvm;
@@ -87,19 +89,21 @@ std::optional<RootConstantAccess> matchRootConstantHandle(CallInst &Handle) {
   auto *ElemArrayTy = dyn_cast<ArrayType>(HandleTy->getTypeParameter(0));
   if (!ElemArrayTy || !ElemArrayTy->getElementType()->isIntegerTy(8))
     return std::nullopt;
+  uint64_t ElementSize = ElemArrayTy->getNumElements();
+  if (ElementSize > std::numeric_limits<uint32_t>::max() / RangeSize)
+    return std::nullopt;
 
   RootConstantAccess Access;
   Access.Handle = &Handle;
   Access.Space = static_cast<uint32_t>(SpaceC->getZExtValue());
   Access.Register = static_cast<uint32_t>(RegisterC->getZExtValue());
   Access.RangeSize = static_cast<uint32_t>(RangeSize);
-  Access.ElementSize = static_cast<uint32_t>(ElemArrayTy->getNumElements());
+  Access.ElementSize = static_cast<uint32_t>(ElementSize);
   return Access;
 }
 
-/// Collects every `llvm.dx.resource.load.cbufferrow.4.*` call \p Handle is
-/// used through, or `std::nullopt` if any use is something else (a
-/// different `cbufferrow.N` width, or any other call) -- in which case
+/// Collects homogeneous 128-bit rows (2/4/8 components) through \p Handle,
+/// or `std::nullopt` if any use is unsupported -- in which case
 /// \p Handle is left entirely alone, for
 /// `feme::cpu::checkSupportedRaisedOps` to reject exactly as before this
 /// pass existed, rather than partially rewriting it. A row index need not
@@ -110,7 +114,13 @@ collectRowLoads(CallInst &Handle) {
   SmallVector<RootConstantRowLoad, 4> Loads;
   for (User *U : Handle.users()) {
     auto *CI = dyn_cast<CallInst>(U);
-    if (!CI || getIntrinsicID(CI) != Intrinsic::dx_resource_load_cbufferrow_4)
+    if (!CI)
+      return std::nullopt;
+    auto *RowTy = dyn_cast<StructType>(CI->getType());
+    Intrinsic::ID RowID = RowTy ? feme::dxil::getCBufferRowIntrinsic(*RowTy)
+                                : Intrinsic::not_intrinsic;
+    if (RowID == Intrinsic::not_intrinsic || RowID != getIntrinsicID(CI) ||
+        CI->getArgOperand(0) != &Handle)
       return std::nullopt;
     Loads.push_back(RootConstantRowLoad{CI, CI->getArgOperand(1)});
   }
@@ -269,79 +279,62 @@ uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
                                  Value *RootConstants,
                                  Value *RootConstantSize) {
   LLVMContext &Ctx = Access.Handle->getContext();
-  Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *I64Ty = Type::getInt64Ty(Ctx);
-  // Roadmap R25: the required span is the binding's full advertised size
-  // (every byte a host is expected to supply for it), not merely the
-  // subset of rows this function's own loads happen to touch statically --
-  // which is no longer even knowable once a row or the array index is
-  // dynamic (see the file comment above).
   uint32_t RootConstantSizeNeeded = Access.ElementSize * Access.RangeSize;
-
-  // The array index is the same for every load through this one handle
-  // (DXIL's `handlefrombinding` binds one specific element); constant-folds
-  // away entirely for the common non-array (`RangeSize == 1`, `Index ==
-  // 0`) case, leaving the exact code a narrower binding produced before
-  // R25.
   Value *Index = Access.Handle->getArgOperand(3);
 
   for (const RootConstantRowLoad &RL : Access.Loads) {
-    // Rewrites `RL` into a bounds-checked load from `RootConstants`: reads
-    // zero for any component wholly or partly outside `RootConstantSize`'s
-    // declared span, matching "root-constant accesses outside
-    // `RootConstantSize` read zero" in feme/docs/FeMeCPUDesign.md's "Root
-    // constants" section (the same behaviour a descriptor-backed constant
-    // buffer's bounds check gives an out-of-range read). Both an
-    // out-of-range row and an out-of-range array index end up caught by
-    // the same check: `BaseOffset` grows past `RootConstantSize` either
-    // way, since that is the binding's full advertised size.
     auto *RetTy = cast<StructType>(RL.Load->getType());
     unsigned NumComponents = RetTy->getNumElements();
     Type *ElemTy = RetTy->getElementType(0);
     uint32_t ComponentSize = RowSizeBytes / NumComponents;
 
     IRBuilder<> Builder(RL.Load);
+    Value *Index64 = Builder.CreateZExt(Index, I64Ty);
+    Value *Size64 = Builder.CreateZExt(RootConstantSize, I64Ty);
+    Value *IndexInBounds = Builder.CreateICmpULT(
+        Index64, ConstantInt::get(I64Ty, Access.RangeSize));
     Value *ElementOffset =
-        Builder.CreateMul(Index, ConstantInt::get(I32Ty, Access.ElementSize),
+        Builder.CreateMul(Index64, ConstantInt::get(I64Ty, Access.ElementSize),
                           "root_const.elem_off");
-    Value *RowOffset = Builder.CreateMul(
-        RL.Row, ConstantInt::get(I32Ty, RowSizeBytes), "root_const.row_off");
-    Value *BaseOffset =
-        Builder.CreateAdd(ElementOffset, RowOffset, "root_const.base_off");
+    Value *RowOffset = Builder.CreateMul(Builder.CreateZExt(RL.Row, I64Ty),
+                                         ConstantInt::get(I64Ty, RowSizeBytes),
+                                         "root_const.row_off");
 
-    // A `select` between the loaded value and zero is not enough on its
-    // own: unlike a descriptor-backed load (whose bounds check guards a
-    // call into `libFeMeRuntimeCPU`, not a raw pointer dereference), the
-    // load here would still execute unconditionally, reading through
-    // `RootConstants` even when the whole block is empty (a null
-    // pointer -- see `feme::cpu::DispatchResources::RootConstants`) or too
-    // small for this row. A real (uniform -- this bounds check depends
-    // only on the dispatch-wide `RootConstantSize` and this access's own
-    // operands, never on per-lane data) branch guards the load itself
-    // instead.
-    Value *RowEnd =
-        Builder.CreateAdd(BaseOffset, ConstantInt::get(I32Ty, RowSizeBytes));
-    Value *InBounds =
-        Builder.CreateICmpUGE(RootConstantSize, RowEnd, "root_const.inbounds");
-
-    Instruction *ThenTerm = nullptr;
-    Instruction *ElseTerm = nullptr;
-    SplitBlockAndInsertIfThenElse(InBounds, RL.Load, &ThenTerm, &ElseTerm);
-
-    IRBuilder<> ThenBuilder(ThenTerm);
-    IRBuilder<> MergeBuilder(RL.Load); // The original block is now the merge.
-    // Every `phi` in a block must be grouped at its top, so all `NumComponents`
-    // of them are created first, in one pass, before the `insertvalue` chain
-    // assembling `Result` (itself ordinary, non-`phi` instructions) below.
+    // A row may be only partly present, but cannot borrow bytes from another
+    // array element. Wide arithmetic and an independent index check prevent
+    // large invalid indices from wrapping into the supplied block.
     SmallVector<PHINode *, 4> Merged(NumComponents);
     for (unsigned Component = 0; Component != NumComponents; ++Component) {
-      Value *ComponentOffset = ThenBuilder.CreateAdd(
-          BaseOffset, ConstantInt::get(I32Ty, Component * ComponentSize));
-      Value *ComponentOffset64 = ThenBuilder.CreateZExt(ComponentOffset, I64Ty);
+      IRBuilder<> ComponentBuilder(RL.Load);
+      Value *RelativeOffset = ComponentBuilder.CreateAdd(
+          RowOffset, ConstantInt::get(I64Ty, Component * ComponentSize));
+      Value *RelativeEnd = ComponentBuilder.CreateAdd(
+          RelativeOffset, ConstantInt::get(I64Ty, ComponentSize));
+      Value *ElementInBounds = ComponentBuilder.CreateICmpULE(
+          RelativeEnd, ConstantInt::get(I64Ty, Access.ElementSize));
+      Value *ComponentOffset =
+          ComponentBuilder.CreateAdd(ElementOffset, RelativeOffset);
+      Value *ComponentEnd = ComponentBuilder.CreateAdd(
+          ComponentOffset, ConstantInt::get(I64Ty, ComponentSize));
+      Value *SpanInBounds =
+          ComponentBuilder.CreateICmpULE(ComponentEnd, Size64);
+      Value *InBounds = ComponentBuilder.CreateAnd(
+          IndexInBounds,
+          ComponentBuilder.CreateAnd(ElementInBounds, SpanInBounds),
+          "root_const.inbounds");
+      Instruction *ThenTerm = nullptr;
+      Instruction *ElseTerm = nullptr;
+      SplitBlockAndInsertIfThenElse(InBounds, RL.Load, &ThenTerm, &ElseTerm);
+      IRBuilder<> ThenBuilder(ThenTerm);
+      IRBuilder<> MergeBuilder(RL.Load);
       Value *Ptr =
           ThenBuilder.CreateInBoundsGEP(ThenBuilder.getInt8Ty(), RootConstants,
-                                        ComponentOffset64, "root_const.ptr");
-      Value *Loaded = ThenBuilder.CreateAlignedLoad(ElemTy, Ptr, Align(4),
+                                        ComponentOffset, "root_const.ptr");
+      Align Alignment =
+          commonAlignment(commonAlignment(Align(4), Access.ElementSize),
+                          Component * ComponentSize);
+      Value *Loaded = ThenBuilder.CreateAlignedLoad(ElemTy, Ptr, Alignment,
                                                     "root_const.load");
       Merged[Component] = MergeBuilder.CreatePHI(ElemTy, 2, "root_const.value");
       Merged[Component]->addIncoming(Loaded, ThenTerm->getParent());
@@ -349,6 +342,7 @@ uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
                                      ElseTerm->getParent());
     }
 
+    IRBuilder<> MergeBuilder(RL.Load);
     Value *Result = PoisonValue::get(RetTy);
     for (unsigned Component = 0; Component != NumComponents; ++Component)
       Result = MergeBuilder.CreateInsertValue(Result, Merged[Component],

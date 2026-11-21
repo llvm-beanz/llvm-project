@@ -1329,6 +1329,13 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
   return feme::Module::fromLLVMIR(std::move(LLVMMod));
 }
 
+std::vector<uint8_t> buildRootConstantBytes(const HeapFile &Heap) {
+  std::vector<uint8_t> Bytes(Heap.RootConstants.size() * sizeof(uint32_t));
+  if (!Bytes.empty())
+    memcpy(Bytes.data(), Heap.RootConstants.data(), Bytes.size());
+  return Bytes;
+}
+
 /// Runs `--object` mode (see the file comment above): loads \p Filename as
 /// a real compiled object file, resolves \p EntryPoint's (or "main"'s)
 /// `feme_cpu_entry_<name>` symbol in it, and dispatches \p GroupCount
@@ -1377,10 +1384,12 @@ Error runObjectMode(StringRef Filename, StringRef EntryPoint,
   if (!EntryAddr)
     return EntryAddr.takeError();
 
+  std::vector<uint8_t> RootConstantBytes = buildRootConstantBytes(Heap);
   DispatchResources Resources;
   Resources.ResourceHeap = Storage.Descriptors;
   Resources.ImageHeap = Images.Descriptors;
   Resources.SamplerHeap = Samplers;
+  Resources.RootConstants = RootConstantBytes;
   for (unsigned I = 0; I != RepeatCount; ++I) {
     runDispatch(EntryAddr->toPtr<EntryPointFn>(), ResourceInfo{}, Resources,
                 GroupCount);
@@ -1589,13 +1598,7 @@ int main(int argc, char **argv) {
   }
   std::vector<BoundSamplerBinding> SamplerBindings =
       toBoundSamplerBindings(*SamplerBindingsStorage);
-  std::vector<uint8_t> RootConstantBytes(Heap.RootConstants.size() *
-                                         sizeof(uint32_t));
-  // Guard against a null `data()` on both sides when `RootConstants` is
-  // empty (see `buildEntryStorage`'s equivalent memcpy guard above).
-  if (!RootConstantBytes.empty())
-    memcpy(RootConstantBytes.data(), Heap.RootConstants.data(),
-           RootConstantBytes.size());
+  std::vector<uint8_t> RootConstantBytes = buildRootConstantBytes(Heap);
 
   DispatchResources Resources;
   Resources.ResourceHeap = Storage->Descriptors;

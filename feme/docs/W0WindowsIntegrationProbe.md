@@ -27,6 +27,55 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) wide constant rows and bounded reads (VM, 2026-11-21)
+
+The shared CPU root-constant lowering now accepts all six canonical DXIL
+scalar shapes: `i16`/`half`, `i32`/`float`, and `i64`/`double`, in the
+128-bit `.8`/`.4`/`.2` rows respectively. It reuses the DXIL raiser's row
+matcher, including rejection of empty, opaque, mixed and wrong-width
+aggregates. The declared element-size times array-length span must fit
+the ABI's `uint32_t` byte size; tests check the exact limit and standard
+unsupported-operation errors above it.
+
+Array and row offsets are widened before multiplication. Each component
+requires a valid array index, a complete scalar within that array element,
+and sufficient supplied bytes. Invalid large indices cannot wrap into a
+valid address, and a row cannot borrow bytes from a following element.
+This intentionally corrects the old whole-row behavior: valid components
+of partial rows survive, while incomplete scalars read zero. Alignment is
+bounded by the root block's four-byte guarantee and reduced for odd strides.
+
+Four source fixtures and three unit cases exercise:
+
+- All six scalar types in normal widths 4/8, scalar-reference and AOT
+  execution, with three complete dispatch/readback snapshots per mode.
+- Six-lane varying indices, partial waves, 12-byte array elements, invalid
+  indices/rows that wrapped in the old 32-bit arithmetic, and guard words.
+- Three-byte elements with `i16` loads requiring alignment 1; extra supplied
+  bytes cannot complete a scalar outside its declared element.
+- Real native ARM64 SDK DXC SM6.2 HLSL with `/enable-16bit-types`: `double`
+  at offset 0, `uint64_t` at 8, `half` at 16 and `uint16_t` at 18. DXC reports
+  a 20-byte cbuffer; the three-thread shader validates exact readback at both
+  wave widths and in reference mode.
+- AOT YAML root input, now packed through the same helper as normal/reference
+  execution and retained across repeats. Short and empty AOT blocks bypass
+  reflected span validation and verify the compiled load guards directly.
+
+All automated execution is through LIT. Focused root/CPU/DXIL and existing
+AOT coverage passes **700 cases, zero failures**, in **5.68 seconds**.
+After rebuilding all FeMe prerequisites and the native ARM64 ICD with
+assertions and PCH disabled, the complete suite with SDK FXC on PATH passes
+**4,032**, with **15 Skipped, 10 Unsupported and zero failures**, from
+**4,057** discovered tests in **184.88 seconds**. No artifact ABI or Vulkan
+advertisements change. Windows adapter matrices were not rerun for this
+portable compiler milestone; no external Vulkan CTS result is claimed.
+
+This advances W2(a)'s non-32-bit and bounded-index prerequisite only.
+It still promotes one use-inferred cbuffer binding, not an explicit root
+layout or multiple descriptor-backed CBVs. Root descriptors, descriptor
+tables and promise enforcement remain unwired to CPU dispatch. W0(c),
+W0(g), W1 and W2(a) remain open; owned `CreateDevice` is still `E_NOTIMPL`.
+
 ## W2(a) root-signature parsing and immutable binding plans (VM, 2026-11-21)
 
 [RootBindingPlan](../include/feme/Transforms/DXIL/RootBindingPlan.h), in

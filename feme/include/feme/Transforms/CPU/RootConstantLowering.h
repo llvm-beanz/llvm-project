@@ -28,11 +28,12 @@
 //    or dynamic array index (the `handlefrombinding` call's own `Index`
 //    operand); an *unbounded* range (DXIL's `RangeSize == -1` sentinel) is
 //    not, since it has no fixed advertised size to bounds-check against.
-//  - A `llvm.dx.resource.load.cbufferrow.4.*` access (DXIL's 32-bit-per-
-//    component row shape; `cbufferrow.2`/`.8`, 64- and 16-bit components,
-//    are not yet lowered) is accepted with either a constant or dynamic row
-//    index; anything else is left for `checkSupportedRaisedOps` to reject
-//    exactly as before this pass existed.
+//  - Homogeneous `cbufferrow.2`/`.4`/`.8` rows of 64/32/16-bit integer or
+//    floating-point components are accepted with constant or dynamic row
+//    indices. Unsupported shapes remain for `checkSupportedRaisedOps`.
+//    Each component is checked against both its declared array element and
+//    the supplied root block. Invalid indices read zero without touching
+//    storage; the required byte span must fit the ABI's 32-bit size.
 //  - The root-constant span this access requires is the binding's full
 //    advertised size (its declared per-element byte size, from the
 //    `dx.CBuffer` handle's own type, times `RangeSize`) rather than only
@@ -70,7 +71,7 @@ class Value;
 
 namespace feme::cpu {
 
-/// One `llvm.dx.resource.load.cbufferrow.4.*` call reading a row of the
+/// One `llvm.dx.resource.load.cbufferrow.{2,4,8}.*` call reading a row of the
 /// recognized root-constant binding. \p Row is the load's own row-index
 /// operand, kept as a `Value` rather than a resolved constant: roadmap R25
 /// lifted the constant-row-index restriction, so this may be a

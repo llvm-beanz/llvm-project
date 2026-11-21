@@ -42,10 +42,19 @@
 #ifndef FEME_TRANSFORMS_DXIL_OPRAISING_H
 #define FEME_TRANSFORMS_DXIL_OPRAISING_H
 
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/PassManager.h"
+
+namespace llvm {
+class StructType;
+}
 
 namespace feme {
 namespace dxil {
+
+/// Matches a homogeneous 128-bit constant-buffer row to its canonical
+/// intrinsic, or not_intrinsic for an unsupported aggregate shape.
+llvm::Intrinsic::ID getCBufferRowIntrinsic(const llvm::StructType &RetTy);
 
 /// Rewrites calls to `dx.op.*` functions (DXIL's calling-convention encoding
 /// of its operations, see `llvm/lib/Target/DirectX/DXIL.td`) back into the

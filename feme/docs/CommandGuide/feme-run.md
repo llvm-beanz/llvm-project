@@ -44,6 +44,12 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   5, see [../FeMeCPUDesign.md](../FeMeCPUDesign.md)) diffs against.
   `--wave-size` is ignored. A shader using a wave intrinsic (which has no
   meaning one invocation at a time) is rejected.
+- `--object`: loads a native object compiled by
+  `feme --target=<host-triple>` and dispatches its
+  `feme_cpu_entry_<entry-point>` symbol instead of compiling input IR.
+  Traditional `bindings`, `image-bindings` and `sampler-bindings` are
+  rejected because compiled objects retain no binding-prefix reflection.
+  Logical heap entries and YAML `root-constants` are supported.
 - `--heap=<file>`: a YAML file describing the resource heap a dispatch runs
   against:
 
@@ -98,6 +104,16 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   target's reserved heap prefix (see "Bound-resource normalization" in
   [../FeMeCPUDesign.md](../FeMeCPUDesign.md)); an unbound slot within a
   declared range is left as the zero descriptor.
+
+  `root-constants` are packed into the CPU ABI's byte block in normal,
+  reference and object modes, with storage retained across repeated
+  dispatches. The shader's single inferred cbuffer binding accepts
+  homogeneous 16-/32-/64-bit integer and floating-point rows; the YAML
+  still uses `uint32` words, not typed scalar values. Each scalar must
+  fit both its declared array element and the supplied block, otherwise
+  it reads zero. Normal/reference dispatch reject an undersized block
+  against reflection; object mode has no reflected required span and
+  exercises the compiled guards directly for short or empty input.
 
   `images`/`samplers` (roadmap steps R31/R41) are the image-heap/
   sampler-heap counterparts of `resource-heap`: each entry is the

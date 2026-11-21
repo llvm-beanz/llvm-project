@@ -67,7 +67,9 @@ The original compute-only baseline is no longer current:
   scheduling machinery still lives in `lib/Vulkan`; extracting that machinery
   is a prerequisite to sharing it with Direct3D.
 - Root-constant lowering accepts one binding at any register/space, bounded
-  arrays, and dynamic row indices for the supported 32-bit row loads.
+  arrays, and dynamic row indices for homogeneous 16-/32-/64-bit integer
+  and floating-point rows. Components are bounded against their array
+  element and supplied root bytes, with overflow-safe offset arithmetic.
   Multiple CBVs and a root-signature-driven distinction between root constants
   and CBVs still need compiler work. `BoundResourceNormalizationPass`
   currently normalizes typed/raw buffers, not general constant buffers.

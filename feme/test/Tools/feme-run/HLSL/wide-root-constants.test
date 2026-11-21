@@ -1,0 +1,40 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /enable-16bit-types /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=3 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+
+# CHECK-COUNT-3: binding[7:3][0]: 2309737967 4045620583 60000 13 5 2309737967 4045620583 60000 13 5 2309737967 4045620583 60000 13 5 123456789 987654321{{$}}
+# CHECK-NOT: binding[
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) {
+  double D;
+  uint64_t L;
+  half H;
+  uint16_t U;
+};
+RWByteAddressBuffer Output : register(u3, space7);
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+  Output.Store(TID.x * 20, uint(L));
+  Output.Store(TID.x * 20 + 4, uint(L >> 32));
+  Output.Store(TID.x * 20 + 8, uint(U));
+  Output.Store(TID.x * 20 + 12, uint(D * 2.0));
+  Output.Store(TID.x * 20 + 16, uint(H * half(2.0)));
+}
+
+#--- heap.yaml
+root-constants: [0, 1075445760, 2309737967, 4045620583, 3932176640, 0]
+bindings:
+  - space: 7
+    register: 3
+    entries:
+      - index: 0
+        size: 68
+        data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 123456789, 987654321]
