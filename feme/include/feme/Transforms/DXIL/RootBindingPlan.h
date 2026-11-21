@@ -82,7 +82,9 @@ public:
                                    llvm::dxbc::ShaderVisibility Stage) const;
   /// Checks bound-resource declarations reachable from an entry point,
   /// including direct helper calls, before normalization discards identities.
-  /// Dynamic heap access and resource-kind/promise compatibility are separate.
+  /// Root SRV/UAV descriptors require raw/structured buffers. Dynamic heap
+  /// access, counters and other resource-kind/promise compatibility are
+  /// separate.
   llvm::Error checkShaderBindings(const llvm::Function &Entry,
                                   llvm::dxbc::ShaderVisibility Stage) const;
   void print(llvm::raw_ostream &OS) const;

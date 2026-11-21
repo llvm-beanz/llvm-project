@@ -2535,8 +2535,17 @@ domain. Dynamic/malformed declarations and indirect calls fail explicitly,
 while unrelated functions and dead handles are ignored. Validation failures
 leave selection metadata unattached.
 
-This checks declared binding identity, not descriptor contents, table
-materialization, class-aware heap remapping, full resource-kind/counter
+The same preflight checks the containing parameter kind: root SRV/UAV
+descriptors accept only canonical raw/structured buffer handles, not typed
+buffers, textures, multisample textures or feedback textures. The latter
+require descriptor-table ranges. This matches native DXC's typed-SRV root
+descriptor rejection; `/Vd` fixtures test FeMe's independent rejection.
+Canonical raw and structured buffers remain admitted, and the table path
+retains existing resource-kind behavior. Checks precede normalization and
+metadata attachment in stage/JIT/reference/AOT compilation.
+
+This checks declared binding identity and root SRV/UAV resource kinds,
+not descriptor contents, table materialization, full resource-kind/counter
 compatibility or root-descriptor promises. Native dynamic-heap access is
 outside this static binding check. The inferred mode remains unchanged.
 

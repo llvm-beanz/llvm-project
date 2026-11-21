@@ -1,0 +1,159 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /Fo %t/raw.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --wave-size=4 --repeat=3 --heap=%t/raw.yaml %t/raw.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --wave-size=8 --repeat=3 --heap=%t/raw.yaml %t/raw.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/raw.yaml %t/raw.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/raw.dxil -o %t/raw.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object.yaml %t/raw.o | FileCheck %s --check-prefix=AOT
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D STRUCTURED /Fo %t/structured.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --repeat=3 --heap=%t/structured.yaml %t/structured.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/structured.yaml %t/structured.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/structured.dxil -o %t/structured.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object-structured.yaml %t/structured.o | FileCheck %s --check-prefix=AOT
+# RUN: not %dxil_dxc /nologo /WX /T cs_6_2 /E main /D TYPED /Fo %t/rejected.dxil %t/shader.hlsl 2>&1 | FileCheck %s --check-prefix=SDK
+# RUN: %dxil_dxc /nologo /WX /Vd /T cs_6_2 /E main /D TYPED /Fo %t/typed-root.dxil %t/shader.hlsl
+# RUN: not feme-run --root-signature-constants --heap=%t/typed.yaml %t/typed-root.dxil 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: not feme-run --root-signature-constants --reference --heap=%t/typed.yaml %t/typed-root.dxil 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/typed-root.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: feme-run --repeat=3 --heap=%t/typed.yaml %t/typed-root.dxil | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D TYPED /D TABLE /Fo %t/typed-table.dxil %t/shader.hlsl
+# RUN: feme-run --root-signature-constants --repeat=3 --heap=%t/typed.yaml %t/typed-table.dxil | FileCheck %s
+# RUN: feme-run --root-signature-constants --reference --repeat=3 --heap=%t/typed.yaml %t/typed-table.dxil | FileCheck %s
+# RUN: feme --root-signature-constants --target=%feme_host_triple %t/typed-table.dxil -o %t/typed-table.o
+# RUN: feme-run --object --repeat=3 --heap=%t/object-typed.yaml %t/typed-table.o | FileCheck %s --check-prefix=AOT
+#
+# CHECK: binding[srv:7:3][0]: 11 13 17 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][0]: 53 55 59 123456789 987654321{{$}}
+# CHECK-NEXT: binding[srv:7:3][0]: 11 13 17 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][0]: 106 110 118 123456789 987654321{{$}}
+# CHECK-NEXT: binding[srv:7:3][0]: 11 13 17 123456789 987654321{{$}}
+# CHECK-NEXT: binding[uav:7:3][0]: 159 165 177 123456789 987654321{{$}}
+# CHECK-NOT: binding[
+# AOT: heap[0]: 11 13 17 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 53 55 59 123456789 987654321{{$}}
+# AOT-NEXT: heap[0]: 11 13 17 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 106 110 118 123456789 987654321{{$}}
+# AOT-NEXT: heap[0]: 11 13 17 123456789 987654321{{$}}
+# AOT-NEXT: heap[1]: 159 165 177 123456789 987654321{{$}}
+# AOT-NOT: heap[
+# SDK: {{[Rr]oot [Dd]escriptor}}
+# REJECT: root descriptor mismatch: srv space=7 register=3 in 'main' requires a raw or structured buffer
+
+#--- shader.hlsl
+cbuffer Constants : register(b3, space7) { uint A; };
+#if defined(TYPED)
+Buffer<uint> Input : register(t3, space7);
+#elif defined(STRUCTURED)
+StructuredBuffer<uint> Input : register(t3, space7);
+#else
+ByteAddressBuffer Input : register(t3, space7);
+#endif
+RWByteAddressBuffer Output : register(u3, space7);
+#if defined(TABLE)
+#define RESOURCES "DescriptorTable(SRV(t3,space=7),UAV(u3,space=7)),"
+#else
+#define RESOURCES "SRV(t3,space=7),UAV(u3,space=7),"
+#endif
+[RootSignature(RESOURCES "RootConstants(num32BitConstants=1,b3,space=7)")]
+[numthreads(3, 1, 1)]
+void main(uint3 TID : SV_DispatchThreadID) {
+  uint Offset = TID.x * 4;
+#if defined(TYPED) || defined(STRUCTURED)
+  uint Value = Input[TID.x];
+#else
+  uint Value = Input.Load(Offset);
+#endif
+  Output.Store(Offset, Output.Load(Offset) + Value + A);
+}
+
+#--- raw.yaml
+root-constants: [42]
+bindings:
+  - space: 7
+    register: 3
+    register-class: srv
+    entries:
+      - index: 0
+        size: 20
+        data: [11, 13, 17, 123456789, 987654321]
+  - space: 7
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+#--- structured.yaml
+root-constants: [42]
+bindings:
+  - space: 7
+    register: 3
+    register-class: srv
+    entries:
+      - index: 0
+        size: 20
+        kind: structured-buffer
+        stride: 4
+        data: [11, 13, 17, 123456789, 987654321]
+  - space: 7
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+#--- typed.yaml
+root-constants: [42]
+bindings:
+  - space: 7
+    register: 3
+    register-class: srv
+    entries:
+      - index: 0
+        size: 20
+        kind: typed-buffer
+        format: r32_uint
+        data: [11, 13, 17, 123456789, 987654321]
+  - space: 7
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 20
+        data: [0, 0, 0, 123456789, 987654321]
+#--- object.yaml
+root-constants: [42]
+resource-heap:
+  - index: 0
+    size: 20
+    data: [11, 13, 17, 123456789, 987654321]
+  - index: 1
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]
+#--- object-structured.yaml
+root-constants: [42]
+resource-heap:
+  - index: 0
+    size: 20
+    kind: structured-buffer
+    stride: 4
+    data: [11, 13, 17, 123456789, 987654321]
+  - index: 1
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]
+#--- object-typed.yaml
+root-constants: [42]
+resource-heap:
+  - index: 0
+    size: 20
+    kind: typed-buffer
+    format: r32_uint
+    data: [11, 13, 17, 123456789, 987654321]
+  - index: 1
+    size: 20
+    data: [0, 0, 0, 123456789, 987654321]

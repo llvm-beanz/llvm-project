@@ -27,6 +27,48 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) root descriptor resource kinds (VM, 2026-11-21)
+
+Opt-in explicit-root preflight now checks the containing parameter kind,
+not only class, space, visibility and range coverage. Root SRV/UAV
+descriptors accept canonical raw/structured buffer handles; typed buffers,
+textures, multisample textures and feedback textures require descriptor
+tables. The check occurs before normalization or root-selection metadata
+attachment in stage/JIT/reference/AOT compilation. The inferred default
+remains unchanged.
+
+Two new unit cases cover a ten-type canonical matrix with both Root
+Signature 1.0/1.1 and SRV/UAV descriptors, plus stage-disjoint root/table
+parameters and direct helper reachability. Valid raw/structured declarations
+are admitted; typed/texture declarations are rejected under roots but retain
+their existing table behavior. An unrelated function does not affect
+validation, and a helper's root-kind error names that helper.
+
+The native DXC fixture uses b3/t3/u3 in space 7. Raw and scalar-structured
+SRVs with a raw UAV execute under root descriptors, and a typed R32_UINT
+SRV executes under a descriptor table. Normal, scalar-reference and native
+AOT paths check three retained dispatches, complete accumulating output,
+unchanged input and untouched guards; widths 4/8 exercise partial waves.
+Native SDK compilation independently rejects a typed SRV root descriptor.
+Compiling that same source with `/Vd` tests FeMe's rejection in normal,
+reference and AOT compilation. Inferred mode still executes it without
+enforcing the root signature.
+
+All automated tests run through LIT. Focused coverage passes **844**, with
+zero failures, in **8.44 seconds**. The rebuilt complete suite with native
+SDK DXC/FXC passes **4,062**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,087** discovered tests in **157.32 seconds**. Three
+new passes correspond to two unit cases and one source fixture. Assertions,
+disabled PCH and the memory-safe job limit are retained. These timings are
+not a controlled performance comparison.
+
+This is a bounded resource-kind compatibility check, not counter
+compatibility, descriptor contents/static promises, D3D12 table preparation,
+general CBVs, multiple inline parameters or owned device execution.
+Artifact ABI remains 8 and shader argument layouts are unchanged.
+No Windows adapter-matrix or external Vulkan CTS result is claimed.
+`CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a) remain open.
+
 ## W2(a) buffer register namespace isolation (VM, 2026-11-21)
 
 Bound raw/typed buffers now preserve SRV/UAV register namespaces from the

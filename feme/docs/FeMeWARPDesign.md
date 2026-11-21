@@ -74,8 +74,11 @@ The original compute-only baseline is no longer current:
   parameter from a checked root plan and refuses to promote descriptor-backed
   CBVs. Before normalization it checks live declarations in the entry/direct
   helper graph for class, space, visibility and complete containment in one
-  root binding; adjacent ranges cannot collectively cover an array. This
-  does not materialize tables or establish full shader/root compatibility.
+  root binding; adjacent ranges cannot collectively cover an array.
+  Preflight also requires raw/structured buffers for root SRV/UAV descriptors;
+  typed buffers and textures require tables. Counter/promise compatibility
+  remains separate. The check does not materialize tables or establish full
+  shader/root compatibility.
   Bound raw/typed buffers now retain separate SRV/UAV namespaces through
   normalization, reflection and host preparation, including coincident
   register numbers. Unqualified host bindings must be unambiguous.

@@ -60,7 +60,10 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   register space and stage visibility. One root binding must contain each
   complete declared range; adjacent ranges or individual static samplers
   cannot collectively cover an array. Dynamic declarations and indirect
-  calls fail validation. This is binding preflight, not descriptor/table
+  calls fail validation. Root SRV/UAV descriptors require raw or structured
+  buffers; typed buffers and textures require descriptor tables. Counter
+  compatibility and descriptor promises are not validated by this check.
+  This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in
   normal/reference compilation; pass it to `feme` when producing an AOT

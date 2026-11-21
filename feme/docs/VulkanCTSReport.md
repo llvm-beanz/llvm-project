@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a) root-descriptor-kind regression scope (2026-11-21)
+
+The [resource-kind follow-up](W0WindowsIntegrationProbe.md#w2a-root-descriptor-resource-kinds-vm-2026-11-21)
+requires raw/structured buffers for root SRV/UAV descriptors in opt-in
+explicit-root compilation. Typed buffers and textures require tables.
+Two unit cases cover both signature versions, canonical resource types,
+stage visibility and helper reachability. A native DXC fixture independently
+checks the SDK rejection and FeMe's `/Vd` negative path, and verifies raw/
+structured roots and typed tables through normal/reference/AOT execution,
+retained dispatches, unchanged inputs and complete guard readbacks.
+
+The complete rebuilt FeMe LIT suite passes **4,062**, with **15 Skipped,
+10 Unsupported and zero failures**, from **4,087** discovered tests in
+**157.32 seconds**. Focused coverage passes **844** in **8.44 seconds**.
+The three new passes are two unit cases and one source fixture. Existing
+graphics and Vulkan unit/real-loader coverage remains passing; timings are
+not a controlled performance comparison.
+
+The inferred default, artifact ABI 8 and shader argument layouts are
+unchanged. Counter compatibility, descriptor promises/contents, general CBVs
+and owned D3D12 execution remain open. No Vulkan command semantics,
+advertisements, pinned inventory or adapter-matrix results change.
+**No real Vulkan CTS pass is claimed**; the external runner remains
+unavailable.
+
 ## W2(a) buffer-namespace regression scope (2026-11-21)
 
 The [namespace-isolation follow-up](W0WindowsIntegrationProbe.md#w2a-buffer-register-namespace-isolation-vm-2026-11-21)

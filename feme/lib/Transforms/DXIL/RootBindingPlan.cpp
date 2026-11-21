@@ -402,6 +402,25 @@ Error RootBindingPlan::checkShaderBindings(const Function &Entry,
         return createStringError(inconvertibleErrorCode(), "in '%s': %s",
                                  F->getName().str().c_str(),
                                  toString(std::move(E)).c_str());
+      if (!isa<llvm::dxil::RawBufferExtType>(Ty)) {
+        const RootBinding *Matched =
+            findBinding(Class, Values[0], Values[1], Stage);
+        for (const RootParameter &Parameter : Parameters) {
+          if (Parameter.Kind != dxbc::RootParameterType::SRV &&
+              Parameter.Kind != dxbc::RootParameterType::UAV)
+            continue;
+          if (llvm::any_of(Parameter.Bindings, [&](const RootBinding &Binding) {
+                return &Binding == Matched;
+              }))
+            return createStringError(
+                inconvertibleErrorCode(),
+                "root descriptor mismatch: %s space=%u register=%u in '%s' "
+                "requires a raw or structured buffer; use a descriptor table "
+                "for typed buffers or textures",
+                className(Class).data(), Values[0], Values[1],
+                F->getName().str().c_str());
+        }
+      }
     }
   }
   return Error::success();

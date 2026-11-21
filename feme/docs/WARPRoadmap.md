@@ -507,6 +507,22 @@ execution.
 Focused LIT passes 841 cases; the rebuilt full suite passes 4,059, with
 15 skipped, 10 unsupported and zero failures, from 4,084 discovered tests.
 
+W2(a) root-descriptor-kind progress (2026-11-21): explicit-root preflight
+now checks the containing parameter kind as well as class/space/range.
+Root SRV/UAV descriptors admit raw/structured buffers, not typed buffers or
+textures. Descriptor tables retain the existing resource-kind behavior.
+A canonical type matrix covers both Root Signature 1.0/1.1, SRV/UAV,
+raw/structured/typed buffers, textures, multisample and feedback textures.
+The native DXC fixture retains the SDK's typed-SRV root-descriptor rejection
+and compiles that layout with `/Vd` to independently verify FeMe's rejection
+in normal/reference/AOT compilation. Valid raw/structured roots and typed
+tables execute repeated dispatches with full input/output/guard readbacks;
+the inferred default remains unchanged. This does not validate counters,
+descriptor promises or contents, materialize D3D12 tables, support general
+CBVs/multiple inline parameters or close W2(a)/owned device execution.
+Focused LIT passes 844 cases; the rebuilt full suite passes 4,062, with
+15 skipped, 10 unsupported and zero failures, from 4,087 discovered tests.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

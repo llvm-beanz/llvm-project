@@ -84,6 +84,9 @@ coverage" in [../Design.md](../Design.md).
   space and stage visibility, with one root binding containing each full
   declaration. Arrays cannot span adjacent ranges or individual static
   samplers; dynamic declarations and indirect calls fail validation.
+  Root SRV/UAV descriptors require raw or structured buffers; typed buffers
+  and textures require descriptor tables. Counter compatibility and
+  descriptor promises remain outside this check.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

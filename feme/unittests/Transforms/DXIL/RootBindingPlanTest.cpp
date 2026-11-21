@@ -471,6 +471,79 @@ TEST(RootBindingPlanTest, ValidatesResourceClassesFromCanonicalHandleTypes) {
   }
 }
 
+TEST(RootBindingPlanTest, RootDescriptorsRequireRawOrStructuredBuffers) {
+  LLVMContext C;
+  auto *I8 = Type::getInt8Ty(C);
+  auto *I32 = Type::getInt32Ty(C);
+  SmallVector<TargetExtType *, 8> Types{
+      TargetExtType::get(C, "dx.RawBuffer", {I8}, {0, 0}),
+      TargetExtType::get(C, "dx.RawBuffer", {I32}, {0, 0}),
+      TargetExtType::get(C, "dx.RawBuffer", {I8}, {1, 0}),
+      TargetExtType::get(C, "dx.RawBuffer", {I32}, {1, 0}),
+      TargetExtType::get(C, "dx.TypedBuffer", {I32}, {0, 0, 0}),
+      TargetExtType::get(C, "dx.TypedBuffer", {I32}, {1, 0, 0}),
+      TargetExtType::get(C, "dx.Texture", {I32}, {0, 0, 0, 2}),
+      TargetExtType::get(C, "dx.Texture", {I32}, {1, 0, 0, 2}),
+      TargetExtType::get(C, "dx.MSTexture", {I32}, {0, 4, 0, 3}),
+      TargetExtType::get(C, "dx.FeedbackTexture", {}, {0, 2})};
+  for (auto [Index, Ty] : enumerate(Types)) {
+    Module M("descriptor-kind", C);
+    auto *F = makeShaderFunction(M, "main");
+    addBinding(M, *F, Ty);
+    bool Writable =
+        Index == 2 || Index == 3 || Index == 5 || Index == 7 || Index == 9;
+    for (uint32_t Version : {1u, 2u}) {
+      std::vector<uint32_t> Data{3, 7};
+      if (Version == 2)
+        Data.push_back(0);
+      auto Plan = RootBindingPlan::parse(
+          root(Version, {{Writable ? 4u : 3u, 0, Data}}));
+      ASSERT_TRUE(bool(Plan));
+      auto E = Plan->checkShaderBindings(*F, dxbc::ShaderVisibility::All);
+      if (Index < 4) {
+        EXPECT_THAT_ERROR(std::move(E), Succeeded());
+        continue;
+      }
+      EXPECT_TRUE(StringRef(toString(std::move(E)))
+                      .contains("requires a raw or structured buffer"));
+      auto Table = RootBindingPlan::parse(root(
+          Version,
+          {table(Version,
+                 Version == 1
+                     ? std::vector<uint32_t>{Writable ? 1u : 0u, 1, 3, 7, 0}
+                     : std::vector<uint32_t>{Writable ? 1u : 0u, 1, 3, 7, 0,
+                                             0})}));
+      ASSERT_TRUE(bool(Table));
+      EXPECT_THAT_ERROR(
+          Table->checkShaderBindings(*F, dxbc::ShaderVisibility::All),
+          Succeeded());
+    }
+  }
+}
+
+TEST(RootBindingPlanTest, DescriptorKindsUseVisibleParametersAndHelpers) {
+  LLVMContext C;
+  Module M("descriptor-helpers", C);
+  auto *Entry = makeShaderFunction(M, "main");
+  auto *Helper = makeShaderFunction(M, "helper");
+  auto *Other = makeShaderFunction(M, "unrelated");
+  auto *Ty =
+      TargetExtType::get(C, "dx.TypedBuffer", {Type::getInt32Ty(C)}, {0, 0, 0});
+  addBinding(M, *Helper, Ty);
+  addBinding(M, *Other, Ty, 9);
+  IRBuilder<>(Entry->getEntryBlock().getTerminator()).CreateCall(Helper);
+  auto Plan = RootBindingPlan::parse(
+      root(2, {{3, 1, {3, 7, 0}}, table(2, {0, 1, 3, 7, 0, 0}, 5)}));
+  ASSERT_TRUE(bool(Plan));
+  EXPECT_THAT_ERROR(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::Pixel),
+      Succeeded());
+  std::string Message = toString(
+      Plan->checkShaderBindings(*Entry, dxbc::ShaderVisibility::Vertex));
+  EXPECT_TRUE(StringRef(Message).contains("root descriptor mismatch"));
+  EXPECT_TRUE(StringRef(Message).contains("in 'helper'"));
+}
+
 TEST(RootBindingPlanTest, ChecksReachableHelpersButNotUnrelatedFunctions) {
   LLVMContext C;
   Module M("helpers", C);
