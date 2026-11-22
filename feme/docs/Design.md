@@ -1509,9 +1509,18 @@ raise to `llvm.dx.resource.samplecmp`; real clamps, including zero and
 dynamic values, raise to `llvm.dx.resource.samplecmp.clamp`. Malformed
 clamps and unsupported result uses remain unraised without an extra read.
 Real LLVM roundtrips cover all six comparison texture shapes; native SDK
-DXC pixel shaders cover plain and dynamic-clamp import. CPU normal/reference/
-AOT admission rejects both implicit forms with an explicit derivative-aware
-lowering diagnostic. They are not lowered as level-zero samples.
+DXC pixel shaders cover plain and dynamic-clamp import. Heap-backed scalar
+FP32 `Texture2D` implicit comparison now lowers in fragment stages through
+the existing shared comparison helper with real coarse quad derivatives,
+implicit LOD and the optional shader MinLod clamp. Constant signed spatial
+offsets, comparison references, sampler reflection and dead-handle cleanup
+are retained. Admission and lowering share a read-only predicate; compute,
+unannotated stages, other shapes and dynamic/undefined offsets still fail
+explicit admission. Implicit samples are never substituted with level zero.
+Compiled fragment execution tests distinguish derivative-selected mip 1,
+explicit mip 0 and shader-clamped mip 2, with helper-only lanes, partial
+waves, output guards and repeated invocation. This does not enable bound/
+static descriptors or establish native D3D12 rendering.
 
 Bias/gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered

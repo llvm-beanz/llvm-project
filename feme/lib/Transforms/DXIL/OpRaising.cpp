@@ -1299,7 +1299,8 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // `levels_xy` lowering to verify against yet, so a mip-count query stays
 // unraised). Bias/gradient sampling and gather remain outside this raiser's
 // scope. Implicit comparison preserves the wire clamp but requires
-// derivative-aware CPU lowering; only level-zero comparison executes on CPU.
+// derivative-aware CPU lowering. Heap-backed scalar FP32 Texture2D comparison
+// executes in fragment stages; level-zero comparison also covers other shapes.
 //===----------------------------------------------------------------------===//
 
 /// The number of texture coordinate components DXIL's sample/load ops

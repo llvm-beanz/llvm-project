@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/ResourceLowering.h"
 
+#include "feme/Core/ShaderStage.h"
 #include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "feme/Transforms/CPU/RootConstantLowering.h"
@@ -671,7 +672,7 @@ bool isZeroOffset(const Value *Offset) {
 }
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
-/// `samplecmplevelzero`/`load.level` calls in
+/// `samplecmp`/`samplecmp.clamp`/`samplecmplevelzero`/`load.level` calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
 /// ImageCalls.h), using \p Env's image/sampler heap operands. An access this
@@ -691,8 +692,12 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
-    if (ID == Intrinsic::dx_resource_samplecmplevelzero) {
-      if (!isSupportedDXILSampleCmpLevelZero(*CI))
+    bool IsComparisonImplicit = ID == Intrinsic::dx_resource_samplecmp ||
+                                ID == Intrinsic::dx_resource_samplecmp_clamp;
+    if (ID == Intrinsic::dx_resource_samplecmplevelzero ||
+        IsComparisonImplicit) {
+      if (!(IsComparisonImplicit ? isSupportedDXILSampleCmp(*CI)
+                                 : isSupportedDXILSampleCmpLevelZero(*CI)))
         continue;
       IRBuilder<> Builder(CI);
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
@@ -711,6 +716,9 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                            : Builder.CreateExtractElement(Offset, uint64_t{0});
       Value *NoClamp =
           ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true);
+      Value *MinLodClamp = ID == Intrinsic::dx_resource_samplecmp_clamp
+                               ? CI->getArgOperand(5)
+                               : NoClamp;
       CallInst *NewCall;
       if (Kind == dxil::ResourceKind::TextureCube ||
           Kind == dxil::ResourceKind::TextureCubeArray) {
@@ -750,10 +758,15 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
               Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
               OffsetX, OffsetY, NoClamp, Builder.getTrue(), CI->getName());
         } else {
+          SampleDerivatives D =
+              IsComparisonImplicit
+                  ? getOrSynthesizeSample2DDerivatives(Builder, F, U, V)
+                  : SampleDerivatives{Zero, Zero, Zero, Zero};
           NewCall = createSampleCmp2D(
-              Builder, Env, ImageIndex, SamplerIndex, U, V, Zero, Zero, Zero,
-              Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
-              OffsetX, OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+              Builder, Env, ImageIndex, SamplerIndex, U, V, D.DUdX, D.DUdY,
+              D.DVdX, D.DVdY, Zero, Builder.getInt1(!IsComparisonImplicit),
+              CI->getArgOperand(3), Zero, OffsetX, OffsetY, MinLodClamp,
+              Builder.getTrue(), CI->getName());
         }
       }
       CI->replaceAllUsesWith(NewCall);
@@ -986,6 +999,12 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == Intrinsic::dx_resource_samplecmp ||
+        ID == Intrinsic::dx_resource_samplecmp_clamp) {
+      if (isSupportedDXILSampleCmp(*CI))
+        return true;
+      continue;
+    }
     if (ID == Intrinsic::dx_resource_samplecmplevelzero) {
       if (isSupportedDXILSampleCmpLevelZero(*CI))
         return true;
@@ -1135,9 +1154,8 @@ void attachResourceMetadata(Function &F,
 
 } // namespace
 
-bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
-  if (getIntrinsicID(&CI) != Intrinsic::dx_resource_samplecmplevelzero ||
-      CI.arg_size() != 5 || !CI.getType()->isFloatTy() ||
+static bool isSupportedDXILComparisonSample(const CallInst &CI) {
+  if (!CI.getType()->isFloatTy() ||
       !CI.getArgOperand(3)->getType()->isFloatTy())
     return false;
   auto *TextureTy =
@@ -1187,6 +1205,26 @@ bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
   return Offset &&
          isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(0u)) &&
          isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(1u));
+}
+
+bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
+  return getIntrinsicID(&CI) == Intrinsic::dx_resource_samplecmplevelzero &&
+         CI.arg_size() == 5 && isSupportedDXILComparisonSample(CI);
+}
+
+bool feme::cpu::isSupportedDXILSampleCmp(const CallInst &CI) {
+  Intrinsic::ID ID = getIntrinsicID(&CI);
+  bool HasClamp = ID == Intrinsic::dx_resource_samplecmp_clamp;
+  if ((ID != Intrinsic::dx_resource_samplecmp && !HasClamp) ||
+      CI.arg_size() != (HasClamp ? 6u : 5u) ||
+      (HasClamp && !CI.getArgOperand(5)->getType()->isFloatTy()) ||
+      feme::getShaderStage(*CI.getFunction()) != feme::ShaderStage::Fragment)
+    return false;
+  auto *TextureTy =
+      dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
+  return TextureTy && TextureTy->getNumIntParameters() == 4 &&
+         TextureTy->getDimension() == dxil::ResourceKind::Texture2D &&
+         isSupportedDXILComparisonSample(CI);
 }
 
 /// Replaces every `llvm.dx.resource.nonuniformindex` call with its own index

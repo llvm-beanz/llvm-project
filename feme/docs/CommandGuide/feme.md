@@ -116,10 +116,15 @@ coverage" in [../Design.md](../Design.md).
   Scalar FP32 implicit `SampleCmp` also has checked opcode-64 mapping,
   preserving real MinLod clamps (including zero and dynamic values) in
   `llvm.dx.resource.samplecmp.clamp`; undefined/poison clamps select
-  `llvm.dx.resource.samplecmp`. This supports import/raising, not CPU
-  execution: both forms fail explicit derivative-aware lowering admission,
-  including AOT compilation. Implicit execution, shader clamps and
-  half/vector results remain unsupported.
+  `llvm.dx.resource.samplecmp`. Fragment-stage heap-backed scalar FP32
+  `Texture2D` forms now lower through shared comparison helpers with real
+  coarse quad derivatives, implicit LOD and the optional shader MinLod clamp.
+  Constant signed offsets and sampler reflection are retained. Compute/
+  unannotated stages, other implicit shapes and dynamic/undefined offsets
+  still fail explicit admission. Compiled fragment execution is tested;
+  this does not enable implicit comparison in compute/reference dispatch,
+  descriptor materialization or owned D3D12 rendering. Half/vector results
+  remain unsupported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

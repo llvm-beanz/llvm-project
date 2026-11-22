@@ -767,6 +767,37 @@ materialization and owned D3D12 execution remain open. `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b) are not closed. No new adapter-matrix or
 external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) fragment comparison CPU execution progress (2026-11-22):
+heap-backed scalar FP32 `Texture2D::SampleCmp`, including the optional shader
+MinLod clamp, now lowers in fragment stages through the existing comparison
+runtime. Real coarse U/V quad derivatives select implicit LOD; comparison
+references, constant signed offsets, sampler reflection and dead-handle
+cleanup are retained. Admission, signature growth and lowering share one
+read-only predicate. Compute/unannotated stages, other implicit shapes and
+dynamic/undefined offsets still reject explicitly, rather than substituting
+LOD zero. Existing six-shape level-zero execution is unchanged.
+
+One new LIT fixture and two unit tests cover exact helper/derivative/clamp
+operands, idempotence/reflection, admission and compiled fragment execution.
+Distinct mip depths make derivative-selected mip 1, explicit mip 0 and
+shader-clamped mip 2 observably different. Helper-only horizontal lanes
+contribute to derivatives without writing outputs. Wave sizes 4/8,
+one/three quads, partial final waves, guards, result masks and repeated
+invocation pass. The existing compute admission fixture retains normal/
+reference/AOT rejection. This is canonical compiled fragment evidence,
+not native DXC shader execution through an owned D3D12 device.
+
+Selected CPU/comparison LIT passes 821 in 5.48 seconds. Full FeMe LIT passes
+4,100, with 15 skipped, 10 unsupported and zero failures, from 4,125
+discovered tests in 78.78 seconds. Three added tests add three passes.
+Assertions, disabled PCH, sccache and the two-worker build limit are retained;
+timings are not a controlled performance comparison. Artifact ABI 8 and
+argument layouts remain unchanged. Broader comparison conformance, other
+implicit shapes/stages, bound/static descriptor materialization and owned
+D3D12 execution remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed. No new adapter-matrix or external Vulkan
+CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

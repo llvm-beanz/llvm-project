@@ -27,6 +27,38 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) fragment comparison CPU execution (VM, 2026-11-22)
+
+Heap-backed scalar FP32 `Texture2D::SampleCmp`, including the optional
+shader MinLod clamp, now executes in the compiled fragment-stage path.
+Shared comparison helpers receive real coarse quad derivatives, implicit
+LOD, comparison references and constant signed offsets. Sampler reflection
+and dead-handle cleanup are retained. One read-only predicate gates early
+admission, signature growth and lowering. Compute/unannotated stages,
+other implicit shapes and dynamic/undefined offsets reject explicitly;
+implicit LOD is never substituted with zero.
+
+One LIT fixture and two unit tests cover exact derivative/reference/offset/
+clamp operands, idempotence, reflection, admission and compiled execution.
+Distinct mip depths distinguish derivative-selected mip 1, explicit mip 0
+and shader-clamped mip 2. Helper-only horizontal lanes supply derivatives
+without writing outputs. Wave sizes 4/8, one/three quads, partial final
+waves, guards, result masks and repeated invocation pass. Existing normal/
+reference/AOT compute admission remains rejected. This is canonical
+compiled fragment evidence, not native DXC execution on an owned device.
+
+Selected CPU/comparison LIT passes **821** in **5.48 seconds**. Full FeMe LIT
+passes **4,100**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,125** discovered tests in **78.78 seconds**. Three added tests
+add three passes. Assertions, disabled PCH, sccache and the two-worker build
+limit are retained; timings are not controlled speedups.
+
+Artifact ABI 8 and argument layouts are unchanged. Other implicit shapes/
+stages, broader comparison conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a) implicit comparison compiler mapping (VM, 2026-11-22)
 
 Scalar FP32 `SampleCmp` now has matching numbered opcode-64 LLVM lowering

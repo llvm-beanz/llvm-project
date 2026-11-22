@@ -3064,8 +3064,14 @@ documented reason rather than an oversight:
   alongside `SampleCmpLevelZero` (65). Undefined/poison wire clamps select
   the plain intrinsic; real zero/nonzero/dynamic MinLod clamps are retained.
   Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
-  Both implicit forms explicitly fail CPU normal/reference/AOT admission
-  until derivative-aware lowering exists; they are not treated as LOD zero.
+  Heap-backed scalar FP32 `Texture2D` implicit comparison now executes in
+  compiled fragment stages with real coarse quad derivatives and the optional
+  shader MinLod clamp. The shared comparison runtime receives implicit LOD,
+  the reference and constant signed offsets; sampler reflection and dead-handle
+  cleanup are retained. Tests distinguish derivative-selected mip 1 from
+  explicit zero and clamped mip 2, including helper-only lanes, partial waves,
+  guards and repeated invocation. Compute/unannotated stages and other
+  implicit shapes still fail explicit admission; none are treated as LOD zero.
   Level-zero comparison now raises and executes
   on the CPU for heap-backed scalar FP32 1D/2D/cube textures, including arrays,
   with constant texel offsets through shared comparison image helpers. Other dimensions,

@@ -42,6 +42,8 @@
 // `feme.cpu.image.*` calls. Comparison admission and lowering share the
 // predicate below; constant texel offsets are preserved and comparison
 // sampler usage is reflected without changing the shader argument ABI.
+// Fragment-only Texture2D SampleCmp also threads real coarse quad derivatives
+// and an optional shader MinLod clamp through the same comparison helper.
 //
 //===----------------------------------------------------------------------===//
 
@@ -59,6 +61,10 @@ namespace feme::cpu {
 /// Tests the scalar FP32 heap-backed 1D/2D/cube comparison forms supported by
 /// both early CPU admission and resource lowering.
 bool isSupportedDXILSampleCmpLevelZero(const llvm::CallInst &CI);
+
+/// Tests heap-backed scalar FP32 Texture2D implicit comparison in a fragment
+/// stage, with optional MinLod clamp and constant spatial offsets.
+bool isSupportedDXILSampleCmp(const llvm::CallInst &CI);
 
 /// Canonicalizes a raised shader's descriptor-heap resource access into
 /// `feme.cpu.resource.*` calls. See the file comment above for current

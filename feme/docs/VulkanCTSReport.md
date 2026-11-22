@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) fragment comparison CPU regression scope (2026-11-22)
+
+The [fragment comparison execution follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fragment-comparison-cpu-execution-vm-2026-11-22)
+executes heap-backed scalar FP32 DXIL `Texture2D::SampleCmp` in compiled
+fragment stages through existing shared helpers. Real coarse quad
+derivatives select implicit LOD; optional shader MinLod clamps, references,
+constant signed offsets and sampler reflection survive. Compute/unannotated
+stages and other implicit shapes still reject; no LOD-zero approximation
+or new Vulkan sampler implementation is added.
+
+One LIT fixture and two unit tests cover lowering/admission and compiled
+execution. Distinct mip depths separate derivative-selected mip 1, explicit
+mip 0 and shader-clamped mip 2. Helper-only horizontal lanes, partial waves,
+guards, result masks and repeated invocation are checked. Selected CPU/
+comparison LIT passes **821** in **5.48 seconds**. Full FeMe LIT passes
+**4,100**, with **15 Skipped, 10 Unsupported and zero failures**, from
+**4,125** discovered tests in **78.78 seconds**. Timings are not controlled
+speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Other implicit shapes/
+stages, broader conformance, bound/static descriptor materialization and
+owned D3D12 execution remain open. **No real Vulkan CTS pass is claimed**;
+the external runner remains unavailable.
+
 ## W2(a) implicit comparison compiler regression scope (2026-11-22)
 
 The [implicit comparison mapping follow-up](W0WindowsIntegrationProbe.md#w2a-implicit-comparison-compiler-mapping-vm-2026-11-22)

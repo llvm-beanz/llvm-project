@@ -58,11 +58,17 @@ Error checkSupportedRaisedOps(const Module &M) {
     switch (F.getIntrinsicID()) {
     case Intrinsic::dx_resource_samplecmp:
     case Intrinsic::dx_resource_samplecmp_clamp:
+      if (llvm::all_of(F.users(), [](const User *U) {
+            const auto *CI = dyn_cast<CallInst>(U);
+            return CI && isSupportedDXILSampleCmp(*CI);
+          }))
+        continue;
       return createStringError(
           inconvertibleErrorCode(),
-          "unsupported raised operation: '%s' requires derivative-aware DXIL "
-          "implicit comparison sampling lowering, which the FeMe CPU target "
-          "does not yet support",
+          "unsupported raised operation: '%s' requires heap-backed scalar FP32 "
+          "Texture2D fragment comparison sampling with shape-matched "
+          "coordinates and constant offsets; derivative-aware lowering for "
+          "other stages/shapes is not yet supported",
           F.getName().str().c_str());
     case Intrinsic::dx_resource_samplecmplevelzero:
       if (llvm::all_of(F.users(), [](const User *U) {

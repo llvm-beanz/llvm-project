@@ -105,10 +105,15 @@ The original compute-only baseline is no longer current:
   mapping, including preserved real zero/nonzero/dynamic MinLod clamps.
   Undefined/poison clamps select the plain canonical intrinsic.
   Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
-  Both implicit forms still fail normal/reference/AOT CPU admission with
-  an explicit derivative-aware lowering diagnostic; no implicit LOD is
-  replaced with zero. Other dimensions, dynamic/undefined offsets, implicit
-  comparison execution, shader clamps and half/vector results remain open;
+  Heap-backed scalar FP32 `Texture2D` implicit comparison now executes in
+  compiled fragment stages through shared helpers, with real coarse quad
+  derivatives, implicit LOD, constant signed offsets and the optional shader
+  MinLod clamp. Tests distinguish mip 1 from explicit zero and clamped mip 2,
+  including helper lanes, partial waves, guards and repeated invocation.
+  Compute/unannotated stages and other implicit shapes still fail explicit
+  admission; no implicit LOD is replaced with zero. Other dimensions,
+  dynamic/undefined offsets, broader comparison conformance and half/vector
+  results remain open;
   no bound/static descriptor
   materialization or owned D3D12 execution is established.
   Counter/promise compatibility remains separate. The check does not

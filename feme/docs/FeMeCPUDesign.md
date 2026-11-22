@@ -2598,14 +2598,29 @@ sampler-heap reflection/artifact flag.
 Other shapes, half/vector results, default samplers and dynamic/undefined
 offsets fail explicit comparison admission. This does not normalize bound
 image/sampler handles or materialize static samplers. Implicit `SampleCmp`
-now has checked scalar FP32 opcode-64 forward/reverse mapping, but not CPU
-execution. Undefined/poison clamps select the plain intrinsic; real zero,
+now has checked scalar FP32 opcode-64 forward/reverse mapping. Undefined/
+poison clamps select the plain intrinsic; real zero,
 nonzero and dynamic clamps survive as `samplecmp.clamp`. Six-shape LLVM
 roundtrips and native SDK DXC pixel-shader import verify this compiler
-mapping. Normal/reference/AOT CPU admission explicitly requires
-derivative-aware DXIL implicit comparison sampling lowering for either
-form; it never substitutes explicit LOD zero. Implicit execution, shader
-clamps and broader comparison conformance remain open.
+mapping. Heap-backed scalar FP32 `Texture2D` implicit comparison now executes
+in the compiled fragment-stage path. Both plain and clamped forms reuse
+`createSampleCmp2D`, with real coarse U/V quad derivatives, implicit LOD,
+zero bias and the optional shader MinLod clamp. The shared read-only matcher
+gates admission, signature growth and lowering on fragment stage, comparison
+sampler, FP32 coordinates and constant signed offsets. Compute, missing
+stage identity, other shapes and dynamic/undefined offsets still reject;
+no implicit sample is replaced with LOD zero. Sampler reflection and
+post-traversal dead-handle cleanup remain unchanged.
+
+Compiled fragment execution distinguishes derivative-selected mip 1,
+explicit mip 0 and shader-clamped mip 2 using distinct depth values.
+Helper-only horizontal lanes contribute to derivatives without writing
+outputs. Wave sizes 4/8, one/three quads, partial final waves, output guards,
+result masks and repeated invocation pass. Transform tests check exact
+derivative/reference/offset/clamp operands, idempotence and reflection;
+admission tests reject dynamic offsets and compute/unannotated stages.
+Broader comparison conformance, other implicit shapes/stages, descriptor
+materialization and owned D3D12 execution remain open.
 
 For `Texture2DArray`, the third FP32 coordinate is passed separately as
 the array layer to `createSampleCmpArray2D`; the two constant i32 offsets
