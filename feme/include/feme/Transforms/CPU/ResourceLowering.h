@@ -37,6 +37,12 @@
 //    helper function the entry point calls -- is deferred; a function is
 //    rewritten only if every resource access it performs is local to it.
 //
+// Image follow-up: ordinary 2D/array/cube sampling/loading and heap-backed
+// scalar FP32 Texture2D SampleCmpLevelZero also lower to shared
+// `feme.cpu.image.*` calls. Comparison admission and lowering share the
+// predicate below; constant texel offsets are preserved and comparison
+// sampler usage is reflected without changing the shader argument ABI.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_RESOURCELOWERING_H
@@ -44,7 +50,15 @@
 
 #include "llvm/IR/PassManager.h"
 
+namespace llvm {
+class CallInst;
+}
+
 namespace feme::cpu {
+
+/// Tests the scalar FP32 heap-backed Texture2D comparison form supported by
+/// both early CPU admission and resource lowering.
+bool isSupportedDXILSampleCmpLevelZero(const llvm::CallInst &CI);
 
 /// Canonicalizes a raised shader's descriptor-heap resource access into
 /// `feme.cpu.resource.*` calls. See the file comment above for current

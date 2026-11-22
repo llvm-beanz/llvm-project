@@ -1,0 +1,54 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+#
+# Real SDK DXC opcode-65 execution with per-lane image/sampler heap indices,
+# nonuniform annotations and a partial final wave. Distinct compare functions
+# make silently selecting the wrong sampler observable. Guards stay intact.
+# CHECK: heap[2]: 42 0 0 0 1065353216 0 0 0 1065353216 0 0 42
+#
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  uint index = tid.x & 1;
+  Texture2D<float> t = ResourceDescriptorHeap[NonUniformResourceIndex(index)];
+  SamplerComparisonState s = SamplerDescriptorHeap[NonUniformResourceIndex(index)];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  float a = t.SampleCmpLevelZero(s, float2(0.5, 0.5), 0.5);
+  float b = t.SampleCmpLevelZero(s, float2(0.5, 0.5), 0.9);
+  outBuffer.Store(4 + tid.x * 8, asuint(a));
+  outBuffer.Store(8 + tid.x * 8, asuint(b));
+}
+#
+#--- heap.yaml
+resource-heap:
+  - index: 2
+    size: 48
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [1, 1]
+    format: r32_float
+    data: [1048576000]
+  - index: 1
+    dimension: 2d
+    extent: [1, 1]
+    format: r32_float
+    data: [1061158912]
+samplers:
+  - index: 0
+    compare-enable: true
+    compare-func: less
+  - index: 1
+    compare-enable: true
+    compare-func: greater

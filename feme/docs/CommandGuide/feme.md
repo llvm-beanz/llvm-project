@@ -103,8 +103,10 @@ coverage" in [../Design.md](../Design.md).
   not static sampler materialization or execution.
   Scalar FP32 `SampleCmpLevelZero` now raises to the canonical intrinsic
   after checked opcode-65 mapping. Valid bound access reaches the
-  descriptor error; canonical bindless comparison is explicitly rejected
-  because the CPU target does not yet lower DXIL comparison sampling.
+  descriptor error. Canonical heap-backed scalar FP32 `Texture2D`
+  comparison now executes on the CPU with two FP32 coordinates and two
+  constant i32 texel offsets, using the shared comparison sampler helper.
+  Other dimensions and dynamic/undefined offsets fail explicit admission.
   Implicit comparison, clamps and half/vector results are not supported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full

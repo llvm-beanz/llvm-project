@@ -3062,8 +3062,10 @@ documented reason rather than an oversight:
 - **Bias/gradient sampling and gather.** Apart from the new scalar FP32
   `SampleCmpLevelZero` mapping, DXIL has no numbered wire opcode
   for remaining comparison sampling/gather in this LLVM tree yet (see
-  Design.md's status note). Level-zero comparison now raises, but CPU DXIL
-  comparison lowering still fails explicit unsupported-op admission.
+  Design.md's status note). Level-zero comparison now raises and executes
+  on the CPU for heap-backed scalar FP32 `Texture2D`, with constant texel
+  offsets, through the shared comparison image helper. Other dimensions,
+  dynamic/undefined offsets and half/vector results remain unsupported.
   For the remaining comparison/gather forms, the DXIL import half is still
   blocked upstream; bias/
   gradient sampling has no import-side blocker but is simply not

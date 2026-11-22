@@ -27,6 +27,46 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) bounded comparison CPU execution (VM, 2026-11-22)
+
+Heap-backed scalar FP32 `Texture2D` level-zero comparison now executes
+through the existing shared `feme.cpu.image.samplecmp.2d.f32` helper.
+Early CPU admission and resource lowering share one matcher for the
+texture/sampler handles, two FP32 coordinates, reference and two constant
+i32 texel offsets. The helper receives explicit LOD zero, zero derivatives/
+bias and no shader MinLod clamp. Point comparison and bilinear comparison
+filtering reuse the existing runtime rather than a second D3D sampler.
+Consumed dead texture/sampler handles are removed for AOT code generation;
+comparison use sets the existing sampler-heap reflection/artifact flag.
+
+New canonical and actual SDK DXC fixtures verify point/bilinear results,
+negative offsets, divergent coordinates/references, nonuniform two-entry
+image/sampler heaps, five-thread partial waves, complete guards and
+repeated normal/reference/AOT dispatches. Distinct image values and compare
+functions make incorrect heap selection observable. A transform fixture
+checks explicit LOD zero, positive/negative offsets, sampler reflection,
+repeat-pass idempotence and unmodified unsupported 3D/vector/dynamic-offset
+calls. The existing admission fixture now checks rejection of a default
+sampler rather than rejecting all level-zero comparison.
+
+Initial validation found dead handles reaching AOT target-type codegen;
+the consumed-handle cleanup fixes that compiler issue. Fixture corrections
+use the boolean `--object` option with a positional object input, and
+supported scalar raw stores instead of the still-unraised native `Store2`
+form. Final full FeMe LIT passes **4,080**, with **15 Skipped,
+10 Unsupported and zero failures**, from **4,105** discovered tests in
+**102.27 seconds**. Three new fixtures add three passes. Assertions,
+disabled PCH and the two-worker build limit are retained; timings are not
+a controlled performance comparison.
+
+Artifact ABI remains 8 and argument layouts are unchanged. Bound image/
+sampler normalization, static descriptor materialization, other comparison
+dimensions/types, implicit comparison, clamps and dynamic/undefined offsets
+remain open. This is bounded runner execution, not an owned D3D12 device
+or full D3D sampling conformance. `CreateDevice` remains `E_NOTIMPL`;
+W0(c), W0(g), W1 and W2(a)/W2(b) are not closed. No new adapter-matrix or
+external Vulkan CTS result is claimed.
+
 ## W2(a) level-zero comparison mapping (VM, 2026-11-22)
 
 LLVM now defines and lowers DXIL opcode 65 for scalar FP32

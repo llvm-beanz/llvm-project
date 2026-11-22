@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 
+#include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/RootConstantLowering.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Function.h"
@@ -56,10 +57,15 @@ Error checkSupportedRaisedOps(const Module &M) {
 
     switch (F.getIntrinsicID()) {
     case Intrinsic::dx_resource_samplecmplevelzero:
+      if (llvm::all_of(F.users(), [](const User *U) {
+            const auto *CI = dyn_cast<CallInst>(U);
+            return CI && isSupportedDXILSampleCmpLevelZero(*CI);
+          }))
+        continue;
       return createStringError(
           inconvertibleErrorCode(),
-          "unsupported raised operation: '%s' requires DXIL comparison "
-          "sampling lowering, which the FeMe CPU target does not yet support",
+          "unsupported raised operation: '%s' requires scalar FP32 Texture2D "
+          "comparison sampling with heap handles and constant i32 offsets",
           F.getName().str().c_str());
     case Intrinsic::dx_resource_handlefrombinding:
     case Intrinsic::dx_resource_handlefromimplicitbinding:

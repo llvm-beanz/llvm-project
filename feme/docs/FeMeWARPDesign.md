@@ -92,9 +92,12 @@ The original compute-only baseline is no longer current:
   Scalar FP32 `SampleCmpLevelZero` now has matching LLVM opcode-65
   lowering and checked FeMe raising, including real forward/reverse and
   native DXC evidence. Valid bound comparison access reaches descriptor
-  admission; canonical bindless comparison fails explicit CPU unsupported-op
-  admission. Implicit comparison, clamps, half/vector results and CPU
-  comparison execution remain open.
+  admission. Heap-backed scalar FP32 `Texture2D` level-zero comparison now
+  executes through the shared CPU image helper in JIT/reference/AOT modes,
+  with constant texel offsets and reflected sampler-heap usage.
+  Other dimensions, dynamic/undefined offsets, implicit comparison, clamps
+  and half/vector results remain open; no bound/static descriptor
+  materialization or owned D3D12 execution is established.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.

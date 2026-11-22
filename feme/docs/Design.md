@@ -1480,9 +1480,16 @@ only FP32 field-zero scalar results are modeled, not status, aggregate or
 other component uses. Supported texture shapes are 1D/array, 2D/array and
 cube/array; 3D and other unsupported shapes remain unraised. Cube offsets
 are unused poison. Tests exercise real forward/reverse roundtrips and
-actual SDK DXC comparison IR. This does not implement CPU DXIL comparison
-sampling: canonical calls fail explicit unsupported-op admission, and bound
-image/sampler descriptor preparation remains unsupported.
+actual SDK DXC comparison IR. CPU resource lowering now supports scalar
+FP32 level-zero comparison on heap-backed `Texture2D` with a comparison
+sampler, two FP32 coordinates and two constant i32 texel offsets. Admission
+and lowering share one read-only matcher. The existing shared
+`feme.cpu.image.samplecmp.2d.f32` helper receives explicit LOD zero, the
+comparison reference and both offsets, with zero derivatives/bias and no
+shader MinLod clamp. Consumed dead handles are removed for AOT codegen;
+sampler-heap usage is reflected through the existing metadata/artifact flag.
+Other comparison shapes/types and dynamic or undefined offsets fail
+explicit admission. Bound image/sampler preparation remains unsupported.
 
 `dx.op.sampleBias`/`sampleGrad` (bias/gradient sampling) and remaining
 comparison-sampling/gather ops (`sampleCmp`, `textureGather*`) have no

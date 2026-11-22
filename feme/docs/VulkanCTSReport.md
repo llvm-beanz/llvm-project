@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a) bounded comparison CPU regression scope (2026-11-22)
+
+The [bounded comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-bounded-comparison-cpu-execution-vm-2026-11-22)
+reuses the shared comparison image helper for heap-backed scalar FP32
+DXIL `Texture2D` level-zero sampling with constant texel offsets.
+Admission and lowering share a matcher; consumed dead handles are removed
+for AOT and sampler usage is reflected through the existing artifact flag.
+No new Vulkan sampling implementation or descriptor representation is added.
+
+Canonical and actual SDK DXC fixtures verify point/bilinear comparison,
+negative offsets, nonuniform image/sampler indices, divergent coordinates/
+references, partial waves, guards and repeated normal/reference/AOT
+dispatches. Transform coverage checks explicit LOD zero, sampler reflection,
+idempotence and unsupported forms; default samplers still fail admission.
+Full FeMe LIT passes **4,080**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,105** discovered tests in **102.27 seconds**. Three new
+fixtures add three passes; existing graphics and Vulkan unit/real-loader
+coverage remains passing. Timings are not a controlled speedup comparison.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Bound/static descriptor
+materialization, other comparison forms and owned D3D12 execution remain
+open. **No real Vulkan CTS pass is claimed**; the external runner remains
+unavailable.
+
 ## W2(a) level-zero comparison regression scope (2026-11-22)
 
 The [level-zero comparison follow-up](W0WindowsIntegrationProbe.md#w2a-level-zero-comparison-mapping-vm-2026-11-22)

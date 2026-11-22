@@ -78,8 +78,11 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   not materialize or execute static samplers.
   Scalar FP32 `SampleCmpLevelZero` now has checked opcode-65 raising, so
   valid native bound access reaches the descriptor error. Canonical
-  bindless comparison is explicitly rejected in normal/reference/AOT
-  CPU compilation until DXIL comparison sampling lowering exists.
+  heap-backed scalar FP32 `Texture2D` comparison now executes in
+  normal/reference/AOT modes with two FP32 coordinates and two constant
+  i32 offsets. Supply image and comparison-sampler entries in the YAML
+  heaps; both point and bilinear comparison filtering use the shared runtime.
+  Other dimensions and dynamic/undefined offsets fail explicit admission.
   Implicit comparison, clamps and half/vector results remain unsupported.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.

@@ -12,6 +12,7 @@
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "feme/Transforms/CPU/RootConstantLowering.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/DXILResource.h"
 #include "llvm/IR/Constants.h"
@@ -669,24 +670,54 @@ bool isZeroOffset(const Value *Offset) {
   return C && C->isNullValue();
 }
 
-/// Lowers every `llvm.dx.resource.sample`/`samplelevel`/`load.level` call in
+/// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
+/// `samplecmplevelzero`/`load.level` calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
 /// ImageCalls.h), using \p Env's image/sampler heap operands. An access this
-/// function cannot model (a texture dimension other than 2D, a non-constant
-/// or nonzero offset, an unrecognized handle) is left unraised, independent
+/// function cannot model (an unsupported dimension/offset or an unrecognized
+/// handle) is left unraised, independent
 /// of every other access in \p F -- unlike the buffer path, this is safe on
 /// a per-access basis because an unlowered `llvm.dx.resource.*` call remains
 /// valid IR on its own (it is simply not retargetable to the CPU target
 /// until a later increment covers it), rather than half of a handle's
 /// worth of accesses being rewritten out from under the other half.
-bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
+bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
+                        bool &UsesSamplerHeap) {
   bool Changed = false;
+  SmallPtrSet<CallInst *, 4> ComparisonHandles;
   for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
     auto *CI = dyn_cast<CallInst>(&I);
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == Intrinsic::dx_resource_samplecmplevelzero) {
+      if (!isSupportedDXILSampleCmpLevelZero(*CI))
+        continue;
+      IRBuilder<> Builder(CI);
+      auto Img = classifyImageHandle(CI->getArgOperand(0));
+      auto Sampler = classifySamplerHandle(CI->getArgOperand(1));
+      Value *Coord = CI->getArgOperand(2);
+      Value *Offset = CI->getArgOperand(4);
+      Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
+      CallInst *NewCall = createSampleCmp2D(
+          Builder, Env, Img->HandleFromHeap->getArgOperand(0),
+          (*Sampler)->getArgOperand(0),
+          Builder.CreateExtractElement(Coord, uint64_t{0}),
+          Builder.CreateExtractElement(Coord, uint64_t{1}), Zero, Zero, Zero,
+          Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
+          Builder.CreateExtractElement(Offset, uint64_t{0}),
+          Builder.CreateExtractElement(Offset, uint64_t{1}),
+          ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
+          Builder.getTrue(), CI->getName());
+      CI->replaceAllUsesWith(NewCall);
+      CI->eraseFromParent();
+      ComparisonHandles.insert(Img->HandleFromHeap);
+      ComparisonHandles.insert(*Sampler);
+      UsesSamplerHeap = true;
+      Changed = true;
+      continue;
+    }
     bool IsSample = ID == Intrinsic::dx_resource_sample;
     bool IsSampleLevel = ID == Intrinsic::dx_resource_samplelevel;
     bool IsLoadLevel = ID == Intrinsic::dx_resource_load_level;
@@ -893,6 +924,9 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
     CI->eraseFromParent();
     Changed = true;
   }
+  for (CallInst *Handle : ComparisonHandles)
+    if (Handle->use_empty())
+      Handle->eraseFromParent();
   return Changed;
 }
 
@@ -906,6 +940,11 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == Intrinsic::dx_resource_samplecmplevelzero) {
+      if (isSupportedDXILSampleCmpLevelZero(*CI))
+        return true;
+      continue;
+    }
     bool IsSample = ID == Intrinsic::dx_resource_sample;
     bool IsSampleLevel = ID == Intrinsic::dx_resource_samplelevel;
     bool IsLoadLevel = ID == Intrinsic::dx_resource_load_level;
@@ -956,7 +995,8 @@ struct RootConstantMetadata {
 /// RootConstantLowering.h), if any, is written to \p RootConstant.
 Function *lowerFunctionResources(Function &F,
                                  SmallVectorImpl<uint32_t> &StaticHeapIndices,
-                                 RootConstantMetadata &RootConstant) {
+                                 RootConstantMetadata &RootConstant,
+                                 bool &UsesSamplerHeap) {
   if (F.isDeclaration())
     return nullptr;
 
@@ -984,7 +1024,7 @@ Function *lowerFunctionResources(Function &F,
     ImgEnv.ImageHeapCount = Env.ImageHeapCount;
     ImgEnv.SamplerHeap = Env.SamplerHeap;
     ImgEnv.SamplerHeapCount = Env.SamplerHeapCount;
-    lowerImageAccesses(*NewF, ImgEnv);
+    lowerImageAccesses(*NewF, ImgEnv, UsesSamplerHeap);
   }
 
   // A shader that also reads a recognized root-constant binding (see
@@ -1008,9 +1048,8 @@ Function *lowerFunctionResources(Function &F,
 /// Attaches the `!feme.cpu.resources` heap-usage metadata node "Heap usage
 /// discovery" describes for \p F: its name, \p RootConstant's byte span
 /// (0 if \p F has no co-existing root-constant access -- see
-/// `lowerFunctionResources`), whether the sampler heap is used (always
-/// false -- `feme::dxil::OpRaisingPass` does not yet reconstruct a sampler
-/// handle from the heap, see `raiseResourceHandleFromHeap`'s comment), \p
+/// `lowerFunctionResources`), whether comparison sampling uses the sampler
+/// heap, \p
 /// RootConstant's binding (space/register, both 0 if \p F has none), a
 /// root-constant min offset (always 0: a DXIL root constant's own
 /// register-bound view always starts its own span at byte 0, unlike a
@@ -1021,7 +1060,8 @@ Function *lowerFunctionResources(Function &F,
 /// shader reads through a constant descriptor index.
 void attachResourceMetadata(Function &F,
                             SmallVectorImpl<uint32_t> &StaticHeapIndices,
-                            const RootConstantMetadata &RootConstant) {
+                            const RootConstantMetadata &RootConstant,
+                            bool UsesSamplerHeap) {
   llvm::sort(StaticHeapIndices);
   StaticHeapIndices.erase(llvm::unique(StaticHeapIndices),
                           StaticHeapIndices.end());
@@ -1032,7 +1072,8 @@ void attachResourceMetadata(Function &F,
   Ops.push_back(MDString::get(Ctx, F.getName()));
   Ops.push_back(
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstant.Size)));
-  Ops.push_back(ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)));
+  Ops.push_back(ConstantAsMetadata::get(
+      ConstantInt::get(Type::getInt1Ty(Ctx), UsesSamplerHeap)));
   Ops.push_back(
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstant.Space)));
   Ops.push_back(
@@ -1047,6 +1088,36 @@ void attachResourceMetadata(Function &F,
 }
 
 } // namespace
+
+bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
+  if (getIntrinsicID(&CI) != Intrinsic::dx_resource_samplecmplevelzero ||
+      CI.arg_size() != 5 || !CI.getType()->isFloatTy() ||
+      !CI.getArgOperand(3)->getType()->isFloatTy())
+    return false;
+  auto *TextureTy =
+      dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
+  auto *SamplerTy =
+      dyn_cast<dxil::SamplerExtType>(CI.getArgOperand(1)->getType());
+  if (!TextureTy || TextureTy->getNumTypeParameters() != 1 ||
+      TextureTy->getNumIntParameters() != 4 ||
+      !TextureTy->getTypeParameter(0)->getScalarType()->isFloatTy() ||
+      TextureTy->getDimension() != dxil::ResourceKind::Texture2D ||
+      !SamplerTy || SamplerTy->getNumIntParameters() != 1 ||
+      SamplerTy->getSamplerType() != dxil::SamplerType::Comparison ||
+      !classifyImageHandle(CI.getArgOperand(0)) ||
+      !classifySamplerHandle(CI.getArgOperand(1)))
+    return false;
+  LLVMContext &Ctx = CI.getContext();
+  if (CI.getArgOperand(2)->getType() !=
+          FixedVectorType::get(Type::getFloatTy(Ctx), 2) ||
+      CI.getArgOperand(4)->getType() !=
+          FixedVectorType::get(Type::getInt32Ty(Ctx), 2))
+    return false;
+  auto *Offset = dyn_cast<Constant>(CI.getArgOperand(4));
+  return Offset &&
+         isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(0u)) &&
+         isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(1u));
+}
 
 /// Replaces every `llvm.dx.resource.nonuniformindex` call with its own index
 /// operand. The marker only tells a GPU backend that a descriptor index may
@@ -1078,11 +1149,14 @@ PreservedAnalyses ResourceLoweringPass::run(Module &M,
   for (Function &F : llvm::make_early_inc_range(M.functions())) {
     SmallVector<uint32_t, 4> StaticHeapIndices;
     RootConstantMetadata RootConstant;
-    Function *NewF = lowerFunctionResources(F, StaticHeapIndices, RootConstant);
+    bool UsesSamplerHeap = false;
+    Function *NewF = lowerFunctionResources(F, StaticHeapIndices, RootConstant,
+                                            UsesSamplerHeap);
     if (!NewF)
       continue;
     Changed = true;
-    attachResourceMetadata(*NewF, StaticHeapIndices, RootConstant);
+    attachResourceMetadata(*NewF, StaticHeapIndices, RootConstant,
+                           UsesSamplerHeap);
   }
 
   // An unused `handlefromheap`/`handlefrombinding` declaration is left

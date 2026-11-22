@@ -2582,11 +2582,21 @@ references survive real roundtrips; only field-zero scalar results with a
 comparison sampler are mapped. Unsupported result uses/types and texture
 shapes remain unraised without adding a second sample read. Valid native
 DXC comparison linkage now reaches bound-descriptor admission, rather than
-an unraised comparison operation. Canonical bindless comparison calls fail
-explicitly in normal/reference/AOT CPU compilation with
-`requires DXIL comparison sampling lowering, which the FeMe CPU target does not yet support`.
-CPU comparison execution, implicit `SampleCmp`, clamps and half/vector
-results remain open.
+an unraised comparison operation. Canonical heap-backed scalar FP32
+`Texture2D` comparison calls now execute in normal/reference/AOT CPU
+compilation, using the existing shared comparison image helper. Admission
+and lowering share the same eligibility predicate: two FP32 coordinates,
+a comparison sampler and two constant i32 offsets. Explicit LOD is zero;
+derivatives/bias are zero and the shader MinLod clamp is disabled. Point
+comparison and bilinear comparison filtering reuse the shared runtime.
+Consumed dead texture/sampler handles are removed so AOT does not see
+unlowered target extension types, and comparison use sets the existing
+sampler-heap reflection/artifact flag.
+
+Other shapes, half/vector results, default samplers and dynamic/undefined
+offsets fail explicit comparison admission. This does not normalize bound
+image/sampler handles or materialize static samplers. Implicit `SampleCmp`,
+clamps and comparison execution for the other raised dimensions remain open.
 
 This checks declared binding identity, root SRV/UAV resource kinds and
 native heap flags and static sampler modes, not descriptor contents, table

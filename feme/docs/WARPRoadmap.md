@@ -619,6 +619,35 @@ two-worker build limit are retained; timings are not a controlled speedup.
 Artifact ABI 8 and argument layouts are unchanged. W2(a)/W2(b), owned
 D3D12 execution and `CreateDevice` (`E_NOTIMPL`) remain open.
 
+W2(a) bounded comparison CPU execution progress (2026-11-22): heap-backed
+scalar FP32 `Texture2D::SampleCmpLevelZero` now lowers through the existing
+shared comparison image helper. Admission and lowering share one predicate
+for texture/sampler handles, two FP32 coordinates, reference and constant
+i32 texel offsets. Explicit LOD zero, zero derivatives/bias and no shader
+MinLod clamp preserve the level-zero contract. Consumed dead handles are
+removed for AOT, and comparison use sets the existing sampler-heap
+reflection/artifact flag without changing ABI 8 or argument layouts.
+
+Canonical and actual SDK DXC fixtures verify point and bilinear comparison,
+negative offsets, divergent coordinates/references, nonuniform two-entry
+image/sampler heaps, five-thread partial waves, complete output guards and
+repeated normal/reference/AOT dispatches. Transform tests check explicit
+LOD zero, positive/negative offsets, sampler reflection, repeat-pass
+idempotence and unsupported dimension/vector/dynamic-offset preservation.
+Default sampler admission still fails explicitly. Native multi-component
+raw stores remain unsupported; the DXC fixture uses supported scalar stores.
+Full FeMe LIT passes 4,080, with 15 skipped, 10 unsupported and zero failures,
+from 4,105 discovered tests in 102.27 seconds. Three new fixtures add three
+passes; assertions, disabled PCH and the two-worker build limit are retained.
+Timings are not a controlled speedup comparison.
+
+Bound image/sampler normalization, static descriptor materialization,
+other comparison dimensions/types, implicit `SampleCmp`, clamps and
+dynamic/undefined offsets remain open. This proves bounded runner execution,
+not an owned D3D12 device or full sampling conformance. `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b) are not closed. No new adapter-matrix or
+external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.
