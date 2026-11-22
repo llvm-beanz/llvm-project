@@ -78,12 +78,14 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   not materialize or execute static samplers.
   Scalar FP32 `SampleCmpLevelZero` now has checked opcode-65 raising, so
   valid native bound access reaches the descriptor error. Canonical
-  heap-backed scalar FP32 `Texture2D`/`Texture2DArray` comparison now executes in
-  normal/reference/AOT modes with two/three FP32 coordinates and two constant
-  i32 offsets. Supply image and comparison-sampler entries in the YAML
-  heaps; both point and bilinear comparison filtering use the shared runtime.
-  The array layer is the third coordinate, separate from the two spatial
-  texel offsets; omitting it fails explicit admission.
+  heap-backed scalar FP32 1D/2D comparison, including array forms, now
+  executes in normal/reference/AOT modes. Plain 1D uses scalar FP32 U
+  and a constant scalar i32 offset; 1D-array coordinates are FP32 (U, layer).
+  Plain/array 2D retains two/three FP32 coordinates and two constant i32
+  spatial offsets. Supply image and comparison-sampler entries in the YAML
+  heaps; point/linear comparison filtering uses the shared runtime.
+  Array layers are separate from spatial offsets; omitting the layer
+  fails explicit admission.
   Other dimensions and dynamic/undefined offsets fail explicit admission.
   Implicit comparison, clamps and half/vector results remain unsupported.
   This is binding preflight, not descriptor/table

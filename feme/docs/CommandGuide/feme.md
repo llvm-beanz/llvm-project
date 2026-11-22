@@ -103,12 +103,13 @@ coverage" in [../Design.md](../Design.md).
   not static sampler materialization or execution.
   Scalar FP32 `SampleCmpLevelZero` now raises to the canonical intrinsic
   after checked opcode-65 mapping. Valid bound access reaches the
-  descriptor error. Canonical heap-backed scalar FP32 `Texture2D`/
-  `Texture2DArray` comparison now executes on the CPU with two/three FP32
-  coordinates and two
-  constant i32 texel offsets, using the shared comparison sampler helper.
+  descriptor error. Canonical heap-backed scalar FP32 1D/2D comparison,
+  including array forms, now executes on the CPU using shared helpers.
+  Plain 1D uses scalar FP32 U and a constant scalar i32 offset; 1D arrays
+  use FP32 (U, layer) coordinates with the same scalar offset. Plain/array
+  2D uses two/three FP32 coordinates and two constant i32 spatial offsets.
   Other dimensions and dynamic/undefined offsets fail explicit admission.
-  An array's third coordinate selects the layer; offsets affect only U/V.
+  An array's final coordinate selects the layer; offsets are spatial only.
   Implicit comparison, clamps and half/vector results are not supported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full

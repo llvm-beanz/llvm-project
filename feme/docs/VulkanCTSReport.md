@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a) 1D comparison CPU regression scope (2026-11-22)
+
+The [1D comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-1d-comparison-cpu-execution-vm-2026-11-22)
+extends scalar FP32 DXIL level-zero comparison to heap-backed `Texture1D`
+and `Texture1DArray` through existing shared helpers. Scalar U/offset and
+array (U, layer)/scalar-offset forms are checked by the same admission/
+lowering predicate. Ordinary DXIL 1D sampling eligibility is unchanged;
+no new Vulkan sampling implementation or descriptor representation is added.
+
+Four new fixtures verify helper operands, sampler reflection, idempotence,
+malformed forms, ordinary-sampling preservation, dynamic-offset rejection,
+canonical point/linear comparison and actual SDK DXC execution. Signed
+offsets, divergent coordinates/layers, partial waves, guards and repeated
+normal/reference/AOT dispatches exercise both 1D forms. LLVM forward/reverse
+coverage now includes 1D arrays. Focused LIT passes **14** in **8.07 seconds**.
+Full FeMe LIT passes **4,088**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,113** discovered tests in **91.24 seconds**. Four added
+fixtures add four passes; existing graphics and Vulkan unit/real-loader
+coverage remains passing. Timings are not a controlled performance comparison.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Remaining comparison
+forms, bound/static descriptor materialization and owned D3D12 execution
+remain open. **No real Vulkan CTS pass is claimed**; the external runner
+remains unavailable.
+
 ## W2(a) array comparison CPU regression scope (2026-11-22)
 
 The [array comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-array-comparison-cpu-execution-vm-2026-11-22)

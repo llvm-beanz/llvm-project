@@ -9,7 +9,7 @@
 ;
 ; The array layer cannot be omitted, even though a plain 2D comparison
 ; with otherwise identical handles/coordinates is supported.
-; CHECK: requires scalar FP32 Texture2D or Texture2DArray comparison sampling with heap handles and constant i32 offsets
+; CHECK: requires scalar FP32 1D/2D comparison sampling with heap handles, shape-matched coordinates and constant i32 offsets
 define void @main() #0 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 7) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_7t(i32 0)
   %s = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32 0)

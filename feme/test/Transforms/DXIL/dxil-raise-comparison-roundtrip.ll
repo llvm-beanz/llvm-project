@@ -51,6 +51,19 @@ define float @comparison_2d_array(<3 x float> %coord, float %reference) {
   ret float %v
 }
 
+; CHECK-LABEL: define float @comparison_1d_array(
+define float @comparison_1d_array(<2 x float> %coord, float %reference) {
+  ; CHECK: insertelement <2 x float> {{.*}}, float {{.*}}, i32 1
+  ; CHECK: call float @llvm.dx.resource.samplecmplevelzero
+  ; CHECK-SAME: <2 x float> {{.*}}, float %reference, i32 -1)
+  %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 6) @llvm.dx.resource.handlefrombinding.tdx.Texture_v4f32_0_0_1_6t(i32 0, i32 0, i32 1, i32 0, ptr null)
+  %s = call target("dx.Sampler", 1) @llvm.dx.resource.handlefrombinding.tdx.Sampler_1t(i32 0, i32 0, i32 1, i32 0, ptr null)
+  %v = call float @llvm.dx.resource.samplecmplevelzero.f32.tdx.Texture_v4f32_0_0_1_6t.tdx.Sampler_1t.v2f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 6) %t, target("dx.Sampler", 1) %s, <2 x float> %coord, float %reference, i32 -1)
+  ret float %v
+}
+
+declare target("dx.Texture", <4 x float>, 0, 0, 1, 6) @llvm.dx.resource.handlefrombinding.tdx.Texture_v4f32_0_0_1_6t(i32, i32, i32, i32, ptr)
+declare float @llvm.dx.resource.samplecmplevelzero.f32.tdx.Texture_v4f32_0_0_1_6t.tdx.Sampler_1t.v2f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 6), target("dx.Sampler", 1), <2 x float>, float, i32)
 declare target("dx.Texture", <4 x float>, 0, 0, 1, 7) @llvm.dx.resource.handlefrombinding.tdx.Texture_v4f32_0_0_1_7t(i32, i32, i32, i32, ptr)
 declare float @llvm.dx.resource.samplecmplevelzero.f32.tdx.Texture_v4f32_0_0_1_7t.tdx.Sampler_1t.v3f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 7), target("dx.Sampler", 1), <3 x float>, float, <2 x i32>)
 declare target("dx.Texture", <4 x float>, 0, 0, 1, 1) @llvm.dx.resource.handlefrombinding.tdx.Texture_v4f32_0_0_1_1t(i32, i32, i32, i32, ptr)

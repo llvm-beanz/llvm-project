@@ -2583,10 +2583,11 @@ comparison sampler are mapped. Unsupported result uses/types and texture
 shapes remain unraised without adding a second sample read. Valid native
 DXC comparison linkage now reaches bound-descriptor admission, rather than
 an unraised comparison operation. Canonical heap-backed scalar FP32
-`Texture2D`/`Texture2DArray` comparison calls now execute in normal/reference/AOT CPU
-compilation, using the existing shared comparison image helper. Admission
-and lowering share the same eligibility predicate: shape-matched two/three FP32 coordinates,
-a comparison sampler and two constant i32 offsets. Explicit LOD is zero;
+`Texture1D`/`Texture1DArray` and `Texture2D`/`Texture2DArray` comparison calls
+now execute in normal/reference/AOT CPU compilation, using the existing
+shared comparison image helpers. Admission and lowering share the same
+eligibility predicate: shape-matched FP32 coordinates, a comparison sampler
+and constant i32 spatial offsets. Explicit LOD is zero;
 derivatives/bias are zero and the shader MinLod clamp is disabled. Point
 comparison and bilinear comparison filtering reuse the shared runtime.
 Consumed dead texture/sampler handles are removed so AOT does not see
@@ -2606,6 +2607,15 @@ verify divergent layers, negative offsets, partial waves and guarded
 repeated normal/reference/AOT dispatches. Transform coverage requires the
 layer coordinate, retains sampler reflection and remains idempotent;
 malformed two-coordinate array calls fail explicit admission.
+
+For `Texture1D`, U and the constant i32 offset are scalars; `Texture1DArray`
+adds a second FP32 coordinate for the layer but still has one scalar
+spatial offset. The existing `createSampleCmp1D`/`createSampleCmpArray1D`
+helpers preserve these shapes without synthesizing unused vector elements.
+Canonical and actual SDK DXC coverage checks point/linear comparison,
+signed offsets, divergent coordinates/layers, partial waves and guarded
+repeated normal/reference/AOT dispatches. Dynamic scalar offsets fail
+admission. Ordinary DXIL 1D `SampleLevel` eligibility remains unchanged.
 
 This checks declared binding identity, root SRV/UAV resource kinds and
 native heap flags and static sampler modes, not descriptor contents, table

@@ -676,6 +676,34 @@ owned D3D12 execution are not established. `CreateDevice` remains
 `E_NOTIMPL`; W2(a)/W2(b) are not closed. No new adapter-matrix or external
 Vulkan CTS result is claimed.
 
+W2(a) 1D comparison CPU execution progress (2026-11-22): scalar FP32
+heap-backed `Texture1D`/`Texture1DArray::SampleCmpLevelZero` now lowers
+through the existing shared 1D comparison helpers. Plain 1D uses scalar
+FP32 U and a constant scalar i32 spatial offset; the array uses FP32
+(U, layer) coordinates with the same scalar offset. Eligibility remains
+shared between admission and lowering. The comparison path no longer
+depends on ordinary 2D/cube handle classification, so ordinary DXIL 1D
+sampling/loading is deliberately unchanged.
+
+Four new fixtures verify helper operands, signed scalar offsets, sampler
+reflection, idempotence, malformed shape preservation, unchanged ordinary
+1D `SampleLevel` and dynamic-offset rejection in normal/reference/AOT.
+Canonical point/linear comparisons and actual SDK DXC execution cover
+divergent coordinates/layers, five-thread partial waves, complete guards
+and repeated normal/reference/AOT dispatches. The real LLVM forward/reverse
+fixture now also covers 1D-array coordinates and a scalar signed offset.
+
+Focused LIT passes 14 in 8.07 seconds. Full FeMe LIT passes 4,088, with
+15 skipped, 10 unsupported and zero failures, from 4,113 discovered tests
+in 91.24 seconds. Four added fixtures add four passes. Assertions, disabled
+PCH and the two-worker build limit are retained; timings are not a controlled
+performance comparison. Artifact ABI 8, argument layouts and Vulkan behavior
+are unchanged. Cube comparison CPU execution, implicit comparison, clamps,
+half/vector results, dynamic/undefined offsets, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b) are not closed. No new adapter-matrix or
+external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

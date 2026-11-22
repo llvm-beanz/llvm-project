@@ -1481,17 +1481,21 @@ other component uses. Supported texture shapes are 1D/array, 2D/array and
 cube/array; 3D and other unsupported shapes remain unraised. Cube offsets
 are unused poison. Tests exercise real forward/reverse roundtrips and
 actual SDK DXC comparison IR. CPU resource lowering now supports scalar
-FP32 level-zero comparison on heap-backed `Texture2D`/`Texture2DArray` with
-a comparison sampler, shape-matched two/three FP32 coordinates and two
-constant i32 texel offsets. The array's third coordinate is the layer;
-offsets affect only the two spatial coordinates. Admission
-and lowering share one read-only matcher. The existing shared
-`feme.cpu.image.samplecmp.2d.f32`/`.2darray.f32` helpers receive explicit LOD zero, the
-comparison reference and both offsets, with zero derivatives/bias and no
+FP32 level-zero comparison on heap-backed `Texture1D`/`Texture1DArray` and
+`Texture2D`/`Texture2DArray` with a comparison sampler. Plain 1D coordinates
+and offsets are scalar FP32/i32; 1D-array coordinates are two FP32
+components (U, layer), still with a scalar i32 offset. Plain/array 2D
+retains two/three FP32 coordinates and two constant i32 spatial offsets.
+Array layers are separate from offsets. Admission and lowering share one
+read-only matcher. The existing shared `feme.cpu.image.samplecmp.*.f32`
+helpers receive explicit LOD zero, the comparison reference and offsets,
+with zero derivatives/bias and no
 shader MinLod clamp. Consumed dead handles are removed for AOT codegen;
 sampler-heap usage is reflected through the existing metadata/artifact flag.
 Other comparison shapes/types and dynamic or undefined offsets fail
 explicit admission. Bound image/sampler preparation remains unsupported.
+Ordinary DXIL 1D sampling/loading remains outside this increment; its
+existing eligibility checks and function signatures are unchanged.
 
 `dx.op.sampleBias`/`sampleGrad` (bias/gradient sampling) and remaining
 comparison-sampling/gather ops (`sampleCmp`, `textureGather*`) have no

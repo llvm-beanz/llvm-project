@@ -695,35 +695,53 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       if (!isSupportedDXILSampleCmpLevelZero(*CI))
         continue;
       IRBuilder<> Builder(CI);
-      auto Img = classifyImageHandle(CI->getArgOperand(0));
+      auto *Image = cast<CallInst>(CI->getArgOperand(0));
+      auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
       auto Sampler = classifySamplerHandle(CI->getArgOperand(1));
       Value *Coord = CI->getArgOperand(2);
       Value *Offset = CI->getArgOperand(4);
       Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
-      Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
+      Value *ImageIndex = Image->getArgOperand(0);
       Value *SamplerIndex = (*Sampler)->getArgOperand(0);
-      Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
-      Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
-      Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
-      Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+      Value *U = Coord->getType()->isFloatTy()
+                     ? Coord
+                     : Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *OffsetX = Offset->getType()->isIntegerTy(32)
+                           ? Offset
+                           : Builder.CreateExtractElement(Offset, uint64_t{0});
       Value *NoClamp =
           ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true);
       CallInst *NewCall;
-      if (Img->Shape == ImageShape::Array2D) {
-        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
-        NewCall = createSampleCmpArray2D(
-            Builder, Env, ImageIndex, SamplerIndex, U, V, Layer, Zero, Zero,
-            Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
-            OffsetX, OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+      if (Kind == dxil::ResourceKind::Texture1D) {
+        NewCall = createSampleCmp1D(Builder, Env, ImageIndex, SamplerIndex, U,
+                                    Zero, Zero, Zero, Builder.getTrue(),
+                                    CI->getArgOperand(3), Zero, OffsetX,
+                                    NoClamp, Builder.getTrue(), CI->getName());
+      } else if (Kind == dxil::ResourceKind::Texture1DArray) {
+        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
+        NewCall = createSampleCmpArray1D(
+            Builder, Env, ImageIndex, SamplerIndex, U, Layer, Zero, Zero, Zero,
+            Builder.getTrue(), CI->getArgOperand(3), Zero, OffsetX, NoClamp,
+            Builder.getTrue(), CI->getName());
       } else {
-        NewCall = createSampleCmp2D(
-            Builder, Env, ImageIndex, SamplerIndex, U, V, Zero, Zero, Zero,
-            Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero, OffsetX,
-            OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+        Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+        Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+        if (Kind == dxil::ResourceKind::Texture2DArray) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          NewCall = createSampleCmpArray2D(
+              Builder, Env, ImageIndex, SamplerIndex, U, V, Layer, Zero, Zero,
+              Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
+              OffsetX, OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+        } else {
+          NewCall = createSampleCmp2D(
+              Builder, Env, ImageIndex, SamplerIndex, U, V, Zero, Zero, Zero,
+              Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
+              OffsetX, OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+        }
       }
       CI->replaceAllUsesWith(NewCall);
       CI->eraseFromParent();
-      ComparisonHandles.insert(Img->HandleFromHeap);
+      ComparisonHandles.insert(Image);
       ComparisonHandles.insert(*Sampler);
       UsesSamplerHeap = true;
       Changed = true;
@@ -1112,22 +1130,35 @@ bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
   if (!TextureTy || TextureTy->getNumTypeParameters() != 1 ||
       TextureTy->getNumIntParameters() != 4 ||
       !TextureTy->getTypeParameter(0)->getScalarType()->isFloatTy() ||
-      (TextureTy->getDimension() != dxil::ResourceKind::Texture2D &&
+      (TextureTy->getDimension() != dxil::ResourceKind::Texture1D &&
+       TextureTy->getDimension() != dxil::ResourceKind::Texture1DArray &&
+       TextureTy->getDimension() != dxil::ResourceKind::Texture2D &&
        TextureTy->getDimension() != dxil::ResourceKind::Texture2DArray) ||
       !SamplerTy || SamplerTy->getNumIntParameters() != 1 ||
       SamplerTy->getSamplerType() != dxil::SamplerType::Comparison ||
-      !classifyImageHandle(CI.getArgOperand(0)) ||
+      getIntrinsicID(CI.getArgOperand(0)) !=
+          Intrinsic::dx_resource_handlefromheap ||
       !classifySamplerHandle(CI.getArgOperand(1)))
     return false;
   LLVMContext &Ctx = CI.getContext();
-  unsigned NumCoords =
-      TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray ? 3 : 2;
-  if (CI.getArgOperand(2)->getType() !=
-          FixedVectorType::get(Type::getFloatTy(Ctx), NumCoords) ||
-      CI.getArgOperand(4)->getType() !=
-          FixedVectorType::get(Type::getInt32Ty(Ctx), 2))
+  bool Is1D = TextureTy->getDimension() == dxil::ResourceKind::Texture1D ||
+              TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray;
+  bool IsArray =
+      TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray ||
+      TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray;
+  unsigned NumCoords = (Is1D ? 1 : 2) + (IsArray ? 1 : 0);
+  Type *CoordTy = NumCoords == 1
+                      ? Type::getFloatTy(Ctx)
+                      : FixedVectorType::get(Type::getFloatTy(Ctx), NumCoords);
+  Type *OffsetTy = Type::getInt32Ty(Ctx);
+  if (!Is1D)
+    OffsetTy = FixedVectorType::get(Type::getInt32Ty(Ctx), 2);
+  if (CI.getArgOperand(2)->getType() != CoordTy ||
+      CI.getArgOperand(4)->getType() != OffsetTy)
     return false;
   auto *Offset = dyn_cast<Constant>(CI.getArgOperand(4));
+  if (Is1D)
+    return isa_and_nonnull<ConstantInt>(Offset);
   return Offset &&
          isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(0u)) &&
          isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(1u));

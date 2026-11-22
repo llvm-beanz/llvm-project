@@ -1,0 +1,59 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+#
+# Real SDK DXC plain/array 1D comparison with signed scalar offsets,
+# divergent coordinates/layers, a partial wave and guarded repeated output.
+# CHECK: heap[2]: 42 0 0 0 4 4 4 0 4 0 4 4 4 4 0 4 4 0 0 0 4 42
+#
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture1D<float> t = ResourceDescriptorHeap[0];
+  Texture1DArray<float> a = ResourceDescriptorHeap[1];
+  SamplerComparisonState s = SamplerDescriptorHeap[0];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  float u = 0.25 + (tid.x & 1) * 0.5;
+  float layer = (tid.x >> 1) & 1;
+  float p = t.SampleCmpLevelZero(s, u, 0.5);
+  float pa = a.SampleCmpLevelZero(s, float2(u, layer), 0.5);
+  float n = a.SampleCmpLevelZero(s, float2(0.75, layer), 0.5, -1);
+  float o = t.SampleCmpLevelZero(s, 0.25, 0.5, 1);
+  outBuffer.Store(4 + tid.x * 16, (uint)(p * 4));
+  outBuffer.Store(8 + tid.x * 16, (uint)(pa * 4));
+  outBuffer.Store(12 + tid.x * 16, (uint)(n * 4));
+  outBuffer.Store(16 + tid.x * 16, (uint)(o * 4));
+}
+#
+#--- heap.yaml
+resource-heap:
+  - index: 2
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 1d
+    extent: [2]
+    format: r32_float
+    data: [1048576000, 1061158912]
+  - index: 1
+    dimension: 1d-array
+    array-layers: 2
+    extent: [2]
+    format: r32_float
+    data: [1048576000, 1061158912, 1061158912, 1048576000]
+samplers:
+  - index: 0
+    compare-enable: true
+    compare-func: less
+    address-u: clamp-to-edge
