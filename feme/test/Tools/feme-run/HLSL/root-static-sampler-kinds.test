@@ -13,6 +13,7 @@
 # RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D MAX_FILTER /Fo %t/ordinary-maximum.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T cs_6_2 /E main /D MIN_FILTER /Fo %t/ordinary-minimum.dxil %t/shader.hlsl
 # RUN: feme-run --inspect-root-signature %t/comparison.dxil | FileCheck %s --check-prefix=LAYOUT
+# RUN: feme-translate --import-dxil %t/comparison.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=CMP-IR
 # RUN: not feme-run --root-signature-constants %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=DEFAULT
 # RUN: not feme-run --root-signature-constants --reference %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=DEFAULT
 # RUN: not feme --root-signature-constants --target=%feme_host_triple %t/ordinary-comparison.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=DEFAULT
@@ -25,7 +26,7 @@
 # RUN: not feme-run --root-signature-constants %t/comparison-maximum.dxil 2>&1 | FileCheck %s --check-prefix=MAXIMUM
 # RUN: not feme-run --root-signature-constants --reference %t/comparison-maximum.dxil 2>&1 | FileCheck %s --check-prefix=MAXIMUM
 # RUN: not feme --root-signature-constants --target=%feme_host_triple %t/comparison-maximum.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=MAXIMUM
-# RUN: not feme-run --root-signature-constants %t/comparison.dxil 2>&1 | FileCheck %s --check-prefix=CMP-ADMISSION
+# RUN: not feme-run --root-signature-constants %t/comparison.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
 # RUN: not feme-run --root-signature-constants %t/ordinary.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
 # RUN: not feme-run %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
 # RUN: not feme-run --reference %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
@@ -33,14 +34,14 @@
 #
 # DXC accepts mismatched states without /Vd. Legacy sampler handle raising
 # now exposes their declared mode to real shader preflight. Valid comparison
-# linkage still reaches an unsupported sample operation, not execution.
+# linkage still reaches unsupported bound descriptors, not execution.
 # This does not test materialization or execution of static sampler descriptors.
 # LAYOUT: static-sampler[0]: space=7 register=3 visibility=0 filter=128
 # DEFAULT: static sampler mismatch: sampler space=7 register=3 in 'main' declares mode=0 but filter=128 requires mode=1
 # COMPARISON: static sampler mismatch: sampler space=7 register=3 in 'main' declares mode=1 but filter=0 requires mode=0
 # MAXIMUM: static sampler mismatch: sampler space=7 register=3 in 'main' declares mode=1 but filter=384 requires mode=0
-# CMP-ADMISSION: unsupported raised operation: 'dx.op.sampleCmpLevelZero.f32'
-# CMP-ADMISSION-NOT: static sampler mismatch
+# CMP-IR: call float @llvm.dx.resource.samplecmplevelzero
+# CMP-IR-SAME: float 5.000000e-01
 # BOUND: unsupported raised operation: 'llvm.dx.resource.handlefrombinding
 # BOUND-NOT: static sampler mismatch
 

@@ -76,6 +76,11 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   native shaders reach this check. Valid and inferred sampling remains
   unsupported at bound-descriptor/comparison-access admission; this does
   not materialize or execute static samplers.
+  Scalar FP32 `SampleCmpLevelZero` now has checked opcode-65 raising, so
+  valid native bound access reaches the descriptor error. Canonical
+  bindless comparison is explicitly rejected in normal/reference/AOT
+  CPU compilation until DXIL comparison sampling lowering exists.
+  Implicit comparison, clamps and half/vector results remain unsupported.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

@@ -835,6 +835,30 @@ public:
         });
   }
 
+  [[nodiscard]] bool lowerSampleCmpLevelZero(Function &F) {
+    if (!F.getReturnType()->isFloatTy())
+      return replaceFunction(F, [](CallInst *) -> Error {
+        return createStringError(
+            inconvertibleErrorCode(),
+            "SampleCmpLevelZero requires a scalar float result");
+      });
+    auto *SamplerTy =
+        dyn_cast<dxil::SamplerExtType>(F.getFunctionType()->getParamType(1));
+    if (!SamplerTy || !SamplerTy->getNumIntParameters() ||
+        SamplerTy->getIntParameter(0) !=
+            static_cast<unsigned>(dxil::SamplerType::Comparison))
+      return replaceFunction(F, [](CallInst *) -> Error {
+        return createStringError(inconvertibleErrorCode(),
+                                 "SampleCmpLevelZero requires a comparison "
+                                 "sampler");
+      });
+    return lowerSampleOp(
+        F, OpCode::SampleCmpLevelZero, /*CoordsIdx=*/2, /*OffsetsIdx=*/4,
+        [](IRBuilder<> &, CallInst *CI, SmallVectorImpl<Value *> &Args) {
+          Args.push_back(CI->getArgOperand(3));
+        });
+  }
+
   [[nodiscard]] bool lowerSampleGrad(Function &F, bool HasClamp) {
     return lowerSampleOp(
         F, OpCode::SampleGrad, /*CoordsIdx=*/2, /*OffsetsIdx=*/5,
@@ -1475,6 +1499,9 @@ public:
         break;
       case Intrinsic::dx_resource_samplelevel:
         HasErrors |= lowerSampleLevel(F);
+        break;
+      case Intrinsic::dx_resource_samplecmplevelzero:
+        HasErrors |= lowerSampleCmpLevelZero(F);
         break;
       case Intrinsic::dx_resource_samplegrad:
         HasErrors |= lowerSampleGrad(F, /*HasClamp=*/false);

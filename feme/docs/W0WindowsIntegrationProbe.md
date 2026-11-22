@@ -27,6 +27,51 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) level-zero comparison mapping (VM, 2026-11-22)
+
+LLVM now defines and lowers DXIL opcode 65 for scalar FP32
+`llvm.dx.resource.samplecmplevelzero`; FeMe raises supported
+`dx.op.sampleCmpLevelZero.f32` calls back to it. Forward lowering uses the
+existing sample operand/result helpers and requires a comparison sampler.
+Reverse raising validates the texture/sampler, relevant coordinate/offset
+and reference types, and all result uses before adding a canonical call.
+Only field-zero scalar FP32 results are modeled. Status, aggregate and
+extra-component uses, malformed types, default samplers and unsupported
+shapes such as 3D remain unraised without introducing duplicate reads.
+
+New LLVM fixtures check positive/invalid forward mapping. FeMe fixtures
+check raw raising and real forward/reverse roundtrips for 1D, 2D and
+cube-array forms, including nonzero offsets and comparison references.
+Unused cube offsets preserve poison through the shared forward helper;
+the positive LLVM fixture was corrected to expect that existing behavior.
+The actual SDK DXC comparison fixture now verifies canonical access after
+import; valid Root Signature 1.0/1.1 linkage reaches unsupported bound
+descriptor admission rather than an unraised comparison operation.
+
+A canonical bindless fixture checks explicit CPU rejection in normal,
+reference and AOT compilation: DXIL comparison sampling lowering is not
+yet implemented. Implicit `SampleCmp` (opcode 64), clamps, half/vector
+results and CPU comparison execution are outside this increment. No
+static sampler or bound image/sampler descriptor is materialized.
+
+All automated validation uses LIT. Focused FeMe coverage passes **861**
+in **14.71 seconds**. Full FeMe LIT passes **4,077**, with **15 Skipped,
+10 Unsupported and zero failures**, from **4,102** discovered tests in
+**157.62 seconds**. Three added FeMe fixtures add three passes. DirectX
+LIT passes **630**, with **one Expectedly Failed and one Unsupported**,
+from **632** discovered tests in **97.36 seconds**, using one worker.
+An initial eight-worker DirectX run lost a worker without a test-specific
+failure; its partial result is not counted as completed coverage, and
+the cause is not established. The serial rerun completed successfully.
+Assertions, disabled PCH and the two-worker build limit are retained.
+Timings are not a controlled performance comparison.
+
+Artifact ABI remains 8 and shader argument layouts are unchanged.
+Descriptor preparation, static sampler materialization, general CBVs,
+multiple inline parameters and owned D3D12 execution remain open.
+`CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b) are
+not closed. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a) native legacy sampler handles (VM, 2026-11-22)
 
 Legacy pre-SM6.6 sampler bindings now reach static-mode preflight. The

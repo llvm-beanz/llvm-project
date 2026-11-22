@@ -3059,9 +3059,13 @@ A follow-up pass closed R30's two self-contained remaining items:
 What R30 still leaves for a later increment, each for a concrete,
 documented reason rather than an oversight:
 
-- **Bias/gradient sampling and gather.** DXIL has no numbered wire opcode
-  for comparison sampling/gather in this LLVM tree yet (see Design.md's
-  status note), so only the DXIL import half is blocked upstream; bias/
+- **Bias/gradient sampling and gather.** Apart from the new scalar FP32
+  `SampleCmpLevelZero` mapping, DXIL has no numbered wire opcode
+  for remaining comparison sampling/gather in this LLVM tree yet (see
+  Design.md's status note). Level-zero comparison now raises, but CPU DXIL
+  comparison lowering still fails explicit unsupported-op admission.
+  For the remaining comparison/gather forms, the DXIL import half is still
+  blocked upstream; bias/
   gradient sampling has no import-side blocker but is simply not
   implemented yet. Update (roadmap L58): an ordinary, non-comparison
   `Bias` operand is now implemented on the SPIR-V import side, scoped to

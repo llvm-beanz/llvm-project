@@ -594,6 +594,31 @@ in 69.15 seconds. One new transform fixture adds one pass. Timings are not
 a controlled performance comparison. Artifact ABI 8 and shader argument
 layouts are unchanged; W2(a)/W2(b) and owned D3D12 execution remain open.
 
+W2(a) level-zero comparison mapping progress (2026-11-22): LLVM now lowers
+scalar FP32 `llvm.dx.resource.samplecmplevelzero` to DXIL opcode 65, and
+FeMe raises the supported wire form back to that canonical intrinsic.
+Real forward/reverse roundtrips cover 1D, 2D and cube-array coordinates,
+comparison references and nonzero offsets. Raising requires a comparison
+sampler and field-zero scalar uses; status, aggregate, extra-component,
+malformed-type and unsupported-dimension cases remain unraised without
+adding a duplicate sample read. The actual SDK DXC comparison fixture now
+reaches unsupported bound-descriptor admission after valid root linkage.
+Canonical bindless comparison sampling is explicitly rejected in
+normal/reference/AOT CPU compilation until CPU lowering exists. Implicit
+`SampleCmp`, clamps, half/vector results and descriptor/static-sampler
+materialization remain open; this is not sampling execution.
+
+Focused FeMe LIT passes 861 in 14.71 seconds; full FeMe LIT passes 4,077,
+with 15 skipped, 10 unsupported and zero failures, from 4,102 discovered
+tests in 157.62 seconds. DirectX LIT passes 630, with one expected failure
+and one unsupported, from 632 discovered tests in 97.36 seconds. The latter
+completed serially after an eight-worker run lost a worker process without
+a test-specific failure; the interruption's cause is not established.
+Three new FeMe fixtures add three passes. Assertions, disabled PCH and the
+two-worker build limit are retained; timings are not a controlled speedup.
+Artifact ABI 8 and argument layouts are unchanged. W2(a)/W2(b), owned
+D3D12 execution and `CreateDevice` (`E_NOTIMPL`) remain open.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

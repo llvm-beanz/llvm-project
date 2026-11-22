@@ -1,5 +1,32 @@
 # Vulkan CTS status
 
+## W2(a) level-zero comparison regression scope (2026-11-22)
+
+The [level-zero comparison follow-up](W0WindowsIntegrationProbe.md#w2a-level-zero-comparison-mapping-vm-2026-11-22)
+adds scalar FP32 DXIL opcode-65 forward lowering and checked reverse
+raising. Raw-IR and real LLVM roundtrip fixtures preserve coordinates,
+offsets and references while leaving unsupported result uses/types and
+shapes unraised without duplicate reads. Actual SDK DXC comparison IR
+now reaches bound-descriptor admission after valid root linkage.
+Canonical bindless comparison is explicitly rejected in normal/reference/
+AOT CPU compilation; neither comparison execution nor descriptor/static
+sampler materialization is established.
+
+Focused FeMe LIT passes **861** in **14.71 seconds**. Full FeMe LIT passes
+**4,077**, with **15 Skipped, 10 Unsupported and zero failures**, from
+**4,102** discovered tests in **157.62 seconds**. Three new FeMe fixtures
+add three passes; existing graphics and Vulkan unit/real-loader coverage
+remains passing. Serial DirectX LIT passes **630**, with **one Expectedly
+Failed and one Unsupported**, from **632** discovered tests in **97.36
+seconds**, after an incomplete eight-worker run lost a worker. The cause
+of that interruption is not established. Timings are not a controlled
+performance comparison.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Owned D3D12 execution
+remains absent. **No real Vulkan CTS pass is claimed**; the external runner
+remains unavailable.
+
 ## W2(a) native legacy-sampler regression scope (2026-11-22)
 
 The [legacy-sampler follow-up](W0WindowsIntegrationProbe.md#w2a-native-legacy-sampler-handles-vm-2026-11-22)

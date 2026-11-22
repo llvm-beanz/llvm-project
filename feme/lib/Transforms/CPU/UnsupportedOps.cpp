@@ -55,6 +55,12 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
 
     switch (F.getIntrinsicID()) {
+    case Intrinsic::dx_resource_samplecmplevelzero:
+      return createStringError(
+          inconvertibleErrorCode(),
+          "unsupported raised operation: '%s' requires DXIL comparison "
+          "sampling lowering, which the FeMe CPU target does not yet support",
+          F.getName().str().c_str());
     case Intrinsic::dx_resource_handlefrombinding:
     case Intrinsic::dx_resource_handlefromimplicitbinding:
     case Intrinsic::spv_resource_handlefrombinding:

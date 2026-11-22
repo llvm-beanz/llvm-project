@@ -43,7 +43,8 @@ covered, including default/comparison sampler handle modes. Raw and
 structured buffer accesses when retargeting
 to `amdgcn-*` (typed buffer/texture/cbuffer accesses alone are covered
 there; raw/structured buffers are not yet), texture sampling
-(`Sample`/`SampleLevel` raise but have no `amdgcn-*`/NVPTX lowering yet),
+(`Sample`/`SampleLevel` and scalar FP32 `SampleCmpLevelZero` raise but
+have no `amdgcn-*`/NVPTX lowering yet),
 and shader input/output signature ops are not, so a shader using those will
 fail at this stage rather than at any point specific to `feme`'s own
 Driver/CLI logic -- a DXBC-derived module is limited to the same set, on
@@ -100,6 +101,11 @@ coverage" in [../Design.md](../Design.md).
   native shaders reach static-mode checking. Valid and inferred sampling
   remains unsupported at bound-descriptor/comparison-access admission,
   not static sampler materialization or execution.
+  Scalar FP32 `SampleCmpLevelZero` now raises to the canonical intrinsic
+  after checked opcode-65 mapping. Valid bound access reaches the
+  descriptor error; canonical bindless comparison is explicitly rejected
+  because the CPU target does not yet lower DXIL comparison sampling.
+  Implicit comparison, clamps and half/vector results are not supported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

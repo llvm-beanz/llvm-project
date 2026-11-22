@@ -1297,14 +1297,15 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
 // `levels_xy` lowering to verify against yet, so a mip-count query stays
 // unraised). `SampleBias`/`SampleGrad` (bias/gradient sampling) and
-// comparison sampling/gather have no numbered `DXILOp<N, ...>` definition in
-// this LLVM tree at all yet (`sampleCmp`/`textureGather` are declared
-// `DXILOpClass`es with no op assigned a wire opcode), so there is nothing to
-// raise from or verify against on the DXIL side; comparison sampling is
-// still implemented end-to-end for SPIR-V and the CPU target's runtime
+// implicit comparison sampling/gather have no numbered `DXILOp<N, ...>`
+// definition in this LLVM tree at all yet (`sampleCmp`/`textureGather` are
+// declared `DXILOpClass`es with no op assigned a wire opcode), so there is
+// nothing to raise from or verify against on the DXIL side; comparison sampling
+// is still implemented end-to-end for SPIR-V and the CPU target's runtime
 // helpers (see feme/docs/FeMeGraphicsDesign.md's "Canonical image
 // operations"), just not reachable from a DXIL module until upstream adds
-// that lowering.
+// that lowering. FP32 scalar `SampleCmpLevelZero` (65) has a forward
+// lowering and is raised below; CPU comparison-access lowering is separate.
 //===----------------------------------------------------------------------===//
 
 /// The number of texture coordinate components DXIL's sample/load ops
@@ -1375,7 +1376,7 @@ Value *packTextureVector(IRBuilder<> &Builder, ArrayRef<Value *> Components) {
   return Vec;
 }
 
-/// Rewrites every `extractvalue` reading a raised sample/load's `%dx.types.
+/// Collects every `extractvalue` reading a raised sample/load's `%dx.types.
 /// ResRet` result -- exactly `replaceLoadResultUses`'s DXIL-import-side
 /// counterpart in `feme/lib/Transforms/CPU/ResourceLowering.cpp`, but for
 /// the raising direction: DXIL's `ResRet` struct always carries 4 value
@@ -1384,19 +1385,26 @@ Value *packTextureVector(IRBuilder<> &Builder, ArrayRef<Value *> Components) {
 /// component count) are recognized; anything else (including any read of
 /// the status field, which the raised intrinsic has no equivalent for) is
 /// left unraised, exactly as `raiseTypedBufferLoad` already does for
-/// buffers. Returns false leaving \p CI untouched if any use doesn't match.
-bool replaceResRetExtracts(CallInst &CI, unsigned Width, Value *Loaded,
-                           IRBuilder<> &Builder) {
+/// buffers. Returns std::nullopt without mutation if any use doesn't match.
+std::optional<SmallVector<ExtractValueInst *, 4>>
+getResRetExtracts(CallInst &CI, unsigned Width) {
   SmallVector<ExtractValueInst *, 4> Extracts;
   for (User *U : CI.users()) {
     auto *EV = dyn_cast<ExtractValueInst>(U);
     if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] >= Width)
-      return false;
+      return std::nullopt;
     Extracts.push_back(EV);
   }
+  return Extracts;
+}
 
+bool replaceResRetExtracts(CallInst &CI, unsigned Width, Value *Loaded,
+                           IRBuilder<> &Builder) {
+  auto Extracts = getResRetExtracts(CI, Width);
+  if (!Extracts)
+    return false;
   auto *VecTy = dyn_cast<FixedVectorType>(Loaded->getType());
-  for (ExtractValueInst *EV : Extracts) {
+  for (ExtractValueInst *EV : *Extracts) {
     Builder.SetInsertPoint(EV);
     Value *Component =
         VecTy ? Builder.CreateExtractElement(Loaded, EV->getIndices()[0])
@@ -1511,6 +1519,63 @@ bool raiseSampleLevel(CallInst &CI) {
       Builder.CreateCall(SampleLevelFn, {Handle, Sampler, Coord, Lod, Offset});
   if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
     return false;
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises FP32 `SampleCmpLevelZero` (65), preserving the comparison reference.
+/// Only result field zero is defined; status/aggregate uses remain unraised.
+bool raiseSampleCmpLevelZero(CallInst &CI) {
+  if (CI.arg_size() != 11)
+    return false;
+  auto *RetTy = dyn_cast<StructType>(CI.getType());
+  if (!RetTy || RetTy->getNumElements() != 5 ||
+      !RetTy->getElementType(0)->isFloatTy() || !getResRetExtracts(CI, 1))
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType()) : nullptr;
+  Value *Sampler = lookThroughCastHandle(CI.getArgOperand(2));
+  auto *SamplerTy =
+      Sampler ? dyn_cast<dxil::SamplerExtType>(Sampler->getType()) : nullptr;
+  if (!HandleTy || HandleTy->getNumTypeParameters() != 1 ||
+      HandleTy->getNumIntParameters() < 4 || !SamplerTy ||
+      !SamplerTy->getNumIntParameters() ||
+      SamplerTy->getIntParameter(0) !=
+          static_cast<unsigned>(dxil::SamplerType::Comparison) ||
+      HandleTy->getDimension() == dxil::ResourceKind::Texture3D)
+    return false;
+  unsigned NumCoords = getTextureCoordComponents(HandleTy->getDimension());
+  if (!NumCoords)
+    return false;
+  unsigned NumOffsets = getTextureOffsetComponents(HandleTy->getDimension());
+  if (!CI.getArgOperand(10)->getType()->isFloatTy())
+    return false;
+  for (unsigned I = 0; I != NumCoords; ++I)
+    if (!CI.getArgOperand(3 + I)->getType()->isFloatTy())
+      return false;
+  for (unsigned I = 0; I != NumOffsets; ++I)
+    if (!CI.getArgOperand(7 + I)->getType()->isIntegerTy(32))
+      return false;
+  IRBuilder<> Builder(&CI);
+  SmallVector<Value *, 4> Coords;
+  for (unsigned I = 0; I != NumCoords; ++I)
+    Coords.push_back(CI.getArgOperand(3 + I));
+  SmallVector<Value *, 3> Offsets;
+  for (unsigned I = 0; I != NumOffsets; ++I)
+    Offsets.push_back(CI.getArgOperand(7 + I));
+  Value *Coord = packTextureVector(Builder, Coords);
+  Value *Offset = packTextureVector(Builder, Offsets);
+  if (!Offset)
+    Offset = PoisonValue::get(Builder.getInt32Ty());
+  auto *SampleFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_samplecmplevelzero,
+      {Builder.getFloatTy(), HandleTy, SamplerTy, Coord->getType(),
+       Offset->getType()});
+  Value *Loaded = Builder.CreateCall(
+      SampleFn, {Handle, Sampler, Coord, CI.getArgOperand(10), Offset});
+  if (!replaceResRetExtracts(CI, 1, Loaded, Builder))
+    llvm_unreachable("comparison result uses were validated before mutation");
   CI.eraseFromParent();
   return true;
 }
@@ -2046,6 +2111,9 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(62, [](CallInst &CI) { // SampleLevel
     return raiseSampleLevel(CI);
+  });
+  Changed |= forEachDXOpCall(65, [](CallInst &CI) { // SampleCmpLevelZero
+    return raiseSampleCmpLevelZero(CI);
   });
   Changed |= forEachDXOpCall(66, [](CallInst &CI) { // TextureLoad
     return raiseTextureLoad(CI);

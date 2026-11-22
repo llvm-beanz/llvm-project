@@ -1450,16 +1450,18 @@ resource kind; `ResourceMetadata` now validates and preserves that mode,
 and `buildHandleType` reconstructs legacy `dx.Sampler` handles through
 the same cast bridge. Mono/unknown/malformed modes remain unraised for
 normal admission to reject, and sampler kinds mislabeled as SRVs are not
-reconstructed. `raiseSample`/`raiseSampleLevel`/
+reconstructed. `raiseSample`/`raiseSampleLevel`/`raiseSampleCmpLevelZero`/
 `raiseTextureLoad`/`raiseTextureStore`/`raiseGetDimensions` cover item 3's
 "raising the access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
+scalar FP32 `dx.op.sampleCmpLevelZero` (65),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
 `dx.op.getDimensions`'s `.x`/`.xy` fields (72, i.e. a `GetDimensions` call
 whose out-parameters only ever read width, or width and height together --
 a mip-count out-parameter, DXIL's `.z`/`.w` fields, is still left unraised,
 since `DXILOpLowering.cpp` has no `levels_xy`-shaped forward lowering to
-verify against yet). The first three, plus `getDimensions`, were the only
-texture ops LLVM's own `DXILOpLowering.cpp` already lowered a canonical
+verify against yet). Before adding comparison mapping, `Sample`,
+`SampleLevel`, `TextureLoad` and `getDimensions` were the only texture
+ops LLVM's own `DXILOpLowering.cpp` already lowered a canonical
 intrinsic to/from (`getdimensions.xy`'s own forward lowering was added
 alongside this raiser, the same way `TextureStore`'s was, immediately
 below); `TextureStore` did not
@@ -1469,8 +1471,21 @@ raising it needed a new `llvm.dx.resource.store.texture` canonical
 intrinsic and `DXILOpLowering::lowerTextureStore` added upstream first,
 symmetric with the existing `TextureLoad`/`load.level` pair -- cross-checked
 against `-dxil-op-lower` the same way every other raiser in this file is.
-`dx.op.sampleBias`/`sampleGrad` (bias/gradient sampling) and every
-comparison-sampling/gather op (`sampleCmp*`, `textureGather*`) have no
+Level-zero comparison mapping now has a numbered `DXILOp<65, ...>` and
+real `DXILOpLowering::lowerSampleCmpLevelZero` forward lowering to verify
+against. The canonical intrinsic's operand order is texture, comparison
+sampler, coordinates, FP32 reference and offsets. Reverse raising checks
+operand types and all result uses before creating a replacement read:
+only FP32 field-zero scalar results are modeled, not status, aggregate or
+other component uses. Supported texture shapes are 1D/array, 2D/array and
+cube/array; 3D and other unsupported shapes remain unraised. Cube offsets
+are unused poison. Tests exercise real forward/reverse roundtrips and
+actual SDK DXC comparison IR. This does not implement CPU DXIL comparison
+sampling: canonical calls fail explicit unsupported-op admission, and bound
+image/sampler descriptor preparation remains unsupported.
+
+`dx.op.sampleBias`/`sampleGrad` (bias/gradient sampling) and remaining
+comparison-sampling/gather ops (`sampleCmp`, `textureGather*`) have no
 numbered `DXILOp<N, ...>` definition in this LLVM tree at all yet
 (`sampleCmp`/`textureGather` are declared `DXILOpClass`es with no wire
 opcode assigned), so there is nothing to raise from or verify against on

@@ -1001,6 +1001,17 @@ def SampleGrad : DXILOp<63, sampleGrad> {
   let attributes = [Attributes<DXIL1_0, [DXILReadOnly]>];
 }
 
+def SampleCmpLevelZero : DXILOp<65, sampleCmpLevelZero> {
+  let Doc = "samples a texture with comparison filtering at mip level zero";
+  // Handle, Sampler, Coord0..3, Offset0..2, CompareValue
+  let arguments = [HandleTy, HandleTy, FloatTy, FloatTy, FloatTy, FloatTy,
+                   Int32Ty, Int32Ty, Int32Ty, FloatTy];
+  let result = OverloadTy;
+  let overloads = [Overloads<DXIL1_0, [ResRetFloatTy]>];
+  let stages = [Stages<DXIL1_0, [all_stages]>];
+  let attributes = [Attributes<DXIL1_0, [DXILReadOnly]>];
+}
+
 def TextureLoad : DXILOp<66, textureLoad> {
   let Doc = "reads from a texture resource";
   // Handle, MipLevelOrSampleCount, Coord0, Coord1, Coord2, Offset0, Offset1, Offset2

@@ -2576,12 +2576,25 @@ raising; valid explicit linkage and inferred compilation still fail on
 unsupported bound image/sampler descriptors or comparison access. This
 does not materialize static samplers or establish sampling execution.
 
+Scalar FP32 `SampleCmpLevelZero` now has checked DXIL opcode-65 raising
+and matching LLVM forward lowering. Coordinates, offsets and comparison
+references survive real roundtrips; only field-zero scalar results with a
+comparison sampler are mapped. Unsupported result uses/types and texture
+shapes remain unraised without adding a second sample read. Valid native
+DXC comparison linkage now reaches bound-descriptor admission, rather than
+an unraised comparison operation. Canonical bindless comparison calls fail
+explicitly in normal/reference/AOT CPU compilation with
+`requires DXIL comparison sampling lowering, which the FeMe CPU target does not yet support`.
+CPU comparison execution, implicit `SampleCmp`, clamps and half/vector
+results remain open.
+
 This checks declared binding identity, root SRV/UAV resource kinds and
 native heap flags and static sampler modes, not descriptor contents, table
 materialization, full resource-kind/counter compatibility or root-descriptor
 promises. It does not admit otherwise unsupported heap resource operations.
 The inferred mode does not perform root-mode validation; ordinary sampling
-may now reach the bound-descriptor error instead of an unraised-op error.
+and supported scalar FP32 level-zero comparison access may now reach the
+bound-descriptor error instead of an unraised-op error.
 
 That parameter's register/space selects the cbuffer, and its full DWORD
 count sets `RootConstantSize` reflection. Reads must fit both the shader's

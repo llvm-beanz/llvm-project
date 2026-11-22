@@ -89,6 +89,12 @@ The original compute-only baseline is no longer current:
   native DXC shaders therefore reach static-mode preflight. Valid/inferred
   linkage still fails unsupported bound descriptors or comparison access;
   no new sampler descriptor materialization or execution is established.
+  Scalar FP32 `SampleCmpLevelZero` now has matching LLVM opcode-65
+  lowering and checked FeMe raising, including real forward/reverse and
+  native DXC evidence. Valid bound comparison access reaches descriptor
+  admission; canonical bindless comparison fails explicit CPU unsupported-op
+  admission. Implicit comparison, clamps, half/vector results and CPU
+  comparison execution remain open.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.
