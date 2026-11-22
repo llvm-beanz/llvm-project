@@ -103,13 +103,16 @@ coverage" in [../Design.md](../Design.md).
   not static sampler materialization or execution.
   Scalar FP32 `SampleCmpLevelZero` now raises to the canonical intrinsic
   after checked opcode-65 mapping. Valid bound access reaches the
-  descriptor error. Canonical heap-backed scalar FP32 1D/2D comparison,
+  descriptor error. Canonical heap-backed scalar FP32 1D/2D/cube comparison,
   including array forms, now executes on the CPU using shared helpers.
   Plain 1D uses scalar FP32 U and a constant scalar i32 offset; 1D arrays
   use FP32 (U, layer) coordinates with the same scalar offset. Plain/array
   2D uses two/three FP32 coordinates and two constant i32 spatial offsets.
   Other dimensions and dynamic/undefined offsets fail explicit admission.
   An array's final coordinate selects the layer; offsets are spatial only.
+  Cubes use FP32 direction vectors of width three (four for cube arrays).
+  Their unused scalar i32 offset must be poison/undef or zero; nonzero/
+  dynamic offsets fail admission rather than being silently discarded.
   Implicit comparison, clamps and half/vector results are not supported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full

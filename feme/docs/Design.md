@@ -1482,7 +1482,8 @@ cube/array; 3D and other unsupported shapes remain unraised. Cube offsets
 are unused poison. Tests exercise real forward/reverse roundtrips and
 actual SDK DXC comparison IR. CPU resource lowering now supports scalar
 FP32 level-zero comparison on heap-backed `Texture1D`/`Texture1DArray` and
-`Texture2D`/`Texture2DArray` with a comparison sampler. Plain 1D coordinates
+`Texture2D`/`Texture2DArray` and `TextureCube`/`TextureCubeArray` with a
+comparison sampler. Plain 1D coordinates
 and offsets are scalar FP32/i32; 1D-array coordinates are two FP32
 components (U, layer), still with a scalar i32 offset. Plain/array 2D
 retains two/three FP32 coordinates and two constant i32 spatial offsets.
@@ -1494,6 +1495,11 @@ shader MinLod clamp. Consumed dead handles are removed for AOT codegen;
 sampler-heap usage is reflected through the existing metadata/artifact flag.
 Other comparison shapes/types and dynamic or undefined offsets fail
 explicit admission. Bound image/sampler preparation remains unsupported.
+Cube coordinates are a three-component FP32 direction, with a fourth
+component for a cube-array element. The canonical unused scalar i32 offset
+must be poison/undef or zero and is not passed to the runtime. Cube calls
+reuse shared face selection/comparison helpers with six zero derivatives;
+nonzero/dynamic offsets and malformed direction/layer shapes fail admission.
 Ordinary DXIL 1D sampling/loading remains outside this increment; its
 existing eligibility checks and function signatures are unchanged.
 

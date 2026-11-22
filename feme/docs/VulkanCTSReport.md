@@ -1,5 +1,35 @@
 # Vulkan CTS status
 
+## W2(a) cube comparison CPU regression scope (2026-11-22)
+
+The [cube comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-cube-comparison-cpu-execution-vm-2026-11-22)
+extends scalar FP32 DXIL level-zero comparison to heap-backed cubes and
+cube arrays through existing shared helpers. Direction/element coordinates,
+explicit LOD zero, unused offsets, sampler reflection and dead-handle
+cleanup are checked without adding a new Vulkan sampling implementation.
+
+The runner now prepares six physical faces per cube and requires complete
+cube-array face counts, square extents and non-overflowing subresource sizes
+within host vector allocation limits.
+Five new fixtures cover canonical/native DXC execution, all faces and both
+array elements, partial waves, guards, repeated normal/reference/AOT
+dispatches, helper operands and malformed input. Five reference thresholds
+encode six distinct face depths to expose incorrect selection.
+
+Focused LIT passes **19** in **7.04 seconds**. Full FeMe LIT passes **4,093**,
+with **15 Skipped, 10 Unsupported and zero failures**, from **4,118**
+discovered tests in **78.58 seconds**. The added plain-cube LLVM roundtrip
+and host allocation-limit case pass targeted reruns. Five added fixtures
+add five passes; existing
+graphics and Vulkan unit/real-loader coverage remains passing. Timings
+are not a controlled performance comparison.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Broader comparison
+conformance, bound/static descriptor materialization and owned D3D12
+execution remain open. **No real Vulkan CTS pass is claimed**; the external
+runner remains unavailable.
+
 ## W2(a) 1D comparison CPU regression scope (2026-11-22)
 
 The [1D comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-1d-comparison-cpu-execution-vm-2026-11-22)

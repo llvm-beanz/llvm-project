@@ -38,7 +38,7 @@
 //    rewritten only if every resource access it performs is local to it.
 //
 // Image follow-up: ordinary 2D/array/cube sampling/loading and heap-backed
-// scalar FP32 1D/2D (including array) SampleCmpLevelZero also lower to shared
+// scalar FP32 1D/2D/cube (including array) SampleCmpLevelZero lower to shared
 // `feme.cpu.image.*` calls. Comparison admission and lowering share the
 // predicate below; constant texel offsets are preserved and comparison
 // sampler usage is reflected without changing the shader argument ABI.
@@ -56,7 +56,7 @@ class CallInst;
 
 namespace feme::cpu {
 
-/// Tests the scalar FP32 heap-backed 1D/2D comparison forms supported by
+/// Tests the scalar FP32 heap-backed 1D/2D/cube comparison forms supported by
 /// both early CPU admission and resource lowering.
 bool isSupportedDXILSampleCmpLevelZero(const llvm::CallInst &CI);
 

@@ -2583,7 +2583,8 @@ comparison sampler are mapped. Unsupported result uses/types and texture
 shapes remain unraised without adding a second sample read. Valid native
 DXC comparison linkage now reaches bound-descriptor admission, rather than
 an unraised comparison operation. Canonical heap-backed scalar FP32
-`Texture1D`/`Texture1DArray` and `Texture2D`/`Texture2DArray` comparison calls
+`Texture1D`/`Texture1DArray`, `Texture2D`/`Texture2DArray` and
+`TextureCube`/`TextureCubeArray` comparison calls
 now execute in normal/reference/AOT CPU compilation, using the existing
 shared comparison image helpers. Admission and lowering share the same
 eligibility predicate: shape-matched FP32 coordinates, a comparison sampler
@@ -2616,6 +2617,23 @@ Canonical and actual SDK DXC coverage checks point/linear comparison,
 signed offsets, divergent coordinates/layers, partial waves and guarded
 repeated normal/reference/AOT dispatches. Dynamic scalar offsets fail
 admission. Ordinary DXIL 1D `SampleLevel` eligibility remains unchanged.
+
+Cube comparison uses three FP32 direction components and, for an array,
+a fourth FP32 cube-element coordinate. The existing
+`createSampleCmpCube`/`createSampleCmpCubeArray` helpers receive explicit
+LOD zero and six zero derivatives. Unused scalar i32 offsets accept
+poison/undef or zero; nonzero/dynamic offsets are rejected instead of being
+dropped. Canonical and actual SDK DXC fixtures sample all six faces and
+both cube-array elements, with distinct face depths, partial waves and
+guarded repeated normal/reference/AOT dispatches.
+
+The runner's cube YAML preparation now uses six physical face layers for
+`dimension: cube`; `cube-array` requires an explicit positive multiple of
+six in `array-layers` (12 means two cubes). Faces must have nonzero square
+extents. Checked subresource-size multiplication rejects overflow before
+allocation; sizes exceeding the host vector's allocation limit are also
+rejected explicitly. This is heap preparation for the runner, not D3D descriptor
+materialization or owned-device execution.
 
 This checks declared binding identity, root SRV/UAV resource kinds and
 native heap flags and static sampler modes, not descriptor contents, table

@@ -64,9 +64,9 @@ Error checkSupportedRaisedOps(const Module &M) {
         continue;
       return createStringError(
           inconvertibleErrorCode(),
-          "unsupported raised operation: '%s' requires scalar FP32 1D/2D "
+          "unsupported raised operation: '%s' requires scalar FP32 1D/2D/cube "
           "comparison sampling with heap handles, shape-matched coordinates "
-          "and constant i32 offsets",
+          "and supported offsets",
           F.getName().str().c_str());
     case Intrinsic::dx_resource_handlefrombinding:
     case Intrinsic::dx_resource_handlefromimplicitbinding:

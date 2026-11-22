@@ -8,7 +8,7 @@
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 ;
 ; Scalar 1D offsets must still be constant, not a runtime lane index.
-; CHECK: requires scalar FP32 1D/2D comparison sampling with heap handles, shape-matched coordinates and constant i32 offsets
+; CHECK: requires scalar FP32 1D/2D/cube comparison sampling with heap handles, shape-matched coordinates and supported offsets
 define void @main() #0 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_1t(i32 0)
   %s = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32 0)

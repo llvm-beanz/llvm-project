@@ -704,6 +704,41 @@ materialization and owned D3D12 execution remain open. `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b) are not closed. No new adapter-matrix or
 external Vulkan CTS result is claimed.
 
+W2(a) cube comparison CPU execution progress (2026-11-22): scalar FP32
+heap-backed `TextureCube`/`TextureCubeArray::SampleCmpLevelZero` now lowers
+through the existing shared cube comparison helpers. Three FP32 direction
+components select a face, with a fourth FP32 cube-array element coordinate.
+Explicit LOD zero, zero direction derivatives, sampler reflection and
+dead-handle cleanup are retained. Unused scalar i32 offsets accept
+poison/undef or zero; nonzero/dynamic offsets fail admission.
+
+The runner now prepares all six physical faces for a cube. Cube-array
+`array-layers` retains physical-layer meaning and must explicitly be a
+positive multiple of six (12 means two cubes). Nonzero square face extents
+and checked subresource-size multiplication prevent malformed or overflowing
+cube heaps. Host vector allocation limits are rejected explicitly as well.
+This fixes runner preparation, not D3D descriptor materialization.
+
+Five new fixtures verify helper operands, idempotence/reflection, offset
+admission, malformed heap geometry and overflow, canonical execution and
+actual SDK DXC execution. Thirteen-thread guarded repeated normal/reference/
+AOT dispatches sample every face and both array elements; five reference
+thresholds encode six distinct face depths, making wrong face/element
+selection observable. The real LLVM forward/reverse fixture now includes
+plain cubes alongside its existing cube-array case.
+
+Focused LIT passes 19 in 7.04 seconds. Full FeMe LIT passes 4,093, with
+15 skipped, 10 unsupported and zero failures, from 4,118 discovered tests
+in 78.58 seconds. The added plain-cube roundtrip and host allocation-limit
+case also pass targeted reruns. Five added fixtures add five passes.
+Assertions, disabled PCH and
+the two-worker build limit are retained; timings are not a controlled
+performance comparison. Artifact ABI 8 and argument layouts are unchanged.
+Implicit comparison, clamps, half/vector results, broader sampling
+conformance, bound/static descriptor materialization and owned D3D12
+execution remain open. `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)
+are not closed. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

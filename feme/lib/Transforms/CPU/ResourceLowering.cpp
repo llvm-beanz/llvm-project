@@ -712,7 +712,24 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *NoClamp =
           ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true);
       CallInst *NewCall;
-      if (Kind == dxil::ResourceKind::Texture1D) {
+      if (Kind == dxil::ResourceKind::TextureCube ||
+          Kind == dxil::ResourceKind::TextureCubeArray) {
+        Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+        Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
+        if (Kind == dxil::ResourceKind::TextureCubeArray) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
+          NewCall = createSampleCmpCubeArray(
+              Builder, Env, ImageIndex, SamplerIndex, U, V, Z, Zero, Zero, Zero,
+              Zero, Zero, Zero, Layer, Zero, Builder.getTrue(),
+              CI->getArgOperand(3), Zero, NoClamp, Builder.getTrue(),
+              CI->getName());
+        } else {
+          NewCall = createSampleCmpCube(
+              Builder, Env, ImageIndex, SamplerIndex, U, V, Z, Zero, Zero, Zero,
+              Zero, Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3),
+              Zero, NoClamp, Builder.getTrue(), CI->getName());
+        }
+      } else if (Kind == dxil::ResourceKind::Texture1D) {
         NewCall = createSampleCmp1D(Builder, Env, ImageIndex, SamplerIndex, U,
                                     Zero, Zero, Zero, Builder.getTrue(),
                                     CI->getArgOperand(3), Zero, OffsetX,
@@ -1133,7 +1150,9 @@ bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
       (TextureTy->getDimension() != dxil::ResourceKind::Texture1D &&
        TextureTy->getDimension() != dxil::ResourceKind::Texture1DArray &&
        TextureTy->getDimension() != dxil::ResourceKind::Texture2D &&
-       TextureTy->getDimension() != dxil::ResourceKind::Texture2DArray) ||
+       TextureTy->getDimension() != dxil::ResourceKind::Texture2DArray &&
+       TextureTy->getDimension() != dxil::ResourceKind::TextureCube &&
+       TextureTy->getDimension() != dxil::ResourceKind::TextureCubeArray) ||
       !SamplerTy || SamplerTy->getNumIntParameters() != 1 ||
       SamplerTy->getSamplerType() != dxil::SamplerType::Comparison ||
       getIntrinsicID(CI.getArgOperand(0)) !=
@@ -1143,20 +1162,26 @@ bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
   LLVMContext &Ctx = CI.getContext();
   bool Is1D = TextureTy->getDimension() == dxil::ResourceKind::Texture1D ||
               TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray;
+  bool IsCube =
+      TextureTy->getDimension() == dxil::ResourceKind::TextureCube ||
+      TextureTy->getDimension() == dxil::ResourceKind::TextureCubeArray;
   bool IsArray =
       TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray ||
-      TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray;
-  unsigned NumCoords = (Is1D ? 1 : 2) + (IsArray ? 1 : 0);
+      TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray ||
+      TextureTy->getDimension() == dxil::ResourceKind::TextureCubeArray;
+  unsigned NumCoords = (IsCube ? 3 : Is1D ? 1 : 2) + (IsArray ? 1 : 0);
   Type *CoordTy = NumCoords == 1
                       ? Type::getFloatTy(Ctx)
                       : FixedVectorType::get(Type::getFloatTy(Ctx), NumCoords);
   Type *OffsetTy = Type::getInt32Ty(Ctx);
-  if (!Is1D)
+  if (!Is1D && !IsCube)
     OffsetTy = FixedVectorType::get(Type::getInt32Ty(Ctx), 2);
   if (CI.getArgOperand(2)->getType() != CoordTy ||
       CI.getArgOperand(4)->getType() != OffsetTy)
     return false;
   auto *Offset = dyn_cast<Constant>(CI.getArgOperand(4));
+  if (IsCube)
+    return Offset && (isa<UndefValue>(Offset) || Offset->isNullValue());
   if (Is1D)
     return isa_and_nonnull<ConstantInt>(Offset);
   return Offset &&

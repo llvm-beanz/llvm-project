@@ -92,12 +92,15 @@ The original compute-only baseline is no longer current:
   Scalar FP32 `SampleCmpLevelZero` now has matching LLVM opcode-65
   lowering and checked FeMe raising, including real forward/reverse and
   native DXC evidence. Valid bound comparison access reaches descriptor
-  admission. Heap-backed scalar FP32 1D/2D level-zero comparison, including
+  admission. Heap-backed scalar FP32 1D/2D/cube level-zero comparison, including
   array forms, now executes through shared CPU image helpers in JIT/reference/AOT modes,
   with constant texel offsets and reflected sampler-heap usage.
   Plain 1D uses scalar U/offset; array coordinates add a separate FP32
   layer component (second for 1D, third for 2D). Offsets remain spatial
   and use the existing shared sampling runtime.
+  Cubes use three FP32 direction components and an optional fourth
+  cube-array element coordinate; unused scalar offsets are poison/undef
+  or zero, never passed to the shared cube comparison helper.
   Other dimensions, dynamic/undefined offsets, implicit comparison, clamps
   and half/vector results remain open; no bound/static descriptor
   materialization or owned D3D12 execution is established.

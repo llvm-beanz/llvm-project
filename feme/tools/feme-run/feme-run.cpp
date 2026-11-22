@@ -123,6 +123,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
@@ -891,6 +892,8 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
                    *Dimension == ImageDimension::Texture2DArray ||
                    *Dimension == ImageDimension::TextureCubeArray;
     bool Is3D = *Dimension == ImageDimension::Texture3D;
+    bool IsCube = *Dimension == ImageDimension::TextureCube ||
+                  *Dimension == ImageDimension::TextureCubeArray;
     if (Entry.ArrayLayers != 1 && !IsArray)
       return createStringError(inconvertibleErrorCode(),
                                "heap entry image %u sets 'array-layers' "
@@ -903,17 +906,47 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
     uint32_t Depth = Is3D && Entry.Extent.size() > 2 ? Entry.Extent[2] : 1;
     uint32_t ArrayLayers =
         IsArray ? std::max<uint32_t>(1, Entry.ArrayLayers) : 1;
+    // The descriptor ABI counts physical faces, not logical cubes.
+    if (IsCube) {
+      if (!Width || Width != Height)
+        return createStringError(inconvertibleErrorCode(),
+                                 "heap entry image %u requires nonzero square "
+                                 "cube face extents",
+                                 Entry.Index);
+      if (*Dimension == ImageDimension::TextureCube)
+        ArrayLayers = 6;
+      else if (!Entry.ArrayLayers || Entry.ArrayLayers % 6)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "heap entry image %u cube-array requires "
+            "'array-layers' to be a positive multiple of 6",
+            Entry.Index);
+    }
 
     FemeImageSubresourceLayout &Layout = Storage.MipLayouts[Entry.Index];
     Layout.Offset = 0;
     Layout.RowPitch = (uint64_t)Width * ElemSize;
-    Layout.SlicePitch = Layout.RowPitch * Height;
+    auto SlicePitch = checkedMulUnsigned(Layout.RowPitch, uint64_t{Height});
+    if (!SlicePitch)
+      return createStringError(inconvertibleErrorCode(),
+                               "heap entry image %u subresource size overflows",
+                               Entry.Index);
+    Layout.SlicePitch = *SlicePitch;
     Layout.SampleStride = 0;
     uint64_t LayerCount = Is3D ? Depth : ArrayLayers;
-    uint64_t ByteSize = Layout.SlicePitch * LayerCount;
+    auto ByteSize = checkedMulUnsigned(Layout.SlicePitch, LayerCount);
+    if (!ByteSize)
+      return createStringError(inconvertibleErrorCode(),
+                               "heap entry image %u subresource size overflows",
+                               Entry.Index);
 
     std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
-    Buffer.assign(ByteSize, 0);
+    if (*ByteSize > Buffer.max_size())
+      return createStringError(
+          inconvertibleErrorCode(),
+          "heap entry image %u subresource size exceeds host allocation limits",
+          Entry.Index);
+    Buffer.assign(*ByteSize, 0);
     size_t CopySize =
         std::min<size_t>(Buffer.size(), Entry.Data.size() * sizeof(uint32_t));
     if (CopySize > 0)

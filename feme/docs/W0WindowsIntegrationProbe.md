@@ -27,6 +27,49 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) cube comparison CPU execution (VM, 2026-11-22)
+
+Heap-backed scalar FP32 `TextureCube`/`TextureCubeArray::SampleCmpLevelZero`
+now executes through existing shared cube comparison helpers. Three FP32
+direction components select a face; the array adds a fourth FP32 element
+coordinate. Helpers receive explicit LOD zero and six zero direction
+derivatives. Unused scalar i32 offsets accept poison/undef or zero, never
+flow to sampling helpers, and reject nonzero/dynamic values. Admission and
+lowering retain the shared predicate, sampler reflection and dead-handle
+cleanup.
+
+The runner's YAML cube preparation now supplies all six physical face
+layers. Cube-array `array-layers` counts physical faces and requires an
+explicit positive multiple of six (12 means two cubes). Faces must have
+nonzero square extents; checked subresource-size multiplication rejects
+overflow before allocation; sizes exceeding host vector allocation limits
+are also rejected explicitly. Invalid cube-array counts now produce errors,
+rather than describing incomplete cubes that sampling returned as zero.
+
+Five new fixtures cover helper operands, idempotence/reflection, offset
+admission, malformed cube geometry/overflow, canonical execution and actual
+SDK DXC execution. Thirteen-thread partial waves and complete output guards
+are checked over repeated normal/reference/AOT dispatches. Every face of
+both array elements is sampled. Five comparison thresholds encode distinct
+face depths as 0..5, making wrong face/element selection observable.
+The LLVM forward/reverse fixture also now covers plain cubes alongside
+its existing cube-array case.
+
+Focused LIT passes **19** in **7.04 seconds**. Full FeMe LIT passes **4,093**,
+with **15 Skipped, 10 Unsupported and zero failures**, from **4,118**
+discovered tests in **78.58 seconds**. The added plain-cube roundtrip and
+host allocation-limit case pass subsequent targeted reruns. Five new
+fixtures add five passes. Assertions,
+disabled PCH and the two-worker build limit are retained; timings are not
+a controlled speedup comparison.
+
+Artifact ABI remains 8 and argument layouts are unchanged. Implicit
+comparison, clamps, half/vector results, broader sampling conformance,
+bound image/sampler normalization and static descriptor materialization
+remain open. This is bounded runner evidence, not an owned D3D12 device.
+`CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b) are
+not closed. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a) 1D comparison CPU execution (VM, 2026-11-22)
 
 Heap-backed scalar FP32 `Texture1D`/`Texture1DArray::SampleCmpLevelZero`

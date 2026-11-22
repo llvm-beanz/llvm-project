@@ -1,0 +1,63 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+#
+# Five comparison thresholds encode six distinct face depths as 0..5.
+# Every face of each array element is sampled; the second cube reverses
+# depths. Thirteen lanes also test a partial final wave and output guards.
+# CHECK: heap[2]: 42 0 0 1 1 2 2 3 3 4 4 5 5 0 5 1 4 2 3 3 2 4 1 5 0 0 0 42
+#
+#--- shader.hlsl
+static const float3 Directions[6] = {
+  float3(1,0,0), float3(-1,0,0), float3(0,1,0),
+  float3(0,-1,0), float3(0,0,1), float3(0,0,-1)
+};
+#define COUNT(T,C) (T.SampleCmpLevelZero(s,C,0.1875) + \
+                    T.SampleCmpLevelZero(s,C,0.3125) + \
+                    T.SampleCmpLevelZero(s,C,0.4375) + \
+                    T.SampleCmpLevelZero(s,C,0.5625) + \
+                    T.SampleCmpLevelZero(s,C,0.6875))
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(13, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  TextureCube<float> t = ResourceDescriptorHeap[0];
+  TextureCubeArray<float> a = ResourceDescriptorHeap[1];
+  SamplerComparisonState s = SamplerDescriptorHeap[0];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  float3 dir = Directions[tid.x % 6];
+  float layer = (tid.x / 6) & 1;
+  outBuffer.Store(4 + tid.x * 8, (uint)COUNT(t,dir));
+  outBuffer.Store(8 + tid.x * 8, (uint)COUNT(a,float4(dir,layer)));
+}
+#
+#--- heap.yaml
+resource-heap:
+  - index: 2
+    size: 112
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: cube
+    extent: [1, 1]
+    format: r32_float
+    data: [1040187392, 1048576000, 1052770304, 1056964608, 1059061760, 1061158912]
+  - index: 1
+    dimension: cube-array
+    array-layers: 12
+    extent: [1, 1]
+    format: r32_float
+    data: [1040187392, 1048576000, 1052770304, 1056964608, 1059061760, 1061158912,
+           1061158912, 1059061760, 1056964608, 1052770304, 1048576000, 1040187392]
+samplers:
+  - index: 0
+    compare-enable: true
+    compare-func: less

@@ -78,7 +78,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   not materialize or execute static samplers.
   Scalar FP32 `SampleCmpLevelZero` now has checked opcode-65 raising, so
   valid native bound access reaches the descriptor error. Canonical
-  heap-backed scalar FP32 1D/2D comparison, including array forms, now
+  heap-backed scalar FP32 1D/2D/cube comparison, including array forms, now
   executes in normal/reference/AOT modes. Plain 1D uses scalar FP32 U
   and a constant scalar i32 offset; 1D-array coordinates are FP32 (U, layer).
   Plain/array 2D retains two/three FP32 coordinates and two constant i32
@@ -86,6 +86,9 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   heaps; point/linear comparison filtering uses the shared runtime.
   Array layers are separate from spatial offsets; omitting the layer
   fails explicit admission.
+  Cube coordinates are FP32 direction vectors of width three, with a
+  fourth cube-element coordinate for arrays. Unused scalar i32 offsets
+  accept poison/undef or zero; nonzero/dynamic offsets fail admission.
   Other dimensions and dynamic/undefined offsets fail explicit admission.
   Implicit comparison, clamps and half/vector results remain unsupported.
   This is binding preflight, not descriptor/table
@@ -123,7 +126,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
       dimension: 1d              # 1d/1d-array/2d/2d-array/cube/cube-array/3d
       extent: [4, 1]
       format: r32g32b32a32_float
-      data: [0, 1, 2, 3]         # little-endian uint32 words, one mip/layer
+      data: [0, 1, 2, 3]         # little-endian uint32 words, one mip, layer-major
   samplers:                      # the shader's *logical* dynamic sampler heap
     - index: 0
       min-filter: nearest        # nearest/linear
@@ -145,6 +148,14 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
           min-filter: nearest
           address-u: clamp-to-edge
   ```
+
+  Cube images use nonzero square face extents. `dimension: cube` prepares
+  six physical face layers automatically. `dimension: cube-array` requires
+  an explicit positive multiple of six in `array-layers` (12 means two
+  cubes), retaining the descriptor ABI's physical-layer convention.
+  Data is face/layer-major in +X, -X, +Y, -Y, +Z, -Z order for each cube.
+  Incomplete face counts, overflowing subresource sizes and sizes exceeding
+  the host allocation limit are errors.
 
   Every `resource-heap`/`bindings` entry becomes an unstructured,
   host-writable raw buffer (`ResourceKind::Raw`, `FEME_DESCRIPTOR_UAV`

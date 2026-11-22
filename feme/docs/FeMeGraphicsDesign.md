@@ -3063,12 +3063,15 @@ documented reason rather than an oversight:
   `SampleCmpLevelZero` mapping, DXIL has no numbered wire opcode
   for remaining comparison sampling/gather in this LLVM tree yet (see
   Design.md's status note). Level-zero comparison now raises and executes
-  on the CPU for heap-backed scalar FP32 1D/2D textures, including arrays,
+  on the CPU for heap-backed scalar FP32 1D/2D/cube textures, including arrays,
   with constant texel offsets through shared comparison image helpers. Other dimensions,
   dynamic/undefined offsets and half/vector results remain unsupported.
   Plain 1D uses scalar U/offset; array forms add a final FP32 layer
   coordinate and retain spatial-only offsets (one for 1D, two for 2D).
   Ordinary DXIL 1D sampling/loading is not enabled by this comparison work.
+  Cubes use three-component direction vectors, with a fourth cube-array
+  element coordinate, and no spatial offsets. Unused scalar offsets
+  accept poison/undef or zero; nonzero/dynamic offsets are rejected.
   For the remaining comparison/gather forms, the DXIL import half is still
   blocked upstream; bias/
   gradient sampling has no import-side blocker but is simply not
