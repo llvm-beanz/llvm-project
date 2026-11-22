@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a) array comparison CPU regression scope (2026-11-22)
+
+The [array comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-array-comparison-cpu-execution-vm-2026-11-22)
+extends scalar FP32 DXIL level-zero sampling to heap-backed `Texture2DArray`
+through the existing shared array comparison helper. Shape-aware admission
+requires the third FP32 layer coordinate and two constant spatial i32
+offsets. No new Vulkan sampling implementation or descriptor representation
+is added; sampler reflection and argument/artifact ABI 8 are retained.
+
+Four new fixtures cover array lowering, idempotence/reflection, malformed
+coordinate admission, canonical point/bilinear comparison and actual SDK
+DXC execution. Divergent layers, negative offsets, partial waves, guards
+and repeated normal/reference/AOT dispatches verify the array path.
+The LLVM forward/reverse fixture now also covers 2D arrays. Focused LIT
+passes **9** in **5.16 seconds**. Full FeMe LIT passes **4,084**, with
+**15 Skipped, 10 Unsupported and zero failures**, from **4,109** discovered
+tests in **74.39 seconds**. Four added fixtures add four passes; existing
+graphics and Vulkan unit/real-loader coverage remains passing. Timings
+are not a controlled performance comparison.
+
+Vulkan semantics/advertisements, pinned inventory and adapter-matrix results
+are unchanged. Remaining comparison forms, bound/static descriptor
+materialization and owned D3D12 execution remain open. **No real Vulkan CTS
+pass is claimed**; the external runner remains unavailable.
+
 ## W2(a) bounded comparison CPU regression scope (2026-11-22)
 
 The [bounded comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-bounded-comparison-cpu-execution-vm-2026-11-22)

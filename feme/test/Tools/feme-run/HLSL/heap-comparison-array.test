@@ -1,0 +1,48 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+#
+# SDK DXC array comparison preserves per-lane layers and negative offsets,
+# with a partial final wave and guards around repeated dispatch output.
+# CHECK: heap[1]: 42 0 1065353216 1065353216 0 0 1065353216 1065353216 0 0 1065353216 42
+#
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture2DArray<float> t = ResourceDescriptorHeap[0];
+  SamplerComparisonState s = SamplerDescriptorHeap[0];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[1];
+  float3 coord = float3(0.75, 0.5, tid.x & 1);
+  float a = t.SampleCmpLevelZero(s, coord, 0.5, int2(-1, 0));
+  float b = t.SampleCmpLevelZero(s, coord, 0.5);
+  outBuffer.Store(4 + tid.x * 8, asuint(a));
+  outBuffer.Store(8 + tid.x * 8, asuint(b));
+}
+#
+#--- heap.yaml
+resource-heap:
+  - index: 1
+    size: 48
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d-array
+    array-layers: 2
+    extent: [2, 1]
+    format: r32_float
+    data: [1048576000, 1061158912, 1061158912, 1048576000]
+samplers:
+  - index: 0
+    compare-enable: true
+    compare-func: less
+    address-u: clamp-to-edge
+    address-v: clamp-to-edge

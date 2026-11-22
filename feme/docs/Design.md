@@ -1481,10 +1481,12 @@ other component uses. Supported texture shapes are 1D/array, 2D/array and
 cube/array; 3D and other unsupported shapes remain unraised. Cube offsets
 are unused poison. Tests exercise real forward/reverse roundtrips and
 actual SDK DXC comparison IR. CPU resource lowering now supports scalar
-FP32 level-zero comparison on heap-backed `Texture2D` with a comparison
-sampler, two FP32 coordinates and two constant i32 texel offsets. Admission
+FP32 level-zero comparison on heap-backed `Texture2D`/`Texture2DArray` with
+a comparison sampler, shape-matched two/three FP32 coordinates and two
+constant i32 texel offsets. The array's third coordinate is the layer;
+offsets affect only the two spatial coordinates. Admission
 and lowering share one read-only matcher. The existing shared
-`feme.cpu.image.samplecmp.2d.f32` helper receives explicit LOD zero, the
+`feme.cpu.image.samplecmp.2d.f32`/`.2darray.f32` helpers receive explicit LOD zero, the
 comparison reference and both offsets, with zero derivatives/bias and no
 shader MinLod clamp. Consumed dead handles are removed for AOT codegen;
 sampler-heap usage is reflected through the existing metadata/artifact flag.

@@ -648,6 +648,34 @@ not an owned D3D12 device or full sampling conformance. `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b) are not closed. No new adapter-matrix or
 external Vulkan CTS result is claimed.
 
+W2(a) array comparison CPU execution progress (2026-11-22): scalar FP32
+heap-backed `Texture2DArray::SampleCmpLevelZero` now lowers through the
+existing shared array comparison helper. Admission and lowering share
+shape-aware coordinate validation: three FP32 coordinates for an array
+versus two for plain 2D, with two constant spatial i32 offsets in either
+case. The array layer is passed separately and is never treated as an
+offset. Explicit LOD zero, sampler reflection, dead-handle cleanup and
+argument/artifact ABI 8 behavior are retained.
+
+Four new fixtures cover array lowering/idempotence/reflection, missing-layer
+admission errors in normal/reference/AOT, canonical point/bilinear comparison
+and real SDK DXC execution. Distinct layer contents, negative offsets,
+divergent coordinates, five-thread partial waves, complete output guards
+and repeated dispatches make layer/offset mistakes observable. The real
+LLVM forward/reverse fixture also now covers 2D-array coordinates and
+positive/negative spatial offsets.
+
+Focused LIT passes 9 in 5.16 seconds. Full FeMe LIT passes 4,084, with
+15 skipped, 10 unsupported and zero failures, from 4,109 discovered tests
+in 74.39 seconds. Four added fixtures add four passes. Assertions, disabled
+PCH and the two-worker build limit are retained; timings are not a controlled
+performance comparison. 1D/cube comparison CPU execution, implicit comparison,
+clamps, half/vector results and dynamic/undefined offsets remain open.
+Bound image/sampler normalization, static descriptor materialization and
+owned D3D12 execution are not established. `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b) are not closed. No new adapter-matrix or external
+Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

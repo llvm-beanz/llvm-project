@@ -2583,9 +2583,9 @@ comparison sampler are mapped. Unsupported result uses/types and texture
 shapes remain unraised without adding a second sample read. Valid native
 DXC comparison linkage now reaches bound-descriptor admission, rather than
 an unraised comparison operation. Canonical heap-backed scalar FP32
-`Texture2D` comparison calls now execute in normal/reference/AOT CPU
+`Texture2D`/`Texture2DArray` comparison calls now execute in normal/reference/AOT CPU
 compilation, using the existing shared comparison image helper. Admission
-and lowering share the same eligibility predicate: two FP32 coordinates,
+and lowering share the same eligibility predicate: shape-matched two/three FP32 coordinates,
 a comparison sampler and two constant i32 offsets. Explicit LOD is zero;
 derivatives/bias are zero and the shader MinLod clamp is disabled. Point
 comparison and bilinear comparison filtering reuse the shared runtime.
@@ -2597,6 +2597,15 @@ Other shapes, half/vector results, default samplers and dynamic/undefined
 offsets fail explicit comparison admission. This does not normalize bound
 image/sampler handles or materialize static samplers. Implicit `SampleCmp`,
 clamps and comparison execution for the other raised dimensions remain open.
+
+For `Texture2DArray`, the third FP32 coordinate is passed separately as
+the array layer to `createSampleCmpArray2D`; the two constant i32 offsets
+remain spatial only. Layer selection and point/bilinear comparison reuse
+the existing shared array runtime. Canonical and actual SDK DXC fixtures
+verify divergent layers, negative offsets, partial waves and guarded
+repeated normal/reference/AOT dispatches. Transform coverage requires the
+layer coordinate, retains sampler reflection and remains idempotent;
+malformed two-coordinate array calls fail explicit admission.
 
 This checks declared binding identity, root SRV/UAV resource kinds and
 native heap flags and static sampler modes, not descriptor contents, table

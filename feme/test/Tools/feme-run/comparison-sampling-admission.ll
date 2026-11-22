@@ -7,7 +7,7 @@
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 ;
-; CHECK: requires scalar FP32 Texture2D comparison sampling with heap handles and constant i32 offsets
+; CHECK: requires scalar FP32 Texture2D or Texture2DArray comparison sampling with heap handles and constant i32 offsets
 define void @main() #0 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 0)
   %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)

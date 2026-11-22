@@ -27,6 +27,39 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) array comparison CPU execution (VM, 2026-11-22)
+
+Heap-backed scalar FP32 `Texture2DArray::SampleCmpLevelZero` now lowers
+through the existing shared `feme.cpu.image.samplecmp.2darray.f32` helper.
+Admission and lowering share shape-aware validation: the array requires
+three FP32 coordinates, while plain 2D retains two. Both use two constant
+i32 spatial offsets. The array layer is passed separately to the helper;
+offsets do not modify it. Explicit LOD zero, sampler reflection and
+consumed dead-handle cleanup are unchanged.
+
+Four new fixtures verify the exact array helper operands, repeat-pass
+idempotence and sampler reflection; missing-layer rejection in normal/
+reference/AOT; canonical point/bilinear comparison; and actual SDK DXC
+array execution. Distinct contents in two layers, divergent coordinates,
+negative offsets, five-thread partial waves, complete guards and repeated
+normal/reference/AOT dispatches exercise layer selection independently
+of spatial offsets. The LLVM forward/reverse fixture now also covers
+2D-array coordinates, comparison references and positive/negative offsets.
+
+Focused LIT passes **9** in **5.16 seconds**. Full FeMe LIT passes **4,084**,
+with **15 Skipped, 10 Unsupported and zero failures**, from **4,109**
+discovered tests in **74.39 seconds**. Four new fixtures add four passes.
+Assertions, disabled PCH and the two-worker build limit are retained;
+timings are not a controlled speedup comparison.
+
+Artifact ABI remains 8 and argument layouts are unchanged. 1D/cube
+comparison CPU execution, implicit comparison, clamps, half/vector results,
+dynamic/undefined offsets, bound image/sampler normalization and static
+descriptor materialization remain open. This is bounded runner evidence,
+not full D3D sampling conformance or an owned D3D12 device.
+`CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b) are
+not closed. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a) bounded comparison CPU execution (VM, 2026-11-22)
 
 Heap-backed scalar FP32 `Texture2D` level-zero comparison now executes

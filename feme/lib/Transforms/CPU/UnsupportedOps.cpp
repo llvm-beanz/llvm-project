@@ -65,6 +65,7 @@ Error checkSupportedRaisedOps(const Module &M) {
       return createStringError(
           inconvertibleErrorCode(),
           "unsupported raised operation: '%s' requires scalar FP32 Texture2D "
+          "or Texture2DArray "
           "comparison sampling with heap handles and constant i32 offsets",
           F.getName().str().c_str());
     case Intrinsic::dx_resource_handlefrombinding:

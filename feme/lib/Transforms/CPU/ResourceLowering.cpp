@@ -700,16 +700,27 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *Coord = CI->getArgOperand(2);
       Value *Offset = CI->getArgOperand(4);
       Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
-      CallInst *NewCall = createSampleCmp2D(
-          Builder, Env, Img->HandleFromHeap->getArgOperand(0),
-          (*Sampler)->getArgOperand(0),
-          Builder.CreateExtractElement(Coord, uint64_t{0}),
-          Builder.CreateExtractElement(Coord, uint64_t{1}), Zero, Zero, Zero,
-          Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
-          Builder.CreateExtractElement(Offset, uint64_t{0}),
-          Builder.CreateExtractElement(Offset, uint64_t{1}),
-          ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
-          Builder.getTrue(), CI->getName());
+      Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
+      Value *SamplerIndex = (*Sampler)->getArgOperand(0);
+      Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+      Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+      Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+      Value *NoClamp =
+          ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true);
+      CallInst *NewCall;
+      if (Img->Shape == ImageShape::Array2D) {
+        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+        NewCall = createSampleCmpArray2D(
+            Builder, Env, ImageIndex, SamplerIndex, U, V, Layer, Zero, Zero,
+            Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
+            OffsetX, OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+      } else {
+        NewCall = createSampleCmp2D(
+            Builder, Env, ImageIndex, SamplerIndex, U, V, Zero, Zero, Zero,
+            Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero, OffsetX,
+            OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+      }
       CI->replaceAllUsesWith(NewCall);
       CI->eraseFromParent();
       ComparisonHandles.insert(Img->HandleFromHeap);
@@ -1101,15 +1112,18 @@ bool feme::cpu::isSupportedDXILSampleCmpLevelZero(const CallInst &CI) {
   if (!TextureTy || TextureTy->getNumTypeParameters() != 1 ||
       TextureTy->getNumIntParameters() != 4 ||
       !TextureTy->getTypeParameter(0)->getScalarType()->isFloatTy() ||
-      TextureTy->getDimension() != dxil::ResourceKind::Texture2D ||
+      (TextureTy->getDimension() != dxil::ResourceKind::Texture2D &&
+       TextureTy->getDimension() != dxil::ResourceKind::Texture2DArray) ||
       !SamplerTy || SamplerTy->getNumIntParameters() != 1 ||
       SamplerTy->getSamplerType() != dxil::SamplerType::Comparison ||
       !classifyImageHandle(CI.getArgOperand(0)) ||
       !classifySamplerHandle(CI.getArgOperand(1)))
     return false;
   LLVMContext &Ctx = CI.getContext();
+  unsigned NumCoords =
+      TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray ? 3 : 2;
   if (CI.getArgOperand(2)->getType() !=
-          FixedVectorType::get(Type::getFloatTy(Ctx), 2) ||
+          FixedVectorType::get(Type::getFloatTy(Ctx), NumCoords) ||
       CI.getArgOperand(4)->getType() !=
           FixedVectorType::get(Type::getInt32Ty(Ctx), 2))
     return false;
