@@ -56,6 +56,14 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
 
     switch (F.getIntrinsicID()) {
+    case Intrinsic::dx_resource_samplecmp:
+    case Intrinsic::dx_resource_samplecmp_clamp:
+      return createStringError(
+          inconvertibleErrorCode(),
+          "unsupported raised operation: '%s' requires derivative-aware DXIL "
+          "implicit comparison sampling lowering, which the FeMe CPU target "
+          "does not yet support",
+          F.getName().str().c_str());
     case Intrinsic::dx_resource_samplecmplevelzero:
       if (llvm::all_of(F.users(), [](const User *U) {
             const auto *CI = dyn_cast<CallInst>(U);

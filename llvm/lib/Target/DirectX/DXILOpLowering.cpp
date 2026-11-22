@@ -835,27 +835,32 @@ public:
         });
   }
 
-  [[nodiscard]] bool lowerSampleCmpLevelZero(Function &F) {
+  [[nodiscard]] bool lowerSampleCmp(Function &F, bool IsLevelZero,
+                                    bool HasClamp) {
+    const char *OpName = IsLevelZero ? "SampleCmpLevelZero" : "SampleCmp";
     if (!F.getReturnType()->isFloatTy())
-      return replaceFunction(F, [](CallInst *) -> Error {
-        return createStringError(
-            inconvertibleErrorCode(),
-            "SampleCmpLevelZero requires a scalar float result");
+      return replaceFunction(F, [OpName](CallInst *) -> Error {
+        return createStringError(inconvertibleErrorCode(),
+                                 "%s requires a scalar float result", OpName);
       });
     auto *SamplerTy =
         dyn_cast<dxil::SamplerExtType>(F.getFunctionType()->getParamType(1));
     if (!SamplerTy || !SamplerTy->getNumIntParameters() ||
         SamplerTy->getIntParameter(0) !=
             static_cast<unsigned>(dxil::SamplerType::Comparison))
-      return replaceFunction(F, [](CallInst *) -> Error {
+      return replaceFunction(F, [OpName](CallInst *) -> Error {
         return createStringError(inconvertibleErrorCode(),
-                                 "SampleCmpLevelZero requires a comparison "
-                                 "sampler");
+                                 "%s requires a comparison sampler", OpName);
       });
     return lowerSampleOp(
-        F, OpCode::SampleCmpLevelZero, /*CoordsIdx=*/2, /*OffsetsIdx=*/4,
-        [](IRBuilder<> &, CallInst *CI, SmallVectorImpl<Value *> &Args) {
+        F, IsLevelZero ? OpCode::SampleCmpLevelZero : OpCode::SampleCmp,
+        /*CoordsIdx=*/2, /*OffsetsIdx=*/4,
+        [IsLevelZero, HasClamp](IRBuilder<> &IRB, CallInst *CI,
+                                SmallVectorImpl<Value *> &Args) {
           Args.push_back(CI->getArgOperand(3));
+          if (!IsLevelZero)
+            Args.push_back(HasClamp ? CI->getArgOperand(5)
+                                    : UndefValue::get(IRB.getFloatTy()));
         });
   }
 
@@ -1501,7 +1506,14 @@ public:
         HasErrors |= lowerSampleLevel(F);
         break;
       case Intrinsic::dx_resource_samplecmplevelzero:
-        HasErrors |= lowerSampleCmpLevelZero(F);
+        HasErrors |=
+            lowerSampleCmp(F, /*IsLevelZero=*/true, /*HasClamp=*/false);
+        break;
+      case Intrinsic::dx_resource_samplecmp:
+      case Intrinsic::dx_resource_samplecmp_clamp:
+        HasErrors |= lowerSampleCmp(F, /*IsLevelZero=*/false,
+                                    F.getIntrinsicID() ==
+                                        Intrinsic::dx_resource_samplecmp_clamp);
         break;
       case Intrinsic::dx_resource_samplegrad:
         HasErrors |= lowerSampleGrad(F, /*HasClamp=*/false);

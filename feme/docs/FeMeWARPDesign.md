@@ -101,8 +101,15 @@ The original compute-only baseline is no longer current:
   Cubes use three FP32 direction components and an optional fourth
   cube-array element coordinate; unused scalar offsets are poison/undef
   or zero, never passed to the shared cube comparison helper.
-  Other dimensions, dynamic/undefined offsets, implicit comparison, clamps
-  and half/vector results remain open; no bound/static descriptor
+  Scalar FP32 implicit `SampleCmp` now has checked opcode-64 forward/reverse
+  mapping, including preserved real zero/nonzero/dynamic MinLod clamps.
+  Undefined/poison clamps select the plain canonical intrinsic.
+  Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
+  Both implicit forms still fail normal/reference/AOT CPU admission with
+  an explicit derivative-aware lowering diagnostic; no implicit LOD is
+  replaced with zero. Other dimensions, dynamic/undefined offsets, implicit
+  comparison execution, shader clamps and half/vector results remain open;
+  no bound/static descriptor
   materialization or owned D3D12 execution is established.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported

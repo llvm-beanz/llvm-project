@@ -27,6 +27,37 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a) implicit comparison compiler mapping (VM, 2026-11-22)
+
+Scalar FP32 `SampleCmp` now has matching numbered opcode-64 LLVM lowering
+and checked FeMe raising. Coordinates, signed spatial offsets, comparison
+references and optional FP32 MinLod clamps survive. Undefined/poison clamps
+select the plain canonical intrinsic; real zero/nonzero/dynamic clamps
+select `samplecmp.clamp`. Malformed clamps, unsupported result uses,
+default samplers and 3D textures remain unraised without an extra read.
+
+Six new fixtures verify LLVM positive/invalid lowering, raw raising guards,
+real forward/reverse roundtrips across all six comparison shapes, native
+SDK DXC plain/dynamic-clamp pixel-shader import and CPU admission.
+Normal/reference/AOT admission rejects both implicit forms with an explicit
+derivative-aware DXIL implicit comparison sampling lowering diagnostic.
+This is import/raising evidence, not implicit sampling execution; no
+implicit LOD is replaced with zero.
+
+Focused combined LIT passes **35** in **16.89 seconds**. Full FeMe LIT passes
+**4,097**, with **15 Skipped, 10 Unsupported and zero failures**, from
+**4,122** discovered tests in **78.90 seconds**. Serial DirectX LIT passes
+**632**, with **one expected failure and one Unsupported**, from **634**
+discovered tests in **105.11 seconds**. Four FeMe fixtures add four passes;
+two LLVM fixtures add two passes. Assertions, disabled PCH, sccache and the
+two-worker build limit are retained; timings are not controlled speedups.
+
+Artifact ABI 8 and argument layouts are unchanged. Implicit comparison CPU
+execution, shader clamps, broader sampling conformance, bound/static
+descriptor materialization and owned D3D12 execution remain open.
+`CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b) are
+not closed. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a) cube comparison CPU execution (VM, 2026-11-22)
 
 Heap-backed scalar FP32 `TextureCube`/`TextureCubeArray::SampleCmpLevelZero`

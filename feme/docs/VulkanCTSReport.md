@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a) implicit comparison compiler regression scope (2026-11-22)
+
+The [implicit comparison mapping follow-up](W0WindowsIntegrationProbe.md#w2a-implicit-comparison-compiler-mapping-vm-2026-11-22)
+adds checked scalar FP32 DXIL opcode-64 forward/reverse mapping. Coordinates,
+offsets and comparison references survive; undefined/poison clamps select
+the plain intrinsic, while real zero/nonzero/dynamic MinLod clamps are
+preserved. Unsupported result uses and malformed clamps introduce no
+extra read. Six fixtures cover LLVM positive/invalid lowering, six-shape
+roundtrips, raw raising guards, native SDK DXC pixel-shader import and
+explicit normal/reference/AOT CPU rejection. Derivative-aware implicit
+comparison CPU lowering is still required; no LOD-zero approximation or
+new Vulkan sampling implementation is added.
+
+Focused combined LIT passes **35** in **16.89 seconds**. Full FeMe LIT passes
+**4,097**, with **15 Skipped, 10 Unsupported and zero failures**, from
+**4,122** discovered tests in **78.90 seconds**. Serial DirectX LIT passes
+**632**, with **one expected failure and one Unsupported**, from **634**
+discovered tests in **105.11 seconds**. Timings are not controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Implicit comparison
+execution, shader clamps, broader conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. **No real Vulkan CTS
+pass is claimed**; the external runner remains unavailable.
+
 ## W2(a) cube comparison CPU regression scope (2026-11-22)
 
 The [cube comparison execution follow-up](W0WindowsIntegrationProbe.md#w2a-cube-comparison-cpu-execution-vm-2026-11-22)

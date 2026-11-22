@@ -1450,10 +1450,10 @@ resource kind; `ResourceMetadata` now validates and preserves that mode,
 and `buildHandleType` reconstructs legacy `dx.Sampler` handles through
 the same cast bridge. Mono/unknown/malformed modes remain unraised for
 normal admission to reject, and sampler kinds mislabeled as SRVs are not
-reconstructed. `raiseSample`/`raiseSampleLevel`/`raiseSampleCmpLevelZero`/
+reconstructed. `raiseSample`/`raiseSampleLevel`/`raiseSampleCmp`/
 `raiseTextureLoad`/`raiseTextureStore`/`raiseGetDimensions` cover item 3's
 "raising the access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
-scalar FP32 `dx.op.sampleCmpLevelZero` (65),
+scalar FP32 `dx.op.sampleCmp` (64)/`dx.op.sampleCmpLevelZero` (65),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
 `dx.op.getDimensions`'s `.x`/`.xy` fields (72, i.e. a `GetDimensions` call
 whose out-parameters only ever read width, or width and height together --
@@ -1471,9 +1471,9 @@ raising it needed a new `llvm.dx.resource.store.texture` canonical
 intrinsic and `DXILOpLowering::lowerTextureStore` added upstream first,
 symmetric with the existing `TextureLoad`/`load.level` pair -- cross-checked
 against `-dxil-op-lower` the same way every other raiser in this file is.
-Level-zero comparison mapping now has a numbered `DXILOp<65, ...>` and
-real `DXILOpLowering::lowerSampleCmpLevelZero` forward lowering to verify
-against. The canonical intrinsic's operand order is texture, comparison
+Comparison mapping now has numbered `DXILOp<64, ...>`/`DXILOp<65, ...>`
+definitions and shared `DXILOpLowering::lowerSampleCmp` forward lowering
+to verify against. The canonical intrinsic's operand order is texture, comparison
 sampler, coordinates, FP32 reference and offsets. Reverse raising checks
 operand types and all result uses before creating a replacement read:
 only FP32 field-zero scalar results are modeled, not status, aggregate or
@@ -1503,12 +1503,19 @@ nonzero/dynamic offsets and malformed direction/layer shapes fail admission.
 Ordinary DXIL 1D sampling/loading remains outside this increment; its
 existing eligibility checks and function signatures are unchanged.
 
-`dx.op.sampleBias`/`sampleGrad` (bias/gradient sampling) and remaining
-comparison-sampling/gather ops (`sampleCmp`, `textureGather*`) have no
-numbered `DXILOp<N, ...>` definition in this LLVM tree at all yet
-(`sampleCmp`/`textureGather` are declared `DXILOpClass`es with no wire
-opcode assigned), so there is nothing to raise from or verify against on
-the DXIL side -- that gap is upstream LLVM's, not FeMe's. See "Canonical
+Implicit `SampleCmp` preserves its comparison reference, coordinates,
+offsets and optional final FP32 MinLod clamp. Undefined/poison wire clamps
+raise to `llvm.dx.resource.samplecmp`; real clamps, including zero and
+dynamic values, raise to `llvm.dx.resource.samplecmp.clamp`. Malformed
+clamps and unsupported result uses remain unraised without an extra read.
+Real LLVM roundtrips cover all six comparison texture shapes; native SDK
+DXC pixel shaders cover plain and dynamic-clamp import. CPU normal/reference/
+AOT admission rejects both implicit forms with an explicit derivative-aware
+lowering diagnostic. They are not lowered as level-zero samples.
+
+Bias/gradient sampling remains outside FeMe's DXIL access raiser, despite
+LLVM forward lowering. Remaining gather forms still lack matching numbered
+wire operations in this tree. See "Canonical
 image operations" in feme/docs/FeMeGraphicsDesign.md for where the
 canonical `llvm.dx.resource.sample*`/`llvm.spv.resource.sample*`
 intrinsics these raisers produce are consumed by the CPU target, and this

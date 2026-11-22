@@ -2597,8 +2597,15 @@ sampler-heap reflection/artifact flag.
 
 Other shapes, half/vector results, default samplers and dynamic/undefined
 offsets fail explicit comparison admission. This does not normalize bound
-image/sampler handles or materialize static samplers. Implicit `SampleCmp`,
-clamps and comparison execution for the other raised dimensions remain open.
+image/sampler handles or materialize static samplers. Implicit `SampleCmp`
+now has checked scalar FP32 opcode-64 forward/reverse mapping, but not CPU
+execution. Undefined/poison clamps select the plain intrinsic; real zero,
+nonzero and dynamic clamps survive as `samplecmp.clamp`. Six-shape LLVM
+roundtrips and native SDK DXC pixel-shader import verify this compiler
+mapping. Normal/reference/AOT CPU admission explicitly requires
+derivative-aware DXIL implicit comparison sampling lowering for either
+form; it never substitutes explicit LOD zero. Implicit execution, shader
+clamps and broader comparison conformance remain open.
 
 For `Texture2DArray`, the third FP32 coordinate is passed separately as
 the array layer to `createSampleCmpArray2D`; the two constant i32 offsets

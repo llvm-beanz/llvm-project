@@ -113,7 +113,13 @@ coverage" in [../Design.md](../Design.md).
   Cubes use FP32 direction vectors of width three (four for cube arrays).
   Their unused scalar i32 offset must be poison/undef or zero; nonzero/
   dynamic offsets fail admission rather than being silently discarded.
-  Implicit comparison, clamps and half/vector results are not supported.
+  Scalar FP32 implicit `SampleCmp` also has checked opcode-64 mapping,
+  preserving real MinLod clamps (including zero and dynamic values) in
+  `llvm.dx.resource.samplecmp.clamp`; undefined/poison clamps select
+  `llvm.dx.resource.samplecmp`. This supports import/raising, not CPU
+  execution: both forms fail explicit derivative-aware lowering admission,
+  including AOT compilation. Implicit execution, shader clamps and
+  half/vector results remain unsupported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

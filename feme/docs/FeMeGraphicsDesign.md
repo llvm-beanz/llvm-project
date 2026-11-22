@@ -3059,10 +3059,14 @@ A follow-up pass closed R30's two self-contained remaining items:
 What R30 still leaves for a later increment, each for a concrete,
 documented reason rather than an oversight:
 
-- **Bias/gradient sampling and gather.** Apart from the new scalar FP32
-  `SampleCmpLevelZero` mapping, DXIL has no numbered wire opcode
-  for remaining comparison sampling/gather in this LLVM tree yet (see
-  Design.md's status note). Level-zero comparison now raises and executes
+- **Implicit comparison execution, bias/gradient sampling and gather.**
+  Scalar FP32 `SampleCmp` now has checked opcode-64 forward/reverse mapping
+  alongside `SampleCmpLevelZero` (65). Undefined/poison wire clamps select
+  the plain intrinsic; real zero/nonzero/dynamic MinLod clamps are retained.
+  Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
+  Both implicit forms explicitly fail CPU normal/reference/AOT admission
+  until derivative-aware lowering exists; they are not treated as LOD zero.
+  Level-zero comparison now raises and executes
   on the CPU for heap-backed scalar FP32 1D/2D/cube textures, including arrays,
   with constant texel offsets through shared comparison image helpers. Other dimensions,
   dynamic/undefined offsets and half/vector results remain unsupported.
@@ -3072,7 +3076,7 @@ documented reason rather than an oversight:
   Cubes use three-component direction vectors, with a fourth cube-array
   element coordinate, and no spatial offsets. Unused scalar offsets
   accept poison/undef or zero; nonzero/dynamic offsets are rejected.
-  For the remaining comparison/gather forms, the DXIL import half is still
+  For remaining gather forms, the DXIL import half is still
   blocked upstream; bias/
   gradient sampling has no import-side blocker but is simply not
   implemented yet. Update (roadmap L58): an ordinary, non-comparison

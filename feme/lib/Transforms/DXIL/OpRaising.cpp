@@ -1292,20 +1292,14 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // Scope: only the DXIL ops LLVM's own DirectX backend already lowers a
 // canonical intrinsic to (cross-checked against `-dxil-op-lower`, the same
 // standard every other raiser in this file holds itself to -- see the file
-// header comment): `Sample` (60), `SampleLevel` (62), `TextureLoad` (66) and
+// header comment): `Sample` (60), `SampleLevel` (62), scalar FP32 `SampleCmp`
+// (64)/`SampleCmpLevelZero` (65), `TextureLoad` (66) and
 // `GetDimensions`' `.x` and `.xy` fields (72, via
 // `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
 // `levels_xy` lowering to verify against yet, so a mip-count query stays
-// unraised). `SampleBias`/`SampleGrad` (bias/gradient sampling) and
-// implicit comparison sampling/gather have no numbered `DXILOp<N, ...>`
-// definition in this LLVM tree at all yet (`sampleCmp`/`textureGather` are
-// declared `DXILOpClass`es with no op assigned a wire opcode), so there is
-// nothing to raise from or verify against on the DXIL side; comparison sampling
-// is still implemented end-to-end for SPIR-V and the CPU target's runtime
-// helpers (see feme/docs/FeMeGraphicsDesign.md's "Canonical image
-// operations"), just not reachable from a DXIL module until upstream adds
-// that lowering. FP32 scalar `SampleCmpLevelZero` (65) has a forward
-// lowering and is raised below; CPU comparison-access lowering is separate.
+// unraised). Bias/gradient sampling and gather remain outside this raiser's
+// scope. Implicit comparison preserves the wire clamp but requires
+// derivative-aware CPU lowering; only level-zero comparison executes on CPU.
 //===----------------------------------------------------------------------===//
 
 /// The number of texture coordinate components DXIL's sample/load ops
@@ -1523,10 +1517,11 @@ bool raiseSampleLevel(CallInst &CI) {
   return true;
 }
 
-/// Raises FP32 `SampleCmpLevelZero` (65), preserving the comparison reference.
+/// Raises FP32 `SampleCmp` (64)/`SampleCmpLevelZero` (65), preserving the
+/// comparison reference and any real implicit-LOD clamp.
 /// Only result field zero is defined; status/aggregate uses remain unraised.
-bool raiseSampleCmpLevelZero(CallInst &CI) {
-  if (CI.arg_size() != 11)
+bool raiseSampleCmp(CallInst &CI, bool IsLevelZero) {
+  if (CI.arg_size() != (IsLevelZero ? 11u : 12u))
     return false;
   auto *RetTy = dyn_cast<StructType>(CI.getType());
   if (!RetTy || RetTy->getNumElements() != 5 ||
@@ -1551,6 +1546,8 @@ bool raiseSampleCmpLevelZero(CallInst &CI) {
   unsigned NumOffsets = getTextureOffsetComponents(HandleTy->getDimension());
   if (!CI.getArgOperand(10)->getType()->isFloatTy())
     return false;
+  if (!IsLevelZero && !CI.getArgOperand(11)->getType()->isFloatTy())
+    return false;
   for (unsigned I = 0; I != NumCoords; ++I)
     if (!CI.getArgOperand(3 + I)->getType()->isFloatTy())
       return false;
@@ -1568,12 +1565,19 @@ bool raiseSampleCmpLevelZero(CallInst &CI) {
   Value *Offset = packTextureVector(Builder, Offsets);
   if (!Offset)
     Offset = PoisonValue::get(Builder.getInt32Ty());
+  bool HasClamp = !IsLevelZero && !isa<UndefValue>(CI.getArgOperand(11));
+  Intrinsic::ID ID = IsLevelZero ? Intrinsic::dx_resource_samplecmplevelzero
+                     : HasClamp  ? Intrinsic::dx_resource_samplecmp_clamp
+                                 : Intrinsic::dx_resource_samplecmp;
   auto *SampleFn = Intrinsic::getOrInsertDeclaration(
-      CI.getModule(), Intrinsic::dx_resource_samplecmplevelzero,
+      CI.getModule(), ID,
       {Builder.getFloatTy(), HandleTy, SamplerTy, Coord->getType(),
        Offset->getType()});
-  Value *Loaded = Builder.CreateCall(
-      SampleFn, {Handle, Sampler, Coord, CI.getArgOperand(10), Offset});
+  SmallVector<Value *, 6> Args = {Handle, Sampler, Coord, CI.getArgOperand(10),
+                                  Offset};
+  if (HasClamp)
+    Args.push_back(CI.getArgOperand(11));
+  Value *Loaded = Builder.CreateCall(SampleFn, Args);
   if (!replaceResRetExtracts(CI, 1, Loaded, Builder))
     llvm_unreachable("comparison result uses were validated before mutation");
   CI.eraseFromParent();
@@ -2112,8 +2116,11 @@ bool raiseResourceOps(Module &M) {
   Changed |= forEachDXOpCall(62, [](CallInst &CI) { // SampleLevel
     return raiseSampleLevel(CI);
   });
+  Changed |= forEachDXOpCall(64, [](CallInst &CI) { // SampleCmp
+    return raiseSampleCmp(CI, /*IsLevelZero=*/false);
+  });
   Changed |= forEachDXOpCall(65, [](CallInst &CI) { // SampleCmpLevelZero
-    return raiseSampleCmpLevelZero(CI);
+    return raiseSampleCmp(CI, /*IsLevelZero=*/true);
   });
   Changed |= forEachDXOpCall(66, [](CallInst &CI) { // TextureLoad
     return raiseTextureLoad(CI);

@@ -90,7 +90,12 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   fourth cube-element coordinate for arrays. Unused scalar i32 offsets
   accept poison/undef or zero; nonzero/dynamic offsets fail admission.
   Other dimensions and dynamic/undefined offsets fail explicit admission.
-  Implicit comparison, clamps and half/vector results remain unsupported.
+  Scalar FP32 implicit `SampleCmp` now has checked opcode-64 import/raising,
+  with undefined/poison clamps selecting `llvm.dx.resource.samplecmp` and
+  real zero/nonzero/dynamic clamps preserved in `samplecmp.clamp`. It does
+  not execute on CPU: normal/reference/AOT admission explicitly requires
+  derivative-aware DXIL implicit comparison sampling lowering. Implicit
+  execution, shader clamps and half/vector results remain unsupported.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in
