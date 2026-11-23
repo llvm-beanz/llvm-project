@@ -11,7 +11,7 @@
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 ; Other shapes remain rejected in normal/reference/AOT compute paths.
-; CHECK: requires heap-backed FP32 Texture2D/Texture2DArray explicit-gradient sampling
+; CHECK: requires heap-backed FP32 2D/cube (including array) explicit-gradient sampling
 ;--- plain.ll
 define void @main() #0 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32 0)

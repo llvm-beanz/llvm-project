@@ -740,8 +740,19 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                  Kind == dxil::ResourceKind::TextureCubeArray) {
         Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
         Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
-        CubeDirectionDerivatives D =
-            getOrSynthesizeSampleCubeDerivatives(Builder, F, U, V, Z);
+        CubeDirectionDerivatives D;
+        if (IsGrad) {
+          Value *DX = CI->getArgOperand(3);
+          Value *DY = CI->getArgOperand(4);
+          D = {Builder.CreateExtractElement(DX, uint64_t{0}),
+               Builder.CreateExtractElement(DY, uint64_t{0}),
+               Builder.CreateExtractElement(DX, uint64_t{1}),
+               Builder.CreateExtractElement(DY, uint64_t{1}),
+               Builder.CreateExtractElement(DX, uint64_t{2}),
+               Builder.CreateExtractElement(DY, uint64_t{2})};
+        } else {
+          D = getOrSynthesizeSampleCubeDerivatives(Builder, F, U, V, Z);
+        }
         if (Kind == dxil::ResourceKind::TextureCubeArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
           Loaded = createSampleCubeArray(
@@ -1337,7 +1348,9 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   unsigned ResultWidth = FP32Width(CI.getType());
   auto Kind = TextureTy->getDimension();
   if (IsGrad && Kind != dxil::ResourceKind::Texture2D &&
-      Kind != dxil::ResourceKind::Texture2DArray)
+      Kind != dxil::ResourceKind::Texture2DArray &&
+      Kind != dxil::ResourceKind::TextureCube &&
+      Kind != dxil::ResourceKind::TextureCubeArray)
     return false;
   unsigned NumCoords;
   switch (Kind) {
@@ -1367,7 +1380,7 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   Type *CoordTy = Type::getFloatTy(Ctx);
   if (NumCoords != 1)
     CoordTy = FixedVectorType::get(CoordTy, NumCoords);
-  Type *GradTy = FixedVectorType::get(Type::getFloatTy(Ctx), 2);
+  Type *GradTy = FixedVectorType::get(Type::getFloatTy(Ctx), IsCube ? 3 : 2);
   if (IsGrad && (CI.getArgOperand(3)->getType() != GradTy ||
                  CI.getArgOperand(4)->getType() != GradTy))
     return false;

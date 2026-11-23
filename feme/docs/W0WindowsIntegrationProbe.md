@@ -27,6 +27,44 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) explicit cube gradient CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `TextureCube::SampleGrad` and `TextureCubeArray::SampleGrad`
+now execute with default samplers, shape-matched coordinates/gradients,
+scalar/vector results up to the declared texel width (at most four) and
+optional shader MinLod clamps. Three-component dP/dX and dP/dY feed six raw
+direction derivatives to the existing cube projection/LOD runtime with zero
+shader bias. Array elements remain coordinate-only. Unused zero/undef/poison
+scalar offsets are accepted; nonzero/dynamic offsets remain rejected.
+Supplied gradients select LOD in any stage without synthesized derivatives
+or an LOD-zero approximation. Existing tangent-plane projection is unchanged.
+
+Transform tests check derivative order, separate elements, clamps, narrowing,
+reflection, handle cleanup and idempotence, retaining malformed coordinates/
+gradients and nonzero offsets. Admission tests cover every stage and supported/
+unsupported offsets. Compiled fragment tests independently vary all six
+signed gradient components on all faces, selecting mips 0/1/2 despite
+lane-uniform directions while preserving major-axis projection behavior.
+Divergent clamps/elements, scalar/vector components, helpers, partial waves,
+guards and repeats are checked. Normal/reference compute tests select
+divergent mips on all faces and both array elements. A 13-lane normal/
+reference/AOT runner fixture covers plain/clamped cube/array forms,
+scalar/vector results, faces/elements, divergent gradients/clamps, partial
+waves, guards and repeats on one mip; runner image YAML still prepares one mip.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 930; full FeMe LIT passes 4,151, skips
+15 and marks 10 unsupported, with zero failures among 4,176 discovered tests.
+Five new tests add five passes. Existing biased/comparison execution, ordinary
+DXIL sampling/loading eligibility, SPIR-V gradient handling, artifact ABI 8
+and argument layouts are unchanged. 1D/array and 3D gradient CPU calls remain
+explicitly rejected.
+
+This is canonical CPU execution, separate from native SDK DXC import and
+owned D3D12 execution. Bound/static descriptor materialization remains
+open; owned `CreateDevice` remains `E_NOTIMPL`. W2(a)/W2(b)/W3(b) remain
+open. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) explicit 2D-array gradient CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 `Texture2DArray::SampleGrad` now executes through the existing

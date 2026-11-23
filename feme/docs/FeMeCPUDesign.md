@@ -2756,9 +2756,10 @@ missing stage identity. Native DXC plain/clamped array import is distinct
 from canonical compiled execution; bound descriptors remain unsupported.
 
 FP32 DXIL `SampleGrad` now has checked opcode-63 import/raising against
-LLVM's existing forward lowering, with bounded 2D/array CPU execution.
-Scalar/vector FP32 texels up to four components and default samplers cover 1D/array, 2D/array,
-3D and cube/array. Canonical operands preserve coordinates/layers, dP/dX,
+LLVM's existing forward lowering, with bounded 2D/cube (including array)
+CPU execution. Scalar/vector FP32 texels up to four components and default
+samplers cover 1D/array, 2D/array, 3D and cube/array import.
+Canonical operands preserve coordinates/layers, dP/dX,
 dP/dY, signed/dynamic spatial offsets and optional real MinLod clamps.
 Gradient width excludes the array layer; cubes retain three raw-direction
 components. Undefined/poison clamps select the plain intrinsic; zero and
@@ -2768,17 +2769,20 @@ use before adding a sample. Status/aggregate/out-of-width uses, malformed
 calls, comparison samplers, half/integer texels and nonzero/dynamic unused
 gradient/offset slots stay unraised without another read.
 Seven-shape LLVM roundtrips, raw guards, idempotence and native SDK DXC
-plain/clamped import pass. Heap-backed FP32 Texture2D/Texture2DArray gradient
-sampling executes with default samplers, shape-matched coordinates/gradients,
-constant signed offsets and optional shader clamps. Scalar/vector results may use up
-to the declared texel width (at most four). Supplied gradients drive LOD in
-any stage, without synthesized derivatives or an LOD-zero approximation.
-Array coordinates retain the layer; gradients remain two-component U/V
-vectors, and the layer is never differentiated.
+plain/clamped import pass. Heap-backed FP32 2D/cube gradient sampling
+(including arrays) executes with default samplers, shape-matched coordinates/
+gradients and optional shader clamps. Scalar/vector results may use up to
+the declared texel width (at most four). 2D supports constant signed spatial
+offsets; cube offsets must be unused zero/undef/poison scalars. Supplied
+gradients drive LOD in any stage without synthesized derivatives or an
+LOD-zero approximation. Array elements remain coordinate-only, excluded
+from both two-component U/V or three-component raw-direction gradients.
+Six supplied cube direction derivatives use the existing cube projection/
+LOD helpers with zero shader bias and a separate cube-array element.
 Compiled fragment and normal/reference compute tests verify divergent
-multi-mip/layer selection and clamps; single-mip runner tests cover normal,
-reference and AOT dispatch, offsets, components, partial waves and repeats.
-Other gradient shapes and malformed or non-heap operands remain explicitly
+multi-mip/face/element selection and clamps; single-mip runner tests cover
+normal, reference and AOT dispatch, components, partial waves and repeats.
+1D/array, 3D and malformed or non-heap gradient calls remain explicitly
 rejected. Existing biased/comparison execution and SPIR-V gradient handling
 are unchanged. No descriptor materialization or owned-device execution is added.
 

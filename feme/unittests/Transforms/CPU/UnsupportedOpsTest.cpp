@@ -516,6 +516,52 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedArrayGradientSamplingInEveryStage) {
   }
 }
 
+TEST(UnsupportedOpsTest, AdmitsOnlySupportedCubeGradientSamplingInEveryStage) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @cube(i32 %offset, <3 x float> %dx, <3 x float> %dy) {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_5t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call float @llvm.dx.resource.samplegrad.f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.v3f32.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5) %t, target("dx.Sampler", 0) %s, <3 x float> <float 1.0, float 0.0, float 0.0>, <3 x float> %dx, <3 x float> %dy, i32 poison)
+      ret float %r
+    }
+    define <4 x float> @array(i32 %offset, <3 x float> %dx, <3 x float> %dy, <4 x float> %coord, float %clamp) {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_9t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.v3f32.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9) %t, target("dx.Sampler", 0) %s, <4 x float> %coord, <3 x float> %dx, <3 x float> %dy, i32 0, float %clamp)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_5t(i32)
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_9t(i32)
+    declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+    declare float @llvm.dx.resource.samplegrad.f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.v3f32.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5), target("dx.Sampler", 0), <3 x float>, <3 x float>, <3 x float>, i32)
+    declare <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.v3f32.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9), target("dx.Sampler", 0), <4 x float>, <3 x float>, <3 x float>, i32, float)
+  )");
+  ASSERT_TRUE(M);
+  for (StringRef Name : {"cube", "array"}) {
+    Function *F = M->getFunction(Name);
+    auto *Sample = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    Type *OffsetTy = Sample->getArgOperand(5)->getType();
+    Constant *Offsets[] = {ConstantInt::get(OffsetTy, 0),
+                           UndefValue::get(OffsetTy),
+                           PoisonValue::get(OffsetTy)};
+    for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
+      SCOPED_TRACE((Name + ": " + Stage).str());
+      if (!Stage.empty())
+        F->addFnAttr("feme.shader.stage", Stage);
+      for (Constant *Offset : Offsets) {
+        Sample->setArgOperand(5, Offset);
+        EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+      }
+      Sample->setArgOperand(5, ConstantInt::get(OffsetTy, 1));
+      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+      Sample->setArgOperand(5, F->getArg(0));
+      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+      Sample->setArgOperand(5, PoisonValue::get(OffsetTy));
+    }
+  }
+}
+
 TEST(UnsupportedOpsTest, RejectsNonHeapGradientSamplingInEveryStage) {
   LLVMContext Ctx;
   auto M = parseIR(Ctx, R"(
@@ -542,7 +588,7 @@ TEST(UnsupportedOpsTest, RejectsNonHeapGradientSamplingInEveryStage) {
           Failed<StringError>(testing::Property(
               &StringError::getMessage,
               testing::HasSubstr(
-                  "requires heap-backed FP32 Texture2D/Texture2DArray "
+                  "requires heap-backed FP32 2D/cube (including array) "
                   "explicit-gradient sampling"))));
     }
     F->eraseFromParent();

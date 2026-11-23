@@ -1216,6 +1216,46 @@ SDK import remains separate from canonical execution and owned-device
 execution; `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) explicit cube gradient CPU execution progress (2026-11-23):
+heap-backed FP32 `TextureCube::SampleGrad` and `TextureCubeArray::SampleGrad`
+now execute through the existing cube projection/sampling runtime. Shared
+admission and lowering require default samplers, shape-matched FP32 coordinates/
+gradients and scalar/vector results up to the declared texel width (at most
+four). Both gradients have three raw-direction components; cube-array
+coordinates add a separate element that is never differentiated. Unused
+scalar zero/undef/poison offsets and optional shader MinLod clamps are
+supported; nonzero/dynamic cube offsets remain rejected. Six supplied
+direction derivatives drive existing cube LOD with zero shader bias,
+without synthesized derivatives, a fragment-only gate or an LOD-zero
+approximation. Existing tangent-plane projection/LOD behavior is unchanged.
+
+Transform tests verify all six derivative operands in runtime order,
+separate array elements, clamps, narrowing, reflection, handle cleanup and
+idempotence. Missing elements, layer-width gradients and nonzero offsets
+stay untouched; admission tests cover every stage and zero/undef/poison
+versus nonzero/dynamic offsets. Compiled fragment tests independently vary
+all six signed gradient components on all six faces, selecting mips 0/1/2
+despite lane-uniform directions and retaining the existing major-axis
+projection behavior. Divergent clamps/elements, scalar/vector components,
+helpers, partial waves, guards and repeated prepared invocations are checked.
+Normal/reference compute tests select divergent mips on all faces and both
+array elements. A 13-lane normal/reference/AOT runner fixture covers plain/
+clamped cube/array forms, scalar/vector results, divergent gradients/clamps,
+faces/elements, partial waves, guards and repeats on one mip; runner image
+YAML still prepares only one mip.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 930; full FeMe LIT passes 4,151 with
+15 skipped, 10 unsupported and zero failures among 4,176 discovered tests.
+Five new tests add five passes. Existing biased/comparison execution,
+ordinary DXIL sampling/loading eligibility, SPIR-V gradient handling,
+artifact ABI 8 and argument layouts are unchanged. 1D/array and 3D gradient
+CPU execution, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. Native SDK import
+remains separate from canonical CPU and owned-device execution;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

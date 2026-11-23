@@ -157,17 +157,19 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   gradient width excludes array layers. Undefined/poison clamps select the
   plain intrinsic; zero/dynamic clamps remain clamped. Seven-shape roundtrips,
   raw guards, idempotence and native DXC plain/clamped import pass.
-  Heap-backed FP32 Texture2D/Texture2DArray gradients execute in any stage
+  Heap-backed FP32 2D/cube gradients (including arrays) execute in any stage
   through normal/reference/AOT paths, using default samplers, shape-matched
-  coordinates/gradients, constant signed offsets and optional shader clamps.
+  coordinates/gradients and optional shader clamps. 2D uses constant signed
+  offsets; cubes require unused zero/undef/poison scalar offsets.
   Scalar/vector results cannot exceed the declared texel width (at most
-  four). Supplied gradients drive LOD without derivative substitution or
-  an LOD-zero approximation. Array layers remain coordinate-only; gradients
-  have two U/V components. Compiled-stage tests verify multi-mip/layer
-  selection; runner image YAML currently prepares one mip, so its
-  execution fixtures cover layers, offsets, components, partial waves and
-  repeats.
-  Other gradient shapes remain explicitly rejected. No descriptor
+  four). Supplied gradients drive existing LOD/projection helpers without
+  derivative substitution or an LOD-zero approximation. Array elements
+  remain coordinate-only, excluded from two-component U/V or three-component
+  raw-direction gradients. Compiled-stage tests verify multi-mip/face/
+  element selection; runner image YAML currently prepares one mip, so its
+  execution fixtures cover faces/elements, offsets, components, partial
+  waves and repeats.
+  1D/array and 3D gradient calls remain explicitly rejected. No descriptor
   materialization or owned-device execution is enabled.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
