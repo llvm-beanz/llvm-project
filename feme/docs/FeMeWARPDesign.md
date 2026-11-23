@@ -140,7 +140,7 @@ The original compute-only baseline is no longer current:
   undefined/poison clamps select the plain intrinsic. Status/aggregate uses
   and malformed calls stay unraised without an extra sample. Seven-shape
   roundtrips, idempotence and native DXC pixel-shader import pass.
-  Heap-backed FP32 Texture2D biased sampling now executes in compiled fragment
+  Heap-backed FP32 Texture2D/Texture2DArray biased sampling now executes in compiled fragment
   stages with real coarse U/V derivatives, implicit LOD, bias, constant signed
   offsets and optional shader MinLod clamps. Scalar/vector results up to the
   declared texel width (at most four) narrow the shared four-component result.
@@ -151,6 +151,11 @@ The original compute-only baseline is no longer current:
   handles, comparison samplers and dynamic/undefined offsets reject explicitly;
   normal/reference/AOT compute rejection is tested. This does not materialize
   descriptors or establish owned D3D12 execution.
+  Biased array sampling passes a separate third FP32 layer coordinate;
+  only U/V are differentiated and the two signed offsets remain spatial.
+  Distinct layer/mip/texel/component values, divergent layers/bias/clamps,
+  helpers and guarded partial waves are tested. Missing-layer coordinates
+  and compute/unannotated array access still reject explicitly.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.

@@ -2696,9 +2696,9 @@ two-/three-/four-component FP32 texels and default samplers. Result uses
 and operand types are validated before adding a sample; unsupported
 status/aggregate uses and malformed calls remain unraised without an
 extra read.
-Heap-backed FP32 `Texture2D::SampleBias` now executes in compiled fragment
-stages through `createSample2D`. The shared read-only predicate gates early
-admission, signature growth and lowering on a default sampler, two FP32
+Heap-backed FP32 `Texture2D`/`Texture2DArray::SampleBias` now executes in compiled fragment
+stages through `createSample2D`/`createSample2DArray`. The shared read-only predicate gates early
+admission, signature growth and lowering on a default sampler, shape-matched FP32
 coordinates and two constant signed i32 offsets. Scalar/vector results
 up to the declared FP32 texel width (at most four) narrow the shared
 four-component result. Real coarse U/V derivatives, implicit LOD, bias,
@@ -2709,12 +2709,23 @@ derivative axes, distinct mip/texel/component values, divergent -1/0/+1
 bias and zero/two clamps, helper-only lanes, wave sizes 4/8, one/three quads,
 partial final waves, output guards, result masks and repeated invocation.
 Transform tests verify exact operands, idempotence, reflection and rejection
-of compute, arrays, comparison samplers and dynamic offsets. Admission
+of compute, malformed array coordinates, comparison samplers and dynamic offsets. Admission
 also rejects non-heap handles, missing stage and undefined offsets;
 normal/reference/AOT compute rejection remains tested. Other biased
 shapes/stages remain open. Existing SPIR-V bias handling, ordinary DXIL
 sampling and comparison execution are unchanged; implicit LOD is not
 approximated with level zero.
+Array sampling passes the third FP32 coordinate separately as the layer;
+it never differentiates the layer or offsets it spatially. A compiled array
+test checks complementary mip values across two layers, distinct texels/
+components, divergent layers and -1/0/+1 bias, dynamic zero/two clamps,
+both screen derivative axes, helper-only lanes, wave sizes 4/8, one/three
+quads, partial final waves, output guards, result masks and repeated
+invocation. Array transforms check exact layer/derivative/bias/offset/clamp
+operands, result shaping, idempotence, reflection and missing-layer/compute
+rejection. Array admission also rejects dynamic/undefined offsets and
+missing stage identity. Native DXC plain/clamped array import is distinct
+from canonical compiled execution; bound descriptors remain unsupported.
 
 The runner's cube YAML preparation now uses six physical face layers for
 `dimension: cube`; `cube-array` requires an explicit positive multiple of

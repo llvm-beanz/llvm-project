@@ -3,12 +3,14 @@
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /Fo %t/plain.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CLAMP /Fo %t/clamp.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ZERO /Fo %t/zero.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /Fo %t/array-plain.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /D CLAMP /Fo %t/array.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /Fo %t/cube.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /D CLAMP /Fo %t/cube-array.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,PLAIN
 # RUN: feme-translate --import-dxil %t/clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,CLAMP
 # RUN: feme-translate --import-dxil %t/zero.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,ZERO
+# RUN: feme-translate --import-dxil %t/array-plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,PLAIN
 # RUN: feme-translate --import-dxil %t/array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,CLAMP
 # RUN: feme-translate --import-dxil %t/cube.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBE,PLAIN
 # RUN: feme-translate --import-dxil %t/cube-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,CLAMP

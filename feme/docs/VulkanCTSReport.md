@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) array biased-sampling CPU regression scope (2026-11-23)
+
+The [array biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-array-biased-sampling-cpu-execution-vm-2026-11-23)
+executes heap-backed FP32 DXIL `Texture2DArray::SampleBias` in compiled
+fragment stages. The shared array helper receives real U/V derivatives,
+a separate layer coordinate, bias, constant signed spatial offsets and
+optional shader MinLod clamps. The layer is never differentiated.
+Compute/unannotated stages, other biased shapes, malformed layer coordinates
+and dynamic/undefined offsets still reject. No new Vulkan sampler
+implementation or LOD-zero approximation is added.
+
+One LIT fixture and two unit tests cover exact operands/result shaping,
+idempotence/reflection, admission and compiled execution. Distinct layer/
+mip/texel/component values, both derivative axes, divergent layers/bias/
+clamps, helper-only lanes, partial waves, guards, masks and repeated
+invocation are checked. Expanded fixtures verify native SDK DXC plain/
+clamped array import and normal/reference/AOT compute rejection, not
+owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes **901** in **16.27 seconds**. Full
+FeMe LIT passes **4,122**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,147** discovered tests in **95.68 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Other biased shapes/
+stages, gradient mapping/execution, broader sampling conformance,
+bound/static descriptor materialization and owned D3D12 execution remain
+open. **No real Vulkan CTS pass is claimed**; the external runner remains
+unavailable.
+
 ## W2(a)/W3(b) fragment biased-sampling CPU regression scope (2026-11-23)
 
 The [fragment biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fragment-biased-sampling-cpu-execution-vm-2026-11-23)

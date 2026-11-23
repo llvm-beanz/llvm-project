@@ -27,6 +27,41 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) array biased-sampling CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `Texture2DArray::SampleBias` now executes in compiled
+fragment stages through the shared array sampler helper. The third FP32
+coordinate selects the layer separately; only U/V are differentiated and
+the two signed constant offsets remain spatial. Bias, optional shader
+MinLod clamps, scalar/vector result shaping, sampler reflection and
+post-traversal dead-handle cleanup are retained. The shared matcher gates
+admission, signature growth and lowering. Compute/unannotated stages,
+other biased shapes, malformed layer coordinates and dynamic/undefined
+offsets still reject explicitly.
+
+One new LIT fixture and two unit tests cover exact lowering operands,
+result shaping, idempotence/reflection, admission and compiled execution.
+Distinct layer/mip/texel/component values, both screen derivative axes,
+divergent layers and -1/0/+1 bias, dynamic zero/two clamps, helper-only
+lanes, wave sizes 4/8, one/three quads, partial final waves, output guards,
+result masks and repeated invocation pass. Expanded fixtures verify native
+SDK DXC plain/clamped array pixel-shader import and array-specific normal/
+reference/AOT compute rejection. Native import is not native DXC execution
+through an owned D3D12 device.
+
+Expanded CPU/DXIL/comparison LIT passes **901** in **16.27 seconds**. Full
+FeMe LIT passes **4,122**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,147** discovered tests in **95.68 seconds**. Three added tests add
+three passes. Assertions, disabled PCH, sccache and the two-worker build
+limit remain; timings are not controlled speedups.
+
+Existing plain 2D sampling/comparison, SPIR-V bias handling, artifact ABI 8
+and argument layouts are unchanged. Other biased shapes/stages, gradient
+mapping/execution, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) fragment biased-sampling CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 `Texture2D::SampleBias` now executes in compiled fragment

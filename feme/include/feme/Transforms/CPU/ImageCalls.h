@@ -1812,7 +1812,9 @@ llvm::CallInst *createStore2DArrayMSI32(llvm::IRBuilderBase &Builder,
 /// sample). \p Bias/\p MinLodClamp (roadmap L60(a)) mirror
 /// `createSample2D`'s own `Bias`/`MinLodClamp` parameters -- pass a zero
 /// constant/negative infinity, respectively, for a caller with neither to
-/// give. \p OffsetX/\p OffsetY (roadmap L33) are the same `ConstOffset`
+/// give. DXIL Texture2DArray SampleBias passes real bias/clamp values too;
+/// its separate array layer is never differentiated. \p OffsetX/\p OffsetY
+/// (roadmap L33) are the same `ConstOffset`
 /// image operand `createSample2D` documents -- an ordinary (non-comparison)
 /// `Array2D` sample can carry a real, possibly-nonzero one too (SPIR-V's
 /// `ConstOffset` image operand is equally legal against an arrayed

@@ -968,6 +968,39 @@ materialization and owned D3D12 execution remain open. `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) array biased-sampling CPU progress (2026-11-23): heap-backed
+FP32 `Texture2DArray::SampleBias` now lowers in fragment stages through
+the shared array sampler helper. The third FP32 coordinate selects the
+layer independently; only U/V are differentiated and both signed
+constant offsets remain spatial. Bias, optional shader MinLod clamps,
+scalar/vector result shaping, sampler reflection and dead-handle cleanup
+are retained. Admission, signature growth and lowering share the matcher.
+Compute/unannotated stages, other biased shapes, malformed layer coordinates
+and dynamic/undefined offsets still reject explicitly.
+
+One new LIT fixture and two unit tests cover exact layer/derivative/bias/
+offset/clamp operands, result shaping, idempotence/reflection, admission
+and compiled execution. Distinct layer/mip/texel/component values detect
+wrong layer, mip, offset or channel selection. Both screen derivative
+axes, divergent layers and -1/0/+1 bias, dynamic zero/two clamps,
+helper-only lanes, wave sizes 4/8, one/three quads, partial final waves,
+output guards, result masks and repeated invocation pass. Expanded
+fixtures verify native SDK DXC plain/clamped array import and array-specific
+normal/reference/AOT compute rejection. Native import remains distinct
+from canonical execution and owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes 901 in 16.27 seconds. Full FeMe LIT
+passes 4,122, with 15 skipped, 10 unsupported and zero failures, from
+4,147 discovered tests in 95.68 seconds. Three added tests add three passes.
+Assertions, disabled PCH, sccache and the two-worker build limit remain;
+timings are not controlled speedups. Existing plain 2D sampling/comparison,
+SPIR-V bias handling, artifact ABI 8 and argument layouts are unchanged.
+Other biased shapes/stages, gradient mapping/execution, broader sampling
+conformance, bound/static descriptor materialization and owned D3D12
+execution remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

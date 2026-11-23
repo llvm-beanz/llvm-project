@@ -710,14 +710,27 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                ? CI->getArgOperand(5)
                                : ConstantFP::getInfinity(Builder.getFloatTy(),
                                                          /*Negative=*/true);
-      Value *Loaded = createSample2D(
-          Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0), U,
-          V, D.DUdX, D.DUdY, D.DVdX, D.DVdY,
-          ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getFalse(),
-          CI->getArgOperand(3),
-          Builder.CreateExtractElement(Offset, uint64_t{0}),
-          Builder.CreateExtractElement(Offset, uint64_t{1}), MinLodClamp,
-          Builder.getTrue(), CI->getName());
+      Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
+      Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+      Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+      bool IsArray =
+          cast<dxil::TextureExtType>(Image->getType())->getDimension() ==
+          dxil::ResourceKind::Texture2DArray;
+      Value *Loaded;
+      if (IsArray) {
+        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+        Loaded = createSample2DArray(
+            Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0), U,
+            V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero, Builder.getFalse(),
+            CI->getArgOperand(3), OffsetX, OffsetY, MinLodClamp,
+            Builder.getTrue(), CI->getName());
+      } else {
+        Loaded = createSample2D(Builder, Env, Image->getArgOperand(0),
+                                Sampler->getArgOperand(0), U, V, D.DUdX, D.DUdY,
+                                D.DVdX, D.DVdY, Zero, Builder.getFalse(),
+                                CI->getArgOperand(3), OffsetX, OffsetY,
+                                MinLodClamp, Builder.getTrue(), CI->getName());
+      }
       if (Loaded->getType() != CI->getType()) {
         if (auto *VecTy = dyn_cast<FixedVectorType>(CI->getType())) {
           SmallVector<int, 4> Components;
@@ -956,11 +969,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                                        0.0),
                                       ConstantFP::get(Builder.getFloatTy(),
                                                        0.0)};
-      // DXIL's own `Texture2DArray::SampleBias`/clamp/offset overloads are
-      // not threaded through this pass yet (roadmap L60(a)/L33 are
-      // SPIR-V-only so far) -- pass a zero `Bias` constant, zero
-      // `Offset` constants, and a negative-infinity (no-op) `MinLodClamp`
-      // constant, mirroring Plain2D's own no-op constants above.
+      // Ordinary Sample/SampleLevel retain zero bias/offset and no shader
+      // clamp here. SampleBias uses its dedicated path above.
       Value *ZeroOffset = Builder.getInt32(0);
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
@@ -1230,7 +1240,10 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
     return false;
   auto Image = classifyImageHandle(CI.getArgOperand(0));
   auto Sampler = classifySamplerHandle(CI.getArgOperand(1));
-  if (!Image || Image->Shape != ImageShape::Plain2D || !Sampler)
+  if (!Image ||
+      (Image->Shape != ImageShape::Plain2D &&
+       Image->Shape != ImageShape::Array2D) ||
+      !Sampler)
     return false;
   auto *TextureTy = cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
   auto *SamplerTy = cast<dxil::SamplerExtType>(CI.getArgOperand(1)->getType());
@@ -1253,7 +1266,8 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
   LLVMContext &Ctx = CI.getContext();
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
       CI.getArgOperand(2)->getType() !=
-          FixedVectorType::get(Type::getFloatTy(Ctx), 2) ||
+          FixedVectorType::get(Type::getFloatTy(Ctx),
+                               Image->Shape == ImageShape::Array2D ? 3 : 2) ||
       CI.getArgOperand(4)->getType() !=
           FixedVectorType::get(Type::getInt32Ty(Ctx), 2))
     return false;

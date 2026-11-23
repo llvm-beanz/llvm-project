@@ -116,7 +116,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   MinLod clamps survive. Undefined/poison clamps select the plain intrinsic;
   real zero/nonzero/dynamic clamps remain clamped. Seven-shape LLVM roundtrips
   and native DXC pixel-shader import are tested.
-  Heap-backed FP32 Texture2D biased sampling now executes in the separate
+  Heap-backed FP32 Texture2D/Texture2DArray biased sampling now executes in the separate
   compiled fragment-stage path, with real U/V derivatives, implicit LOD,
   bias, constant signed offsets and optional shader MinLod clamps.
   Scalar/vector results up to the declared texel width (at most four) narrow
@@ -126,6 +126,10 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   reference/AOT dispatch. Other shapes/stages, non-heap handles, comparison
   samplers and dynamic/undefined offsets also reject explicitly; no
   descriptor materialization or owned-device execution is enabled.
+  Biased arrays use FP32 (U, V, layer); only U/V are differentiated and
+  the two offsets remain spatial. Compiled array tests check divergent
+  layers/bias/clamps, layer/mip/offset/component selection and guarded
+  partial waves. Missing-layer coordinates still reject explicitly.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

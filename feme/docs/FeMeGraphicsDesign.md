@@ -3106,7 +3106,7 @@ documented reason rather than an oversight:
   survive. Undefined/poison clamps select the plain intrinsic; zero and
   dynamic clamps remain clamped. Status/aggregate uses and malformed calls
   stay unraised without an extra sample. Seven-shape roundtrips, idempotence
-  and native DXC import pass. Heap-backed FP32 Texture2D biased sampling now
+  and native DXC import pass. Heap-backed FP32 Texture2D/Texture2DArray biased sampling now
   executes in compiled fragment stages through the shared 2D helper, with
   real coarse U/V derivatives, implicit LOD, bias, constant signed offsets
   and optional shader MinLod clamps. Scalar/vector results up to the
@@ -3116,13 +3116,18 @@ documented reason rather than an oversight:
   unannotated stages, other shapes, non-heap handles, comparison samplers
   and dynamic/undefined offsets reject explicitly; normal/reference/AOT
   compute rejection is tested. No descriptor materialization is enabled.
+  Biased arrays pass a separate third FP32 layer coordinate; only U/V are
+  differentiated and both offsets remain spatial. Compiled array execution
+  checks distinct layer/mip/texel/component values, divergent layers/bias/
+  clamps, helpers and guarded partial waves. Missing-layer coordinates
+  still reject; changing only the layer cannot change the mip.
   For remaining gather forms, the DXIL import half is still
   blocked upstream; gradient sampling is not yet raised despite existing
   LLVM forward lowering. Update (roadmap L58): an ordinary, non-comparison
   `Bias` operand is now implemented on the SPIR-V import side, scoped to
   `Plain2D`/`Cube` only (matching roadmap L26's own `MinLodClamp` scope
   precedent); ordinary DXIL `Sample`/`SampleLevel` still pass zero bias to
-  the CPU runtime, while heap-backed FP32 Texture2D `SampleBias` passes real
+  the CPU runtime, while heap-backed FP32 Texture2D/Texture2DArray `SampleBias` passes real
   bias in fragment stages. A `Dref`+`Bias`
   combination (depth-comparison sampling with a bias) remains entirely
   unimplemented on both frontends. Update (roadmap L59): explicit-`Grad`
