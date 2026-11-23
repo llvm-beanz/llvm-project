@@ -3064,14 +3064,14 @@ documented reason rather than an oversight:
   alongside `SampleCmpLevelZero` (65). Undefined/poison wire clamps select
   the plain intrinsic; real zero/nonzero/dynamic MinLod clamps are retained.
   Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
-  Heap-backed scalar FP32 1D/2D implicit comparison, including arrays, executes in
-  compiled fragment stages with real coarse quad derivatives and the optional
+  Heap-backed scalar FP32 1D/2D/cube implicit comparison, including arrays, executes in
+  compiled fragment stages with real coarse spatial/direction derivatives and the optional
   shader MinLod clamp. The shared comparison runtime receives implicit LOD,
-  the reference and constant signed offsets; sampler reflection and dead-handle
+  the reference and supported offsets; sampler reflection and dead-handle
   cleanup are retained. Tests distinguish derivative-selected mip 1 from
   explicit zero and clamped mip 2, including helper-only lanes, partial waves,
   guards and repeated invocation. Compute/unannotated stages and other
-  implicit shapes still fail explicit admission; none are treated as LOD zero.
+  shapes still fail explicit admission; none are treated as LOD zero.
   Array layers are passed separately and never differentiated; offsets remain
   spatial. Compiled array execution verifies complementary layer depths across
   three mips, divergent layers/references, dynamic zero/two MinLod clamps,
@@ -3082,6 +3082,13 @@ documented reason rather than an oversight:
   1D/array execution tests X- and Y-derived mip selection, dynamic clamps,
   divergent references/layers, helpers and guarded partial waves. Native
   DXC plain/clamped 1D/array pixel shaders pass import/raising coverage.
+  Cubes use six coarse derivatives of the raw three-component direction;
+  the existing cube runtime projects these before selecting LOD. The fourth
+  cube-array coordinate stays separate and is never differentiated. Unused
+  scalar offsets accept poison/undef or zero only. Combined compiled
+  cube/array execution tests all six faces, both cube elements, both screen
+  derivative axes, dynamic clamps, helpers and guarded partial waves.
+  Native DXC plain/clamped cube/array import is tested, not bound execution.
   Level-zero comparison now raises and executes
   on the CPU for heap-backed scalar FP32 1D/2D/cube textures, including arrays,
   with constant texel offsets through shared comparison image helpers. Other dimensions,

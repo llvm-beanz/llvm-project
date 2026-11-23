@@ -27,6 +27,40 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) cube fragment comparison CPU execution (VM, 2026-11-23)
+
+Heap-backed scalar FP32 `TextureCube`/`TextureCubeArray::SampleCmp` now
+executes in compiled fragment stages through shared cube comparison helpers.
+Six coarse raw-direction derivatives feed the existing face-projection/LOD
+runtime; the fourth cube-array element coordinate is never differentiated.
+References and optional shader MinLod clamps survive. Unused scalar offsets
+accept poison/undef or zero only; nonzero/dynamic offsets and malformed
+layers reject. Admission, signature growth and lowering share the matcher
+for all six comparison shapes. Compute/unannotated stages still reject
+explicitly; no implicit LOD is replaced with zero.
+
+Two new LIT fixtures and two unit tests cover exact lowering operands,
+idempotence/reflection, admission, native SDK DXC plain/clamped cube/array
+pixel-shader import and compiled execution. All six faces, both cube
+elements and both screen derivative axes distinguish implicit mip 1,
+explicit mip 0 and clamped mip 2. Distinct face/layer/mip depths, divergent
+references/layers, dynamic zero/two clamps, helper-only lanes, wave sizes
+4/8, one/three quads, partial final waves, output guards, result masks and
+repeated invocation pass. Native import is not native DXC execution
+through an owned D3D12 device.
+
+Selected CPU/comparison LIT passes **832** in **14.99 seconds**. Full FeMe
+LIT passes **4,111**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,136** discovered tests in **137.56 seconds**. Four added tests add
+four passes. Assertions, disabled PCH, sccache and the two-worker build
+limit remain; timings are not controlled speedups.
+
+Artifact ABI 8 and argument layouts are unchanged. Other stages/shapes,
+broader sampling conformance, bound/static descriptor materialization and
+owned D3D12 execution remain open. `CreateDevice` remains `E_NOTIMPL`;
+W0(c), W0(g), W1 and W2(a)/W2(b)/W3(b) are not closed. No new adapter-matrix
+or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) 1D fragment comparison CPU execution (VM, 2026-11-23)
 
 Heap-backed scalar FP32 `Texture1D`/`Texture1DArray::SampleCmp` now executes

@@ -105,9 +105,9 @@ The original compute-only baseline is no longer current:
   mapping, including preserved real zero/nonzero/dynamic MinLod clamps.
   Undefined/poison clamps select the plain canonical intrinsic.
   Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
-  Heap-backed scalar FP32 1D/2D implicit comparison, including arrays, executes in
+  Heap-backed scalar FP32 1D/2D/cube implicit comparison, including arrays, executes in
   compiled fragment stages through shared helpers, with real coarse quad
-  derivatives, implicit LOD, constant signed offsets and the optional shader
+  spatial/direction derivatives, implicit LOD, supported offsets and the optional shader
   MinLod clamp. Tests distinguish mip 1 from explicit zero and clamped mip 2,
   including helper lanes, partial waves, guards and repeated invocation.
   Array layers remain separate from the U/V derivatives and signed spatial
@@ -120,9 +120,16 @@ The original compute-only baseline is no longer current:
   divergent layers/references, dynamic clamps and guarded partial waves.
   Native DXC plain/clamped 1D/array import is tested; ordinary DXIL 1D
   sampling/loading eligibility remains unchanged.
-  Compute/unannotated stages and other implicit shapes still fail explicit
+  Cubes differentiate all three raw direction components; their six derivatives
+  feed the existing cube projection/LOD runtime. The fourth cube-array
+  coordinate is never differentiated; unused scalar offsets accept
+  poison/undef or zero only. Combined compiled execution tests all six faces,
+  both cube elements and both screen derivative axes, dynamic clamps,
+  helper lanes and guarded partial waves. Native DXC plain/clamped cube/array
+  import is tested, not bound execution.
+  Compute/unannotated stages and other shapes still fail explicit
   admission; no implicit LOD is replaced with zero. Other dimensions,
-  dynamic/undefined offsets, broader comparison conformance and half/vector
+  dynamic/undefined spatial offsets, broader comparison conformance and half/vector
   results remain open;
   no bound/static descriptor
   materialization or owned D3D12 execution is established.

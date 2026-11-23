@@ -66,8 +66,8 @@ Error checkSupportedRaisedOps(const Module &M) {
       return createStringError(
           inconvertibleErrorCode(),
           "unsupported raised operation: '%s' requires heap-backed scalar FP32 "
-          "1D/2D (including array) fragment comparison sampling with "
-          "shape-matched coordinates and constant offsets; derivative-aware "
+          "1D/2D/cube (including array) fragment comparison sampling with "
+          "shape-matched coordinates and supported offsets; derivative-aware "
           "lowering for "
           "other stages/shapes is not yet supported",
           F.getName().str().c_str());

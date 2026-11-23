@@ -1510,18 +1510,18 @@ dynamic values, raise to `llvm.dx.resource.samplecmp.clamp`. Malformed
 clamps and unsupported result uses remain unraised without an extra read.
 Real LLVM roundtrips cover all six comparison texture shapes; native SDK
 DXC pixel shaders cover plain and dynamic-clamp import. Heap-backed scalar
-FP32 1D/2D implicit comparison, including array forms, lowers in fragment
-stages through existing shared comparison helpers with coarse spatial derivatives,
-implicit LOD and the optional shader MinLod clamp. Constant signed spatial
+FP32 1D/2D/cube implicit comparison, including array forms, lowers in fragment
+stages through existing shared comparison helpers with coarse spatial/direction
+derivatives, implicit LOD and the optional shader MinLod clamp. Constant signed spatial
 offsets, comparison references, sampler reflection and dead-handle cleanup
 are retained. Admission and lowering share a read-only predicate; compute,
-unannotated stages, other shapes and dynamic/undefined offsets still fail
+unannotated stages, other shapes and dynamic/undefined spatial offsets still fail
 explicit admission. Implicit samples are never substituted with level zero.
 Compiled fragment execution tests distinguish derivative-selected mip 1,
 explicit mip 0 and shader-clamped mip 2, with helper-only lanes, partial
 waves, output guards and repeated invocation. This does not enable bound/
 static descriptors or establish native D3D12 rendering.
-For arrays, the third FP32 coordinate selects the layer separately; only U/V
+For 2D arrays, the third FP32 coordinate selects the layer separately; only U/V
 are differentiated and the two signed offsets remain spatial. Compiled
 array execution checks complementary layer depths across three mips,
 divergent layers/references and per-lane dynamic zero/two MinLod clamps.
@@ -1535,6 +1535,14 @@ Compiled plain/array execution tests both X- and Y-derived mip selection,
 dynamic zero/two clamps, divergent references/layers and guarded partial
 waves. Actual SDK DXC plain/clamped 1D/array pixel shaders pass import/
 raising; ordinary DXIL 1D sampling/loading eligibility remains unchanged.
+For cubes, six coarse derivatives of the raw three-component direction
+feed the existing cube projection/LOD runtime. Cube arrays pass their fourth
+coordinate separately; the cube element is never differentiated. The unused
+scalar offset accepts poison/undef or zero only and is not forwarded.
+Compiled plain/array execution checks all six faces, both cube elements,
+both screen derivative axes, dynamic clamps and guarded partial waves.
+Native SDK DXC plain/clamped cube/array pixel shaders pass import/raising,
+not bound-descriptor execution.
 
 Bias/gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered

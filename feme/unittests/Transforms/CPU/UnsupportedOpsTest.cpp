@@ -9,6 +9,7 @@
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -74,7 +75,7 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragmentComparison) {
       Failed<StringError>(testing::Property(
           &StringError::getMessage,
           testing::HasSubstr(
-              "1D/2D (including array) fragment comparison sampling"))));
+              "1D/2D/cube (including array) fragment comparison sampling"))));
   Sample->setArgOperand(4, Offset);
   Main->addFnAttr("feme.shader.stage", "compute");
   EXPECT_THAT_ERROR(
@@ -152,6 +153,56 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragment1DComparisons) {
     Value *Offset = Sample->getArgOperand(4);
     Sample->setArgOperand(4, F->getArg(0));
     EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(4, Offset);
+    F->addFnAttr("feme.shader.stage", "compute");
+    EXPECT_THAT_ERROR(
+        checkSupportedRaisedOps(*M),
+        Failed<StringError>(testing::Property(
+            &StringError::getMessage,
+            testing::HasSubstr("other stages/shapes is not yet supported"))));
+    F->removeFnAttr("feme.shader.stage");
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    F->addFnAttr("feme.shader.stage", "fragment");
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  }
+}
+
+TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragmentCubeComparisons) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @cube(i32 %offset) #0 {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_5t(i32 0)
+      %s = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32 0)
+      %r = call float @llvm.dx.resource.samplecmp.f32.tdx.Texture_v4f32_0_0_1_5t.tdx.Sampler_1t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 5) %t, target("dx.Sampler", 1) %s, <3 x float> zeroinitializer, float 0.5, i32 poison)
+      ret float %r
+    }
+    define float @array(i32 %offset) #0 {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_9t(i32 0)
+      %s = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32 0)
+      %r = call float @llvm.dx.resource.samplecmp.clamp.f32.tdx.Texture_v4f32_0_0_1_9t.tdx.Sampler_1t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 9) %t, target("dx.Sampler", 1) %s, <4 x float> zeroinitializer, float 0.5, i32 0, float 2.0)
+      ret float %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 1, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_5t(i32)
+    declare target("dx.Texture", <4 x float>, 0, 0, 1, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_9t(i32)
+    declare target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32)
+    declare float @llvm.dx.resource.samplecmp.f32.tdx.Texture_v4f32_0_0_1_5t.tdx.Sampler_1t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 5), target("dx.Sampler", 1), <3 x float>, float, i32)
+    declare float @llvm.dx.resource.samplecmp.clamp.f32.tdx.Texture_v4f32_0_0_1_9t.tdx.Sampler_1t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 9), target("dx.Sampler", 1), <4 x float>, float, i32, float)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  for (StringRef Name : {"cube", "array"}) {
+    SCOPED_TRACE(Name.str());
+    Function *F = M->getFunction(Name);
+    auto *Sample = dyn_cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    ASSERT_NE(Sample, nullptr);
+    Value *Offset = Sample->getArgOperand(4);
+    Sample->setArgOperand(4, ConstantInt::get(Offset->getType(), 1));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(4, F->getArg(0));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(4, UndefValue::get(Offset->getType()));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
     Sample->setArgOperand(4, Offset);
     F->addFnAttr("feme.shader.stage", "compute");
     EXPECT_THAT_ERROR(

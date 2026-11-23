@@ -864,6 +864,41 @@ owned D3D12 execution remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed. No new adapter-matrix or external Vulkan
 CTS result is claimed.
 
+W2(a)/W3(b) cube fragment comparison CPU progress (2026-11-23): heap-backed
+scalar FP32 `TextureCube`/`TextureCubeArray::SampleCmp` now lowers in fragment
+stages through existing shared cube comparison helpers. Six coarse
+derivatives of the raw three-component direction feed the existing
+face-projection/implicit-LOD runtime. The fourth cube-array element
+coordinate stays separate and is never differentiated. References and
+optional shader MinLod clamps survive. Unused scalar offsets accept
+poison/undef or zero only; nonzero/dynamic offsets and malformed layers
+reject explicitly. The shared matcher now admits all six comparison
+shapes, still only in fragment stages. Compute/unannotated stages reject
+rather than substituting LOD zero. Signature growth, sampler reflection,
+dead-handle cleanup and level-zero behavior remain unchanged.
+
+Two new LIT fixtures and two unit tests cover exact helper/derivative/
+reference/layer/clamp operands, idempotence/reflection, admission, actual
+SDK DXC plain/clamped cube/array pixel-shader import and compiled execution.
+A combined plain/array test distinguishes implicit mip 1, explicit mip 0
+and clamped mip 2 on all six faces, for both cube elements and both screen
+derivative axes. Distinct face/layer/mip depths, divergent references/layers,
+dynamic zero/two clamps, helper-only lanes, wave sizes 4/8, one/three quads,
+partial final waves, output guards, result masks and repeated invocation
+pass. This is canonical compiled execution and native import evidence,
+not native DXC execution through an owned D3D12 device.
+
+Selected CPU/comparison LIT passes 832 in 14.99 seconds. Full FeMe LIT
+passes 4,111, with 15 skipped, 10 unsupported and zero failures, from
+4,136 discovered tests in 137.56 seconds. Four added tests add four passes.
+Assertions, disabled PCH, sccache and the two-worker build limit remain;
+timings are not a controlled performance comparison. Artifact ABI 8 and
+argument layouts are unchanged. Other stages/shapes, broader sampling
+conformance, bound/static descriptor materialization and owned D3D12
+execution remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed. No new adapter-matrix or external Vulkan
+CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

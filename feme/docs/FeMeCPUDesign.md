@@ -2602,13 +2602,13 @@ now has checked scalar FP32 opcode-64 forward/reverse mapping. Undefined/
 poison clamps select the plain intrinsic; real zero,
 nonzero and dynamic clamps survive as `samplecmp.clamp`. Six-shape LLVM
 roundtrips and native SDK DXC pixel-shader import verify this compiler
-mapping. Heap-backed scalar FP32 1D/2D implicit comparison, including array
+mapping. Heap-backed scalar FP32 1D/2D/cube implicit comparison, including array
 forms, executes in the compiled fragment-stage path. Plain/clamped forms
-reuse existing 1D/2D comparison helpers with coarse spatial derivatives, implicit LOD,
+reuse existing comparison helpers with coarse spatial/direction derivatives, implicit LOD,
 zero bias and the optional shader MinLod clamp. The shared read-only matcher
 gates admission, signature growth and lowering on fragment stage, comparison
-sampler, FP32 coordinates and constant signed offsets. Compute, missing
-stage identity, other shapes and dynamic/undefined offsets still reject;
+sampler, FP32 coordinates and supported offsets. Compute, missing
+stage identity, other shapes and dynamic/undefined spatial offsets still reject;
 no implicit sample is replaced with LOD zero. Sampler reflection and
 post-traversal dead-handle cleanup remain unchanged.
 
@@ -2619,7 +2619,7 @@ outputs. Wave sizes 4/8, one/three quads, partial final waves, output guards,
 result masks and repeated invocation pass. Transform tests check exact
 derivative/reference/offset/clamp operands, idempotence and reflection;
 admission tests reject dynamic offsets and compute/unannotated stages.
-Broader comparison conformance, other implicit shapes/stages, descriptor
+Broader comparison conformance, other shapes/stages, descriptor
 materialization and owned D3D12 execution remain open.
 
 For `Texture2DArray`, the third FP32 coordinate is passed separately as
@@ -2671,6 +2671,22 @@ poison/undef or zero; nonzero/dynamic offsets are rejected instead of being
 dropped. Canonical and actual SDK DXC fixtures sample all six faces and
 both cube-array elements, with distinct face depths, partial waves and
 guarded repeated normal/reference/AOT dispatches.
+
+Implicit fragment cube/array comparison reuses these helpers with six real
+coarse derivatives of the raw direction, implicit LOD and the optional shader
+MinLod clamp. The existing cube runtime projects the derivatives on the
+selected face before planning LOD. The cube-array element stays separate
+and is never differentiated; unused offsets retain the poison/undef/zero
+contract above. Combined compiled execution distinguishes implicit mip 1,
+explicit mip 0 and clamped mip 2 on every face, for both cube elements and
+both screen derivative axes. Distinct face/layer/mip depths, divergent
+references/layers, per-lane dynamic zero/two clamps, helper-only lanes,
+wave sizes 4/8, one/three quads, partial final waves, output guards, masks
+and repeated invocation pass. Transform tests check all six direction
+derivatives, implicit flags, layer/reference/clamp operands, idempotence,
+reflection and malformed layer/offset rejection. Admission rejects
+nonzero/dynamic offsets and compute/unannotated stages. Actual SDK DXC
+plain/clamped cube/array pixel shaders pass import/raising only.
 
 The runner's cube YAML preparation now uses six physical face layers for
 `dimension: cube`; `cube-array` requires an explicit positive multiple of

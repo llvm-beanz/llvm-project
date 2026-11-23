@@ -1,5 +1,34 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) cube fragment comparison CPU regression scope (2026-11-23)
+
+The [cube fragment comparison follow-up](W0WindowsIntegrationProbe.md#w2aw3b-cube-fragment-comparison-cpu-execution-vm-2026-11-23)
+executes heap-backed scalar FP32 DXIL `TextureCube`/`TextureCubeArray::SampleCmp`
+in compiled fragment stages. Shared cube comparison helpers receive six
+coarse raw-direction derivatives, implicit LOD, references and optional
+shader MinLod clamps. The cube-array element is never differentiated.
+Unused scalar offsets accept poison/undef or zero only. Compute/unannotated
+stages, malformed layers and nonzero/dynamic offsets still reject.
+No new Vulkan sampling implementation or LOD-zero approximation is added.
+
+Two LIT fixtures and two unit tests cover lowering/idempotence/reflection,
+admission, native SDK DXC plain/clamped cube/array import and compiled
+execution. All six faces, both cube elements, both screen derivative axes,
+distinct face/layer/mip depths, divergent references/layers, dynamic clamps,
+helper-only lanes, partial waves, output guards, masks and repeated
+invocation are checked. Native import is not owned-device execution.
+
+Selected CPU/comparison LIT passes **832** in **14.99 seconds**. Full FeMe
+LIT passes **4,111**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,136** discovered tests in **137.56 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Other stages/shapes,
+broader sampling conformance, bound/static descriptor materialization and
+owned D3D12 execution remain open. **No real Vulkan CTS pass is claimed**;
+the external runner remains unavailable.
+
 ## W2(a)/W3(b) 1D fragment comparison CPU regression scope (2026-11-23)
 
 The [1D fragment comparison follow-up](W0WindowsIntegrationProbe.md#w2aw3b-1d-fragment-comparison-cpu-execution-vm-2026-11-23)

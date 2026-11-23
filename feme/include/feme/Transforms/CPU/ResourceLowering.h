@@ -42,9 +42,9 @@
 // `feme.cpu.image.*` calls. Comparison admission and lowering share the
 // predicate below; constant texel offsets are preserved and comparison
 // sampler usage is reflected without changing the shader argument ABI.
-// Fragment-only 1D/2D (including array) SampleCmp threads spatial
-// derivatives and an optional shader MinLod clamp through the same comparison
-// helper.
+// Fragment-only 1D/2D/cube (including array) SampleCmp threads
+// spatial/direction derivatives and an optional shader MinLod clamp through the
+// same comparison helper.
 //
 //===----------------------------------------------------------------------===//
 
@@ -63,8 +63,8 @@ namespace feme::cpu {
 /// both early CPU admission and resource lowering.
 bool isSupportedDXILSampleCmpLevelZero(const llvm::CallInst &CI);
 
-/// Tests heap-backed scalar FP32 1D/2D (including array) implicit comparison
-/// in a fragment stage, with optional MinLod clamp and constant spatial
+/// Tests heap-backed scalar FP32 1D/2D/cube (including array) implicit
+/// comparison in a fragment stage, with optional MinLod clamp and supported
 /// offsets.
 bool isSupportedDXILSampleCmp(const llvm::CallInst &CI);
 

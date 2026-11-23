@@ -724,18 +724,24 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
           Kind == dxil::ResourceKind::TextureCubeArray) {
         Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
         Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
+        CubeDirectionDerivatives D =
+            IsComparisonImplicit
+                ? getOrSynthesizeSampleCubeDerivatives(Builder, F, U, V, Z)
+                : CubeDirectionDerivatives{Zero, Zero, Zero, Zero, Zero, Zero};
         if (Kind == dxil::ResourceKind::TextureCubeArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
           NewCall = createSampleCmpCubeArray(
-              Builder, Env, ImageIndex, SamplerIndex, U, V, Z, Zero, Zero, Zero,
-              Zero, Zero, Zero, Layer, Zero, Builder.getTrue(),
-              CI->getArgOperand(3), Zero, NoClamp, Builder.getTrue(),
+              Builder, Env, ImageIndex, SamplerIndex, U, V, Z, D.DDirXdX,
+              D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX, D.DDirZdY, Layer,
+              Zero, Builder.getInt1(!IsComparisonImplicit),
+              CI->getArgOperand(3), Zero, MinLodClamp, Builder.getTrue(),
               CI->getName());
         } else {
           NewCall = createSampleCmpCube(
-              Builder, Env, ImageIndex, SamplerIndex, U, V, Z, Zero, Zero, Zero,
-              Zero, Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3),
-              Zero, NoClamp, Builder.getTrue(), CI->getName());
+              Builder, Env, ImageIndex, SamplerIndex, U, V, Z, D.DDirXdX,
+              D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX, D.DDirZdY, Zero,
+              Builder.getInt1(!IsComparisonImplicit), CI->getArgOperand(3),
+              Zero, MinLodClamp, Builder.getTrue(), CI->getName());
         }
       } else if (Kind == dxil::ResourceKind::Texture1D ||
                  Kind == dxil::ResourceKind::Texture1DArray) {
@@ -1230,14 +1236,7 @@ bool feme::cpu::isSupportedDXILSampleCmp(const CallInst &CI) {
       (HasClamp && !CI.getArgOperand(5)->getType()->isFloatTy()) ||
       feme::getShaderStage(*CI.getFunction()) != feme::ShaderStage::Fragment)
     return false;
-  auto *TextureTy =
-      dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
-  return TextureTy && TextureTy->getNumIntParameters() == 4 &&
-         (TextureTy->getDimension() == dxil::ResourceKind::Texture1D ||
-          TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray ||
-          TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
-          TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray) &&
-         isSupportedDXILComparisonSample(CI);
+  return isSupportedDXILComparisonSample(CI);
 }
 
 /// Replaces every `llvm.dx.resource.nonuniformindex` call with its own index

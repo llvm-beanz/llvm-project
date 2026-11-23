@@ -117,10 +117,10 @@ coverage" in [../Design.md](../Design.md).
   preserving real MinLod clamps (including zero and dynamic values) in
   `llvm.dx.resource.samplecmp.clamp`; undefined/poison clamps select
   `llvm.dx.resource.samplecmp`. Fragment-stage heap-backed scalar FP32
-  1D/2D forms, including arrays, lower through shared comparison helpers with
-  coarse spatial derivatives, implicit LOD and the optional shader MinLod clamp.
-  Constant signed offsets and sampler reflection are retained. Compute/
-  unannotated stages, other implicit shapes and dynamic/undefined offsets
+  1D/2D/cube forms, including arrays, lower through shared comparison helpers with
+  coarse spatial/direction derivatives, implicit LOD and the optional shader MinLod clamp.
+  Supported offsets and sampler reflection are retained. Compute/
+  unannotated stages, other shapes and dynamic/undefined spatial offsets
   still fail explicit admission. Compiled fragment execution is tested;
   this does not enable implicit comparison in compute/reference dispatch,
   descriptor materialization or owned D3D12 rendering. Half/vector results
@@ -131,6 +131,11 @@ coverage" in [../Design.md](../Design.md).
   Only U is differentiated. Missing-layer coordinates fail
   admission. Compiled array tests check divergent layers/references,
   dynamic clamps and observable mip selection.
+  Cubes differentiate their three raw direction components, not the fourth
+  cube-array element coordinate. Unused scalar offsets accept poison/undef
+  or zero only. Compiled cube/array tests check all six faces, both elements,
+  both derivative axes, clamps, helpers and guarded partial waves; native
+  DXC plain/clamped import is tested separately from bound execution.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input
