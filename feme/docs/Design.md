@@ -1561,7 +1561,7 @@ without introducing a second read. Tests check seven-shape forward/reverse
 roundtrips, exact coordinate/layer/bias/offset/clamp values, idempotence and
 native SDK DXC pixel-shader import.
 
-Heap-backed FP32 `SampleBias` on 1D/2D/cube textures, including arrays, now
+Heap-backed FP32 `SampleBias` on 1D/2D/3D/cube textures, including arrays, now
 executes in compiled fragment stages through the existing sampling helpers.
 A shared matcher gates
 admission, signature growth and lowering on fragment stage, heap handles,
@@ -1596,8 +1596,15 @@ spatial. Shared 1D helpers preserve bias and optional shader MinLod clamps.
 Compiled tests distinguish mip-0/mip-1 footprints, signed offsets,
 layer/mip/component values, divergent layers/bias/clamps and guarded partial
 waves. Dynamic/poison/undefined 1D offsets and malformed coordinates reject.
-Ordinary DXIL 1D sampling/loading is unchanged; 3D biased execution remains
-unsupported.
+Ordinary DXIL 1D sampling/loading is unchanged.
+3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and three
+constant signed i32 offsets through the existing `createSample3D` helper.
+Compiled tests isolate each coordinate's contribution to LOD on both screen
+axes, signed XYZ offsets, biased/clamped mip selection, result components
+and guarded partial waves. Malformed coordinates/offset widths and dynamic
+or partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
+unchanged. This completes bounded fragment biased execution for the seven
+raised texture shapes, not broader sampling conformance.
 
 Gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered

@@ -755,7 +755,17 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
             getOrSynthesizeSample2DDerivatives(Builder, F, U, V);
         Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
-        if (Kind == dxil::ResourceKind::Texture2DArray) {
+        if (Kind == dxil::ResourceKind::Texture3D) {
+          Value *W = Builder.CreateExtractElement(Coord, uint64_t{2});
+          SampleDerivatives1D WD =
+              getOrSynthesizeSample1DDerivatives(Builder, F, W);
+          Value *OffsetZ = Builder.CreateExtractElement(Offset, uint64_t{2});
+          Loaded = createSample3D(
+              Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
+              U, V, W, D.DUdX, D.DUdY, D.DVdX, D.DVdY, WD.DUdX, WD.DUdY, Zero,
+              Builder.getFalse(), CI->getArgOperand(3), OffsetX, OffsetY,
+              OffsetZ, MinLodClamp, Builder.getTrue(), CI->getName());
+        } else if (Kind == dxil::ResourceKind::Texture2DArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
           Loaded = createSample2DArray(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
@@ -1309,6 +1319,7 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
     NumCoords = 2;
     break;
   case dxil::ResourceKind::Texture2DArray:
+  case dxil::ResourceKind::Texture3D:
   case dxil::ResourceKind::TextureCube:
     NumCoords = 3;
     break;
@@ -1327,8 +1338,9 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
   if (NumCoords != 1)
     CoordTy = FixedVectorType::get(CoordTy, NumCoords);
   Type *OffsetTy = Type::getInt32Ty(Ctx);
+  unsigned NumOffsets = Kind == dxil::ResourceKind::Texture3D ? 3 : 2;
   if (!IsCube && !Is1D)
-    OffsetTy = FixedVectorType::get(Type::getInt32Ty(Ctx), 2);
+    OffsetTy = FixedVectorType::get(Type::getInt32Ty(Ctx), NumOffsets);
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
       CI.getArgOperand(2)->getType() != CoordTy ||
       CI.getArgOperand(4)->getType() != OffsetTy)
@@ -1338,9 +1350,12 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
     return Offset && (isa<UndefValue>(Offset) || Offset->isNullValue());
   if (Is1D)
     return isa_and_nonnull<ConstantInt>(Offset);
-  return Offset &&
-         isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(0u)) &&
-         isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(1u));
+  if (!Offset)
+    return false;
+  for (unsigned I = 0; I < NumOffsets; ++I)
+    if (!isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(I)))
+      return false;
+  return true;
 }
 
 static bool isSupportedDXILComparisonSample(const CallInst &CI) {

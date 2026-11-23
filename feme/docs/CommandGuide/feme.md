@@ -142,7 +142,7 @@ coverage" in [../Design.md](../Design.md).
   real zero/nonzero/dynamic clamps select `llvm.dx.resource.samplebias.clamp`.
   Scalar and two-/three-/four-component FP32 texels use default samplers.
   Seven-shape LLVM roundtrips and native DXC pixel-shader import are tested.
-  Heap-backed FP32 1D/2D/cube biased sampling, including arrays, now executes
+  Heap-backed FP32 1D/2D/3D/cube biased sampling, including arrays, now executes
   in compiled fragment stages with real spatial/direction derivatives,
   implicit LOD, bias, supported offsets
   and optional shader MinLod clamps. Scalar/vector results up to the declared
@@ -166,8 +166,14 @@ coverage" in [../Design.md](../Design.md).
   Compiled tests check mip-0/mip-1 footprints, both derivative axes,
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. Malformed coordinates and dynamic/poison/undefined
-  1D offsets reject. Ordinary DXIL 1D sampling/loading is unchanged; 3D
-  biased execution remains unsupported.
+  1D offsets reject. Ordinary DXIL 1D sampling/loading is unchanged.
+  Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
+  three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
+  both screen axes, signed XYZ offsets, biased/clamped mips and components
+  with guarded partial waves. Malformed coordinates/offset widths and
+  dynamic or partially undefined offsets reject. Ordinary DXIL 3D sampling/
+  loading is unchanged; seven-shape biased execution is not broader sampling
+  conformance.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

@@ -3106,7 +3106,7 @@ documented reason rather than an oversight:
   survive. Undefined/poison clamps select the plain intrinsic; zero and
   dynamic clamps remain clamped. Status/aggregate uses and malformed calls
   stay unraised without an extra sample. Seven-shape roundtrips, idempotence
-  and native DXC import pass. Heap-backed FP32 1D/2D/cube biased sampling,
+  and native DXC import pass. Heap-backed FP32 1D/2D/3D/cube biased sampling,
   including arrays, now executes in compiled fragment stages through shared
   helpers, with real coarse spatial/direction derivatives, implicit LOD, bias, supported offsets
   and optional shader MinLod clamps. Scalar/vector results up to the
@@ -3133,15 +3133,22 @@ documented reason rather than an oversight:
   clamps. Compiled tests check mip-0/mip-1 footprints, both derivative axes,
   layer/mip/texel/component values, divergent layers/bias/clamps and guarded
   partial waves. Malformed coordinates and dynamic/poison/undefined 1D
-  offsets reject. Ordinary DXIL 1D sampling/loading is unchanged; 3D biased
-  execution remains unsupported.
+  offsets reject. Ordinary DXIL 1D sampling/loading is unchanged.
+  Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
+  three constant signed i32 offsets through the existing shared 3D helper.
+  Compiled tests isolate each coordinate's LOD contribution on both screen
+  axes, signed XYZ offsets, biased/clamped mips, scalar/vector results and
+  guarded partial waves. Malformed coordinates/offset widths and dynamic or
+  partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
+  unchanged. All seven raised texture shapes have bounded fragment biased
+  execution; broader sampling conformance remains open.
   For remaining gather forms, the DXIL import half is still
   blocked upstream; gradient sampling is not yet raised despite existing
   LLVM forward lowering. Update (roadmap L58): an ordinary, non-comparison
   `Bias` operand is now implemented on the SPIR-V import side, scoped to
   `Plain2D`/`Cube` only (matching roadmap L26's own `MinLodClamp` scope
   precedent); ordinary DXIL `Sample`/`SampleLevel` still pass zero bias to
-  the CPU runtime, while heap-backed FP32 1D/2D/cube `SampleBias` (including arrays) passes real
+  the CPU runtime, while heap-backed FP32 1D/2D/3D/cube `SampleBias` (including arrays) passes real
   bias in fragment stages. A `Dref`+`Bias`
   combination (depth-comparison sampling with a bias) remains entirely
   unimplemented on both frontends. Update (roadmap L59): explicit-`Grad`

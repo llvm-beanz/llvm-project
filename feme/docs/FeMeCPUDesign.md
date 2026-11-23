@@ -2696,7 +2696,7 @@ two-/three-/four-component FP32 texels and default samplers. Result uses
 and operand types are validated before adding a sample; unsupported
 status/aggregate uses and malformed calls remain unraised without an
 extra read.
-Heap-backed FP32 `SampleBias` on 1D/2D/cube textures, including arrays, now
+Heap-backed FP32 `SampleBias` on 1D/2D/3D/cube textures, including arrays, now
 executes in compiled fragment stages through the shared sampling helpers.
 The shared read-only predicate gates early
 admission, signature growth and lowering on a default sampler, shape-matched FP32
@@ -2731,7 +2731,18 @@ mip-0/mip-1 footprints, both derivative axes, distinct layer/mip/texel/
 component values, divergent layers/bias/clamps, scalar/vector results,
 helpers, partial waves, guards, masks and repeated invocation. Malformed
 coordinates and dynamic/poison/undefined 1D offsets reject. Ordinary DXIL
-1D sampling/loading is unchanged; 3D biased execution remains unsupported.
+1D sampling/loading is unchanged.
+3D sampling uses `createSample3D`, passing FP32 (U, V, W), six coarse
+spatial derivatives, bias, three constant signed i32 offsets and optional
+shader MinLod clamps. Existing 2D derivative synthesis supplies U/V pairs;
+1D derivative synthesis supplies W's pair. Compiled tests isolate U/V/W
+footprints on both screen axes, signed XYZ offsets, biased/clamped mip
+selection, scalar/vector widths one through four, helper-only lanes,
+partial waves, output guards, masks and repeated invocation. Malformed
+coordinates/offset widths and dynamic, poison, undefined or partially
+undefined offsets reject. Ordinary DXIL 3D sampling/loading is unchanged.
+All seven raised texture shapes now have bounded fragment biased execution;
+other stages and broader sampling conformance remain open.
 2D array sampling passes the third FP32 coordinate separately as the layer;
 it never differentiates the layer or offsets it spatially. A compiled array
 test checks complementary mip values across two layers, distinct texels/

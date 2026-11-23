@@ -13,6 +13,8 @@
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D CLAMP /Fo %t/one-clamp.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D ARRAY /Fo %t/one-array.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D ARRAY /D CLAMP /Fo %t/one-array-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D THREE /Fo %t/three.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D THREE /D CLAMP /Fo %t/three-clamp.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,PLAIN
 # RUN: feme-translate --import-dxil %t/clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,CLAMP
 # RUN: feme-translate --import-dxil %t/zero.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,ZERO
@@ -26,6 +28,8 @@
 # RUN: feme-translate --import-dxil %t/one-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONE,CLAMP
 # RUN: feme-translate --import-dxil %t/one-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONEARRAY,PLAIN
 # RUN: feme-translate --import-dxil %t/one-array-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONEARRAY,CLAMP
+# RUN: feme-translate --import-dxil %t/three.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=THREE,PLAIN
+# RUN: feme-translate --import-dxil %t/three-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=THREE,CLAMP
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -36,6 +40,7 @@
 # CUBEARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 9)
 # ONE: call target("dx.Texture", <4 x float>, 0, 0, 1, 1)
 # ONEARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 6)
+# THREE: call target("dx.Texture", <4 x float>, 0, 0, 1, 4)
 # PLAIN: call <4 x float> @llvm.dx.resource.samplebias.v4f32
 # PLAIN-NOT: call %dx.types.ResRet.f32 @dx.op.sampleBias
 # CLAMP: call <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32
@@ -53,6 +58,10 @@ TextureCube<float4> Input : register(t0);
 #define COORD uv.xyz
 #endif
 #define OFFSET
+#elif defined(THREE)
+Texture3D<float4> Input : register(t0);
+#define COORD uv.xyz
+#define OFFSET , int3(1, -2, 1)
 #elif defined(ONE)
 #ifdef ARRAY
 Texture1DArray<float4> Input : register(t0);

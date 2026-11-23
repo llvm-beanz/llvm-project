@@ -27,10 +27,18 @@
 ; RUN: not feme-run --reference %t/onearray.ll 2>&1 | FileCheck %s
 ; RUN: llvm-as %t/onearray.ll -o %t/onearray.bc
 ; RUN: not feme --target=%feme_host_triple %t/onearray.bc -o %t.o 2>&1 | FileCheck %s
+; RUN: not feme-run %t/three.ll 2>&1 | FileCheck %s
+; RUN: not feme-run --reference %t/three.ll 2>&1 | FileCheck %s
+; RUN: llvm-as %t/three.ll -o %t/three.bc
+; RUN: not feme --target=%feme_host_triple %t/three.bc -o %t.o 2>&1 | FileCheck %s
+; RUN: not feme-run %t/threeclamp.ll 2>&1 | FileCheck %s
+; RUN: not feme-run --reference %t/threeclamp.ll 2>&1 | FileCheck %s
+; RUN: llvm-as %t/threeclamp.ll -o %t/threeclamp.bc
+; RUN: not feme --target=%feme_host_triple %t/threeclamp.bc -o %t.o 2>&1 | FileCheck %s
 ; Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-; CHECK: requires heap-backed FP32 1D/2D/cube (including array) fragment biased sampling with a default sampler, shape-matched coordinates and supported offsets
+; CHECK: requires heap-backed FP32 1D/2D/3D/cube (including array) fragment biased sampling with a default sampler, shape-matched coordinates and supported offsets
 ;--- plain.ll
 define void @main() #0 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32 0)
@@ -107,6 +115,32 @@ define void @main() #0 {
 declare target("dx.Texture", <4 x float>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_6t(i32)
 declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
 declare <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32.tdx.Texture_v4f32_0_0_0_6t.tdx.Sampler_0t.v2f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 6), target("dx.Sampler", 0), <2 x float>, float, i32, float)
+declare void @consume(<4 x float>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+;--- three.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32 0)
+  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+  %r = call <4 x float> @llvm.dx.resource.samplebias.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4) %t, target("dx.Sampler", 0) %s, <3 x float> zeroinitializer, float 1.0, <3 x i32> <i32 1, i32 -1, i32 1>)
+  call void @consume(<4 x float> %r)
+  ret void
+}
+declare target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32)
+declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+declare <4 x float> @llvm.dx.resource.samplebias.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), target("dx.Sampler", 0), <3 x float>, float, <3 x i32>)
+declare void @consume(<4 x float>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+;--- threeclamp.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32 0)
+  %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+  %r = call <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4) %t, target("dx.Sampler", 0) %s, <3 x float> zeroinitializer, float -1.0, <3 x i32> <i32 -1, i32 1, i32 -1>, float 0.0)
+  call void @consume(<4 x float> %r)
+  ret void
+}
+declare target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32)
+declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+declare <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), target("dx.Sampler", 0), <3 x float>, float, <3 x i32>, float)
 declare void @consume(<4 x float>)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
 ;--- clamp.ll

@@ -1,5 +1,38 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) 3D biased-sampling CPU regression scope (2026-11-23)
+
+The [3D biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-3d-biased-sampling-cpu-execution-vm-2026-11-23)
+executes heap-backed FP32 DXIL `Texture3D::SampleBias` in compiled fragment
+stages. The existing 3D helper receives FP32 (U, V, W), six coarse spatial
+derivatives, bias, three constant signed i32 offsets and an optional shader
+MinLod clamp. Malformed coordinates/offset widths, dynamic/poison/undefined
+or partially undefined offsets and compute/unannotated stages reject.
+Ordinary DXIL 3D sampling/loading is unchanged; no new Vulkan sampler
+implementation or LOD-zero approximation is added.
+
+One LIT fixture and two unit tests cover exact operands/result shaping,
+idempotence/reflection, admission and compiled execution. U-, V- and
+W-driven LOD on both screen derivative axes, distinct mip/XYZ-texel/component
+values, positive/negative XYZ offsets, divergent bias/clamps, scalar/vector
+results, helper-only lanes, partial waves, guards, masks and repeated
+invocation are checked. Expanded fixtures verify native SDK DXC plain/
+clamped 3D import and normal/reference/AOT compute rejection for both forms,
+not owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes **910** in **21.49 seconds**. Full
+FeMe LIT passes **4,131**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,156** discovered tests in **145.31 seconds**. Timings are not
+controlled speedups.
+
+All seven raised texture shapes have bounded fragment FP32 biased
+execution, not broader sampling conformance. Artifact ABI 8, argument
+layouts, Vulkan semantics/advertisements, pinned inventory and adapter-matrix
+results are unchanged. Other stages, gradient mapping/execution, broader
+sampling conformance, bound/static descriptor materialization and owned
+D3D12 execution remain open. **No real Vulkan CTS pass is claimed**; the
+external runner remains unavailable.
+
 ## W2(a)/W3(b) 1D biased-sampling CPU regression scope (2026-11-23)
 
 The [1D biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-1d-biased-sampling-cpu-execution-vm-2026-11-23)

@@ -140,7 +140,7 @@ The original compute-only baseline is no longer current:
   undefined/poison clamps select the plain intrinsic. Status/aggregate uses
   and malformed calls stay unraised without an extra sample. Seven-shape
   roundtrips, idempotence and native DXC pixel-shader import pass.
-  Heap-backed FP32 1D/2D/cube biased sampling, including arrays, now executes
+  Heap-backed FP32 1D/2D/3D/cube biased sampling, including arrays, now executes
   in compiled fragment stages with real coarse spatial/direction derivatives,
   implicit LOD, bias, supported offsets and optional shader MinLod clamps.
   Scalar/vector results up to the
@@ -168,7 +168,15 @@ The original compute-only baseline is no longer current:
   footprints, both derivative axes, layer/mip/texel/component values,
   divergent layers/bias/clamps and guarded partial waves. Malformed
   coordinates and dynamic/poison/undefined 1D offsets reject. Ordinary DXIL
-  1D sampling/loading is unchanged; 3D biased execution remains unsupported.
+  1D sampling/loading is unchanged.
+  Biased 3D sampling passes FP32 (U, V, W), six coarse spatial derivatives
+  and three constant signed i32 offsets to the existing shared 3D helper.
+  Compiled tests isolate each coordinate's LOD contribution on both screen
+  axes, signed XYZ offsets, biased/clamped mips and result components with
+  guarded partial waves. Malformed coordinates/offset widths and dynamic or
+  partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
+  unchanged. Seven-shape fragment biased execution is bounded compiler/
+  executor coverage, not descriptor materialization or owned-device execution.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.

@@ -116,7 +116,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   MinLod clamps survive. Undefined/poison clamps select the plain intrinsic;
   real zero/nonzero/dynamic clamps remain clamped. Seven-shape LLVM roundtrips
   and native DXC pixel-shader import are tested.
-  Heap-backed FP32 1D/2D/cube biased sampling, including arrays, now executes
+  Heap-backed FP32 1D/2D/3D/cube biased sampling, including arrays, now executes
   in the separate compiled fragment-stage path, with real spatial/direction
   derivatives, implicit LOD, bias, supported offsets and optional shader MinLod clamps.
   Scalar/vector results up to the declared texel width (at most four) narrow
@@ -141,8 +141,15 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. This compute runner still rejects both forms.
   Malformed coordinates and dynamic/poison/undefined 1D offsets reject.
-  Ordinary DXIL 1D sampling/loading is unchanged; 3D biased execution remains
-  unsupported.
+  Ordinary DXIL 1D sampling/loading is unchanged.
+  Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
+  three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
+  both screen axes, signed XYZ offsets, biased/clamped mips and components
+  with guarded partial waves. Malformed coordinates/offset widths and
+  dynamic or partially undefined offsets reject. This compute runner still
+  rejects plain/clamped 3D bias in normal/reference/AOT dispatch. Ordinary
+  DXIL 3D sampling/loading is unchanged; no descriptor materialization or
+  owned-device execution is enabled.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

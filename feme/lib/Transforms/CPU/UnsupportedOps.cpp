@@ -66,7 +66,7 @@ Error checkSupportedRaisedOps(const Module &M) {
       return createStringError(
           inconvertibleErrorCode(),
           "unsupported raised operation: '%s' requires heap-backed FP32 "
-          "1D/2D/cube (including array) fragment biased sampling with a "
+          "1D/2D/3D/cube (including array) fragment biased sampling with a "
           "default "
           "sampler, "
           "shape-matched coordinates and supported offsets; other "
