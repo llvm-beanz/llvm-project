@@ -1,5 +1,32 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) explicit 1D gradient CPU regression scope (2026-11-23)
+
+The [explicit 1D gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-1d-gradient-cpu-execution-vm-2026-11-23)
+adds heap-backed FP32 1D/1D-array CPU execution with scalar supplied gradients,
+constant signed scalar offsets, default samplers, optional shader clamps
+and scalar/vector results up to the declared texel width (at most four).
+Array layers remain coordinate-only. Supplied gradients select LOD in any
+stage without synthesized derivatives or an LOD-zero approximation.
+
+Compiled fragment tests independently vary positive dU/dX and negative
+dU/dY to select mips 0/1/2 despite lane-uniform U, with divergent layers/
+clamps, both signed offsets, components, helpers, partial waves, guards and
+repeats. Normal/reference compute tests verify divergent multi-mip selection
+and independent layers/clamps. A five-lane single-mip normal/reference/AOT
+runner fixture covers plain/clamped 1D/array forms, signed gradients/offsets,
+scalar/vector results, layers/clamps, partial waves, guards and repeats;
+image YAML still prepares one mip. Focused CPU/DXIL/sampling LIT passes 935;
+full FeMe LIT passes 4,156 with 15 skipped, 10 unsupported and zero failures
+among 4,181 discovered tests. The assertions-enabled, PCH-disabled, sccache
+ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, descriptor materialization or
+owned D3D12 execution is claimed. Native SDK import remains separate from
+canonical CPU execution. Ordinary DXIL sampling/loading eligibility,
+artifact ABI 8 and argument layouts are unchanged; `CreateDevice` remains
+`E_NOTIMPL`, and W2(a)/W2(b)/W3(b) remain open.
+
 ## W2(a)/W3(b) explicit cube gradient CPU regression scope (2026-11-23)
 
 The [explicit cube gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-cube-gradient-cpu-execution-vm-2026-11-23)

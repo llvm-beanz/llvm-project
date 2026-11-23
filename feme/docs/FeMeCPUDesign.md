@@ -2756,7 +2756,7 @@ missing stage identity. Native DXC plain/clamped array import is distinct
 from canonical compiled execution; bound descriptors remain unsupported.
 
 FP32 DXIL `SampleGrad` now has checked opcode-63 import/raising against
-LLVM's existing forward lowering, with bounded 2D/cube (including array)
+LLVM's existing forward lowering, with bounded 1D/2D/cube (including array)
 CPU execution. Scalar/vector FP32 texels up to four components and default
 samplers cover 1D/array, 2D/array, 3D and cube/array import.
 Canonical operands preserve coordinates/layers, dP/dX,
@@ -2769,20 +2769,22 @@ use before adding a sample. Status/aggregate/out-of-width uses, malformed
 calls, comparison samplers, half/integer texels and nonzero/dynamic unused
 gradient/offset slots stay unraised without another read.
 Seven-shape LLVM roundtrips, raw guards, idempotence and native SDK DXC
-plain/clamped import pass. Heap-backed FP32 2D/cube gradient sampling
+plain/clamped import pass. Heap-backed FP32 1D/2D/cube gradient sampling
 (including arrays) executes with default samplers, shape-matched coordinates/
 gradients and optional shader clamps. Scalar/vector results may use up to
-the declared texel width (at most four). 2D supports constant signed spatial
+the declared texel width (at most four). 1D/2D support constant signed spatial
 offsets; cube offsets must be unused zero/undef/poison scalars. Supplied
 gradients drive LOD in any stage without synthesized derivatives or an
 LOD-zero approximation. Array elements remain coordinate-only, excluded
-from both two-component U/V or three-component raw-direction gradients.
+from scalar U, two-component U/V or three-component raw-direction gradients.
+1D supplies scalar dU/dX and dU/dY and a constant signed scalar offset to
+the existing plain/array 1D sampling helpers with zero shader bias.
 Six supplied cube direction derivatives use the existing cube projection/
 LOD helpers with zero shader bias and a separate cube-array element.
 Compiled fragment and normal/reference compute tests verify divergent
 multi-mip/face/element selection and clamps; single-mip runner tests cover
 normal, reference and AOT dispatch, components, partial waves and repeats.
-1D/array, 3D and malformed or non-heap gradient calls remain explicitly
+3D and malformed or non-heap gradient calls remain explicitly
 rejected. Existing biased/comparison execution and SPIR-V gradient handling
 are unchanged. No descriptor materialization or owned-device execution is added.
 

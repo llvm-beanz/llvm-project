@@ -3152,17 +3152,18 @@ documented reason rather than an oversight:
   and every result use before adding a sample. Malformed calls and
   status/aggregate/out-of-width uses stay unraised without an extra read.
   Seven-shape roundtrips, raw guards, idempotence and native DXC plain/clamped
-  import pass. Heap-backed FP32 2D/cube gradient sampling (including arrays)
+  import pass. Heap-backed FP32 1D/2D/cube gradient sampling (including arrays)
   executes in any stage with default samplers, shape-matched coordinates/
-  gradients and optional shader clamps. 2D uses constant signed offsets;
+  gradients and optional shader clamps. 1D/2D use constant signed offsets;
   cubes require an unused zero/undef/poison scalar offset. Array elements
-  remain coordinate-only, excluded from both two-component U/V or
+  remain coordinate-only, excluded from scalar U, two-component U/V or
   three-component raw-direction gradients. Scalar/vector results cannot
   exceed the declared texel width (at most four). Supplied gradients drive
   the existing projection/LOD helpers without synthesized derivatives or
   an LOD-zero approximation. Compiled fragment and normal/reference
   compute tests verify multi-mip/face/element selection; single-mip runner
-  tests cover normal/reference/AOT execution. 1D/array and 3D remain explicitly
+  tests cover normal/reference/AOT execution. 1D gradients/offsets are scalar;
+  3D remains explicitly
   rejected. No descriptor materialization or owned-device execution is enabled.
   For remaining gather forms, the DXIL import half is still blocked upstream.
   Update (roadmap L58): an ordinary, non-comparison
@@ -3180,7 +3181,7 @@ documented reason rather than an oversight:
   unchanged (the runtime's own implicit-LOD mip/anisotropy math is
   agnostic to whether a derivative was synthesized, zeroed, or supplied
   explicitly), so no new runtime entry point was needed. DXIL's own
-  1D/array and 3D gradient CPU execution,
+  3D gradient CPU execution,
   `Array2D`/other-shape SPIR-V gradient sampling,
   integer-channel/`compute`-stage/sparse-residency SPIR-V gradient
   sampling, and a `Dref`+`Grad` depth-comparison combination all remain

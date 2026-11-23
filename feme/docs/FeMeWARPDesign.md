@@ -187,17 +187,18 @@ The original compute-only baseline is no longer current:
   adding a sample; malformed calls and unsupported status/aggregate uses
   stay unraised without an extra read. Seven-shape roundtrips, raw guards,
   idempotence and native DXC plain/clamped import pass. Heap-backed FP32
-  2D/cube gradients (including arrays) execute in any stage with default
+  1D/2D/cube gradients (including arrays) execute in any stage with default
   samplers, shape-matched coordinates/gradients and optional shader clamps.
-  2D uses constant signed offsets; cubes require an unused zero/undef/poison
+  1D/2D use constant signed offsets; cubes require an unused zero/undef/poison
   scalar offset. Scalar/vector results cannot exceed the declared texel
   width (at most four). Array elements remain coordinate-only, excluded
-  from U/V or raw-direction gradients. Supplied derivatives drive existing
+  from scalar U, U/V or raw-direction gradients. 1D gradients/offsets are
+  scalar. Supplied derivatives drive existing
   LOD/projection helpers without synthesized derivatives or an LOD-zero
   approximation. Compiled fragment and normal/reference compute tests
   verify multi-mip/face/element selection; single-mip runner tests cover
   normal/reference/AOT execution.
-  1D/array and 3D gradient calls remain explicitly rejected. This does not
+  3D gradient calls remain explicitly rejected. This does not
   materialize descriptors or establish owned D3D12 execution.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported

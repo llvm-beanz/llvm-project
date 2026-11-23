@@ -723,7 +723,9 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       if (Kind == dxil::ResourceKind::Texture1D ||
           Kind == dxil::ResourceKind::Texture1DArray) {
         SampleDerivatives1D D =
-            getOrSynthesizeSample1DDerivatives(Builder, F, U);
+            IsGrad ? SampleDerivatives1D{CI->getArgOperand(3),
+                                         CI->getArgOperand(4)}
+                   : getOrSynthesizeSample1DDerivatives(Builder, F, U);
         if (Kind == dxil::ResourceKind::Texture1DArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
           Loaded = createSample1DArray(
@@ -1347,7 +1349,9 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   unsigned TextureWidth = FP32Width(TextureTy->getTypeParameter(0));
   unsigned ResultWidth = FP32Width(CI.getType());
   auto Kind = TextureTy->getDimension();
-  if (IsGrad && Kind != dxil::ResourceKind::Texture2D &&
+  if (IsGrad && Kind != dxil::ResourceKind::Texture1D &&
+      Kind != dxil::ResourceKind::Texture1DArray &&
+      Kind != dxil::ResourceKind::Texture2D &&
       Kind != dxil::ResourceKind::Texture2DArray &&
       Kind != dxil::ResourceKind::TextureCube &&
       Kind != dxil::ResourceKind::TextureCubeArray)
@@ -1380,7 +1384,9 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   Type *CoordTy = Type::getFloatTy(Ctx);
   if (NumCoords != 1)
     CoordTy = FixedVectorType::get(CoordTy, NumCoords);
-  Type *GradTy = FixedVectorType::get(Type::getFloatTy(Ctx), IsCube ? 3 : 2);
+  Type *GradTy = Type::getFloatTy(Ctx);
+  if (!Is1D)
+    GradTy = FixedVectorType::get(GradTy, IsCube ? 3 : 2);
   if (IsGrad && (CI.getArgOperand(3)->getType() != GradTy ||
                  CI.getArgOperand(4)->getType() != GradTy))
     return false;

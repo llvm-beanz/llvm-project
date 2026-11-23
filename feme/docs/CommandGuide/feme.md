@@ -182,15 +182,16 @@ coverage" in [../Design.md](../Design.md).
   select the plain intrinsic. Operand/result/use guards reject malformed
   calls without another sample. Seven-shape roundtrips, raw guards,
   idempotence and native DXC plain/clamped import pass. Heap-backed FP32
-  2D/cube gradients (including arrays) execute in any stage, including
+  1D/2D/cube gradients (including arrays) execute in any stage, including
   native AOT, with default samplers, shape-matched coordinates/gradients and
-  optional shader clamps. 2D uses constant signed offsets; cubes require
+  optional shader clamps. 1D/2D use constant signed offsets; cubes require
   unused zero/undef/poison scalar offsets. Scalar/vector results cannot
   exceed the declared texel width (at most four). Supplied gradients drive
   existing LOD/projection helpers without synthesized derivatives or an
   LOD-zero approximation. Array elements remain coordinate-only, excluded
-  from two-component U/V or three-component raw-direction gradients.
-  1D/array and 3D gradient calls remain explicitly unsupported. This does not
+  from scalar U, two-component U/V or three-component raw-direction gradients.
+  1D gradients/offsets are scalar. 3D gradient calls remain explicitly
+  unsupported. This does not
   materialize descriptors or establish owned D3D12 rendering.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full

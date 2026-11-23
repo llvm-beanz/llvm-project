@@ -1300,7 +1300,7 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
 // `levels_xy` lowering to verify against yet, so a mip-count query stays
 // unraised). Gather remains outside this raiser's scope. Gradient sampling
-// preserves spatial/direction derivatives/clamp; heap-backed FP32 2D/cube
+// preserves spatial/direction derivatives/clamp; heap-backed FP32 1D/2D/cube
 // (including arrays) executes on CPU. Biased sampling preserves bias/clamp;
 // CPU lowering is
 // stage/shape-limited. Implicit comparison preserves the wire clamp but

@@ -1619,18 +1619,18 @@ before adding a sample. Unused gradient/offset wire slots must be
 undef/poison or zero. Status/aggregate/out-of-width uses, malformed calls,
 comparison samplers and half/integer texels remain unraised without an
 extra read. Seven-shape forward/reverse roundtrips, idempotence, raw guards
-and native SDK DXC plain/clamped import pass. Heap-backed FP32 2D/cube
+and native SDK DXC plain/clamped import pass. Heap-backed FP32 1D/2D/cube
 gradient sampling (including arrays) executes on the CPU with default
 samplers, shape-matched coordinates/gradients and optional shader clamps.
-2D retains constant signed spatial offsets; cubes require an unused
+1D/2D retain constant signed spatial offsets; cubes require an unused
 zero/undef/poison scalar offset. Array elements remain coordinate-only:
-gradients have two U/V components for 2D or three raw-direction components
-for cubes. Supplied gradients select LOD in any stage through the existing
+gradients are scalar for 1D, two U/V components for 2D or three raw-direction
+components for cubes. Supplied gradients select LOD in any stage through the existing
 projection/sampling helpers, without synthesized derivatives or an LOD-zero
 approximation. Scalar/vector results up to the declared texel width (at
 most four) are supported. Compiled fragment and normal/reference compute
 tests verify multi-mip, face and array-element selection; single-mip runner
-tests cover normal/reference/AOT execution. 1D/array and 3D gradients remain
+tests cover normal/reference/AOT execution. 3D gradients remain
 explicitly rejected. This does not materialize descriptors or establish
 owned D3D12 execution.
 Remaining gather forms still lack matching numbered
