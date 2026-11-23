@@ -141,7 +141,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. This compute runner still rejects both forms.
   Malformed coordinates and dynamic/poison/undefined 1D offsets reject.
-  Ordinary DXIL 1D sampling/loading is unchanged.
+  Implicit DXIL 1D sampling and 1D loading remain unsupported.
   Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
   three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
   both screen axes, signed XYZ offsets, biased/clamped mips and components
@@ -150,6 +150,19 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   rejects plain/clamped 3D bias in normal/reference/AOT dispatch. Ordinary
   DXIL 3D sampling/loading is unchanged; no descriptor materialization or
   owned-device execution is enabled.
+  Heap-backed FP32 1D/array `SampleLevel` now executes in any stage through
+  normal/reference/AOT paths with default samplers, scalar U or `(U,layer)`
+  coordinates, constant signed scalar offsets and scalar/vector results
+  up to the declared texel width (at most four). Explicit LOD is preserved
+  with zero derivatives/bias and unchanged sampler LOD behavior.
+  Compiled-stage tests verify multi-mip/layer selection and sampler clamps;
+  native SDK DXC bindless 1D/array runner tests cover signed offsets,
+  components, divergent layers/LODs, partial waves, guards and repeats on
+  one mip. Runner image YAML still prepares one mip. Malformed shapes,
+  non-heap handles, comparison samplers and dynamic/undefined/poison offsets
+  remain rejected. Implicit 1D sampling/loading and other ordinary shapes
+  are unchanged; no bound/static descriptor materialization or owned
+  D3D12 execution is enabled.
   FP32 `SampleGrad` now has checked opcode-63 import/raising for 1D/array,
   2D/array, 3D and cube/array textures, with scalar/vector FP32 texels up to
   four components and default samplers. Coordinates/layers, spatial gradients,

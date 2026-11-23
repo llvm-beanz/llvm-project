@@ -1,0 +1,52 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# Native SDK import plus normal/reference/AOT execution, not owned D3D12.
+# Multi-mip selection is covered by compiled-stage tests; YAML has one mip.
+# CHECK: heap[2]: 42 12 2 11 1 12 2 6 16 12 2 11 1 12 2 6 16 12 2 11 1 42
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture1D<float4> t = ResourceDescriptorHeap[0];
+  Texture1DArray<float4> a = ResourceDescriptorHeap[1];
+  SamplerState s = SamplerDescriptorHeap[0];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  float lod = (tid.x & 1) ? 2.0 : -1.0;
+  float2 coord = float2(0.375, tid.x & 1);
+  float4 p = t.SampleLevel(s, 0.375, lod, 1);
+  float4 n = t.SampleLevel(s, 0.375, lod, -1);
+  float4 ap = a.SampleLevel(s, coord, lod, 1);
+  float4 an = a.SampleLevel(s, coord, lod, -1);
+  outBuffer.Store(4 + tid.x * 16, (uint)p.a);
+  outBuffer.Store(8 + tid.x * 16, (uint)n.g);
+  outBuffer.Store(12 + tid.x * 16, (uint)ap.b);
+  outBuffer.Store(16 + tid.x * 16, (uint)an.r);
+}
+#--- heap.yaml
+resource-heap:
+  - index: 2
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 1d
+    extent: [4]
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040, 1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648]
+  - index: 1
+    dimension: 1d-array
+    array-layers: 2
+    extent: [4]
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040, 1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648, 1098907648, 1097859072, 1096810496, 1095761920, 1094713344, 1093664768, 1092616192, 1091567616, 1090519040, 1088421888, 1086324736, 1084227584, 1082130432, 1077936128, 1073741824, 1065353216]
+samplers:
+  - index: 0
+    address-u: clamp-to-edge

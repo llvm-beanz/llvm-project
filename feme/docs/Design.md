@@ -1501,8 +1501,8 @@ component for a cube-array element. The canonical unused scalar i32 offset
 must be poison/undef or zero and is not passed to the runtime. Cube calls
 reuse shared face selection/comparison helpers with six zero derivatives;
 nonzero/dynamic offsets and malformed direction/layer shapes fail admission.
-Ordinary DXIL 1D sampling/loading remains outside this increment; its
-existing eligibility checks and function signatures are unchanged.
+Implicit DXIL 1D sampling and 1D loading remain unsupported; bounded
+explicit-LOD execution is described below.
 
 Implicit `SampleCmp` preserves its comparison reference, coordinates,
 offsets and optional final FP32 MinLod clamp. Undefined/poison wire clamps
@@ -1535,7 +1535,7 @@ existing 1D comparison helpers; the layer is never differentiated.
 Compiled plain/array execution tests both X- and Y-derived mip selection,
 dynamic zero/two clamps, divergent references/layers and guarded partial
 waves. Actual SDK DXC plain/clamped 1D/array pixel shaders pass import/
-raising; ordinary DXIL 1D sampling/loading eligibility remains unchanged.
+raising; implicit DXIL 1D sampling and 1D loading remain unsupported.
 For cubes, six coarse derivatives of the raw three-component direction
 feed the existing cube projection/LOD runtime. Cube arrays pass their fourth
 coordinate separately; the cube element is never differentiated. The unused
@@ -1596,7 +1596,7 @@ spatial. Shared 1D helpers preserve bias and optional shader MinLod clamps.
 Compiled tests distinguish mip-0/mip-1 footprints, signed offsets,
 layer/mip/component values, divergent layers/bias/clamps and guarded partial
 waves. Dynamic/poison/undefined 1D offsets and malformed coordinates reject.
-Ordinary DXIL 1D sampling/loading is unchanged.
+Implicit DXIL 1D sampling and 1D loading remain unsupported.
 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and three
 constant signed i32 offsets through the existing `createSample3D` helper.
 Compiled tests isolate each coordinate's contribution to LOD on both screen
@@ -1605,6 +1605,22 @@ and guarded partial waves. Malformed coordinates/offset widths and dynamic
 or partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
 unchanged. This completes bounded fragment biased execution for the seven
 raised texture shapes, not broader sampling conformance.
+
+Heap-backed FP32 `Texture1D::SampleLevel` and `Texture1DArray::SampleLevel`
+now execute in any stage with default samplers, scalar U or `(U,layer)`
+coordinates, scalar/vector results up to the declared texel width (at most
+four) and constant signed scalar offsets. Explicit FP32 LOD is passed
+unchanged to the existing 1D helpers with zero derivatives/bias and no
+shader MinLod clamp; sampler-owned LOD behavior remains in the runtime.
+Malformed shapes, comparison samplers, non-heap handles and dynamic/
+undefined/poison offsets remain rejected. Compiled fragment and normal/
+reference compute tests prove multi-mip/layer selection, offsets,
+components, sampler clamps, helpers, partial waves, guards and repeats.
+Native SDK DXC bindless 1D/array shaders also execute through normal/
+reference/AOT paths on one mip; runner YAML still prepares one mip.
+Implicit 1D sampling/loading, other ordinary texture shapes, biased/
+comparison/gradient execution and SPIR-V behavior are unchanged.
+No bound/static descriptor materialization or owned D3D12 execution is added.
 
 FP32 DXIL `SampleGrad` now raises opcode 63 to
 `llvm.dx.resource.samplegrad[.clamp]` against LLVM's existing forward

@@ -2649,7 +2649,8 @@ helpers preserve these shapes without synthesizing unused vector elements.
 Canonical and actual SDK DXC coverage checks point/linear comparison,
 signed offsets, divergent coordinates/layers, partial waves and guarded
 repeated normal/reference/AOT dispatches. Dynamic scalar offsets fail
-admission. Ordinary DXIL 1D `SampleLevel` eligibility remains unchanged.
+admission. Implicit DXIL 1D sampling and 1D loading remain unsupported;
+bounded `SampleLevel` execution is described below.
 Implicit fragment 1D/array comparison also reuses these helpers, with real
 coarse U derivatives, implicit LOD and the optional shader MinLod clamp.
 Only U is differentiated, never the array layer. A combined plain/array
@@ -2730,8 +2731,8 @@ layer, never differentiated or spatially offset. Compiled tests check
 mip-0/mip-1 footprints, both derivative axes, distinct layer/mip/texel/
 component values, divergent layers/bias/clamps, scalar/vector results,
 helpers, partial waves, guards, masks and repeated invocation. Malformed
-coordinates and dynamic/poison/undefined 1D offsets reject. Ordinary DXIL
-1D sampling/loading is unchanged.
+coordinates and dynamic/poison/undefined 1D offsets reject. Implicit DXIL
+1D sampling and 1D loading remain unsupported.
 3D sampling uses `createSample3D`, passing FP32 (U, V, W), six coarse
 spatial derivatives, bias, three constant signed i32 offsets and optional
 shader MinLod clamps. Existing 2D derivative synthesis supplies U/V pairs;
@@ -2754,6 +2755,30 @@ operands, result shaping, idempotence, reflection and missing-layer/compute
 rejection. Array admission also rejects dynamic/undefined offsets and
 missing stage identity. Native DXC plain/clamped array import is distinct
 from canonical compiled execution; bound descriptors remain unsupported.
+
+Heap-backed FP32 `Texture1D::SampleLevel` and `Texture1DArray::SampleLevel`
+now execute through `createSample1D`/`createSample1DArray`. The shared FP32
+sampling matcher requires default samplers, scalar U or `(U,layer)`,
+scalar/vector results up to the declared texel width (at most four), an
+FP32 LOD and constant signed scalar offsets. Explicit LOD is preserved in
+any stage with `UseExplicitLod=true`, zero derivatives/bias and a
+negative-infinity shader MinLod clamp. The layer is passed separately;
+sampler-owned LOD behavior remains in the existing runtime.
+
+Lowering/admission share the matcher. Dynamic/undefined/poison or vector
+offsets, missing layers, comparison samplers, non-heap handles and
+out-of-texel-width results remain unsupported. Transform tests verify
+signature growth, reflection, narrowing, handle cleanup and idempotence.
+Compiled fragment tests vary explicit mips 0/1/2 despite lane-uniform U,
+with signed offsets, layers, all four result widths, helpers, partial
+waves, guards and repeats. Normal/reference compute tests select divergent
+mips, independent layers and sampler minimum/maximum LOD clamps with
+repeated prepared invocations. Native SDK DXC bindless 1D/array shaders
+execute through normal/reference/AOT paths on one mip; runner YAML still
+prepares one mip. This is CPU execution, not owned D3D12 execution or
+bound/static descriptor materialization. Implicit DXIL 1D sampling/loading,
+other ordinary sampling/loading shapes, biased/comparison/gradient
+execution, SPIR-V behavior, artifact ABI 8 and argument layouts are unchanged.
 
 FP32 DXIL `SampleGrad` now has checked opcode-63 import/raising against
 LLVM's existing forward lowering, with bounded 1D/2D/3D/cube (including array)

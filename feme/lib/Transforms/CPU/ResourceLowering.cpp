@@ -696,10 +696,11 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     Intrinsic::ID ID = getIntrinsicID(CI);
     bool IsGrad = ID == Intrinsic::dx_resource_samplegrad ||
                   ID == Intrinsic::dx_resource_samplegrad_clamp;
+    bool IsLevel1D = isSupportedDXILSampleLevel1D(*CI);
     if (ID == Intrinsic::dx_resource_samplebias ||
-        ID == Intrinsic::dx_resource_samplebias_clamp || IsGrad) {
-      if (!(IsGrad ? isSupportedDXILSampleGrad(*CI)
-                   : isSupportedDXILSampleBias(*CI)))
+        ID == Intrinsic::dx_resource_samplebias_clamp || IsGrad || IsLevel1D) {
+      if (!IsLevel1D && !(IsGrad ? isSupportedDXILSampleGrad(*CI)
+                                 : isSupportedDXILSampleBias(*CI)))
         continue;
       IRBuilder<> Builder(CI);
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
@@ -717,25 +718,27 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                : ConstantFP::getInfinity(Builder.getFloatTy(),
                                                          /*Negative=*/true);
       Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
-      Value *Bias = IsGrad ? Zero : CI->getArgOperand(3);
+      Value *Bias = IsGrad || IsLevel1D ? Zero : CI->getArgOperand(3);
       auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
       Value *Loaded;
       if (Kind == dxil::ResourceKind::Texture1D ||
           Kind == dxil::ResourceKind::Texture1DArray) {
         SampleDerivatives1D D =
-            IsGrad ? SampleDerivatives1D{CI->getArgOperand(3),
-                                         CI->getArgOperand(4)}
-                   : getOrSynthesizeSample1DDerivatives(Builder, F, U);
+            IsGrad      ? SampleDerivatives1D{CI->getArgOperand(3),
+                                              CI->getArgOperand(4)}
+            : IsLevel1D ? SampleDerivatives1D{Zero, Zero}
+                        : getOrSynthesizeSample1DDerivatives(Builder, F, U);
+        Value *Lod = IsLevel1D ? CI->getArgOperand(3) : Zero;
         if (Kind == dxil::ResourceKind::Texture1DArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
           Loaded = createSample1DArray(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
-              U, Layer, D.DUdX, D.DUdY, Zero, Builder.getFalse(), Bias, Offset,
-              MinLodClamp, Builder.getTrue(), CI->getName());
+              U, Layer, D.DUdX, D.DUdY, Lod, Builder.getInt1(IsLevel1D), Bias,
+              Offset, MinLodClamp, Builder.getTrue(), CI->getName());
         } else {
           Loaded = createSample1D(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
-              U, D.DUdX, D.DUdY, Zero, Builder.getFalse(), Bias, Offset,
+              U, D.DUdX, D.DUdY, Lod, Builder.getInt1(IsLevel1D), Bias, Offset,
               MinLodClamp, Builder.getTrue(), CI->getName());
         }
       } else if (Kind == dxil::ResourceKind::TextureCube ||
@@ -1149,6 +1152,8 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (isSupportedDXILSampleLevel1D(*CI))
+      return true;
     if (ID == Intrinsic::dx_resource_samplegrad ||
         ID == Intrinsic::dx_resource_samplegrad_clamp) {
       if (isSupportedDXILSampleGrad(*CI))
@@ -1316,19 +1321,21 @@ void attachResourceMetadata(Function &F,
 
 } // namespace
 
-static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
+static bool isSupportedDXILFloatingSample(const CallInst &CI,
+                                          Intrinsic::ID BaseID) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
-  bool HasClamp = ID == (IsGrad ? Intrinsic::dx_resource_samplegrad_clamp
+  bool IsGrad = BaseID == Intrinsic::dx_resource_samplegrad;
+  bool IsLevel = BaseID == Intrinsic::dx_resource_samplelevel;
+  bool HasClamp =
+      !IsLevel && ID == (IsGrad ? Intrinsic::dx_resource_samplegrad_clamp
                                 : Intrinsic::dx_resource_samplebias_clamp);
   unsigned OffsetIdx = IsGrad ? 5 : 4;
-  if ((ID != (IsGrad ? Intrinsic::dx_resource_samplegrad
-                     : Intrinsic::dx_resource_samplebias) &&
-       !HasClamp) ||
+  if ((ID != BaseID && !HasClamp) ||
       CI.arg_size() != OffsetIdx + (HasClamp ? 2u : 1u) ||
       (HasClamp && !CI.getArgOperand(OffsetIdx + 1)->getType()->isFloatTy()) ||
       (!IsGrad && (!CI.getArgOperand(3)->getType()->isFloatTy() ||
-                   feme::getShaderStage(*CI.getFunction()) !=
-                       feme::ShaderStage::Fragment)))
+                   (!IsLevel && feme::getShaderStage(*CI.getFunction()) !=
+                                    feme::ShaderStage::Fragment))))
     return false;
   auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
   auto Sampler = classifySamplerHandle(CI.getArgOperand(1));
@@ -1378,6 +1385,8 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   }
   bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
               Kind == dxil::ResourceKind::Texture1DArray;
+  if (IsLevel && !Is1D)
+    return false;
   bool IsCube = Kind == dxil::ResourceKind::TextureCube ||
                 Kind == dxil::ResourceKind::TextureCubeArray;
   LLVMContext &Ctx = CI.getContext();
@@ -1413,11 +1422,15 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
 }
 
 bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
-  return isSupportedDXILSampleBiasOrGrad(CI, /*IsGrad=*/false);
+  return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_samplebias);
 }
 
 bool feme::cpu::isSupportedDXILSampleGrad(const CallInst &CI) {
-  return isSupportedDXILSampleBiasOrGrad(CI, /*IsGrad=*/true);
+  return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_samplegrad);
+}
+
+bool feme::cpu::isSupportedDXILSampleLevel1D(const CallInst &CI) {
+  return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_samplelevel);
 }
 
 static bool isSupportedDXILComparisonSample(const CallInst &CI) {

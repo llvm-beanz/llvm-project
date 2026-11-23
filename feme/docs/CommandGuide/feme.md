@@ -166,7 +166,7 @@ coverage" in [../Design.md](../Design.md).
   Compiled tests check mip-0/mip-1 footprints, both derivative axes,
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. Malformed coordinates and dynamic/poison/undefined
-  1D offsets reject. Ordinary DXIL 1D sampling/loading is unchanged.
+  1D offsets reject. Implicit DXIL 1D sampling and 1D loading remain unsupported.
   Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
   three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
   both screen axes, signed XYZ offsets, biased/clamped mips and components
@@ -174,6 +174,16 @@ coverage" in [../Design.md](../Design.md).
   dynamic or partially undefined offsets reject. Ordinary DXIL 3D sampling/
   loading is unchanged; seven-shape biased execution is not broader sampling
   conformance.
+  Heap-backed FP32 1D/array `SampleLevel` now compiles in any stage, including
+  native AOT, with default samplers, scalar U or `(U,layer)` coordinates,
+  constant signed scalar offsets and scalar/vector results up to the
+  declared texel width (at most four). Explicit LOD is preserved with zero
+  derivatives/bias and unchanged sampler LOD behavior. Malformed shapes,
+  non-heap handles, comparison samplers and dynamic/undefined/poison offsets
+  remain unsupported. Native SDK DXC bindless 1D/array shaders execute
+  through normal/reference/AOT paths; this does not enable implicit 1D
+  sampling/loading, change other ordinary shapes, materialize bound/static
+  descriptors or establish owned D3D12 rendering.
   FP32 `SampleGrad` now has checked opcode-63 import/raising for 1D/array,
   2D/array, 3D and cube/array textures, with scalar/vector FP32 texels up to
   four components and default samplers. Coordinates/layers, spatial gradients,

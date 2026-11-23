@@ -11,6 +11,7 @@
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/RootConstantLowering.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Analysis/DXILResource.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
@@ -56,6 +57,24 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
 
     switch (F.getIntrinsicID()) {
+    case Intrinsic::dx_resource_samplelevel:
+      for (const User *U : F.users()) {
+        const auto *CI = dyn_cast<CallInst>(U);
+        const auto *Ty =
+            CI ? dyn_cast<dxil::TextureExtType>(CI->getArgOperand(0)->getType())
+               : nullptr;
+        if (Ty &&
+            (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
+             Ty->getDimension() == dxil::ResourceKind::Texture1DArray) &&
+            !isSupportedDXILSampleLevel1D(*CI))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "unsupported raised operation: '%s' requires heap-backed FP32 "
+              "1D/array explicit-LOD sampling with a default sampler, "
+              "shape-matched coordinates and constant signed scalar offsets",
+              F.getName().str().c_str());
+      }
+      continue;
     case Intrinsic::dx_resource_samplebias:
     case Intrinsic::dx_resource_samplebias_clamp:
       if (llvm::all_of(F.users(), [](const User *U) {

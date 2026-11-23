@@ -167,8 +167,8 @@ The original compute-only baseline is no longer current:
   and the offset remains spatial. Compiled tests check mip-0/mip-1
   footprints, both derivative axes, layer/mip/texel/component values,
   divergent layers/bias/clamps and guarded partial waves. Malformed
-  coordinates and dynamic/poison/undefined 1D offsets reject. Ordinary DXIL
-  1D sampling/loading is unchanged.
+  coordinates and dynamic/poison/undefined 1D offsets reject. Implicit DXIL
+  1D sampling and 1D loading remain unsupported.
   Biased 3D sampling passes FP32 (U, V, W), six coarse spatial derivatives
   and three constant signed i32 offsets to the existing shared 3D helper.
   Compiled tests isolate each coordinate's LOD contribution on both screen
@@ -177,6 +177,19 @@ The original compute-only baseline is no longer current:
   partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
   unchanged. Seven-shape fragment biased execution is bounded compiler/
   executor coverage, not descriptor materialization or owned-device execution.
+  Heap-backed FP32 1D/array `SampleLevel` now executes in any stage with
+  default samplers, scalar U or `(U,layer)` coordinates, constant signed
+  scalar offsets and scalar/vector results up to the declared texel width
+  (at most four). Explicit LOD survives with zero derivatives/bias; existing
+  sampler LOD behavior is unchanged. Compiled fragment and normal/reference
+  compute tests verify multi-mip/layer selection, offsets, components,
+  sampler clamps, helpers, partial waves, guards and repeats. Native SDK
+  DXC bindless 1D/array shaders execute through normal/reference/AOT paths
+  on one mip; runner YAML still prepares one mip. Malformed shapes,
+  non-heap handles, comparison samplers and dynamic/undefined/poison offsets
+  remain rejected. This does not enable implicit 1D sampling/loading,
+  change other ordinary shapes or materialize bound/static descriptors.
+  Owned D3D12 execution and W2/W3 closure remain open.
   FP32 `SampleGrad` now has checked opcode-63 import/raising against LLVM's
   existing forward lowering for all seven sampled texture shapes. Scalar/
   vector FP32 texels up to four components use default samplers. Coordinates/

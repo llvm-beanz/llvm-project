@@ -27,6 +27,47 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) explicit 1D LOD CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `Texture1D::SampleLevel` and `Texture1DArray::SampleLevel`
+now execute with default samplers, scalar U or `(U,layer)` coordinates,
+FP32 LOD, constant signed scalar offsets and scalar/vector results up to
+the declared texel width (at most four). Explicit LOD is preserved in any
+stage with zero derivatives/bias and no shader MinLod clamp. Array layers
+remain separate; existing sampler-owned LOD behavior is unchanged.
+Implicit DXIL 1D sampling/loading is not promoted.
+
+Transform tests check LOD/offset forwarding, layers, narrowing, reflection,
+image-only signature growth, handle cleanup and idempotence. Missing
+layers, vector/dynamic/poison offsets, comparison samplers, non-heap handles
+and out-of-texel-width results stay untouched; admission tests reject
+dynamic/undefined/poison offsets in every stage. The earlier comparison
+fixture now retains implicit `Sample` rejection rather than rejecting
+`SampleLevel`. Compiled fragment tests select mips 0/1/2 despite lane-uniform
+U, with layers, signed offsets, all four result widths, helpers, partial
+waves, guards and repeats. Normal/reference compute tests select divergent
+mips, independent layers and sampler minimum/maximum LOD clamps.
+
+Actual SDK DXC SM6.6 bindless plain/array 1D shaders execute through normal/
+reference/AOT paths with signed offsets, components, divergent layers/LODs,
+five lanes, guards and repeats on one mip. This adds native import plus
+CPU execution evidence, not owned-device execution; runner image YAML
+still prepares only one mip.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Expanded focused CPU/DXIL/sampling LIT passes 959 in 18.88 seconds, including
+existing ordinary image-sampling regressions. Full FeMe LIT passes 4,167,
+skips 15 and marks 10 unsupported, with zero failures among 4,192 discovered
+tests in 89.51 seconds. Six new tests add six passes; timings are not
+controlled speedups. Other ordinary sampling/loading shapes, biased/
+comparison/gradient execution, SPIR-V behavior, artifact ABI 8 and argument
+layouts remain unchanged.
+
+Broader sampling conformance, bound/static descriptor materialization and
+owned D3D12 execution remain open; owned `CreateDevice` remains `E_NOTIMPL`.
+W2(a)/W2(b)/W3(b) remain open. No new adapter-matrix or external Vulkan CTS
+result is claimed.
+
 ## W2(a)/W3(b) explicit 3D gradient CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 `Texture3D::SampleGrad` now executes with default samplers,
