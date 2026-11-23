@@ -133,6 +133,16 @@ The original compute-only baseline is no longer current:
   results remain open;
   no bound/static descriptor
   materialization or owned D3D12 execution is established.
+  FP32 `SampleBias` now has checked opcode-61 import/raising against LLVM's
+  existing forward lowering for 1D/array, 2D/array, 3D and cube/array textures.
+  Scalar and two-/three-/four-component FP32 texels and default samplers
+  are supported. Bias, spatial offsets and real MinLod clamps survive;
+  undefined/poison clamps select the plain intrinsic. Status/aggregate uses
+  and malformed calls stay unraised without an extra sample. Seven-shape
+  roundtrips, idempotence and native DXC pixel-shader import pass.
+  Both biased intrinsics still fail explicit CPU admission in every stage;
+  normal/reference/AOT rejection is tested. This does not establish biased
+  execution or materialize descriptors.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.

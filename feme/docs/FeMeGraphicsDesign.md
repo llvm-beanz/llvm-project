@@ -3099,14 +3099,23 @@ documented reason rather than an oversight:
   Cubes use three-component direction vectors, with a fourth cube-array
   element coordinate, and no spatial offsets. Unused scalar offsets
   accept poison/undef or zero; nonzero/dynamic offsets are rejected.
+  FP32 DXIL `SampleBias` now has checked opcode-61 import/raising against
+  existing LLVM forward lowering for 1D/array, 2D/array, 3D and cube/array.
+  Scalar and two-/three-/four-component FP32 texels use default samplers;
+  coordinates/layers, bias, spatial offsets and optional real MinLod clamps
+  survive. Undefined/poison clamps select the plain intrinsic; zero and
+  dynamic clamps remain clamped. Status/aggregate uses and malformed calls
+  stay unraised without an extra sample. Seven-shape roundtrips, idempotence
+  and native DXC import pass, but both biased intrinsics still fail explicit
+  CPU admission in every stage. Normal/reference/AOT rejection is tested;
+  no biased DXIL execution or descriptor materialization is enabled.
   For remaining gather forms, the DXIL import half is still
-  blocked upstream; bias/
-  gradient sampling has no import-side blocker but is simply not
-  implemented yet. Update (roadmap L58): an ordinary, non-comparison
+  blocked upstream; gradient sampling is not yet raised despite existing
+  LLVM forward lowering. Update (roadmap L58): an ordinary, non-comparison
   `Bias` operand is now implemented on the SPIR-V import side, scoped to
   `Plain2D`/`Cube` only (matching roadmap L26's own `MinLodClamp` scope
-  precedent); DXIL's own `Bias` operand still always lowers to a
-  zero-constant no-op (`ResourceLowering.cpp`), and a `Dref`+`Bias`
+  precedent); ordinary DXIL `Sample`/`SampleLevel` still pass zero bias to
+  the CPU runtime, while `SampleBias` rejects before lowering. A `Dref`+`Bias`
   combination (depth-comparison sampling with a bias) remains entirely
   unimplemented on both frontends. Update (roadmap L59): explicit-`Grad`
   gradient sampling is likewise now implemented on the SPIR-V import

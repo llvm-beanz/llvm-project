@@ -1292,13 +1292,15 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // Scope: only the DXIL ops LLVM's own DirectX backend already lowers a
 // canonical intrinsic to (cross-checked against `-dxil-op-lower`, the same
 // standard every other raiser in this file holds itself to -- see the file
-// header comment): `Sample` (60), `SampleLevel` (62), scalar FP32 `SampleCmp`
+// header comment): `Sample` (60), FP32 `SampleBias` (61), `SampleLevel` (62),
+// scalar FP32 `SampleCmp`
 // (64)/`SampleCmpLevelZero` (65), `TextureLoad` (66) and
 // `GetDimensions`' `.x` and `.xy` fields (72, via
 // `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
 // `levels_xy` lowering to verify against yet, so a mip-count query stays
-// unraised). Bias/gradient sampling and gather remain outside this raiser's
-// scope. Implicit comparison preserves the wire clamp but requires
+// unraised). Gradient sampling and gather remain outside this raiser's
+// scope. Biased sampling preserves bias/clamp but still requires CPU lowering.
+// Implicit comparison preserves the wire clamp but requires
 // derivative-aware CPU lowering. Heap-backed scalar FP32 1D/2D/cube (and array)
 // comparison executes in fragment stages; level zero also supports compute.
 //===----------------------------------------------------------------------===//
@@ -1465,6 +1467,83 @@ bool raiseSample(CallInst &CI) {
       Builder.CreateCall(SampleFn, {Handle, Sampler, Coord, Offset});
   if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
     return false;
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises FP32 `SampleBias` (61), preserving bias and real MinLod clamps.
+/// Validate the complete result and operand shapes before adding a sample.
+bool raiseSampleBias(CallInst &CI) {
+  if (CI.arg_size() != 12)
+    return false;
+  auto *RetTy = dyn_cast<StructType>(CI.getType());
+  if (!RetTy || RetTy->getNumElements() != 5 ||
+      !RetTy->getElementType(4)->isIntegerTy(32))
+    return false;
+  for (unsigned I = 0; I < 4; ++I)
+    if (!RetTy->getElementType(I)->isFloatTy() ||
+        !CI.getArgOperand(3 + I)->getType()->isFloatTy())
+      return false;
+  for (unsigned I = 7; I < 10; ++I)
+    if (!CI.getArgOperand(I)->getType()->isIntegerTy(32))
+      return false;
+  if (!CI.getArgOperand(10)->getType()->isFloatTy() ||
+      !CI.getArgOperand(11)->getType()->isFloatTy())
+    return false;
+
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType()) : nullptr;
+  Value *Sampler = lookThroughCastHandle(CI.getArgOperand(2));
+  auto *SamplerTy =
+      Sampler ? dyn_cast<dxil::SamplerExtType>(Sampler->getType()) : nullptr;
+  if (!HandleTy || HandleTy->getNumTypeParameters() != 1 ||
+      HandleTy->getNumIntParameters() < 4 || !SamplerTy ||
+      !SamplerTy->getNumIntParameters() ||
+      SamplerTy->getIntParameter(0) !=
+          static_cast<unsigned>(dxil::SamplerType::Default))
+    return false;
+  unsigned NumCoords = getTextureCoordComponents(HandleTy->getDimension());
+  if (!NumCoords)
+    return false;
+  unsigned NumOffsets = getTextureOffsetComponents(HandleTy->getDimension());
+  for (unsigned I = NumOffsets; I < 3; ++I) {
+    auto *Offset = dyn_cast<Constant>(CI.getArgOperand(7 + I));
+    if (!Offset || (!isa<UndefValue>(Offset) && !Offset->isNullValue()))
+      return false;
+  }
+  Type *ElemTy = HandleTy->getResourceType();
+  auto *VecTy = dyn_cast<FixedVectorType>(ElemTy);
+  unsigned Width = VecTy ? VecTy->getNumElements() : 1;
+  if ((!ElemTy->isFloatTy() &&
+       (!VecTy || !VecTy->getElementType()->isFloatTy())) ||
+      Width > 4 || !getResRetExtracts(CI, Width))
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  SmallVector<Value *, 4> Coords;
+  for (unsigned I = 0; I < NumCoords; ++I)
+    Coords.push_back(CI.getArgOperand(3 + I));
+  SmallVector<Value *, 3> Offsets;
+  for (unsigned I = 0; I < NumOffsets; ++I)
+    Offsets.push_back(CI.getArgOperand(7 + I));
+  Value *Coord = packTextureVector(Builder, Coords);
+  Value *Offset = packTextureVector(Builder, Offsets);
+  if (!Offset)
+    Offset = PoisonValue::get(Builder.getInt32Ty());
+  bool HasClamp = !isa<UndefValue>(CI.getArgOperand(11));
+  auto *SampleFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(),
+      HasClamp ? Intrinsic::dx_resource_samplebias_clamp
+               : Intrinsic::dx_resource_samplebias,
+      {ElemTy, HandleTy, SamplerTy, Coord->getType(), Offset->getType()});
+  SmallVector<Value *, 6> Args = {Handle, Sampler, Coord, CI.getArgOperand(10),
+                                  Offset};
+  if (HasClamp)
+    Args.push_back(CI.getArgOperand(11));
+  Value *Loaded = Builder.CreateCall(SampleFn, Args);
+  if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
+    llvm_unreachable("biased sample uses were validated before mutation");
   CI.eraseFromParent();
   return true;
 }
@@ -2113,6 +2192,9 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(60, [](CallInst &CI) { // Sample
     return raiseSample(CI);
+  });
+  Changed |= forEachDXOpCall(61, [](CallInst &CI) { // SampleBias
+    return raiseSampleBias(CI);
   });
   Changed |= forEachDXOpCall(62, [](CallInst &CI) { // SampleLevel
     return raiseSampleLevel(CI);

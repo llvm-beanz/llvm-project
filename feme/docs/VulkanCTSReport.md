@@ -1,5 +1,33 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) biased-sampling compiler regression scope (2026-11-23)
+
+The [biased-sampling compiler follow-up](W0WindowsIntegrationProbe.md#w2aw3b-biased-sampling-compiler-mapping-vm-2026-11-23)
+adds checked FP32 DXIL opcode-61 `SampleBias` import/raising against existing
+LLVM forward lowering for 1D/array, 2D/array, 3D and cube/array textures.
+Coordinates/layers, bias, spatial offsets and real MinLod clamps survive.
+Status/aggregate uses and malformed calls stay unraised without an extra
+sample. Both biased intrinsics still fail explicit CPU admission in every
+stage; existing SPIR-V bias handling and comparison execution are unchanged.
+No new Vulkan sampling implementation or LOD-zero approximation is added.
+
+Four LIT fixtures and one unit test cover seven-shape forward/reverse
+roundtrips, exact operand values, scalar and two-/three-/four-component
+FP32 results, raw guards, idempotence, actual SDK DXC plain/zero-clamped/
+dynamic-clamped pixel-shader import and normal/reference/AOT rejection.
+This is compiler mapping, not biased CPU or owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes **895** in **7.43 seconds**. Full
+FeMe LIT passes **4,116**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,141** discovered tests in **65.41 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Biased CPU execution,
+gradient mapping/execution, broader sampling conformance, bound/static
+descriptor materialization and owned D3D12 execution remain open.
+**No real Vulkan CTS pass is claimed**; the external runner remains unavailable.
+
 ## W2(a)/W3(b) cube fragment comparison CPU regression scope (2026-11-23)
 
 The [cube fragment comparison follow-up](W0WindowsIntegrationProbe.md#w2aw3b-cube-fragment-comparison-cpu-execution-vm-2026-11-23)

@@ -2688,6 +2688,19 @@ reflection and malformed layer/offset rejection. Admission rejects
 nonzero/dynamic offsets and compute/unannotated stages. Actual SDK DXC
 plain/clamped cube/array pixel shaders pass import/raising only.
 
+FP32 DXIL `SampleBias` now raises opcode 61 to canonical
+`llvm.dx.resource.samplebias[.clamp]`, preserving bias, coordinates/layers,
+spatial offsets and real zero/nonzero/dynamic MinLod clamps. Seven-shape
+LLVM roundtrips and native SDK DXC pixel-shader import cover scalar and
+two-/three-/four-component FP32 texels and default samplers. Result uses
+and operand types are validated before adding a sample; unsupported
+status/aggregate uses and malformed calls remain unraised without an
+extra read. This does not wire bias into CPU image lowering. Admission
+explicitly rejects both biased intrinsics in fragment, compute and
+unannotated stages, with normal/reference/AOT rejection tests. Existing
+SPIR-V bias handling and ordinary DXIL sampling are unchanged; implicit
+LOD is not approximated with level zero.
+
 The runner's cube YAML preparation now uses six physical face layers for
 `dimension: cube`; `cube-array` requires an explicit positive multiple of
 six in `array-layers` (12 means two cubes). Faces must have nonzero square

@@ -43,7 +43,7 @@ covered, including default/comparison sampler handle modes. Raw and
 structured buffer accesses when retargeting
 to `amdgcn-*` (typed buffer/texture/cbuffer accesses alone are covered
 there; raw/structured buffers are not yet), texture sampling
-(`Sample`/`SampleLevel` and scalar FP32 `SampleCmpLevelZero` raise but
+(`Sample`/FP32 `SampleBias`/`SampleLevel` and scalar FP32 comparison raise but
 have no `amdgcn-*`/NVPTX lowering yet),
 and shader input/output signature ops are not, so a shader using those will
 fail at this stage rather than at any point specific to `feme`'s own
@@ -136,6 +136,15 @@ coverage" in [../Design.md](../Design.md).
   or zero only. Compiled cube/array tests check all six faces, both elements,
   both derivative axes, clamps, helpers and guarded partial waves; native
   DXC plain/clamped import is tested separately from bound execution.
+  FP32 `SampleBias` also has checked opcode-61 import/raising, preserving bias,
+  spatial offsets and optional real MinLod clamps for 1D/array, 2D/array, 3D
+  and cube/array textures. Undefined/poison clamps select the plain intrinsic;
+  real zero/nonzero/dynamic clamps select `llvm.dx.resource.samplebias.clamp`.
+  Scalar and two-/three-/four-component FP32 texels use default samplers.
+  Seven-shape LLVM roundtrips and native DXC pixel-shader import are tested.
+  Both biased intrinsics still fail explicit CPU admission in every stage,
+  including normal/reference/AOT compilation; no biased execution or
+  descriptor materialization is enabled.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

@@ -1450,9 +1450,10 @@ resource kind; `ResourceMetadata` now validates and preserves that mode,
 and `buildHandleType` reconstructs legacy `dx.Sampler` handles through
 the same cast bridge. Mono/unknown/malformed modes remain unraised for
 normal admission to reject, and sampler kinds mislabeled as SRVs are not
-reconstructed. `raiseSample`/`raiseSampleLevel`/`raiseSampleCmp`/
+reconstructed. `raiseSample`/`raiseSampleBias`/`raiseSampleLevel`/`raiseSampleCmp`/
 `raiseTextureLoad`/`raiseTextureStore`/`raiseGetDimensions` cover item 3's
-"raising the access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
+"raising the access" for `dx.op.sample` (60), FP32 `dx.op.sampleBias` (61),
+`dx.op.sampleLevel` (62),
 scalar FP32 `dx.op.sampleCmp` (64)/`dx.op.sampleCmpLevelZero` (65),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
 `dx.op.getDimensions`'s `.x`/`.xy` fields (72, i.e. a `GetDimensions` call
@@ -1544,7 +1545,26 @@ both screen derivative axes, dynamic clamps and guarded partial waves.
 Native SDK DXC plain/clamped cube/array pixel shaders pass import/raising,
 not bound-descriptor execution.
 
-Bias/gradient sampling remains outside FeMe's DXIL access raiser, despite
+FP32 `SampleBias` now has checked opcode-61 reverse raising against LLVM's
+existing forward lowering. Scalar and two-/three-/four-component FP32
+texels are supported for 1D, 1DArray, 2D, 2DArray, 3D, Cube and CubeArray.
+The canonical operand order is texture, default sampler, coordinates, FP32
+bias, offsets and optional FP32 MinLod clamp. Undefined/poison clamps select
+`llvm.dx.resource.samplebias`; real clamps, including zero and dynamic
+values, select `llvm.dx.resource.samplebias.clamp`. Signed/dynamic spatial
+offsets survive; unused offset slots must be poison/undef or zero, and cubes
+receive an unused scalar poison offset. Operand types, the complete
+four-FP32-plus-status return shape and all result uses are checked before
+creating a sample. Status/aggregate/out-of-width uses, comparison samplers,
+half/integer texels, unsupported shapes and malformed calls stay unraised,
+without introducing a second read. Tests check seven-shape forward/reverse
+roundtrips, exact coordinate/layer/bias/offset/clamp values, idempotence and
+native SDK DXC pixel-shader import. CPU admission explicitly rejects both
+biased intrinsics in every stage until derivative-aware lowering exists;
+normal/reference/AOT rejection is tested. This is compiler mapping, not
+descriptor materialization, biased CPU execution or owned D3D12 rendering.
+
+Gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered
 wire operations in this tree. See "Canonical
 image operations" in feme/docs/FeMeGraphicsDesign.md for where the

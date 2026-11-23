@@ -110,6 +110,14 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   or zero only. Compiled cube/array tests check all six faces, both elements,
   both derivative axes and dynamic clamps. Native SDK DXC plain/clamped
   cube/array import is not bound-descriptor or owned-device execution.
+  FP32 `SampleBias` also has checked opcode-61 import/raising for 1D/array,
+  2D/array, 3D and cube/array, with scalar and two-/three-/four-component
+  FP32 texels and default samplers. Bias, spatial offsets and optional real
+  MinLod clamps survive. Undefined/poison clamps select the plain intrinsic;
+  real zero/nonzero/dynamic clamps remain clamped. Seven-shape LLVM roundtrips
+  and native DXC pixel-shader import are tested, not biased execution.
+  Both biased intrinsics still fail explicit CPU admission in every stage,
+  including this runner's normal/reference/AOT paths.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

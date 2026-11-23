@@ -27,6 +27,39 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) biased-sampling compiler mapping (VM, 2026-11-23)
+
+FP32 DXIL `SampleBias` now raises opcode 61 against LLVM's existing forward
+lowering for 1D/array, 2D/array, 3D and cube/array textures. Scalar and
+two-/three-/four-component FP32 texels use default samplers. Coordinates/
+layers, bias, spatial offsets and optional real MinLod clamps survive.
+Undefined/poison clamps select the plain intrinsic; real zero/nonzero/
+dynamic clamps remain clamped. Operand/result shapes and every result use
+are checked before adding a sample. Unsupported status/aggregate uses,
+comparison samplers, half/integer texels and malformed calls stay unraised,
+without introducing an extra read.
+
+Four new LIT fixtures and one unit test cover seven-shape LLVM forward/
+reverse roundtrips, exact operand values, raw guards, idempotence, actual
+SDK DXC plain/zero-clamped/dynamic-clamped pixel-shader import and normal/
+reference/AOT CPU rejection. Both biased intrinsics still fail explicit
+CPU admission in fragment, compute and unannotated stages. Dead declarations
+remain harmless. This is import mapping, not biased CPU execution or native
+DXC execution through an owned D3D12 device.
+
+Expanded CPU/DXIL/comparison LIT passes **895** in **7.43 seconds**. Full
+FeMe LIT passes **4,116**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,141** discovered tests in **65.41 seconds**. Five added tests add
+five passes. Assertions, disabled PCH, sccache and the two-worker build
+limit remain; timings are not controlled speedups.
+
+Existing comparison execution, SPIR-V bias handling, artifact ABI 8 and
+argument layouts are unchanged. Biased CPU execution, gradient mapping/
+execution, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) cube fragment comparison CPU execution (VM, 2026-11-23)
 
 Heap-backed scalar FP32 `TextureCube`/`TextureCubeArray::SampleCmp` now

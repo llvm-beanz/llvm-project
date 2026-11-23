@@ -1,0 +1,59 @@
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /Fo %t/plain.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CLAMP /Fo %t/clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ZERO /Fo %t/zero.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /D CLAMP /Fo %t/array.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /Fo %t/cube.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /D CLAMP /Fo %t/cube-array.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,PLAIN
+# RUN: feme-translate --import-dxil %t/clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,CLAMP
+# RUN: feme-translate --import-dxil %t/zero.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,ZERO
+# RUN: feme-translate --import-dxil %t/array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,CLAMP
+# RUN: feme-translate --import-dxil %t/cube.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBE,PLAIN
+# RUN: feme-translate --import-dxil %t/cube-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,CLAMP
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Native import/raising only; no descriptor materialization or CPU execution.
+# TWO: call target("dx.Texture", <4 x float>, 0, 0, 1, 2)
+# ARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 7)
+# CUBE: call target("dx.Texture", <4 x float>, 0, 0, 1, 5)
+# CUBEARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 9)
+# PLAIN: call <4 x float> @llvm.dx.resource.samplebias.v4f32
+# PLAIN-NOT: call %dx.types.ResRet.f32 @dx.op.sampleBias
+# CLAMP: call <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32
+# CLAMP-NOT: call %dx.types.ResRet.f32 @dx.op.sampleBias
+# ZERO: call <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32
+# ZERO-SAME: float 0.000000e+00)
+# ZERO-NOT: call %dx.types.ResRet.f32 @dx.op.sampleBias
+#--- shader.hlsl
+#ifdef CUBE
+#ifdef ARRAY
+TextureCubeArray<float4> Input : register(t0);
+#define COORD uv
+#else
+TextureCube<float4> Input : register(t0);
+#define COORD uv.xyz
+#endif
+#define OFFSET
+#else
+#ifdef ARRAY
+Texture2DArray<float4> Input : register(t0);
+#define COORD uv.xyz
+#else
+Texture2D<float4> Input : register(t0);
+#define COORD uv.xy
+#endif
+#define OFFSET , int2(1, -2)
+#endif
+SamplerState S : register(s0);
+float4 main(float4 uv : TEXCOORD0) : SV_Target {
+#ifdef ZERO
+  return Input.SampleBias(S, COORD, uv.w OFFSET, 0.0);
+#elif defined(CLAMP)
+  return Input.SampleBias(S, COORD, uv.w OFFSET, uv.x);
+#else
+  return Input.SampleBias(S, COORD, uv.w OFFSET);
+#endif
+}
