@@ -1336,7 +1336,8 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   unsigned TextureWidth = FP32Width(TextureTy->getTypeParameter(0));
   unsigned ResultWidth = FP32Width(CI.getType());
   auto Kind = TextureTy->getDimension();
-  if (IsGrad && Kind != dxil::ResourceKind::Texture2D)
+  if (IsGrad && Kind != dxil::ResourceKind::Texture2D &&
+      Kind != dxil::ResourceKind::Texture2DArray)
     return false;
   unsigned NumCoords;
   switch (Kind) {
@@ -1366,8 +1367,9 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   Type *CoordTy = Type::getFloatTy(Ctx);
   if (NumCoords != 1)
     CoordTy = FixedVectorType::get(CoordTy, NumCoords);
-  if (IsGrad && (CI.getArgOperand(3)->getType() != CoordTy ||
-                 CI.getArgOperand(4)->getType() != CoordTy))
+  Type *GradTy = FixedVectorType::get(Type::getFloatTy(Ctx), 2);
+  if (IsGrad && (CI.getArgOperand(3)->getType() != GradTy ||
+                 CI.getArgOperand(4)->getType() != GradTy))
     return false;
   Type *OffsetTy = Type::getInt32Ty(Ctx);
   unsigned NumOffsets = Kind == dxil::ResourceKind::Texture3D ? 3 : 2;

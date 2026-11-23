@@ -187,11 +187,12 @@ The original compute-only baseline is no longer current:
   adding a sample; malformed calls and unsupported status/aggregate uses
   stay unraised without an extra read. Seven-shape roundtrips, raw guards,
   idempotence and native DXC plain/clamped import pass. Heap-backed FP32
-  plain Texture2D gradients now execute in any stage with default samplers,
-  shape-matched coordinates/gradients, constant signed offsets and optional
+  Texture2D/Texture2DArray gradients now execute in any stage with default
+  samplers, shape-matched coordinates/gradients, constant signed offsets and optional
   shader clamps. Scalar/vector results cannot exceed the declared texel
-  width (at most four). Supplied gradients drive LOD directly; compiled
-  fragment and normal/reference compute tests verify multi-mip selection,
+  width (at most four). Array layers remain coordinate-only; supplied U/V
+  gradients drive LOD directly. Compiled fragment and normal/reference
+  compute tests verify multi-mip/layer selection,
   while single-mip runner tests cover normal/reference/AOT execution.
   Other gradient shapes remain explicitly rejected. This does not
   materialize descriptors or establish owned D3D12 execution.

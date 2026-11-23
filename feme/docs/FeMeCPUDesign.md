@@ -2756,8 +2756,8 @@ missing stage identity. Native DXC plain/clamped array import is distinct
 from canonical compiled execution; bound descriptors remain unsupported.
 
 FP32 DXIL `SampleGrad` now has checked opcode-63 import/raising against
-LLVM's existing forward lowering, with bounded 2D CPU execution. Scalar/vector FP32
-texels up to four components and default samplers cover 1D/array, 2D/array,
+LLVM's existing forward lowering, with bounded 2D/array CPU execution.
+Scalar/vector FP32 texels up to four components and default samplers cover 1D/array, 2D/array,
 3D and cube/array. Canonical operands preserve coordinates/layers, dP/dX,
 dP/dY, signed/dynamic spatial offsets and optional real MinLod clamps.
 Gradient width excludes the array layer; cubes retain three raw-direction
@@ -2768,13 +2768,15 @@ use before adding a sample. Status/aggregate/out-of-width uses, malformed
 calls, comparison samplers, half/integer texels and nonzero/dynamic unused
 gradient/offset slots stay unraised without another read.
 Seven-shape LLVM roundtrips, raw guards, idempotence and native SDK DXC
-plain/clamped import pass. Heap-backed FP32 plain Texture2D gradient sampling
-executes with default samplers, shape-matched coordinates/gradients, constant
-signed offsets and optional shader clamps. Scalar/vector results may use up
+plain/clamped import pass. Heap-backed FP32 Texture2D/Texture2DArray gradient
+sampling executes with default samplers, shape-matched coordinates/gradients,
+constant signed offsets and optional shader clamps. Scalar/vector results may use up
 to the declared texel width (at most four). Supplied gradients drive LOD in
 any stage, without synthesized derivatives or an LOD-zero approximation.
+Array coordinates retain the layer; gradients remain two-component U/V
+vectors, and the layer is never differentiated.
 Compiled fragment and normal/reference compute tests verify divergent
-multi-mip selection and clamps; single-mip runner tests cover normal,
+multi-mip/layer selection and clamps; single-mip runner tests cover normal,
 reference and AOT dispatch, offsets, components, partial waves and repeats.
 Other gradient shapes and malformed or non-heap operands remain explicitly
 rejected. Existing biased/comparison execution and SPIR-V gradient handling

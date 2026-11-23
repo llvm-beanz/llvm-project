@@ -1,5 +1,29 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) explicit 2D-array gradient CPU regression scope (2026-11-23)
+
+The [explicit 2D-array gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-2d-array-gradient-cpu-execution-vm-2026-11-23)
+adds heap-backed FP32 Texture2DArray CPU execution with supplied spatial
+gradients and separate array-layer coordinates. Default samplers,
+scalar/vector results up to the declared texel width (at most four),
+constant signed offsets and optional shader MinLod clamps are supported.
+Supplied gradients select LOD in any stage without differentiating layers,
+synthesizing derivatives or approximating LOD as zero.
+
+Compiled fragment and normal/reference compute tests prove multi-mip/layer
+selection and clamps. A five-lane single-mip normal/reference/AOT runner
+fixture covers layers, scalar/vector results, offsets, partial waves,
+guards and repeats; runner image YAML still prepares one mip. Unsupported
+normal/reference/AOT admission now uses 3D. Focused CPU/DXIL/sampling LIT
+passes 925; full FeMe LIT passes 4,146 with 15 skipped, 10 unsupported and
+zero failures among 4,171 discovered tests. The assertions-enabled,
+PCH-disabled, sccache ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, descriptor materialization or
+owned D3D12 execution is claimed. Native SDK import is separate from
+canonical CPU execution. Artifact ABI 8 and argument layouts are unchanged;
+`CreateDevice` remains `E_NOTIMPL`, and W2(a)/W2(b)/W3(b) remain open.
+
 ## W2(a)/W3(b) explicit 2D gradient CPU regression scope (2026-11-23)
 
 The [explicit 2D gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-2d-gradient-cpu-execution-vm-2026-11-23)

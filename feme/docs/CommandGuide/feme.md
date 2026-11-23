@@ -182,11 +182,12 @@ coverage" in [../Design.md](../Design.md).
   select the plain intrinsic. Operand/result/use guards reject malformed
   calls without another sample. Seven-shape roundtrips, raw guards,
   idempotence and native DXC plain/clamped import pass. Heap-backed FP32
-  plain Texture2D gradients execute in any stage, including native AOT,
-  with default samplers, shape-matched coordinates/gradients, constant
+  Texture2D/Texture2DArray gradients execute in any stage, including native
+  AOT, with default samplers, shape-matched coordinates/gradients, constant
   signed offsets and optional shader clamps. Scalar/vector results cannot
   exceed the declared texel width (at most four). Supplied gradients drive
   LOD without synthesized derivatives or an LOD-zero approximation.
+  Array layers remain coordinate-only; gradients have two U/V components.
   Other gradient shapes remain explicitly unsupported. This does not
   materialize descriptors or establish owned D3D12 rendering.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.

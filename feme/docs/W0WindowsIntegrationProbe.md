@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) explicit 2D-array gradient CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `Texture2DArray::SampleGrad` now executes through the existing
+shared array runtime. The shared admission/lowering predicate requires
+three-component `(U,V,layer)` coordinates and two-component spatial gradients;
+layers are never differentiated. Default samplers, scalar/vector results up
+to the declared texel width (at most four), constant signed offsets and
+optional shader MinLod clamps retain the plain-2D contract. Supplied gradients
+drive LOD in any stage, without synthesized derivatives or an LOD-zero
+approximation. Other gradient shapes remain explicitly rejected.
+
+Transform tests check derivative ordering, separate layer forwarding,
+offsets/clamps, result shaping, reflection, handle cleanup and idempotence.
+Missing layers, layer-width gradients, dynamic/undefined/poison/partially
+undefined offsets remain unsupported. Compiled fragment tests independently
+vary all four signed gradient components to select mips 0/1/2 despite
+lane-uniform U/V, with divergent layers/clamps, offsets, components, helper
+lanes, partial waves, guards and repeats. Normal/reference compute tests
+independently vary layer and mip. A five-lane normal/reference/AOT runner
+fixture covers divergent layers, gradients/clamps, scalar/vector results,
+offsets, partial waves, guards and repeats on one mip; runner image YAML
+still prepares only one mip. Normal/reference/AOT rejection now uses 3D.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 925 tests in 18.93 seconds; full FeMe
+LIT passes 4,146, skips 15 and marks 10 unsupported, with zero failures
+among 4,171 discovered tests in 76.97 seconds. Five new tests add five
+passes; timings are not controlled speedups. Existing biased/comparison
+execution, ordinary DXIL sampling/loading eligibility, SPIR-V gradient
+handling, artifact ABI 8 and argument layouts are unchanged.
+
+This is canonical CPU execution, separate from native SDK DXC import and
+owned D3D12 execution. Bound/static descriptor materialization remains
+open; owned `CreateDevice` remains `E_NOTIMPL`. W2(a)/W2(b)/W3(b) remain
+open. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) explicit 2D gradient CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 plain `Texture2D::SampleGrad` now executes with default

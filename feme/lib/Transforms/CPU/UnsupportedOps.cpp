@@ -82,7 +82,8 @@ Error checkSupportedRaisedOps(const Module &M) {
       return createStringError(
           inconvertibleErrorCode(),
           "unsupported raised operation: '%s' requires heap-backed FP32 "
-          "Texture2D explicit-gradient sampling with a default sampler, "
+          "Texture2D/Texture2DArray explicit-gradient sampling with a default "
+          "sampler, "
           "shape-matched coordinates/gradients and constant signed offsets; "
           "other shapes are not yet supported",
           F.getName().str().c_str());
