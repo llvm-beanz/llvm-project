@@ -3152,9 +3152,15 @@ documented reason rather than an oversight:
   and every result use before adding a sample. Malformed calls and
   status/aggregate/out-of-width uses stay unraised without an extra read.
   Seven-shape roundtrips, raw guards, idempotence and native DXC plain/clamped
-  import pass. Both gradient intrinsics still reject CPU execution in every
-  stage, including normal/reference/AOT compute paths. No descriptor
-  materialization or owned-device execution is enabled.
+  import pass. Heap-backed FP32 plain Texture2D gradient sampling now
+  executes in any stage with default samplers, shape-matched coordinates/
+  gradients, constant signed offsets and optional shader clamps.
+  Scalar/vector results cannot exceed the declared texel width (at most
+  four). Supplied gradients drive LOD, without synthesized derivatives or
+  an LOD-zero approximation. Compiled fragment and normal/reference
+  compute tests verify multi-mip selection; single-mip runner tests cover
+  normal/reference/AOT execution. Other gradient shapes remain explicitly
+  rejected. No descriptor materialization or owned-device execution is enabled.
   For remaining gather forms, the DXIL import half is still blocked upstream.
   Update (roadmap L58): an ordinary, non-comparison
   `Bias` operand is now implemented on the SPIR-V import side, scoped to
@@ -3171,7 +3177,7 @@ documented reason rather than an oversight:
   unchanged (the runtime's own implicit-LOD mip/anisotropy math is
   agnostic to whether a derivative was synthesized, zeroed, or supplied
   explicitly), so no new runtime entry point was needed. DXIL's own
-  gradient CPU execution, `Array2D`/other-shape SPIR-V gradient sampling,
+  non-Texture2D gradient CPU execution, `Array2D`/other-shape SPIR-V gradient sampling,
   integer-channel/`compute`-stage/sparse-residency SPIR-V gradient
   sampling, and a `Dref`+`Grad` depth-comparison combination all remain
   unimplemented (see roadmap L60). Update (roadmap L60(a), partial):

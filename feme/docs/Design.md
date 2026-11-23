@@ -1619,10 +1619,16 @@ before adding a sample. Unused gradient/offset wire slots must be
 undef/poison or zero. Status/aggregate/out-of-width uses, malformed calls,
 comparison samplers and half/integer texels remain unraised without an
 extra read. Seven-shape forward/reverse roundtrips, idempotence, raw guards
-and native SDK DXC plain/clamped import pass. Both gradient intrinsics
-still reject explicitly on the CPU in every stage; normal/reference/AOT
-compute rejection is tested. This is compiler mapping, not gradient CPU
-execution, descriptor materialization or owned D3D12 execution.
+and native SDK DXC plain/clamped import pass. Heap-backed FP32 plain
+Texture2D gradient sampling now executes on the CPU with default samplers,
+shape-matched coordinates/gradients, constant signed offsets and optional
+shader clamps. Supplied gradients select LOD in any stage; no synthesized
+derivatives or LOD-zero approximation is used. Scalar/vector results up to
+the declared texel width (at most four) are supported. Compiled fragment and
+normal/reference compute tests verify multi-mip selection; single-mip runner
+tests cover normal/reference/AOT execution. Other gradient shapes remain
+explicitly rejected. This does not materialize descriptors or establish
+owned D3D12 execution.
 Remaining gather forms still lack matching numbered
 wire operations in this tree. See "Canonical
 image operations" in feme/docs/FeMeGraphicsDesign.md for where the

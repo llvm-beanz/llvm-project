@@ -48,6 +48,8 @@
 // Fragment-only FP32 1D/2D/3D/cube (including array) SampleBias threads real
 // spatial/direction derivatives, bias, supported offsets and optional MinLod
 // clamp to the shared sampling helpers.
+// FP32 Texture2D SampleGrad uses supplied gradients in any stage; no stage
+// derivatives are synthesized, and constant spatial offsets/clamps survive.
 //
 //===----------------------------------------------------------------------===//
 
@@ -66,6 +68,11 @@ namespace feme::cpu {
 /// fragment stage, with scalar/vector results, supported offsets and optional
 /// MinLod clamp.
 bool isSupportedDXILSampleBias(const llvm::CallInst &CI);
+
+/// Tests heap-backed FP32 Texture2D explicit-gradient sampling with a default
+/// sampler, shape-matched gradients, scalar/vector results, constant signed
+/// offsets and optional MinLod clamp. No fragment-stage restriction is needed.
+bool isSupportedDXILSampleGrad(const llvm::CallInst &CI);
 
 /// Tests the scalar FP32 heap-backed 1D/2D/cube comparison forms supported by
 /// both early CPU admission and resource lowering.

@@ -1,5 +1,25 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) explicit 2D gradient CPU regression scope (2026-11-23)
+
+The [explicit 2D gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-2d-gradient-cpu-execution-vm-2026-11-23)
+adds heap-backed FP32 plain Texture2D CPU execution with supplied gradients,
+default samplers, constant signed offsets, optional shader clamps and
+scalar/vector results up to the declared texel width (at most four).
+Explicit gradients drive LOD in any stage without synthesized derivatives
+or an LOD-zero approximation. Other gradient shapes remain rejected.
+
+Compiled fragment and normal/reference compute tests prove multi-mip
+selection and clamps; single-mip normal/reference/AOT runner coverage checks
+offsets, components, partial waves, guards and repeats. Runner image YAML
+still prepares only one mip. Focused CPU/DXIL/sampling LIT passes 920;
+full FeMe LIT passes 4,141 with 15 skipped, 10 unsupported and zero failures
+among 4,166 discovered tests. The assertions-enabled, PCH-disabled, sccache
+ARM64 `-j2` build passes. No new Vulkan CTS run, adapter-matrix result,
+descriptor materialization or owned D3D12 execution is claimed. Artifact
+ABI 8 and argument layouts are unchanged; `CreateDevice` remains
+`E_NOTIMPL`, and W2(a)/W2(b)/W3(b) remain open.
+
 ## W2(a)/W3(b) gradient-sampling compiler regression scope (2026-11-23)
 
 The [gradient-sampling compiler follow-up](W0WindowsIntegrationProbe.md#w2aw3b-gradient-sampling-compiler-mapping-vm-2026-11-23)

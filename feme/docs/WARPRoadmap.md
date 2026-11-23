@@ -1144,6 +1144,41 @@ execution remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) explicit 2D gradient CPU execution progress (2026-11-23):
+heap-backed FP32 plain `Texture2D::SampleGrad` now lowers through the existing
+shared 2D sampling runtime. Admission and lowering share a predicate for
+heap-backed handles, default samplers, shape-matched coordinates/gradients,
+constant signed offsets and scalar/vector results up to the declared texel
+width (at most four). Plain and shader-MinLod-clamped calls are supported.
+Supplied dP/dX and dP/dY drive LOD directly, with zero shader bias and no
+synthesized derivatives or LOD-zero approximation. Unlike implicit/bias
+sampling, explicit gradients need no fragment-only gate: compute, graphics
+and unannotated canonical functions share this bounded admission.
+
+Transform tests check exact derivative ordering, offsets, clamp forwarding,
+result shaping, handle cleanup, reflection, idempotence and malformed-input
+rejection. Compiled fragment tests independently vary all four gradient
+components to select mips 0/1/2 despite lane-uniform coordinates, with
+divergent clamps, signed offsets, scalar/vector components, helper lanes,
+partial waves, output guards and repeats. Normal/reference compute tests
+verify divergent supplied-gradient mip selection and clamps. A five-lane
+normal/reference/AOT runner fixture checks signed offsets, result components,
+partial waves, guards and repeats on one mip; runner image YAML still
+prepares only one mip. Other gradient shapes remain explicitly rejected,
+including normal/reference/AOT array compute dispatch.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 build passes with `-j2`.
+Focused CPU/DXIL/sampling LIT passes 920 tests in 18.21 seconds. Full FeMe LIT
+passes 4,141 tests, with 15 skipped, 10 unsupported and zero failures, from
+4,166 discovered tests in 77.26 seconds. Five new tests add five passes.
+Timings are not controlled speedups. Existing biased/comparison execution,
+ordinary DXIL sampling/loading eligibility, SPIR-V gradient handling,
+artifact ABI 8 and argument layouts are unchanged. Other gradient shapes,
+broader sampling conformance, bound/static descriptor materialization and
+owned D3D12 execution remain open. Native SDK import is not owned-device
+execution; `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

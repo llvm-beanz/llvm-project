@@ -672,7 +672,8 @@ bool isZeroOffset(const Value *Offset) {
 }
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
-/// `samplebias[.clamp]`/`samplecmp[.clamp]`/`samplecmplevelzero`/`load.level`
+/// `samplebias[.clamp]`/`samplegrad[.clamp]`/`samplecmp[.clamp]`/
+/// `samplecmplevelzero`/`load.level`
 /// calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
@@ -693,9 +694,12 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    bool IsGrad = ID == Intrinsic::dx_resource_samplegrad ||
+                  ID == Intrinsic::dx_resource_samplegrad_clamp;
     if (ID == Intrinsic::dx_resource_samplebias ||
-        ID == Intrinsic::dx_resource_samplebias_clamp) {
-      if (!isSupportedDXILSampleBias(*CI))
+        ID == Intrinsic::dx_resource_samplebias_clamp || IsGrad) {
+      if (!(IsGrad ? isSupportedDXILSampleGrad(*CI)
+                   : isSupportedDXILSampleBias(*CI)))
         continue;
       IRBuilder<> Builder(CI);
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
@@ -704,12 +708,16 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *U = Coord->getType()->isFloatTy()
                      ? Coord
                      : Builder.CreateExtractElement(Coord, uint64_t{0});
-      Value *Offset = CI->getArgOperand(4);
-      Value *MinLodClamp = ID == Intrinsic::dx_resource_samplebias_clamp
-                               ? CI->getArgOperand(5)
+      unsigned OffsetIdx = IsGrad ? 5 : 4;
+      Value *Offset = CI->getArgOperand(OffsetIdx);
+      bool HasClamp = ID == Intrinsic::dx_resource_samplebias_clamp ||
+                      ID == Intrinsic::dx_resource_samplegrad_clamp;
+      Value *MinLodClamp = HasClamp
+                               ? CI->getArgOperand(OffsetIdx + 1)
                                : ConstantFP::getInfinity(Builder.getFloatTy(),
                                                          /*Negative=*/true);
       Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
+      Value *Bias = IsGrad ? Zero : CI->getArgOperand(3);
       auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
       Value *Loaded;
       if (Kind == dxil::ResourceKind::Texture1D ||
@@ -720,14 +728,13 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
           Loaded = createSample1DArray(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
-              U, Layer, D.DUdX, D.DUdY, Zero, Builder.getFalse(),
-              CI->getArgOperand(3), Offset, MinLodClamp, Builder.getTrue(),
-              CI->getName());
+              U, Layer, D.DUdX, D.DUdY, Zero, Builder.getFalse(), Bias, Offset,
+              MinLodClamp, Builder.getTrue(), CI->getName());
         } else {
           Loaded = createSample1D(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
-              U, D.DUdX, D.DUdY, Zero, Builder.getFalse(), CI->getArgOperand(3),
-              Offset, MinLodClamp, Builder.getTrue(), CI->getName());
+              U, D.DUdX, D.DUdY, Zero, Builder.getFalse(), Bias, Offset,
+              MinLodClamp, Builder.getTrue(), CI->getName());
         }
       } else if (Kind == dxil::ResourceKind::TextureCube ||
                  Kind == dxil::ResourceKind::TextureCubeArray) {
@@ -740,19 +747,28 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
           Loaded = createSampleCubeArray(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
               U, V, Z, D.DDirXdX, D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX,
-              D.DDirZdY, Layer, Zero, Builder.getFalse(), CI->getArgOperand(3),
-              MinLodClamp, Builder.getTrue(), CI->getName());
+              D.DDirZdY, Layer, Zero, Builder.getFalse(), Bias, MinLodClamp,
+              Builder.getTrue(), CI->getName());
         } else {
           Loaded = createSampleCube(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
               U, V, Z, D.DDirXdX, D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX,
-              D.DDirZdY, Zero, Builder.getFalse(), CI->getArgOperand(3),
-              MinLodClamp, Builder.getTrue(), CI->getName());
+              D.DDirZdY, Zero, Builder.getFalse(), Bias, MinLodClamp,
+              Builder.getTrue(), CI->getName());
         }
       } else {
         Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
-        SampleDerivatives D =
-            getOrSynthesizeSample2DDerivatives(Builder, F, U, V);
+        SampleDerivatives D;
+        if (IsGrad) {
+          Value *DX = CI->getArgOperand(3);
+          Value *DY = CI->getArgOperand(4);
+          D = {Builder.CreateExtractElement(DX, uint64_t{0}),
+               Builder.CreateExtractElement(DY, uint64_t{0}),
+               Builder.CreateExtractElement(DX, uint64_t{1}),
+               Builder.CreateExtractElement(DY, uint64_t{1})};
+        } else {
+          D = getOrSynthesizeSample2DDerivatives(Builder, F, U, V);
+        }
         Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
         if (Kind == dxil::ResourceKind::Texture3D) {
@@ -763,21 +779,21 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
           Loaded = createSample3D(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
               U, V, W, D.DUdX, D.DUdY, D.DVdX, D.DVdY, WD.DUdX, WD.DUdY, Zero,
-              Builder.getFalse(), CI->getArgOperand(3), OffsetX, OffsetY,
-              OffsetZ, MinLodClamp, Builder.getTrue(), CI->getName());
+              Builder.getFalse(), Bias, OffsetX, OffsetY, OffsetZ, MinLodClamp,
+              Builder.getTrue(), CI->getName());
         } else if (Kind == dxil::ResourceKind::Texture2DArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
           Loaded = createSample2DArray(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
               U, V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero,
-              Builder.getFalse(), CI->getArgOperand(3), OffsetX, OffsetY,
-              MinLodClamp, Builder.getTrue(), CI->getName());
+              Builder.getFalse(), Bias, OffsetX, OffsetY, MinLodClamp,
+              Builder.getTrue(), CI->getName());
         } else {
           Loaded = createSample2D(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
               U, V, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero, Builder.getFalse(),
-              CI->getArgOperand(3), OffsetX, OffsetY, MinLodClamp,
-              Builder.getTrue(), CI->getName());
+              Bias, OffsetX, OffsetY, MinLodClamp, Builder.getTrue(),
+              CI->getName());
         }
       }
       if (Loaded->getType() != CI->getType()) {
@@ -1113,6 +1129,12 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == Intrinsic::dx_resource_samplegrad ||
+        ID == Intrinsic::dx_resource_samplegrad_clamp) {
+      if (isSupportedDXILSampleGrad(*CI))
+        return true;
+      continue;
+    }
     if (ID == Intrinsic::dx_resource_samplebias ||
         ID == Intrinsic::dx_resource_samplebias_clamp) {
       if (isSupportedDXILSampleBias(*CI))
@@ -1274,14 +1296,19 @@ void attachResourceMetadata(Function &F,
 
 } // namespace
 
-bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
+static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
-  bool HasClamp = ID == Intrinsic::dx_resource_samplebias_clamp;
-  if ((ID != Intrinsic::dx_resource_samplebias && !HasClamp) ||
-      CI.arg_size() != (HasClamp ? 6u : 5u) ||
-      !CI.getArgOperand(3)->getType()->isFloatTy() ||
-      (HasClamp && !CI.getArgOperand(5)->getType()->isFloatTy()) ||
-      feme::getShaderStage(*CI.getFunction()) != feme::ShaderStage::Fragment)
+  bool HasClamp = ID == (IsGrad ? Intrinsic::dx_resource_samplegrad_clamp
+                                : Intrinsic::dx_resource_samplebias_clamp);
+  unsigned OffsetIdx = IsGrad ? 5 : 4;
+  if ((ID != (IsGrad ? Intrinsic::dx_resource_samplegrad
+                     : Intrinsic::dx_resource_samplebias) &&
+       !HasClamp) ||
+      CI.arg_size() != OffsetIdx + (HasClamp ? 2u : 1u) ||
+      (HasClamp && !CI.getArgOperand(OffsetIdx + 1)->getType()->isFloatTy()) ||
+      (!IsGrad && (!CI.getArgOperand(3)->getType()->isFloatTy() ||
+                   feme::getShaderStage(*CI.getFunction()) !=
+                       feme::ShaderStage::Fragment)))
     return false;
   auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
   auto Sampler = classifySamplerHandle(CI.getArgOperand(1));
@@ -1309,6 +1336,8 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
   unsigned TextureWidth = FP32Width(TextureTy->getTypeParameter(0));
   unsigned ResultWidth = FP32Width(CI.getType());
   auto Kind = TextureTy->getDimension();
+  if (IsGrad && Kind != dxil::ResourceKind::Texture2D)
+    return false;
   unsigned NumCoords;
   switch (Kind) {
   case dxil::ResourceKind::Texture1D:
@@ -1337,15 +1366,18 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
   Type *CoordTy = Type::getFloatTy(Ctx);
   if (NumCoords != 1)
     CoordTy = FixedVectorType::get(CoordTy, NumCoords);
+  if (IsGrad && (CI.getArgOperand(3)->getType() != CoordTy ||
+                 CI.getArgOperand(4)->getType() != CoordTy))
+    return false;
   Type *OffsetTy = Type::getInt32Ty(Ctx);
   unsigned NumOffsets = Kind == dxil::ResourceKind::Texture3D ? 3 : 2;
   if (!IsCube && !Is1D)
     OffsetTy = FixedVectorType::get(Type::getInt32Ty(Ctx), NumOffsets);
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
       CI.getArgOperand(2)->getType() != CoordTy ||
-      CI.getArgOperand(4)->getType() != OffsetTy)
+      CI.getArgOperand(OffsetIdx)->getType() != OffsetTy)
     return false;
-  auto *Offset = dyn_cast<Constant>(CI.getArgOperand(4));
+  auto *Offset = dyn_cast<Constant>(CI.getArgOperand(OffsetIdx));
   if (IsCube)
     return Offset && (isa<UndefValue>(Offset) || Offset->isNullValue());
   if (Is1D)
@@ -1356,6 +1388,14 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
     if (!isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(I)))
       return false;
   return true;
+}
+
+bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
+  return isSupportedDXILSampleBiasOrGrad(CI, /*IsGrad=*/false);
+}
+
+bool feme::cpu::isSupportedDXILSampleGrad(const CallInst &CI) {
+  return isSupportedDXILSampleBiasOrGrad(CI, /*IsGrad=*/true);
 }
 
 static bool isSupportedDXILComparisonSample(const CallInst &CI) {

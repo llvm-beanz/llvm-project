@@ -74,11 +74,17 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
     case Intrinsic::dx_resource_samplegrad:
     case Intrinsic::dx_resource_samplegrad_clamp:
+      if (llvm::all_of(F.users(), [](const User *U) {
+            const auto *CI = dyn_cast<CallInst>(U);
+            return CI && isSupportedDXILSampleGrad(*CI);
+          }))
+        continue;
       return createStringError(
           inconvertibleErrorCode(),
-          "unsupported raised operation: '%s' requires explicit-gradient "
-          "sampling lowering, which is not yet supported by the FeMe CPU "
-          "target",
+          "unsupported raised operation: '%s' requires heap-backed FP32 "
+          "Texture2D explicit-gradient sampling with a default sampler, "
+          "shape-matched coordinates/gradients and constant signed offsets; "
+          "other shapes are not yet supported",
           F.getName().str().c_str());
     case Intrinsic::dx_resource_samplecmp:
     case Intrinsic::dx_resource_samplecmp_clamp:

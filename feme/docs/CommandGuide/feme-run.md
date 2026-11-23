@@ -156,10 +156,16 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   signed/dynamic spatial offsets and optional real MinLod clamps survive;
   gradient width excludes array layers. Undefined/poison clamps select the
   plain intrinsic; zero/dynamic clamps remain clamped. Seven-shape roundtrips,
-  raw guards, idempotence and native DXC plain/clamped import pass. Both
-  gradient intrinsics still reject normal/reference/AOT compute dispatch
-  explicitly; CPU gradient execution is unsupported in every stage.
-  No derivative substitution, LOD-zero approximation, descriptor
+  raw guards, idempotence and native DXC plain/clamped import pass.
+  Heap-backed FP32 plain Texture2D gradients execute in any stage through
+  normal/reference/AOT paths, using default samplers, shape-matched
+  coordinates/gradients, constant signed offsets and optional shader clamps.
+  Scalar/vector results cannot exceed the declared texel width (at most
+  four). Supplied gradients drive LOD without derivative substitution or
+  an LOD-zero approximation. Compiled-stage tests verify multi-mip
+  selection; runner image YAML currently prepares one mip, so its
+  execution fixture covers offsets, components, partial waves and repeats.
+  Other gradient shapes remain explicitly rejected. No descriptor
   materialization or owned-device execution is enabled.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.

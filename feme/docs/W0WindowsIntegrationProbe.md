@@ -27,6 +27,38 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) explicit 2D gradient CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 plain `Texture2D::SampleGrad` now executes with default
+samplers, shape-matched coordinates/gradients, constant signed offsets and
+optional shader MinLod clamps. Scalar/vector results may use up to the
+declared texel width (at most four). Supplied gradients select LOD in any
+stage, without synthesized derivatives or an LOD-zero approximation.
+Admission and lowering share the same predicate. Other gradient shapes,
+non-heap handles and malformed coordinates/gradients/offsets remain rejected.
+
+Compiled fragment tests independently vary all four gradient components to
+select mips 0/1/2 despite lane-uniform coordinates, including divergent
+clamps, signed offsets, result components, helpers, partial waves, guards
+and repeats. Normal/reference compute tests verify divergent multi-mip
+selection and clamps. A five-lane normal/reference/AOT runner fixture checks
+offsets, scalar/vector components, partial waves, guards and repeats on one
+mip; image YAML still prepares only one mip. Normal/reference/AOT rejection
+now uses unsupported array gradients.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 920 tests in 18.21 seconds; full FeMe
+LIT passes 4,141, skips 15 and marks 10 unsupported, with zero failures
+among 4,166 discovered tests in 77.26 seconds. Five new tests add five
+passes; timings are not controlled speedups. Artifact ABI 8, argument
+layouts, ordinary DXIL sampling/loading eligibility, biased/comparison
+execution and SPIR-V gradient handling remain unchanged.
+
+This is canonical CPU execution, separate from native SDK DXC import and
+owned D3D12 execution. Bound/static descriptor materialization remains
+open; owned `CreateDevice` remains `E_NOTIMPL`. W2(a)/W2(b)/W3(b) remain
+open. No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) gradient-sampling compiler mapping (VM, 2026-11-23)
 
 FP32 DXIL `SampleGrad` now raises opcode 63 against LLVM's existing forward

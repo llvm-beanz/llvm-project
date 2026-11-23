@@ -181,10 +181,14 @@ coverage" in [../Design.md](../Design.md).
   survive; gradient width excludes array layers. Undefined/poison clamps
   select the plain intrinsic. Operand/result/use guards reject malformed
   calls without another sample. Seven-shape roundtrips, raw guards,
-  idempotence and native DXC plain/clamped import pass. CPU gradient execution
-  remains explicitly unsupported in every stage, including native AOT
-  compilation. This is compiler mapping, not descriptor materialization
-  or owned D3D12 rendering.
+  idempotence and native DXC plain/clamped import pass. Heap-backed FP32
+  plain Texture2D gradients execute in any stage, including native AOT,
+  with default samplers, shape-matched coordinates/gradients, constant
+  signed offsets and optional shader clamps. Scalar/vector results cannot
+  exceed the declared texel width (at most four). Supplied gradients drive
+  LOD without synthesized derivatives or an LOD-zero approximation.
+  Other gradient shapes remain explicitly unsupported. This does not
+  materialize descriptors or establish owned D3D12 rendering.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input
