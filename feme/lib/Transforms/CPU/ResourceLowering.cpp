@@ -786,8 +786,15 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
         if (Kind == dxil::ResourceKind::Texture3D) {
           Value *W = Builder.CreateExtractElement(Coord, uint64_t{2});
-          SampleDerivatives1D WD =
-              getOrSynthesizeSample1DDerivatives(Builder, F, W);
+          SampleDerivatives1D WD;
+          if (IsGrad) {
+            WD = {
+                Builder.CreateExtractElement(CI->getArgOperand(3), uint64_t{2}),
+                Builder.CreateExtractElement(CI->getArgOperand(4),
+                                             uint64_t{2})};
+          } else {
+            WD = getOrSynthesizeSample1DDerivatives(Builder, F, W);
+          }
           Value *OffsetZ = Builder.CreateExtractElement(Offset, uint64_t{2});
           Loaded = createSample3D(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
@@ -1349,13 +1356,6 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
   unsigned TextureWidth = FP32Width(TextureTy->getTypeParameter(0));
   unsigned ResultWidth = FP32Width(CI.getType());
   auto Kind = TextureTy->getDimension();
-  if (IsGrad && Kind != dxil::ResourceKind::Texture1D &&
-      Kind != dxil::ResourceKind::Texture1DArray &&
-      Kind != dxil::ResourceKind::Texture2D &&
-      Kind != dxil::ResourceKind::Texture2DArray &&
-      Kind != dxil::ResourceKind::TextureCube &&
-      Kind != dxil::ResourceKind::TextureCubeArray)
-    return false;
   unsigned NumCoords;
   switch (Kind) {
   case dxil::ResourceKind::Texture1D:
@@ -1386,7 +1386,8 @@ static bool isSupportedDXILSampleBiasOrGrad(const CallInst &CI, bool IsGrad) {
     CoordTy = FixedVectorType::get(CoordTy, NumCoords);
   Type *GradTy = Type::getFloatTy(Ctx);
   if (!Is1D)
-    GradTy = FixedVectorType::get(GradTy, IsCube ? 3 : 2);
+    GradTy = FixedVectorType::get(
+        GradTy, IsCube || Kind == dxil::ResourceKind::Texture3D ? 3 : 2);
   if (IsGrad && (CI.getArgOperand(3)->getType() != GradTy ||
                  CI.getArgOperand(4)->getType() != GradTy))
     return false;

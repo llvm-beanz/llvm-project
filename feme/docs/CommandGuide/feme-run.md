@@ -157,9 +157,9 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   gradient width excludes array layers. Undefined/poison clamps select the
   plain intrinsic; zero/dynamic clamps remain clamped. Seven-shape roundtrips,
   raw guards, idempotence and native DXC plain/clamped import pass.
-  Heap-backed FP32 1D/2D/cube gradients (including arrays) execute in any stage
+  Heap-backed FP32 1D/2D/3D/cube gradients (including arrays) execute in any stage
   through normal/reference/AOT paths, using default samplers, shape-matched
-  coordinates/gradients and optional shader clamps. 1D/2D use constant signed
+  coordinates/gradients and optional shader clamps. 1D/2D/3D use constant signed
   offsets; cubes require unused zero/undef/poison scalar offsets.
   Scalar/vector results cannot exceed the declared texel width (at most
   four). Supplied gradients drive existing LOD/projection helpers without
@@ -168,8 +168,10 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   raw-direction gradients. Compiled-stage tests verify multi-mip/face/
   element selection; runner image YAML currently prepares one mip, so its
   execution fixtures cover faces/elements, offsets, components, partial
-  waves and repeats. 1D gradients/offsets are scalar.
-  3D gradient calls remain explicitly rejected. No descriptor
+  waves and repeats. 1D gradients/offsets are scalar; 3D coordinates,
+  gradients and offsets have three U/V/W components. All seven raised
+  shapes have bounded CPU execution; dynamic or partially undefined 3D
+  offsets remain rejected in normal/reference/AOT admission. No descriptor
   materialization or owned-device execution is enabled.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.

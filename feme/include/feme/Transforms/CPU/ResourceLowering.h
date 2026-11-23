@@ -48,9 +48,10 @@
 // Fragment-only FP32 1D/2D/3D/cube (including array) SampleBias threads real
 // spatial/direction derivatives, bias, supported offsets and optional MinLod
 // clamp to the shared sampling helpers.
-// FP32 1D/2D/cube (including array) SampleGrad uses supplied spatial/direction
-// gradients in any stage; array elements are never differentiated, no stage
-// derivatives are synthesized, and supported offsets/clamps survive.
+// FP32 1D/2D/3D/cube (including array) SampleGrad uses supplied
+// spatial/direction gradients in any stage; array elements are never
+// differentiated, no stage derivatives are synthesized, and supported
+// offsets/clamps survive.
 //
 //===----------------------------------------------------------------------===//
 
@@ -70,10 +71,11 @@ namespace feme::cpu {
 /// MinLod clamp.
 bool isSupportedDXILSampleBias(const llvm::CallInst &CI);
 
-/// Tests heap-backed FP32 1D/2D/cube (including array) explicit-gradient
+/// Tests heap-backed FP32 1D/2D/3D/cube (including array) explicit-gradient
 /// sampling with a default sampler, spatial/direction gradients excluding array
 /// elements, scalar/vector results, supported offsets and optional MinLod
-/// clamp. 1D gradients/offsets are scalar; cubes require an unused
+/// clamp. 1D gradients/offsets are scalar; 3D uses three-component spatial
+/// gradients/offsets; cubes require an unused
 /// (zero/undef/poison) scalar offset. No fragment-stage restriction is needed.
 bool isSupportedDXILSampleGrad(const llvm::CallInst &CI);
 

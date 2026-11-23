@@ -1294,6 +1294,46 @@ open. Native SDK import remains separate from canonical CPU and owned-device
 execution; `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) explicit 3D gradient CPU execution progress (2026-11-23):
+heap-backed FP32 `Texture3D::SampleGrad` now executes through the existing
+volume sampling runtime. Shared admission/lowering requires three-component
+U/V/W coordinates, dP/dX and dP/dY, constant signed XYZ offsets, default
+samplers and scalar/vector results up to the declared texel width (at most
+four). Optional shader MinLod clamps survive. Six supplied spatial
+derivatives select LOD in any stage with zero shader bias, without
+synthesized derivatives, a fragment-only gate or an LOD-zero approximation.
+All seven raised FP32 SampleGrad shapes now have bounded CPU execution.
+
+Transform tests verify all six derivatives in runtime order, signed XYZ
+offsets, clamps, result shaping, reflection, handle cleanup and idempotence.
+Malformed coordinate/gradient/offset widths and dynamic offsets stay
+untouched; admission tests reject dynamic, undefined, poison and partially
+undefined offsets in fragment, vertex, compute and unannotated functions.
+Compiled fragment tests independently supply positive dP/dX or negative
+dP/dY for each U/V/W component to select mips 0/1/2 despite lane-uniform
+coordinates, with clamps, signed XYZ offsets, scalar/vector components,
+helpers, partial waves, guards and repeated prepared invocations.
+Normal/reference compute tests select divergent mips 0/2 using only
+negative dW/dY and independently clamp them. A five-lane normal/reference/
+AOT runner fixture covers plain/clamped 3D forms, scalar/vector components,
+signed XYZ offsets, divergent gradients/clamps, partial waves, guards and
+repeats on one mip; runner image YAML still prepares only one mip.
+Negative runner tests now reject dynamic W and partially poison XYZ
+offsets instead of rejecting the valid 3D shape.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 940 in 26.11 seconds; full FeMe LIT
+passes 4,161 with 15 skipped, 10 unsupported and zero failures among
+4,186 discovered tests in 83.68 seconds. Five new tests add five passes;
+timings are not controlled speedups. Existing biased/comparison execution,
+ordinary DXIL sampling/loading eligibility, SPIR-V gradient handling,
+artifact ABI 8 and argument layouts remain unchanged. Broader sampling
+conformance, bound/static descriptor materialization and owned D3D12
+execution remain open. Native SDK import remains separate from canonical
+CPU and owned-device execution; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed. No new adapter-matrix or external Vulkan
+CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

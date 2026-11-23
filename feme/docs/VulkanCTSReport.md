@@ -1,5 +1,35 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) explicit 3D gradient CPU regression scope (2026-11-23)
+
+The [explicit 3D gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-3d-gradient-cpu-execution-vm-2026-11-23)
+adds heap-backed FP32 3D CPU execution with three-component supplied
+gradients, constant signed XYZ offsets, default samplers, optional shader
+clamps and scalar/vector results up to the declared texel width (at most
+four). Supplied gradients select LOD in any stage without synthesized
+derivatives or an LOD-zero approximation. All seven raised FP32 gradient
+shapes now have bounded CPU execution.
+
+Compiled fragment tests independently vary all six U/V/W derivatives to
+select mips 0/1/2 despite lane-uniform coordinates, with clamps, signed
+offsets, components, helpers, partial waves, guards and repeats.
+Normal/reference compute tests verify divergent multi-mip selection using
+only negative dW/dY and independent clamps. A five-lane single-mip normal/
+reference/AOT runner fixture covers plain/clamped 3D forms, signed XYZ
+offsets, scalar/vector results, divergent gradients/clamps, partial waves,
+guards and repeats; image YAML still prepares one mip. Negative runner
+admission rejects dynamic W and partially poison XYZ offsets.
+Focused CPU/DXIL/sampling LIT passes 940; full FeMe LIT passes 4,161 with
+15 skipped, 10 unsupported and zero failures among 4,186 discovered tests.
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, descriptor materialization
+or owned D3D12 execution is claimed. Native SDK import remains separate
+from canonical CPU execution. Ordinary DXIL sampling/loading eligibility,
+biased/comparison execution, SPIR-V gradient handling, artifact ABI 8 and
+argument layouts are unchanged. Broader sampling conformance and
+W2(a)/W2(b)/W3(b) remain open; owned `CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) explicit 1D gradient CPU regression scope (2026-11-23)
 
 The [explicit 1D gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-1d-gradient-cpu-execution-vm-2026-11-23)

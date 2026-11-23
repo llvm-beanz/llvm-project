@@ -605,6 +605,46 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupported1DGradientSamplingInEveryStage) {
   }
 }
 
+TEST(UnsupportedOpsTest, AdmitsOnlySupported3DGradientSamplingInEveryStage) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x i32> %offset, <3 x float> %coord, <3 x float> %dx, <3 x float> %dy, float %clamp) {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3f32.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4) %t, target("dx.Sampler", 0) %s, <3 x float> %coord, <3 x float> %dx, <3 x float> %dy, <3 x i32> <i32 1, i32 -1, i32 2>, float %clamp)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32)
+    declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+    declare <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3f32.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), target("dx.Sampler", 0), <3 x float>, <3 x float>, <3 x float>, <3 x i32>, float)
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  auto *Sample = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+  Value *Offset = Sample->getArgOperand(5);
+  for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
+    SCOPED_TRACE(Stage.str());
+    if (!Stage.empty())
+      F->addFnAttr("feme.shader.stage", Stage);
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+    Sample->setArgOperand(5, F->getArg(0));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(5, UndefValue::get(Offset->getType()));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(5, PoisonValue::get(Offset->getType()));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    for (unsigned I = 0; I < 3; ++I) {
+      SmallVector<Constant *, 3> Components(
+          3, ConstantInt::get(Type::getInt32Ty(Ctx), 0));
+      Components[I] = UndefValue::get(Type::getInt32Ty(Ctx));
+      Sample->setArgOperand(5, ConstantVector::get(Components));
+      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    }
+    Sample->setArgOperand(5, Offset);
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  }
+}
+
 TEST(UnsupportedOpsTest, RejectsNonHeapGradientSamplingInEveryStage) {
   LLVMContext Ctx;
   auto M = parseIR(Ctx, R"(
@@ -631,7 +671,7 @@ TEST(UnsupportedOpsTest, RejectsNonHeapGradientSamplingInEveryStage) {
           Failed<StringError>(testing::Property(
               &StringError::getMessage,
               testing::HasSubstr(
-                  "requires heap-backed FP32 1D/2D/cube (including array) "
+                  "requires heap-backed FP32 1D/2D/3D/cube (including array) "
                   "explicit-gradient sampling"))));
     }
     F->eraseFromParent();
