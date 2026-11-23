@@ -3142,9 +3142,21 @@ documented reason rather than an oversight:
   partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
   unchanged. All seven raised texture shapes have bounded fragment biased
   execution; broader sampling conformance remains open.
-  For remaining gather forms, the DXIL import half is still
-  blocked upstream; gradient sampling is not yet raised despite existing
-  LLVM forward lowering. Update (roadmap L58): an ordinary, non-comparison
+  FP32 DXIL `SampleGrad` now raises opcode 63 against LLVM's existing forward
+  lowering for 1D/array, 2D/array, 3D and cube/array textures. Scalar/vector
+  FP32 texels up to four components use default samplers. Coordinates/
+  layers, dP/dX, dP/dY, signed/dynamic spatial offsets and optional real
+  MinLod clamps survive; gradient width excludes array layers. Undefined/
+  poison clamps select the plain intrinsic; zero/dynamic clamps remain
+  clamped. Shared bias/gradient guards validate operands, complete results
+  and every result use before adding a sample. Malformed calls and
+  status/aggregate/out-of-width uses stay unraised without an extra read.
+  Seven-shape roundtrips, raw guards, idempotence and native DXC plain/clamped
+  import pass. Both gradient intrinsics still reject CPU execution in every
+  stage, including normal/reference/AOT compute paths. No descriptor
+  materialization or owned-device execution is enabled.
+  For remaining gather forms, the DXIL import half is still blocked upstream.
+  Update (roadmap L58): an ordinary, non-comparison
   `Bias` operand is now implemented on the SPIR-V import side, scoped to
   `Plain2D`/`Cube` only (matching roadmap L26's own `MinLodClamp` scope
   precedent); ordinary DXIL `Sample`/`SampleLevel` still pass zero bias to
@@ -3159,7 +3171,7 @@ documented reason rather than an oversight:
   unchanged (the runtime's own implicit-LOD mip/anisotropy math is
   agnostic to whether a derivative was synthesized, zeroed, or supplied
   explicitly), so no new runtime entry point was needed. DXIL's own
-  gradient sampling, `Array2D`/other-shape SPIR-V gradient sampling,
+  gradient CPU execution, `Array2D`/other-shape SPIR-V gradient sampling,
   integer-channel/`compute`-stage/sparse-residency SPIR-V gradient
   sampling, and a `Dref`+`Grad` depth-comparison combination all remain
   unimplemented (see roadmap L60). Update (roadmap L60(a), partial):

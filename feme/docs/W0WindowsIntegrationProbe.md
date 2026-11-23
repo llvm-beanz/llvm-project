@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) gradient-sampling compiler mapping (VM, 2026-11-23)
+
+FP32 DXIL `SampleGrad` now raises opcode 63 against LLVM's existing forward
+lowering for 1D/array, 2D/array, 3D and cube/array textures. Scalar/vector
+FP32 texels up to four components use default samplers. Coordinates/layers,
+dP/dX, dP/dY, signed/dynamic spatial offsets and optional real MinLod clamps
+survive. Gradient width excludes array layers; cubes retain three raw-
+direction components. Undefined/poison clamps select the plain intrinsic;
+zero and dynamic real clamps remain clamped. Unused gradient/offset wire
+slots must be undef/poison or zero.
+
+Bias and gradient raising share complete operand/result/use validation
+before adding a sample. Status/aggregate/out-of-width uses, malformed calls,
+comparison samplers, half/integer texels and unsupported shapes stay unraised
+without another read. Four LIT fixtures and one unit test cover seven-shape
+LLVM forward/reverse roundtrips, exact operand values, scalar and two-/
+three-/four-component FP32 results, idempotence, four accepted raw clamp/
+dynamic cases, eighteen rejected raw cases and native SDK DXC plain/clamped
+pixel-shader import for all seven shapes. Both gradient intrinsics still
+fail explicit CPU admission in every stage; normal/reference/AOT compute
+rejection is tested. This is compiler mapping, not gradient CPU or native
+DXC execution through an owned D3D12 device.
+
+Expanded CPU/DXIL/comparison/gradient LIT passes **915** in **14.55 seconds**.
+Full FeMe LIT passes **4,136**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,161** discovered tests in **70.58 seconds**. Five added
+tests add five passes. Assertions, disabled PCH, sccache and the two-worker
+build limit remain; timings are not controlled speedups.
+
+Existing biased/comparison execution, ordinary DXIL sampling, SPIR-V gradient
+handling, artifact ABI 8 and argument layouts are unchanged. Gradient CPU
+execution, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) 3D biased-sampling CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 `Texture3D::SampleBias` now executes in compiled fragment

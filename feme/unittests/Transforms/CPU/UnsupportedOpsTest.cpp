@@ -446,6 +446,39 @@ TEST(UnsupportedOpsTest, RejectsNonHeapBiasedSamplingInEveryStage) {
   EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
 }
 
+TEST(UnsupportedOpsTest, RejectsGradientSamplingInEveryStage) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @plain(target("dx.Texture", float, 0, 0, 0, 2) %t, target("dx.Sampler", 0) %s) {
+      %r = call float @llvm.dx.resource.samplegrad.f32.tdx.Texture_f32_0_0_0_2t.tdx.Sampler_0t.v2f32.v2f32.v2f32.v2i32(target("dx.Texture", float, 0, 0, 0, 2) %t, target("dx.Sampler", 0) %s, <2 x float> zeroinitializer, <2 x float> zeroinitializer, <2 x float> zeroinitializer, <2 x i32> zeroinitializer)
+      ret float %r
+    }
+    define float @clamped(target("dx.Texture", float, 0, 0, 0, 2) %t, target("dx.Sampler", 0) %s) {
+      %r = call float @llvm.dx.resource.samplegrad.clamp.f32.tdx.Texture_f32_0_0_0_2t.tdx.Sampler_0t.v2f32.v2f32.v2f32.v2i32(target("dx.Texture", float, 0, 0, 0, 2) %t, target("dx.Sampler", 0) %s, <2 x float> zeroinitializer, <2 x float> zeroinitializer, <2 x float> zeroinitializer, <2 x i32> zeroinitializer, float 0.0)
+      ret float %r
+    }
+    declare float @llvm.dx.resource.samplegrad.f32.tdx.Texture_f32_0_0_0_2t.tdx.Sampler_0t.v2f32.v2f32.v2f32.v2i32(target("dx.Texture", float, 0, 0, 0, 2), target("dx.Sampler", 0), <2 x float>, <2 x float>, <2 x float>, <2 x i32>)
+    declare float @llvm.dx.resource.samplegrad.clamp.f32.tdx.Texture_f32_0_0_0_2t.tdx.Sampler_0t.v2f32.v2f32.v2f32.v2i32(target("dx.Texture", float, 0, 0, 0, 2), target("dx.Sampler", 0), <2 x float>, <2 x float>, <2 x float>, <2 x i32>, float)
+  )");
+  ASSERT_TRUE(M);
+  for (StringRef Name : {"plain", "clamped"}) {
+    Function *F = M->getFunction(Name);
+    for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
+      SCOPED_TRACE((Name + ": " + Stage).str());
+      if (!Stage.empty())
+        F->addFnAttr("feme.shader.stage", Stage);
+      EXPECT_THAT_ERROR(
+          checkSupportedRaisedOps(*M),
+          Failed<StringError>(testing::Property(
+              &StringError::getMessage,
+              testing::HasSubstr(
+                  "requires explicit-gradient sampling lowering"))));
+    }
+    F->eraseFromParent();
+  }
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+}
+
 TEST(UnsupportedOpsTest, RejectsUnraisedDXOpCall) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

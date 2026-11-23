@@ -174,6 +174,17 @@ coverage" in [../Design.md](../Design.md).
   dynamic or partially undefined offsets reject. Ordinary DXIL 3D sampling/
   loading is unchanged; seven-shape biased execution is not broader sampling
   conformance.
+  FP32 `SampleGrad` now has checked opcode-63 import/raising for 1D/array,
+  2D/array, 3D and cube/array textures, with scalar/vector FP32 texels up to
+  four components and default samplers. Coordinates/layers, spatial gradients,
+  signed/dynamic spatial offsets and real zero/nonzero/dynamic MinLod clamps
+  survive; gradient width excludes array layers. Undefined/poison clamps
+  select the plain intrinsic. Operand/result/use guards reject malformed
+  calls without another sample. Seven-shape roundtrips, raw guards,
+  idempotence and native DXC plain/clamped import pass. CPU gradient execution
+  remains explicitly unsupported in every stage, including native AOT
+  compilation. This is compiler mapping, not descriptor materialization
+  or owned D3D12 rendering.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

@@ -1293,13 +1293,15 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // canonical intrinsic to (cross-checked against `-dxil-op-lower`, the same
 // standard every other raiser in this file holds itself to -- see the file
 // header comment): `Sample` (60), FP32 `SampleBias` (61), `SampleLevel` (62),
+// FP32 `SampleGrad` (63),
 // scalar FP32 `SampleCmp`
 // (64)/`SampleCmpLevelZero` (65), `TextureLoad` (66) and
 // `GetDimensions`' `.x` and `.xy` fields (72, via
 // `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
 // `levels_xy` lowering to verify against yet, so a mip-count query stays
-// unraised). Gradient sampling and gather remain outside this raiser's
-// scope. Biased sampling preserves bias/clamp; CPU lowering is
+// unraised). Gather remains outside this raiser's scope. Gradient sampling
+// preserves spatial derivatives/clamp but has no DXIL CPU lowering yet.
+// Biased sampling preserves bias/clamp; CPU lowering is
 // stage/shape-limited. Implicit comparison preserves the wire clamp but
 // requires derivative-aware CPU lowering. Heap-backed scalar FP32 1D/2D/cube
 // (and array) comparison executes in fragment stages; level zero also supports
@@ -1472,10 +1474,11 @@ bool raiseSample(CallInst &CI) {
   return true;
 }
 
-/// Raises FP32 `SampleBias` (61), preserving bias and real MinLod clamps.
+/// Raises FP32 `SampleBias` (61) or `SampleGrad` (63), preserving real MinLod
+/// clamps and either bias or spatial derivatives (never array-layer gradients).
 /// Validate the complete result and operand shapes before adding a sample.
-bool raiseSampleBias(CallInst &CI) {
-  if (CI.arg_size() != 12)
+bool raiseSampleBiasOrGrad(CallInst &CI, bool IsGrad) {
+  if (CI.arg_size() != (IsGrad ? 17u : 12u))
     return false;
   auto *RetTy = dyn_cast<StructType>(CI.getType());
   if (!RetTy || RetTy->getNumElements() != 5 ||
@@ -1488,9 +1491,9 @@ bool raiseSampleBias(CallInst &CI) {
   for (unsigned I = 7; I < 10; ++I)
     if (!CI.getArgOperand(I)->getType()->isIntegerTy(32))
       return false;
-  if (!CI.getArgOperand(10)->getType()->isFloatTy() ||
-      !CI.getArgOperand(11)->getType()->isFloatTy())
-    return false;
+  for (unsigned I = 10; I < CI.arg_size(); ++I)
+    if (!CI.getArgOperand(I)->getType()->isFloatTy())
+      return false;
 
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
   auto *HandleTy =
@@ -1513,6 +1516,14 @@ bool raiseSampleBias(CallInst &CI) {
     if (!Offset || (!isa<UndefValue>(Offset) && !Offset->isNullValue()))
       return false;
   }
+  unsigned NumGrad = NumOffsets ? NumOffsets : 3;
+  if (IsGrad)
+    for (unsigned Start : {10u, 13u})
+      for (unsigned I = NumGrad; I < 3; ++I) {
+        auto *Grad = dyn_cast<Constant>(CI.getArgOperand(Start + I));
+        if (!Grad || (!isa<UndefValue>(Grad) && !Grad->isNullValue()))
+          return false;
+      }
   Type *ElemTy = HandleTy->getResourceType();
   auto *VecTy = dyn_cast<FixedVectorType>(ElemTy);
   unsigned Width = VecTy ? VecTy->getNumElements() : 1;
@@ -1532,19 +1543,37 @@ bool raiseSampleBias(CallInst &CI) {
   Value *Offset = packTextureVector(Builder, Offsets);
   if (!Offset)
     Offset = PoisonValue::get(Builder.getInt32Ty());
-  bool HasClamp = !isa<UndefValue>(CI.getArgOperand(11));
-  auto *SampleFn = Intrinsic::getOrInsertDeclaration(
-      CI.getModule(),
-      HasClamp ? Intrinsic::dx_resource_samplebias_clamp
-               : Intrinsic::dx_resource_samplebias,
-      {ElemTy, HandleTy, SamplerTy, Coord->getType(), Offset->getType()});
-  SmallVector<Value *, 6> Args = {Handle, Sampler, Coord, CI.getArgOperand(10),
-                                  Offset};
+  Value *Clamp = CI.getArgOperand(IsGrad ? 16 : 11);
+  bool HasClamp = !isa<UndefValue>(Clamp);
+  Intrinsic::ID ID = IsGrad
+                         ? (HasClamp ? Intrinsic::dx_resource_samplegrad_clamp
+                                     : Intrinsic::dx_resource_samplegrad)
+                         : (HasClamp ? Intrinsic::dx_resource_samplebias_clamp
+                                     : Intrinsic::dx_resource_samplebias);
+  SmallVector<Type *, 7> Overloads = {ElemTy, HandleTy, SamplerTy,
+                                      Coord->getType()};
+  SmallVector<Value *, 7> Args = {Handle, Sampler, Coord};
+  if (IsGrad) {
+    for (unsigned Start : {10u, 13u}) {
+      SmallVector<Value *, 3> Components;
+      for (unsigned I = 0; I < NumGrad; ++I)
+        Components.push_back(CI.getArgOperand(Start + I));
+      Value *Grad = packTextureVector(Builder, Components);
+      Overloads.push_back(Grad->getType());
+      Args.push_back(Grad);
+    }
+  } else {
+    Args.push_back(CI.getArgOperand(10));
+  }
+  Overloads.push_back(Offset->getType());
+  Args.push_back(Offset);
+  auto *SampleFn =
+      Intrinsic::getOrInsertDeclaration(CI.getModule(), ID, Overloads);
   if (HasClamp)
-    Args.push_back(CI.getArgOperand(11));
+    Args.push_back(Clamp);
   Value *Loaded = Builder.CreateCall(SampleFn, Args);
   if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
-    llvm_unreachable("biased sample uses were validated before mutation");
+    llvm_unreachable("sample uses were validated before mutation");
   CI.eraseFromParent();
   return true;
 }
@@ -2195,10 +2224,13 @@ bool raiseResourceOps(Module &M) {
     return raiseSample(CI);
   });
   Changed |= forEachDXOpCall(61, [](CallInst &CI) { // SampleBias
-    return raiseSampleBias(CI);
+    return raiseSampleBiasOrGrad(CI, /*IsGrad=*/false);
   });
   Changed |= forEachDXOpCall(62, [](CallInst &CI) { // SampleLevel
     return raiseSampleLevel(CI);
+  });
+  Changed |= forEachDXOpCall(63, [](CallInst &CI) { // SampleGrad
+    return raiseSampleBiasOrGrad(CI, /*IsGrad=*/true);
   });
   Changed |= forEachDXOpCall(64, [](CallInst &CI) { // SampleCmp
     return raiseSampleCmp(CI, /*IsLevelZero=*/false);

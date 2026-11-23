@@ -72,6 +72,14 @@ Error checkSupportedRaisedOps(const Module &M) {
           "shape-matched coordinates and supported offsets; other "
           "stages/shapes are not yet supported",
           F.getName().str().c_str());
+    case Intrinsic::dx_resource_samplegrad:
+    case Intrinsic::dx_resource_samplegrad_clamp:
+      return createStringError(
+          inconvertibleErrorCode(),
+          "unsupported raised operation: '%s' requires explicit-gradient "
+          "sampling lowering, which is not yet supported by the FeMe CPU "
+          "target",
+          F.getName().str().c_str());
     case Intrinsic::dx_resource_samplecmp:
     case Intrinsic::dx_resource_samplecmp_clamp:
       if (llvm::all_of(F.users(), [](const User *U) {

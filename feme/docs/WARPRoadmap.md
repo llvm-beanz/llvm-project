@@ -1109,6 +1109,41 @@ materialization and owned D3D12 execution remain open. `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) gradient-sampling compiler progress (2026-11-23): FP32 DXIL
+`SampleGrad` now raises opcode 63 to `llvm.dx.resource.samplegrad[.clamp]`
+against LLVM's existing forward lowering. Scalar/vector FP32 texels up to
+four components use default samplers for 1D/array, 2D/array, 3D and cube/
+array textures. Coordinates/layers, dP/dX, dP/dY, signed/dynamic spatial
+offsets and optional real MinLod clamps survive. Gradient width excludes
+array layers: one for 1D/array, two for 2D/array, three for 3D/cube/array.
+Undefined/poison clamps select the plain intrinsic; zero and dynamic real
+clamps remain clamped. Unused gradient/offset wire slots must be undef/
+poison or zero. Bias and gradient raising share complete operand/result/
+use validation before adding a sample, so status/aggregate/out-of-width
+uses and malformed calls stay unraised without introducing a second read.
+Comparison samplers, half/integer texels and unsupported shapes stay unraised.
+
+Four LIT fixtures and one unit test cover seven-shape LLVM forward/reverse
+roundtrips, exact coordinate/layer/gradient/offset/clamp values, scalar and
+two-/three-/four-component FP32 results, idempotence, four accepted raw
+clamp/dynamic cases, eighteen rejected raw cases and native SDK DXC plain/
+clamped pixel-shader import for all seven shapes. Both gradient intrinsics
+still fail explicit CPU admission in every stage; normal/reference/AOT
+compute rejection is tested. This is compiler mapping, not gradient CPU
+execution, descriptor materialization or owned-device execution.
+
+Expanded CPU/DXIL/comparison/gradient LIT passes 915 in 14.55 seconds. Full
+FeMe LIT passes 4,136, with 15 skipped, 10 unsupported and zero failures,
+from 4,161 discovered tests in 70.58 seconds. Five added tests add five
+passes. Assertions, disabled PCH, sccache and the two-worker build limit
+remain; timings are not controlled speedups. Existing biased/comparison
+execution, ordinary DXIL sampling, SPIR-V gradient handling, artifact ABI 8
+and argument layouts are unchanged. Gradient CPU execution, broader sampling
+conformance, bound/static descriptor materialization and owned D3D12
+execution remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

@@ -177,6 +177,19 @@ The original compute-only baseline is no longer current:
   partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
   unchanged. Seven-shape fragment biased execution is bounded compiler/
   executor coverage, not descriptor materialization or owned-device execution.
+  FP32 `SampleGrad` now has checked opcode-63 import/raising against LLVM's
+  existing forward lowering for all seven sampled texture shapes. Scalar/
+  vector FP32 texels up to four components use default samplers. Coordinates/
+  layers, spatial gradients, signed/dynamic spatial offsets and optional
+  real MinLod clamps survive; gradient width excludes array layers.
+  Undefined/poison clamps select the plain intrinsic. Shared bias/gradient
+  guards check operand types, complete results and every result use before
+  adding a sample; malformed calls and unsupported status/aggregate uses
+  stay unraised without an extra read. Seven-shape roundtrips, raw guards,
+  idempotence and native DXC plain/clamped import pass. CPU gradient execution
+  still rejects explicitly in every stage, including normal/reference/AOT
+  compute paths. This is compiler mapping, not descriptor materialization
+  or owned D3D12 execution.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.

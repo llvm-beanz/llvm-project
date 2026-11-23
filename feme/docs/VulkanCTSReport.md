@@ -1,5 +1,38 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) gradient-sampling compiler regression scope (2026-11-23)
+
+The [gradient-sampling compiler follow-up](W0WindowsIntegrationProbe.md#w2aw3b-gradient-sampling-compiler-mapping-vm-2026-11-23)
+adds checked FP32 DXIL opcode-63 `SampleGrad` import/raising against LLVM's
+existing forward lowering for 1D/array, 2D/array, 3D and cube/array textures.
+Coordinates/layers, dP/dX, dP/dY, signed/dynamic spatial offsets and optional
+real MinLod clamps survive; gradient width excludes array layers. Undefined/
+poison clamps select the plain intrinsic; zero/dynamic real clamps remain
+clamped. Shared bias/gradient guards validate all operands, complete results
+and every use before adding a sample. Unsupported status/aggregate/
+out-of-width uses and malformed calls stay unraised without another read.
+Both gradient intrinsics still reject CPU execution in every stage.
+No new Vulkan sampler implementation, derivative substitution or LOD-zero
+approximation is added.
+
+Four LIT fixtures and one unit test cover seven-shape LLVM forward/reverse
+roundtrips, exact operand values, scalar and two-/three-/four-component FP32
+results, idempotence, four accepted raw clamp/dynamic cases, eighteen rejected
+raw cases, native SDK DXC plain/clamped pixel-shader import for all seven
+shapes and normal/reference/AOT compute rejection. This is compiler mapping,
+not gradient CPU or owned-device execution.
+
+Expanded CPU/DXIL/comparison/gradient LIT passes **915** in **14.55 seconds**.
+Full FeMe LIT passes **4,136**, with **15 Skipped, 10 Unsupported and zero
+failures**, from **4,161** discovered tests in **70.58 seconds**. Timings are
+not controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Gradient CPU execution,
+broader sampling conformance, bound/static descriptor materialization and
+owned D3D12 execution remain open. **No real Vulkan CTS pass is claimed**;
+the external runner remains unavailable.
+
 ## W2(a)/W3(b) 3D biased-sampling CPU regression scope (2026-11-23)
 
 The [3D biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-3d-biased-sampling-cpu-execution-vm-2026-11-23)

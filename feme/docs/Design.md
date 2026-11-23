@@ -1606,8 +1606,24 @@ or partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
 unchanged. This completes bounded fragment biased execution for the seven
 raised texture shapes, not broader sampling conformance.
 
-Gradient sampling remains outside FeMe's DXIL access raiser, despite
-LLVM forward lowering. Remaining gather forms still lack matching numbered
+FP32 DXIL `SampleGrad` now raises opcode 63 to
+`llvm.dx.resource.samplegrad[.clamp]` against LLVM's existing forward
+lowering. Scalar and fixed-vector texels up to four FP32 components use
+default samplers on 1D/array, 2D/array, 3D and cube/array textures. Canonical
+operands are texture, sampler, coordinates, dP/dX, dP/dY, spatial offsets
+and optional MinLod clamp. Gradient width excludes array layers: one for
+1D/array, two for 2D/array, three for 3D/cube/array. Real zero/nonzero/dynamic
+clamps survive; undef/poison clamps select the plain intrinsic.
+Bias and gradient raising share complete operand/result/use validation
+before adding a sample. Unused gradient/offset wire slots must be
+undef/poison or zero. Status/aggregate/out-of-width uses, malformed calls,
+comparison samplers and half/integer texels remain unraised without an
+extra read. Seven-shape forward/reverse roundtrips, idempotence, raw guards
+and native SDK DXC plain/clamped import pass. Both gradient intrinsics
+still reject explicitly on the CPU in every stage; normal/reference/AOT
+compute rejection is tested. This is compiler mapping, not gradient CPU
+execution, descriptor materialization or owned D3D12 execution.
+Remaining gather forms still lack matching numbered
 wire operations in this tree. See "Canonical
 image operations" in feme/docs/FeMeGraphicsDesign.md for where the
 canonical `llvm.dx.resource.sample*`/`llvm.spv.resource.sample*`

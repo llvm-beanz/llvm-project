@@ -1,0 +1,94 @@
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /Fo %t/two.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CLAMP /Fo %t/two-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /Fo %t/array.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /D CLAMP /Fo %t/array-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /Fo %t/one.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D CLAMP /Fo %t/one-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D ARRAY /Fo %t/one-array.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D ARRAY /D CLAMP /Fo %t/one-array-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D THREE /Fo %t/three.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D THREE /D CLAMP /Fo %t/three-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /Fo %t/cube.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D CLAMP /Fo %t/cube-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /Fo %t/cube-array.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /D CLAMP /Fo %t/cube-array-clamp.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/two.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,PLAIN
+# RUN: feme-translate --import-dxil %t/two-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,CLAMP
+# RUN: feme-translate --import-dxil %t/array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,PLAIN
+# RUN: feme-translate --import-dxil %t/array-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,CLAMP
+# RUN: feme-translate --import-dxil %t/one.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONE,PLAIN
+# RUN: feme-translate --import-dxil %t/one-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONE,CLAMP
+# RUN: feme-translate --import-dxil %t/one-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONEARRAY,PLAIN
+# RUN: feme-translate --import-dxil %t/one-array-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONEARRAY,CLAMP
+# RUN: feme-translate --import-dxil %t/three.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=THREE,PLAIN
+# RUN: feme-translate --import-dxil %t/three-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=THREE,CLAMP
+# RUN: feme-translate --import-dxil %t/cube.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBE,PLAIN
+# RUN: feme-translate --import-dxil %t/cube-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBE,CLAMP
+# RUN: feme-translate --import-dxil %t/cube-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,PLAIN
+# RUN: feme-translate --import-dxil %t/cube-array-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,CLAMP
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Native import/raising only, not CPU or owned-device execution.
+# TWO: call target("dx.Texture", <4 x float>, 0, 0, 1, 2)
+# ARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 7)
+# ONE: call target("dx.Texture", <4 x float>, 0, 0, 1, 1)
+# ONEARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 6)
+# THREE: call target("dx.Texture", <4 x float>, 0, 0, 1, 4)
+# CUBE: call target("dx.Texture", <4 x float>, 0, 0, 1, 5)
+# CUBEARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 9)
+# PLAIN: call <4 x float> @llvm.dx.resource.samplegrad.v4f32
+# PLAIN-NOT: call %dx.types.ResRet.f32 @dx.op.sampleGrad
+# CLAMP: call <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32
+# CLAMP-NOT: call %dx.types.ResRet.f32 @dx.op.sampleGrad
+#--- shader.hlsl
+#ifdef CUBE
+#ifdef ARRAY
+TextureCubeArray<float4> Input : register(t0);
+#define COORD uv
+#else
+TextureCube<float4> Input : register(t0);
+#define COORD uv.xyz
+#endif
+#define GX gx.xyz
+#define GY gy.xyz
+#define OFFSET
+#elif defined(THREE)
+Texture3D<float4> Input : register(t0);
+#define COORD uv.xyz
+#define GX gx.xyz
+#define GY gy.xyz
+#define OFFSET , int3(1, -2, 1)
+#elif defined(ONE)
+#ifdef ARRAY
+Texture1DArray<float4> Input : register(t0);
+#define COORD uv.xy
+#else
+Texture1D<float4> Input : register(t0);
+#define COORD uv.x
+#endif
+#define GX gx.x
+#define GY gy.x
+#define OFFSET , -1
+#else
+#ifdef ARRAY
+Texture2DArray<float4> Input : register(t0);
+#define COORD uv.xyz
+#else
+Texture2D<float4> Input : register(t0);
+#define COORD uv.xy
+#endif
+#define GX gx.xy
+#define GY gy.xy
+#define OFFSET , int2(1, -2)
+#endif
+SamplerState S : register(s0);
+float4 main(float4 uv : TEXCOORD0, float4 gx : TEXCOORD1, float4 gy : TEXCOORD2) : SV_Target {
+#ifdef CLAMP
+  return Input.SampleGrad(S, COORD, GX, GY OFFSET, uv.w);
+#else
+  return Input.SampleGrad(S, COORD, GX, GY OFFSET);
+#endif
+}

@@ -150,6 +150,17 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   rejects plain/clamped 3D bias in normal/reference/AOT dispatch. Ordinary
   DXIL 3D sampling/loading is unchanged; no descriptor materialization or
   owned-device execution is enabled.
+  FP32 `SampleGrad` now has checked opcode-63 import/raising for 1D/array,
+  2D/array, 3D and cube/array textures, with scalar/vector FP32 texels up to
+  four components and default samplers. Coordinates/layers, spatial gradients,
+  signed/dynamic spatial offsets and optional real MinLod clamps survive;
+  gradient width excludes array layers. Undefined/poison clamps select the
+  plain intrinsic; zero/dynamic clamps remain clamped. Seven-shape roundtrips,
+  raw guards, idempotence and native DXC plain/clamped import pass. Both
+  gradient intrinsics still reject normal/reference/AOT compute dispatch
+  explicitly; CPU gradient execution is unsupported in every stage.
+  No derivative substitution, LOD-zero approximation, descriptor
+  materialization or owned-device execution is enabled.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in
