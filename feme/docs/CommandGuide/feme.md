@@ -142,19 +142,25 @@ coverage" in [../Design.md](../Design.md).
   real zero/nonzero/dynamic clamps select `llvm.dx.resource.samplebias.clamp`.
   Scalar and two-/three-/four-component FP32 texels use default samplers.
   Seven-shape LLVM roundtrips and native DXC pixel-shader import are tested.
-  Heap-backed FP32 Texture2D/Texture2DArray biased sampling now executes in compiled fragment
-  stages with real U/V derivatives, implicit LOD, bias, constant signed offsets
+  Heap-backed FP32 2D/cube biased sampling, including arrays, now executes
+  in compiled fragment stages with real spatial/direction derivatives,
+  implicit LOD, bias, supported offsets
   and optional shader MinLod clamps. Scalar/vector results up to the declared
   texel width (at most four) narrow the shared four-component result.
   Mip/offset/component selection, divergent bias/clamps, helpers and guarded
   partial waves are tested. Compute/unannotated stages, other shapes,
-  non-heap handles, comparison samplers and dynamic/undefined offsets
+  non-heap handles, comparison samplers and dynamic/undefined spatial offsets
   reject explicitly; normal/reference/AOT compute rejection is tested.
   Descriptor materialization and owned D3D12 rendering remain unsupported.
   Biased arrays use FP32 (U, V, layer), with only U/V differentiated and
   two spatial offsets. Compiled array tests check divergent layers/bias/
   clamps and observable layer/mip/offset/component selection; missing-layer
   coordinates still fail admission.
+  Cubes use six raw-XYZ derivatives for face-projected implicit LOD; a
+  separate cube-array element is never differentiated. Unused scalar offsets
+  must be poison/undef or zero. Compiled tests check all faces, both elements,
+  biased/clamped mip selection and components with guarded partial waves.
+  Nonzero/dynamic cube offsets and 1D/3D biased execution remain unsupported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

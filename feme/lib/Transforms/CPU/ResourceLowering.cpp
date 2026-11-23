@@ -703,33 +703,52 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *Coord = CI->getArgOperand(2);
       Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
-      SampleDerivatives D =
-          getOrSynthesizeSample2DDerivatives(Builder, F, U, V);
       Value *Offset = CI->getArgOperand(4);
       Value *MinLodClamp = ID == Intrinsic::dx_resource_samplebias_clamp
                                ? CI->getArgOperand(5)
                                : ConstantFP::getInfinity(Builder.getFloatTy(),
                                                          /*Negative=*/true);
       Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
-      Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
-      Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
-      bool IsArray =
-          cast<dxil::TextureExtType>(Image->getType())->getDimension() ==
-          dxil::ResourceKind::Texture2DArray;
+      auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
       Value *Loaded;
-      if (IsArray) {
-        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
-        Loaded = createSample2DArray(
-            Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0), U,
-            V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero, Builder.getFalse(),
-            CI->getArgOperand(3), OffsetX, OffsetY, MinLodClamp,
-            Builder.getTrue(), CI->getName());
+      if (Kind == dxil::ResourceKind::TextureCube ||
+          Kind == dxil::ResourceKind::TextureCubeArray) {
+        Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
+        CubeDirectionDerivatives D =
+            getOrSynthesizeSampleCubeDerivatives(Builder, F, U, V, Z);
+        if (Kind == dxil::ResourceKind::TextureCubeArray) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
+          Loaded = createSampleCubeArray(
+              Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
+              U, V, Z, D.DDirXdX, D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX,
+              D.DDirZdY, Layer, Zero, Builder.getFalse(), CI->getArgOperand(3),
+              MinLodClamp, Builder.getTrue(), CI->getName());
+        } else {
+          Loaded = createSampleCube(
+              Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
+              U, V, Z, D.DDirXdX, D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX,
+              D.DDirZdY, Zero, Builder.getFalse(), CI->getArgOperand(3),
+              MinLodClamp, Builder.getTrue(), CI->getName());
+        }
       } else {
-        Loaded = createSample2D(Builder, Env, Image->getArgOperand(0),
-                                Sampler->getArgOperand(0), U, V, D.DUdX, D.DUdY,
-                                D.DVdX, D.DVdY, Zero, Builder.getFalse(),
-                                CI->getArgOperand(3), OffsetX, OffsetY,
-                                MinLodClamp, Builder.getTrue(), CI->getName());
+        SampleDerivatives D =
+            getOrSynthesizeSample2DDerivatives(Builder, F, U, V);
+        Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+        Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+        if (Kind == dxil::ResourceKind::Texture2DArray) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          Loaded = createSample2DArray(
+              Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
+              U, V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero,
+              Builder.getFalse(), CI->getArgOperand(3), OffsetX, OffsetY,
+              MinLodClamp, Builder.getTrue(), CI->getName());
+        } else {
+          Loaded = createSample2D(
+              Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
+              U, V, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero, Builder.getFalse(),
+              CI->getArgOperand(3), OffsetX, OffsetY, MinLodClamp,
+              Builder.getTrue(), CI->getName());
+        }
       }
       if (Loaded->getType() != CI->getType()) {
         if (auto *VecTy = dyn_cast<FixedVectorType>(CI->getType())) {
@@ -991,9 +1010,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       // so far.
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
-      // DXIL's own `TextureCube::SampleBias` is not threaded through this
-      // pass yet (roadmap L58 is SPIR-V-only so far) -- pass a zero
-      // `Bias` constant.
+      // SampleBias is handled separately above; ordinary sampling has no bias.
       Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
       // Roadmap L56: mirror Plain2D's own implicit-vs-explicit-LOD
       // derivative gating above, but for the raw direction vector (X, Y,
@@ -1021,10 +1038,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
       Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
-      // DXIL's own `TextureCubeArray::Sample`/`SampleBias` clamp/bias
-      // overloads are not threaded through this pass yet -- pass the
-      // same no-op constants as Cube above (roadmap L26/L58/L60(a) are
-      // SPIR-V-only so far).
+      // Ordinary Sample/SampleLevel have no bias here; their clamp overload
+      // is not yet threaded through. SampleBias is handled separately above.
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
       Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
@@ -1240,10 +1255,7 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
     return false;
   auto Image = classifyImageHandle(CI.getArgOperand(0));
   auto Sampler = classifySamplerHandle(CI.getArgOperand(1));
-  if (!Image ||
-      (Image->Shape != ImageShape::Plain2D &&
-       Image->Shape != ImageShape::Array2D) ||
-      !Sampler)
+  if (!Image || !Sampler)
     return false;
   auto *TextureTy = cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
   auto *SamplerTy = cast<dxil::SamplerExtType>(CI.getArgOperand(1)->getType());
@@ -1263,15 +1275,23 @@ bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
   };
   unsigned TextureWidth = FP32Width(TextureTy->getTypeParameter(0));
   unsigned ResultWidth = FP32Width(CI.getType());
+  bool IsCube =
+      Image->Shape == ImageShape::Cube || Image->Shape == ImageShape::CubeArray;
+  unsigned NumCoords = Image->Shape == ImageShape::Plain2D     ? 2
+                       : Image->Shape == ImageShape::CubeArray ? 4
+                                                               : 3;
   LLVMContext &Ctx = CI.getContext();
+  Type *OffsetTy = Type::getInt32Ty(Ctx);
+  if (!IsCube)
+    OffsetTy = FixedVectorType::get(Type::getInt32Ty(Ctx), 2);
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
       CI.getArgOperand(2)->getType() !=
-          FixedVectorType::get(Type::getFloatTy(Ctx),
-                               Image->Shape == ImageShape::Array2D ? 3 : 2) ||
-      CI.getArgOperand(4)->getType() !=
-          FixedVectorType::get(Type::getInt32Ty(Ctx), 2))
+          FixedVectorType::get(Type::getFloatTy(Ctx), NumCoords) ||
+      CI.getArgOperand(4)->getType() != OffsetTy)
     return false;
   auto *Offset = dyn_cast<Constant>(CI.getArgOperand(4));
+  if (IsCube)
+    return Offset && (isa<UndefValue>(Offset) || Offset->isNullValue());
   return Offset &&
          isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(0u)) &&
          isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(1u));

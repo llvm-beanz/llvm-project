@@ -6,6 +6,8 @@
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /Fo %t/array-plain.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /D CLAMP /Fo %t/array.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /Fo %t/cube.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D CLAMP /Fo %t/cube-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /Fo %t/cube-array-plain.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /D CLAMP /Fo %t/cube-array.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,PLAIN
 # RUN: feme-translate --import-dxil %t/clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,CLAMP
@@ -13,6 +15,8 @@
 # RUN: feme-translate --import-dxil %t/array-plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,PLAIN
 # RUN: feme-translate --import-dxil %t/array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,CLAMP
 # RUN: feme-translate --import-dxil %t/cube.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBE,PLAIN
+# RUN: feme-translate --import-dxil %t/cube-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBE,CLAMP
+# RUN: feme-translate --import-dxil %t/cube-array-plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,PLAIN
 # RUN: feme-translate --import-dxil %t/cube-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,CLAMP
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 # See https://llvm.org/LICENSE.txt for license information.

@@ -1561,10 +1561,11 @@ without introducing a second read. Tests check seven-shape forward/reverse
 roundtrips, exact coordinate/layer/bias/offset/clamp values, idempotence and
 native SDK DXC pixel-shader import.
 
-Heap-backed FP32 `Texture2D`/`Texture2DArray::SampleBias` now executes in compiled fragment
-stages through the existing 2D/array sampling helpers. A shared matcher gates
+Heap-backed FP32 `SampleBias` on 2D/cube textures, including arrays, now
+executes in compiled fragment stages through the existing sampling helpers.
+A shared matcher gates
 admission, signature growth and lowering on fragment stage, heap handles,
-default sampler, shape-matched FP32 coordinates and two constant signed i32 offsets.
+default sampler, shape-matched FP32 coordinates and supported offsets.
 Scalar/vector FP32 results up to the texture's declared width (at most four)
 are extracted/shuffled from the runtime's four-component result. Real
 coarse U/V derivatives select implicit LOD; bias, offsets and optional
@@ -1573,7 +1574,7 @@ handle cleanup are retained. Compiled execution checks both derivative
 axes, distinct mip/texel/component values, divergent negative/zero/positive
 bias and zero/two clamps, helpers, partial waves, guards and repeated
 invocation. Compute/unannotated stages, other shapes, non-heap handles,
-comparison samplers and dynamic/undefined offsets still reject explicitly;
+comparison samplers and dynamic/undefined spatial offsets still reject explicitly;
 normal/reference/AOT compute rejection is tested. Ordinary sampling,
 comparison execution and SPIR-V bias handling are unchanged. This does not
 materialize descriptors or establish native D3D12 rendering.
@@ -1583,6 +1584,13 @@ array execution uses distinct layer/mip/texel/component values, divergent
 layers/bias/clamps and guarded partial waves to detect wrong layer or LOD
 selection. Changing only the layer cannot change the mip. Missing-layer
 coordinates and compute array access still reject explicitly.
+Cube sampling supplies six coarse raw-XYZ direction derivatives to the
+existing face-projection/implicit-LOD runtime. Cube arrays pass a separate
+fourth element coordinate, never differentiated. The unused scalar offset
+must be poison/undef or zero; nonzero/dynamic cube offsets reject. Compiled
+tests distinguish all six faces, both elements, biased/clamped mip selection
+and result components across both derivative axes and guarded partial waves.
+1D/3D biased execution remains unsupported.
 
 Gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered

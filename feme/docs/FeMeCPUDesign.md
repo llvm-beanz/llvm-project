@@ -2696,10 +2696,11 @@ two-/three-/four-component FP32 texels and default samplers. Result uses
 and operand types are validated before adding a sample; unsupported
 status/aggregate uses and malformed calls remain unraised without an
 extra read.
-Heap-backed FP32 `Texture2D`/`Texture2DArray::SampleBias` now executes in compiled fragment
-stages through `createSample2D`/`createSample2DArray`. The shared read-only predicate gates early
+Heap-backed FP32 `SampleBias` on 2D/cube textures, including arrays, now
+executes in compiled fragment stages through the shared sampling helpers.
+The shared read-only predicate gates early
 admission, signature growth and lowering on a default sampler, shape-matched FP32
-coordinates and two constant signed i32 offsets. Scalar/vector results
+coordinates and supported offsets. Scalar/vector results
 up to the declared FP32 texel width (at most four) narrow the shared
 four-component result. Real coarse U/V derivatives, implicit LOD, bias,
 offsets and optional shader MinLod clamp are passed to the existing runtime.
@@ -2710,11 +2711,18 @@ bias and zero/two clamps, helper-only lanes, wave sizes 4/8, one/three quads,
 partial final waves, output guards, result masks and repeated invocation.
 Transform tests verify exact operands, idempotence, reflection and rejection
 of compute, malformed array coordinates, comparison samplers and dynamic offsets. Admission
-also rejects non-heap handles, missing stage and undefined offsets;
+also rejects non-heap handles, missing stage and undefined spatial offsets;
 normal/reference/AOT compute rejection remains tested. Other biased
 shapes/stages remain open. Existing SPIR-V bias handling, ordinary DXIL
 sampling and comparison execution are unchanged; implicit LOD is not
 approximated with level zero.
+Cube sampling uses `createSampleCube`/`createSampleCubeArray`, passing six
+coarse raw-XYZ derivatives to the existing face-projection/implicit-LOD
+runtime. A cube-array element is passed separately and never differentiated.
+Unused scalar cube offsets accept poison/undef or zero only; nonzero/dynamic
+offsets reject. Compiled execution checks all six faces, both elements,
+both derivative axes, biased/clamped mip selection, every result component
+and guarded partial waves. 1D/3D biased execution remains unsupported.
 Array sampling passes the third FP32 coordinate separately as the layer;
 it never differentiates the layer or offsets it spatially. A compiled array
 test checks complementary mip values across two layers, distinct texels/

@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) cube biased-sampling CPU regression scope (2026-11-23)
+
+The [cube biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-cube-biased-sampling-cpu-execution-vm-2026-11-23)
+executes heap-backed FP32 DXIL `TextureCube`/`TextureCubeArray::SampleBias`
+in compiled fragment stages. Six coarse raw-XYZ derivatives feed existing
+face-projection/implicit-LOD logic, with bias and optional shader MinLod
+clamps. The cube-array element is passed separately and never differentiated.
+Unused scalar offsets accept poison/undef or zero only; nonzero/dynamic
+offsets, malformed coordinates and compute/unannotated stages reject.
+No new Vulkan sampler implementation or LOD-zero approximation is added.
+
+One LIT fixture and two unit tests cover exact operands/result shaping,
+idempotence/reflection, admission and compiled execution. All six faces,
+both elements and screen derivative axes, biased/clamped mip selection,
+result components, divergent elements/bias/clamps, helper-only lanes,
+partial waves, guards, masks and repeated invocation are checked. Expanded
+fixtures verify native SDK DXC plain/clamped cube/array import and normal/
+reference/AOT compute rejection, not owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes **904** in **10.30 seconds**. Full
+FeMe LIT passes **4,125**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,150** discovered tests in **73.22 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. 1D/3D biased execution,
+other stages, gradient mapping/execution, broader sampling conformance,
+bound/static descriptor materialization and owned D3D12 execution remain
+open. **No real Vulkan CTS pass is claimed**; the external runner remains
+unavailable.
+
 ## W2(a)/W3(b) array biased-sampling CPU regression scope (2026-11-23)
 
 The [array biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-array-biased-sampling-cpu-execution-vm-2026-11-23)

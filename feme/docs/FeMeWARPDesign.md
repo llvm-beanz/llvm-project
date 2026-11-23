@@ -140,15 +140,16 @@ The original compute-only baseline is no longer current:
   undefined/poison clamps select the plain intrinsic. Status/aggregate uses
   and malformed calls stay unraised without an extra sample. Seven-shape
   roundtrips, idempotence and native DXC pixel-shader import pass.
-  Heap-backed FP32 Texture2D/Texture2DArray biased sampling now executes in compiled fragment
-  stages with real coarse U/V derivatives, implicit LOD, bias, constant signed
-  offsets and optional shader MinLod clamps. Scalar/vector results up to the
+  Heap-backed FP32 2D/cube biased sampling, including arrays, now executes
+  in compiled fragment stages with real coarse spatial/direction derivatives,
+  implicit LOD, bias, supported offsets and optional shader MinLod clamps.
+  Scalar/vector results up to the
   declared texel width (at most four) narrow the shared four-component result.
   Shared admission/signature growth/lowering, sampler reflection and dead
   handle cleanup are tested. Compiled execution checks both derivative axes,
   mip/texel/component selection, divergent bias/clamps, helpers, partial waves
   and guarded repeats. Compute/unannotated stages, other shapes, non-heap
-  handles, comparison samplers and dynamic/undefined offsets reject explicitly;
+  handles, comparison samplers and dynamic/undefined spatial offsets reject explicitly;
   normal/reference/AOT compute rejection is tested. This does not materialize
   descriptors or establish owned D3D12 execution.
   Biased array sampling passes a separate third FP32 layer coordinate;
@@ -156,6 +157,12 @@ The original compute-only baseline is no longer current:
   Distinct layer/mip/texel/component values, divergent layers/bias/clamps,
   helpers and guarded partial waves are tested. Missing-layer coordinates
   and compute/unannotated array access still reject explicitly.
+  Cubes supply six raw-XYZ derivatives to the existing face-projection/LOD
+  runtime; the separate cube-array element is never differentiated. Unused
+  scalar offsets accept poison/undef or zero only. All six faces, both
+  elements, biased/clamped mip selection, components and guarded partial
+  waves are tested. Nonzero/dynamic cube offsets and 1D/3D biased execution
+  remain unsupported.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.

@@ -1001,6 +1001,41 @@ execution remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) cube biased-sampling CPU progress (2026-11-23): heap-backed
+FP32 `TextureCube`/`TextureCubeArray::SampleBias` now lowers in fragment
+stages through the existing cube sampler helpers. Six coarse raw-direction
+derivatives feed the shared face-projection/implicit-LOD runtime. The
+fourth cube-array element coordinate is passed separately and never
+differentiated. Bias, optional shader MinLod clamps, scalar/vector result
+shaping, sampler reflection and post-traversal dead-handle cleanup are
+retained. Admission, signature growth and lowering share the matcher.
+Unused scalar offsets accept poison/undef or zero only; nonzero/dynamic
+offsets, malformed coordinates and compute/unannotated stages still reject.
+
+One new LIT fixture and two unit tests cover exact six-derivative/element/
+bias/clamp operands, result shaping, idempotence/reflection, admission and
+compiled execution. Distinct face/element/mip/component values distinguish
+all six faces, both cube elements and derivative-selected mip 1 from biased
+mips 0/2 and shader-clamped mip 2. Both screen derivative axes, divergent
+elements and -1/0/+1 bias, dynamic zero/two clamps, helper-only lanes,
+wave sizes 4/8, one/three quads, partial final waves, output guards, result
+masks and repeated invocation pass. Expanded fixtures verify native SDK
+DXC plain/clamped cube/array import and shape-specific normal/reference/AOT
+compute rejection. Native import remains distinct from canonical execution
+and owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes 904 in 10.30 seconds. Full FeMe LIT
+passes 4,125, with 15 skipped, 10 unsupported and zero failures, from
+4,150 discovered tests in 73.22 seconds. Three added tests add three passes.
+Assertions, disabled PCH, sccache and the two-worker build limit remain;
+timings are not controlled speedups. Existing 2D/array biased sampling,
+comparison execution, ordinary DXIL sampling, SPIR-V bias handling,
+artifact ABI 8 and argument layouts are unchanged. 1D/3D biased execution,
+other stages, gradient mapping/execution, broader sampling conformance,
+bound/static descriptor materialization and owned D3D12 execution remain
+open. `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.
