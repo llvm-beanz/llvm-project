@@ -117,7 +117,7 @@ coverage" in [../Design.md](../Design.md).
   preserving real MinLod clamps (including zero and dynamic values) in
   `llvm.dx.resource.samplecmp.clamp`; undefined/poison clamps select
   `llvm.dx.resource.samplecmp`. Fragment-stage heap-backed scalar FP32
-  `Texture2D` forms now lower through shared comparison helpers with real
+  `Texture2D`/`Texture2DArray` forms lower through shared comparison helpers with real
   coarse quad derivatives, implicit LOD and the optional shader MinLod clamp.
   Constant signed offsets and sampler reflection are retained. Compute/
   unannotated stages, other implicit shapes and dynamic/undefined offsets
@@ -125,6 +125,10 @@ coverage" in [../Design.md](../Design.md).
   this does not enable implicit comparison in compute/reference dispatch,
   descriptor materialization or owned D3D12 rendering. Half/vector results
   remain unsupported.
+  Array coordinates are FP32 (U, V, layer); only U/V are differentiated
+  and the two offsets remain spatial. Missing-layer coordinates fail
+  admission. Compiled array tests check divergent layers/references,
+  dynamic clamps and observable mip selection.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

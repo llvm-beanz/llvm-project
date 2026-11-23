@@ -10,7 +10,7 @@
 ; Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-; CHECK: requires heap-backed scalar FP32 Texture2D fragment comparison sampling with shape-matched coordinates and constant offsets
+; CHECK: requires heap-backed scalar FP32 Texture2D/Texture2DArray fragment comparison sampling with shape-matched coordinates and constant offsets
 ;--- plain.ll
 define void @main() #0 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 0)

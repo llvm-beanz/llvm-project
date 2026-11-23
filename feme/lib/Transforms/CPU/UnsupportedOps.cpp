@@ -66,7 +66,8 @@ Error checkSupportedRaisedOps(const Module &M) {
       return createStringError(
           inconvertibleErrorCode(),
           "unsupported raised operation: '%s' requires heap-backed scalar FP32 "
-          "Texture2D fragment comparison sampling with shape-matched "
+          "Texture2D/Texture2DArray fragment comparison sampling with "
+          "shape-matched "
           "coordinates and constant offsets; derivative-aware lowering for "
           "other stages/shapes is not yet supported",
           F.getName().str().c_str());

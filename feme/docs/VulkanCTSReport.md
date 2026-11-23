@@ -1,5 +1,34 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) array fragment comparison CPU regression scope (2026-11-23)
+
+The [array fragment comparison follow-up](W0WindowsIntegrationProbe.md#w2aw3b-array-fragment-comparison-cpu-execution-vm-2026-11-23)
+extends heap-backed scalar FP32 DXIL implicit comparison to `Texture2DArray`
+in compiled fragment stages. Shared array comparison helpers receive
+real U/V quad derivatives, a separate layer coordinate, signed constant
+spatial offsets and the optional shader MinLod clamp. Compute/unannotated
+stages, other implicit shapes and missing-layer coordinates still reject.
+No new Vulkan sampling implementation or LOD-zero approximation is added.
+
+One new LIT fixture and two unit tests cover helper/derivative operands,
+idempotence/reflection, admission and compiled execution. Complementary
+layer depths across three mips, divergent layers/references, dynamic
+zero/two clamps, helper-only lanes, partial waves, output guards, result
+masks and repeated invocation make wrong layer/mip selection observable.
+Expanded fixtures also verify plain array lowering and native SDK DXC
+plain/dynamic-clamp array pixel-shader import, not owned-device execution.
+
+Selected CPU/comparison LIT passes **824** in **16.22 seconds**. Full FeMe
+LIT passes **4,103**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,128** discovered tests in **129.34 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Other implicit shapes/
+stages, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. **No real Vulkan CTS
+pass is claimed**; the external runner remains unavailable.
+
 ## W2(a)/W3(b) fragment comparison CPU regression scope (2026-11-22)
 
 The [fragment comparison execution follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fragment-comparison-cpu-execution-vm-2026-11-22)

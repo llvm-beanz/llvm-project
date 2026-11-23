@@ -2602,9 +2602,9 @@ now has checked scalar FP32 opcode-64 forward/reverse mapping. Undefined/
 poison clamps select the plain intrinsic; real zero,
 nonzero and dynamic clamps survive as `samplecmp.clamp`. Six-shape LLVM
 roundtrips and native SDK DXC pixel-shader import verify this compiler
-mapping. Heap-backed scalar FP32 `Texture2D` implicit comparison now executes
+mapping. Heap-backed scalar FP32 `Texture2D`/`Texture2DArray` implicit comparison executes
 in the compiled fragment-stage path. Both plain and clamped forms reuse
-`createSampleCmp2D`, with real coarse U/V quad derivatives, implicit LOD,
+`createSampleCmp2D`/`createSampleCmpArray2D`, with coarse U/V quad derivatives, implicit LOD,
 zero bias and the optional shader MinLod clamp. The shared read-only matcher
 gates admission, signature growth and lowering on fragment stage, comparison
 sampler, FP32 coordinates and constant signed offsets. Compute, missing
@@ -2630,6 +2630,17 @@ verify divergent layers, negative offsets, partial waves and guarded
 repeated normal/reference/AOT dispatches. Transform coverage requires the
 layer coordinate, retains sampler reflection and remains idempotent;
 malformed two-coordinate array calls fail explicit admission.
+Implicit fragment array sampling likewise differentiates only U/V, never
+the layer. Its plain/clamped paths retain signed spatial offsets, the
+comparison reference and optional shader MinLod clamp. A compiled array
+test distinguishes complementary layer depths at derivative-selected mip 1,
+explicit mip 0 and shader-clamped mip 2. Divergent layers/references,
+per-lane dynamic zero/two clamps, helper-only horizontal lanes, wave sizes
+4/8, one/three quads, partial final waves, output guards, result masks and
+repeated invocation pass. Transform tests check exact helper operands,
+four spatial derivatives, missing-layer/compute rejection, idempotence
+and sampler reflection. Native SDK DXC array plain/dynamic-clamp pixel
+shaders pass import/raising tests; bound descriptors remain unsupported.
 
 For `Texture1D`, U and the constant i32 offset are scalars; `Texture1DArray`
 adds a second FP32 coordinate for the layer but still has one scalar

@@ -27,6 +27,40 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) array fragment comparison CPU execution (VM, 2026-11-23)
+
+Heap-backed scalar FP32 `Texture2DArray::SampleCmp`, including the optional
+shader MinLod clamp, now executes in compiled fragment stages through the
+shared array comparison helper. The third FP32 coordinate selects the
+layer independently; only U/V are differentiated and signed constant
+offsets remain spatial. Admission, signature growth and lowering share
+the existing read-only predicate. Sampler reflection, dead-handle cleanup,
+plain 2D and six-shape level-zero behavior remain unchanged. Compute/
+unannotated stages, other implicit shapes, missing-layer coordinates and
+dynamic/undefined offsets reject explicitly.
+
+One new LIT fixture and two unit tests cover exact helper/derivative
+operands, idempotence/reflection, admission and compiled array execution.
+Complementary layer depths across three mips distinguish wrong layer and
+mip selection. Divergent layers/references, per-lane dynamic zero/two
+MinLod clamps, helper-only horizontal lanes, wave sizes 4/8, one/three
+quads, partial final waves, output guards, result masks and repeated
+invocation pass. Expanded fixtures verify plain array lowering and native
+SDK DXC plain/dynamic-clamp array pixel-shader import. Native import is
+not native DXC execution through an owned D3D12 device.
+
+Selected CPU/comparison LIT passes **824** in **16.22 seconds**. Full FeMe
+LIT passes **4,103**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,128** discovered tests in **129.34 seconds**. Three added tests add
+three passes. Assertions, disabled PCH, sccache and the two-worker build
+limit remain enabled; timings are not controlled speedups.
+
+Artifact ABI 8 and argument layouts are unchanged. Other implicit shapes/
+stages, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) fragment comparison CPU execution (VM, 2026-11-22)
 
 Heap-backed scalar FP32 `Texture2D::SampleCmp`, including the optional

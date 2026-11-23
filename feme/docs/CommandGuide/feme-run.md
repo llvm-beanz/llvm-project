@@ -93,12 +93,16 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   Scalar FP32 implicit `SampleCmp` now has checked opcode-64 import/raising,
   with undefined/poison clamps selecting `llvm.dx.resource.samplecmp` and
   real zero/nonzero/dynamic clamps preserved in `samplecmp.clamp`.
-  Heap-backed scalar FP32 `Texture2D` implicit comparison now executes in
+  Heap-backed scalar FP32 `Texture2D`/`Texture2DArray` implicit comparison executes in
   the separate compiled fragment-stage path, with real coarse quad
   derivatives, implicit LOD, constant signed offsets and the optional
   shader MinLod clamp. This compute runner still rejects implicit comparison
   in normal/reference/AOT dispatch. Other implicit shapes/stages,
   dynamic/undefined offsets and half/vector results remain unsupported.
+  Array coordinates are FP32 (U, V, layer), with only U/V differentiated
+  and two spatial offsets. Missing-layer coordinates reject explicitly.
+  Compiled fragment array execution checks divergent layers/references,
+  dynamic clamps, mip selection, helper lanes and guarded partial waves.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

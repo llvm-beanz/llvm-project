@@ -11,9 +11,6 @@
 ; CHECK-LABEL: define float @dynamic_offset(<2 x i32> %offset)
 ; CHECK: call float @llvm.dx.resource.samplecmp
 ; CHECK-NOT: @feme.cpu.image.samplecmp
-; CHECK-LABEL: define float @array()
-; CHECK: call float @llvm.dx.resource.samplecmp
-; CHECK-NOT: @feme.cpu.image.samplecmp
 ; CHECK-LABEL: define float @comparison(
 ; CHECK-SAME: ptr %image_heap, i32 %image_heap_count)
 ; CHECK: [[U:%.*]] = extractelement <2 x float> %coord, i64 0
@@ -57,7 +54,14 @@ define float @array() #0 {
   %r = call float @llvm.dx.resource.samplecmp.f32.tdx.Texture_v4f32_0_0_1_7t.tdx.Sampler_1t.v3f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 1, 7) %t, target("dx.Sampler", 1) %s, <3 x float> zeroinitializer, float 0.5, <2 x i32> zeroinitializer)
   ret float %r
 }
-; CHECK: !feme.cpu.resources = !{![[RES:[0-9]+]], !{{[0-9]+}}}
+; CHECK-LABEL: define float @array(
+; CHECK: call float @feme.stage.derivative.x.coarse.f32
+; CHECK: call float @feme.stage.derivative.y.coarse.f32
+; CHECK: call float @feme.stage.derivative.x.coarse.f32
+; CHECK: call float @feme.stage.derivative.y.coarse.f32
+; CHECK: call float @feme.cpu.image.samplecmp.2darray.f32(
+; CHECK-SAME: i1 false, float 5.000000e-01, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
+; CHECK: !feme.cpu.resources = !{![[RES:[0-9]+]], !{{[0-9]+}}, !{{[0-9]+}}}
 ; CHECK: ![[RES]] = !{!"comparison", i32 0, i1 true
 declare target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32)
 declare target("dx.Texture", <4 x float>, 0, 0, 1, 7) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_7t(i32)

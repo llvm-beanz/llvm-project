@@ -751,17 +751,19 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       } else {
         Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+        SampleDerivatives D =
+            IsComparisonImplicit
+                ? getOrSynthesizeSample2DDerivatives(Builder, F, U, V)
+                : SampleDerivatives{Zero, Zero, Zero, Zero};
         if (Kind == dxil::ResourceKind::Texture2DArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
           NewCall = createSampleCmpArray2D(
-              Builder, Env, ImageIndex, SamplerIndex, U, V, Layer, Zero, Zero,
-              Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3), Zero,
-              OffsetX, OffsetY, NoClamp, Builder.getTrue(), CI->getName());
+              Builder, Env, ImageIndex, SamplerIndex, U, V, Layer, D.DUdX,
+              D.DUdY, D.DVdX, D.DVdY, Zero,
+              Builder.getInt1(!IsComparisonImplicit), CI->getArgOperand(3),
+              Zero, OffsetX, OffsetY, MinLodClamp, Builder.getTrue(),
+              CI->getName());
         } else {
-          SampleDerivatives D =
-              IsComparisonImplicit
-                  ? getOrSynthesizeSample2DDerivatives(Builder, F, U, V)
-                  : SampleDerivatives{Zero, Zero, Zero, Zero};
           NewCall = createSampleCmp2D(
               Builder, Env, ImageIndex, SamplerIndex, U, V, D.DUdX, D.DUdY,
               D.DVdX, D.DVdY, Zero, Builder.getInt1(!IsComparisonImplicit),
@@ -1223,7 +1225,8 @@ bool feme::cpu::isSupportedDXILSampleCmp(const CallInst &CI) {
   auto *TextureTy =
       dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
   return TextureTy && TextureTy->getNumIntParameters() == 4 &&
-         TextureTy->getDimension() == dxil::ResourceKind::Texture2D &&
+         (TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
+          TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray) &&
          isSupportedDXILComparisonSample(CI);
 }
 

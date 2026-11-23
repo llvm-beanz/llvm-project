@@ -4,12 +4,16 @@
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CLAMP /Fo %t/clamp.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=PLAIN
 # RUN: feme-translate --import-dxil %t/clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=CLAMP
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /Fo %t/array.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ARRAY /D CLAMP /Fo %t/array-clamp.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,PLAIN
+# RUN: feme-translate --import-dxil %t/array-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ARRAY,CLAMP
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #
-# Import/raising only: implicit derivatives and bound descriptors do not
-# acquire CPU execution support through this compiler mapping.
+# Import/raising only: bound descriptors do not acquire CPU execution support.
+# ARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 7)
 # PLAIN: call float @llvm.dx.resource.samplecmp.f32
 # PLAIN-SAME: float 5.000000e-01, <2 x i32> <i32 1, i32 -1>)
 # PLAIN-NOT: call %dx.types.ResRet.f32 @dx.op.sampleCmp
@@ -17,12 +21,21 @@
 # CLAMP-SAME: float 5.000000e-01, <2 x i32> <i32 1, i32 -1>, float
 # CLAMP-NOT: call %dx.types.ResRet.f32 @dx.op.sampleCmp
 #--- shader.hlsl
-Texture2D<float> Input : register(t0);
-SamplerComparisonState S : register(s0);
-float main(float2 uv : TEXCOORD0) : SV_Target {
-#ifdef CLAMP
-  return Input.SampleCmp(S, uv, 0.5, int2(1, -1), uv.x);
+#ifdef ARRAY
+Texture2DArray<float> Input : register(t0);
 #else
-  return Input.SampleCmp(S, uv, 0.5, int2(1, -1));
+Texture2D<float> Input : register(t0);
+#endif
+SamplerComparisonState S : register(s0);
+float main(float3 uv : TEXCOORD0) : SV_Target {
+#ifdef ARRAY
+#define COORD uv
+#else
+#define COORD uv.xy
+#endif
+#ifdef CLAMP
+  return Input.SampleCmp(S, COORD, 0.5, int2(1, -1), uv.x);
+#else
+  return Input.SampleCmp(S, COORD, 0.5, int2(1, -1));
 #endif
 }
