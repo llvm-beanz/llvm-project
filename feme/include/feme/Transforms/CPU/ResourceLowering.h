@@ -45,6 +45,8 @@
 // Fragment-only 1D/2D/cube (including array) SampleCmp threads
 // spatial/direction derivatives and an optional shader MinLod clamp through the
 // same comparison helper.
+// Fragment-only FP32 Texture2D SampleBias similarly threads real derivatives,
+// bias, constant spatial offsets and optional MinLod clamp to the 2D helper.
 //
 //===----------------------------------------------------------------------===//
 
@@ -58,6 +60,10 @@ class CallInst;
 }
 
 namespace feme::cpu {
+
+/// Tests heap-backed FP32 Texture2D biased sampling in a fragment stage,
+/// with scalar/vector results, constant offsets and optional MinLod clamp.
+bool isSupportedDXILSampleBias(const llvm::CallInst &CI);
 
 /// Tests the scalar FP32 heap-backed 1D/2D/cube comparison forms supported by
 /// both early CPU admission and resource lowering.

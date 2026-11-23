@@ -672,7 +672,8 @@ bool isZeroOffset(const Value *Offset) {
 }
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
-/// `samplecmp`/`samplecmp.clamp`/`samplecmplevelzero`/`load.level` calls in
+/// `samplebias[.clamp]`/`samplecmp[.clamp]`/`samplecmplevelzero`/`load.level`
+/// calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
 /// ImageCalls.h), using \p Env's image/sampler heap operands. An access this
@@ -686,12 +687,55 @@ bool isZeroOffset(const Value *Offset) {
 bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                         bool &UsesSamplerHeap) {
   bool Changed = false;
-  SmallPtrSet<CallInst *, 4> ComparisonHandles;
+  SmallPtrSet<CallInst *, 4> SampleHandles;
   for (Instruction &I : llvm::make_early_inc_range(instructions(F))) {
     auto *CI = dyn_cast<CallInst>(&I);
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == Intrinsic::dx_resource_samplebias ||
+        ID == Intrinsic::dx_resource_samplebias_clamp) {
+      if (!isSupportedDXILSampleBias(*CI))
+        continue;
+      IRBuilder<> Builder(CI);
+      auto *Image = cast<CallInst>(CI->getArgOperand(0));
+      auto *Sampler = cast<CallInst>(CI->getArgOperand(1));
+      Value *Coord = CI->getArgOperand(2);
+      Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
+      SampleDerivatives D =
+          getOrSynthesizeSample2DDerivatives(Builder, F, U, V);
+      Value *Offset = CI->getArgOperand(4);
+      Value *MinLodClamp = ID == Intrinsic::dx_resource_samplebias_clamp
+                               ? CI->getArgOperand(5)
+                               : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                                         /*Negative=*/true);
+      Value *Loaded = createSample2D(
+          Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0), U,
+          V, D.DUdX, D.DUdY, D.DVdX, D.DVdY,
+          ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getFalse(),
+          CI->getArgOperand(3),
+          Builder.CreateExtractElement(Offset, uint64_t{0}),
+          Builder.CreateExtractElement(Offset, uint64_t{1}), MinLodClamp,
+          Builder.getTrue(), CI->getName());
+      if (Loaded->getType() != CI->getType()) {
+        if (auto *VecTy = dyn_cast<FixedVectorType>(CI->getType())) {
+          SmallVector<int, 4> Components;
+          for (unsigned I = 0; I < VecTy->getNumElements(); ++I)
+            Components.push_back(I);
+          Loaded = Builder.CreateShuffleVector(Loaded, Components);
+        } else {
+          Loaded = Builder.CreateExtractElement(Loaded, uint64_t{0});
+        }
+      }
+      CI->replaceAllUsesWith(Loaded);
+      CI->eraseFromParent();
+      SampleHandles.insert(Image);
+      SampleHandles.insert(Sampler);
+      UsesSamplerHeap = true;
+      Changed = true;
+      continue;
+    }
     bool IsComparisonImplicit = ID == Intrinsic::dx_resource_samplecmp ||
                                 ID == Intrinsic::dx_resource_samplecmp_clamp;
     if (ID == Intrinsic::dx_resource_samplecmplevelzero ||
@@ -787,8 +831,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       }
       CI->replaceAllUsesWith(NewCall);
       CI->eraseFromParent();
-      ComparisonHandles.insert(Image);
-      ComparisonHandles.insert(*Sampler);
+      SampleHandles.insert(Image);
+      SampleHandles.insert(*Sampler);
       UsesSamplerHeap = true;
       Changed = true;
       continue;
@@ -881,9 +925,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       // already requires the offset operand to be compile-time zero
       // before reaching here) -- pass zero offset and a negative-infinity
       // (no-op) `MinLodClamp` constant, matching roadmap L26's SPIR-V-only
-      // scope so far. DXIL's own `Texture2D::SampleBias` is not threaded
-      // through this pass yet either (roadmap L58 is SPIR-V-only so far)
-      // -- pass a zero `Bias` constant.
+      // scope for ordinary sampling. SampleBias uses its dedicated path
+      // above; Sample/SampleLevel retain zero bias here.
       Value *ZeroOffset = Builder.getInt32(0);
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
@@ -999,7 +1042,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     CI->eraseFromParent();
     Changed = true;
   }
-  for (CallInst *Handle : ComparisonHandles)
+  for (CallInst *Handle : SampleHandles)
     if (Handle->use_empty())
       Handle->eraseFromParent();
   return Changed;
@@ -1015,6 +1058,12 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == Intrinsic::dx_resource_samplebias ||
+        ID == Intrinsic::dx_resource_samplebias_clamp) {
+      if (isSupportedDXILSampleBias(*CI))
+        return true;
+      continue;
+    }
     if (ID == Intrinsic::dx_resource_samplecmp ||
         ID == Intrinsic::dx_resource_samplecmp_clamp) {
       if (isSupportedDXILSampleCmp(*CI))
@@ -1129,7 +1178,7 @@ Function *lowerFunctionResources(Function &F,
 /// Attaches the `!feme.cpu.resources` heap-usage metadata node "Heap usage
 /// discovery" describes for \p F: its name, \p RootConstant's byte span
 /// (0 if \p F has no co-existing root-constant access -- see
-/// `lowerFunctionResources`), whether comparison sampling uses the sampler
+/// `lowerFunctionResources`), whether sampling uses the sampler
 /// heap, \p
 /// RootConstant's binding (space/register, both 0 if \p F has none), a
 /// root-constant min offset (always 0: a DXIL root constant's own
@@ -1169,6 +1218,50 @@ void attachResourceMetadata(Function &F,
 }
 
 } // namespace
+
+bool feme::cpu::isSupportedDXILSampleBias(const CallInst &CI) {
+  Intrinsic::ID ID = getIntrinsicID(&CI);
+  bool HasClamp = ID == Intrinsic::dx_resource_samplebias_clamp;
+  if ((ID != Intrinsic::dx_resource_samplebias && !HasClamp) ||
+      CI.arg_size() != (HasClamp ? 6u : 5u) ||
+      !CI.getArgOperand(3)->getType()->isFloatTy() ||
+      (HasClamp && !CI.getArgOperand(5)->getType()->isFloatTy()) ||
+      feme::getShaderStage(*CI.getFunction()) != feme::ShaderStage::Fragment)
+    return false;
+  auto Image = classifyImageHandle(CI.getArgOperand(0));
+  auto Sampler = classifySamplerHandle(CI.getArgOperand(1));
+  if (!Image || Image->Shape != ImageShape::Plain2D || !Sampler)
+    return false;
+  auto *TextureTy = cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
+  auto *SamplerTy = cast<dxil::SamplerExtType>(CI.getArgOperand(1)->getType());
+  if (TextureTy->getNumTypeParameters() != 1 ||
+      TextureTy->getNumIntParameters() != 4 ||
+      SamplerTy->getNumIntParameters() != 1 ||
+      SamplerTy->getSamplerType() != dxil::SamplerType::Default)
+    return false;
+  auto FP32Width = [](Type *Ty) -> unsigned {
+    if (Ty->isFloatTy())
+      return 1;
+    auto *VecTy = dyn_cast<FixedVectorType>(Ty);
+    return VecTy && VecTy->getElementType()->isFloatTy() &&
+                   VecTy->getNumElements() <= 4
+               ? VecTy->getNumElements()
+               : 0;
+  };
+  unsigned TextureWidth = FP32Width(TextureTy->getTypeParameter(0));
+  unsigned ResultWidth = FP32Width(CI.getType());
+  LLVMContext &Ctx = CI.getContext();
+  if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
+      CI.getArgOperand(2)->getType() !=
+          FixedVectorType::get(Type::getFloatTy(Ctx), 2) ||
+      CI.getArgOperand(4)->getType() !=
+          FixedVectorType::get(Type::getInt32Ty(Ctx), 2))
+    return false;
+  auto *Offset = dyn_cast<Constant>(CI.getArgOperand(4));
+  return Offset &&
+         isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(0u)) &&
+         isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(1u));
+}
 
 static bool isSupportedDXILComparisonSample(const CallInst &CI) {
   if (!CI.getType()->isFloatTy() ||

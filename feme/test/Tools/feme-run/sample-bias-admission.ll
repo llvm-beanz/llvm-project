@@ -10,7 +10,7 @@
 ; Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-; CHECK: requires derivative-aware DXIL biased sampling lowering, which is not yet supported
+; CHECK: requires heap-backed FP32 Texture2D fragment biased sampling with a default sampler, shape-matched coordinates and constant signed offsets
 ;--- plain.ll
 define void @main() #0 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32 0)

@@ -1559,10 +1559,24 @@ creating a sample. Status/aggregate/out-of-width uses, comparison samplers,
 half/integer texels, unsupported shapes and malformed calls stay unraised,
 without introducing a second read. Tests check seven-shape forward/reverse
 roundtrips, exact coordinate/layer/bias/offset/clamp values, idempotence and
-native SDK DXC pixel-shader import. CPU admission explicitly rejects both
-biased intrinsics in every stage until derivative-aware lowering exists;
-normal/reference/AOT rejection is tested. This is compiler mapping, not
-descriptor materialization, biased CPU execution or owned D3D12 rendering.
+native SDK DXC pixel-shader import.
+
+Heap-backed FP32 `Texture2D::SampleBias` now executes in compiled fragment
+stages through the existing 2D sampling helper. A shared matcher gates
+admission, signature growth and lowering on fragment stage, heap handles,
+default sampler, two FP32 coordinates and two constant signed i32 offsets.
+Scalar/vector FP32 results up to the texture's declared width (at most four)
+are extracted/shuffled from the runtime's four-component result. Real
+coarse U/V derivatives select implicit LOD; bias, offsets and optional
+shader MinLod clamps survive. Sampler reflection and post-traversal dead
+handle cleanup are retained. Compiled execution checks both derivative
+axes, distinct mip/texel/component values, divergent negative/zero/positive
+bias and zero/two clamps, helpers, partial waves, guards and repeated
+invocation. Compute/unannotated stages, other shapes, non-heap handles,
+comparison samplers and dynamic/undefined offsets still reject explicitly;
+normal/reference/AOT compute rejection is tested. Ordinary sampling,
+comparison execution and SPIR-V bias handling are unchanged. This does not
+materialize descriptors or establish native D3D12 rendering.
 
 Gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered

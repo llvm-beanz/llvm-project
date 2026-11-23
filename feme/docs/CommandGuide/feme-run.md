@@ -115,9 +115,17 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   FP32 texels and default samplers. Bias, spatial offsets and optional real
   MinLod clamps survive. Undefined/poison clamps select the plain intrinsic;
   real zero/nonzero/dynamic clamps remain clamped. Seven-shape LLVM roundtrips
-  and native DXC pixel-shader import are tested, not biased execution.
-  Both biased intrinsics still fail explicit CPU admission in every stage,
-  including this runner's normal/reference/AOT paths.
+  and native DXC pixel-shader import are tested.
+  Heap-backed FP32 Texture2D biased sampling now executes in the separate
+  compiled fragment-stage path, with real U/V derivatives, implicit LOD,
+  bias, constant signed offsets and optional shader MinLod clamps.
+  Scalar/vector results up to the declared texel width (at most four) narrow
+  the shared four-component result. Mip/offset/component selection,
+  divergent bias/clamps, helpers and guarded partial waves are tested.
+  This compute runner still rejects both biased intrinsics in normal/
+  reference/AOT dispatch. Other shapes/stages, non-heap handles, comparison
+  samplers and dynamic/undefined offsets also reject explicitly; no
+  descriptor materialization or owned-device execution is enabled.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

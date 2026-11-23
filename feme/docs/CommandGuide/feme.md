@@ -142,9 +142,15 @@ coverage" in [../Design.md](../Design.md).
   real zero/nonzero/dynamic clamps select `llvm.dx.resource.samplebias.clamp`.
   Scalar and two-/three-/four-component FP32 texels use default samplers.
   Seven-shape LLVM roundtrips and native DXC pixel-shader import are tested.
-  Both biased intrinsics still fail explicit CPU admission in every stage,
-  including normal/reference/AOT compilation; no biased execution or
-  descriptor materialization is enabled.
+  Heap-backed FP32 Texture2D biased sampling now executes in compiled fragment
+  stages with real U/V derivatives, implicit LOD, bias, constant signed offsets
+  and optional shader MinLod clamps. Scalar/vector results up to the declared
+  texel width (at most four) narrow the shared four-component result.
+  Mip/offset/component selection, divergent bias/clamps, helpers and guarded
+  partial waves are tested. Compute/unannotated stages, other shapes,
+  non-heap handles, comparison samplers and dynamic/undefined offsets
+  reject explicitly; normal/reference/AOT compute rejection is tested.
+  Descriptor materialization and owned D3D12 rendering remain unsupported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

@@ -2695,11 +2695,26 @@ LLVM roundtrips and native SDK DXC pixel-shader import cover scalar and
 two-/three-/four-component FP32 texels and default samplers. Result uses
 and operand types are validated before adding a sample; unsupported
 status/aggregate uses and malformed calls remain unraised without an
-extra read. This does not wire bias into CPU image lowering. Admission
-explicitly rejects both biased intrinsics in fragment, compute and
-unannotated stages, with normal/reference/AOT rejection tests. Existing
-SPIR-V bias handling and ordinary DXIL sampling are unchanged; implicit
-LOD is not approximated with level zero.
+extra read.
+Heap-backed FP32 `Texture2D::SampleBias` now executes in compiled fragment
+stages through `createSample2D`. The shared read-only predicate gates early
+admission, signature growth and lowering on a default sampler, two FP32
+coordinates and two constant signed i32 offsets. Scalar/vector results
+up to the declared FP32 texel width (at most four) narrow the shared
+four-component result. Real coarse U/V derivatives, implicit LOD, bias,
+offsets and optional shader MinLod clamp are passed to the existing runtime.
+Sampler reflection and post-traversal dead-handle cleanup are retained.
+A combined compiled test checks every scalar/vector return width, both
+derivative axes, distinct mip/texel/component values, divergent -1/0/+1
+bias and zero/two clamps, helper-only lanes, wave sizes 4/8, one/three quads,
+partial final waves, output guards, result masks and repeated invocation.
+Transform tests verify exact operands, idempotence, reflection and rejection
+of compute, arrays, comparison samplers and dynamic offsets. Admission
+also rejects non-heap handles, missing stage and undefined offsets;
+normal/reference/AOT compute rejection remains tested. Other biased
+shapes/stages remain open. Existing SPIR-V bias handling, ordinary DXIL
+sampling and comparison execution are unchanged; implicit LOD is not
+approximated with level zero.
 
 The runner's cube YAML preparation now uses six physical face layers for
 `dimension: cube`; `cube-array` requires an explicit positive multiple of

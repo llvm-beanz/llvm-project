@@ -217,7 +217,39 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragmentCubeComparisons) {
   }
 }
 
-TEST(UnsupportedOpsTest, RejectsBiasedSamplingInEveryStage) {
+TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragmentBiasedSampling) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x i32> %offset) #0 {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32.tdx.Texture_v4f32_0_0_0_2t.tdx.Sampler_0t.v2f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 0, 2) %t, target("dx.Sampler", 0) %s, <2 x float> zeroinitializer, float 1.0, <2 x i32> <i32 -1, i32 2>, float 0.0)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_2t(i32)
+    declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+    declare <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32.tdx.Texture_v4f32_0_0_0_2t.tdx.Sampler_0t.v2f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 0, 2), target("dx.Sampler", 0), <2 x float>, float, <2 x i32>, float)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  Function *F = M->getFunction("main");
+  auto *Sample = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+  Value *Offset = Sample->getArgOperand(4);
+  Sample->setArgOperand(4, F->getArg(0));
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+  Sample->setArgOperand(4, UndefValue::get(Offset->getType()));
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+  Sample->setArgOperand(4, Offset);
+  F->addFnAttr("feme.shader.stage", "compute");
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+  F->removeFnAttr("feme.shader.stage");
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+  F->addFnAttr("feme.shader.stage", "fragment");
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+}
+
+TEST(UnsupportedOpsTest, RejectsNonHeapBiasedSamplingInEveryStage) {
   LLVMContext Ctx;
   auto M = parseIR(Ctx, R"(
     define float @plain(target("dx.Texture", float, 0, 0, 0, 2) %t, target("dx.Sampler", 0) %s) {
@@ -242,8 +274,8 @@ TEST(UnsupportedOpsTest, RejectsBiasedSamplingInEveryStage) {
           checkSupportedRaisedOps(*M),
           Failed<StringError>(testing::Property(
               &StringError::getMessage,
-              testing::HasSubstr("derivative-aware DXIL biased sampling "
-                                 "lowering, which is not yet supported"))));
+              testing::HasSubstr("requires heap-backed FP32 Texture2D fragment "
+                                 "biased sampling"))));
     }
     F->eraseFromParent();
   }

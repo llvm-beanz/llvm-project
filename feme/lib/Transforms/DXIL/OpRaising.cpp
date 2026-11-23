@@ -1299,10 +1299,11 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
 // `levels_xy` lowering to verify against yet, so a mip-count query stays
 // unraised). Gradient sampling and gather remain outside this raiser's
-// scope. Biased sampling preserves bias/clamp but still requires CPU lowering.
-// Implicit comparison preserves the wire clamp but requires
-// derivative-aware CPU lowering. Heap-backed scalar FP32 1D/2D/cube (and array)
-// comparison executes in fragment stages; level zero also supports compute.
+// scope. Biased sampling preserves bias/clamp; CPU lowering is
+// stage/shape-limited. Implicit comparison preserves the wire clamp but
+// requires derivative-aware CPU lowering. Heap-backed scalar FP32 1D/2D/cube
+// (and array) comparison executes in fragment stages; level zero also supports
+// compute.
 //===----------------------------------------------------------------------===//
 
 /// The number of texture coordinate components DXIL's sample/load ops

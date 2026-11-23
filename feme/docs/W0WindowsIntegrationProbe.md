@@ -27,6 +27,43 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) fragment biased-sampling CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `Texture2D::SampleBias` now executes in compiled fragment
+stages through the shared 2D sampler helper. Real coarse U/V derivatives
+select implicit LOD; bias, constant signed offsets and optional shader
+MinLod clamps survive. Scalar/vector results up to the declared FP32
+texel width (at most four) narrow the runtime's four-component result.
+Shared admission/signature growth/lowering, sampler reflection and
+post-traversal dead-handle cleanup are retained. Compute/unannotated stages,
+other shapes, non-heap handles, comparison samplers and dynamic/undefined
+offsets still reject explicitly.
+
+One new LIT fixture and two unit tests cover exact lowering operands,
+result shaping, idempotence/reflection, admission and compiled execution.
+A combined test distinguishes derivative-selected mip 1, biased mips 0/2
+and shader-clamped mip 2, using distinct mip/texel/component values. Both
+screen derivative axes, divergent -1/0/+1 bias and zero/two clamps,
+helper-only lanes, wave sizes 4/8, one/three quads, partial final waves,
+output guards, result masks and repeated invocation pass. Existing
+seven-shape LLVM roundtrips, actual SDK DXC import and normal/reference/AOT
+compute rejection still pass. This is canonical execution, not native DXC
+execution through an owned D3D12 device.
+
+Expanded CPU/DXIL/comparison LIT passes **898** in **9.42 seconds**. Full
+FeMe LIT passes **4,119**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,144** discovered tests in **65.33 seconds**. Three added tests add
+three passes. Assertions, disabled PCH, sccache and the two-worker build
+limit remain; timings are not controlled speedups.
+
+Existing comparison execution, ordinary DXIL sampling, SPIR-V bias handling,
+artifact ABI 8 and argument layouts are unchanged. Other biased shapes/
+stages, gradient mapping/execution, broader sampling conformance,
+bound/static descriptor materialization and owned D3D12 execution remain
+open. `CreateDevice` remains `E_NOTIMPL`; W0(c), W0(g), W1 and
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) biased-sampling compiler mapping (VM, 2026-11-23)
 
 FP32 DXIL `SampleBias` now raises opcode 61 against LLVM's existing forward

@@ -932,6 +932,42 @@ Bound/static descriptor materialization and owned D3D12 execution remain
 open. `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) fragment biased-sampling CPU progress (2026-11-23): heap-backed
+FP32 `Texture2D::SampleBias` now lowers in fragment stages through the
+existing shared 2D sampler helper. Real coarse U/V derivatives select
+implicit LOD; bias, constant signed spatial offsets and optional shader
+MinLod clamps survive. Scalar/vector results up to the declared FP32
+texel width (at most four) narrow the runtime's four-component result.
+Admission, signature growth and lowering share a read-only matcher.
+Sampler reflection and post-traversal dead-handle cleanup are retained.
+Compute/unannotated stages, other shapes, non-heap handles, comparison
+samplers and dynamic/undefined offsets still reject explicitly.
+
+One new LIT fixture and two unit tests cover exact helper/derivative/
+bias/offset/clamp operands, scalar/vector result shaping, idempotence,
+reflection, admission and compiled fragment execution. A combined compiled
+test distinguishes derivative-selected mip 1 from negative-/positive-bias
+mips 0/2 and shader-clamped mip 2. Distinct mip/texel/component values make
+wrong LOD, offset or channel selection observable. Both screen derivative
+axes, divergent -1/0/+1 bias and zero/two clamps, helper-only lanes, wave
+sizes 4/8, one/three quads, partial final waves, output guards, result
+masks and repeated invocation pass. Existing seven-shape LLVM roundtrips,
+native SDK DXC import and normal/reference/AOT compute rejection still pass.
+This is canonical compiled execution, not native DXC execution through
+an owned D3D12 device.
+
+Expanded CPU/DXIL/comparison LIT passes 898 in 9.42 seconds. Full FeMe LIT
+passes 4,119, with 15 skipped, 10 unsupported and zero failures, from
+4,144 discovered tests in 65.33 seconds. Three added tests add three passes.
+Assertions, disabled PCH, sccache and the two-worker build limit remain;
+timings are not controlled speedups. Existing comparison execution,
+ordinary DXIL sampling, SPIR-V bias handling, artifact ABI 8 and argument
+layouts are unchanged. Other biased shapes/stages, gradient mapping/
+execution, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

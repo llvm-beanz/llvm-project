@@ -1,5 +1,37 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) fragment biased-sampling CPU regression scope (2026-11-23)
+
+The [fragment biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fragment-biased-sampling-cpu-execution-vm-2026-11-23)
+executes heap-backed FP32 DXIL `Texture2D::SampleBias` in compiled fragment
+stages. The shared 2D helper receives real U/V derivatives, implicit LOD,
+bias, constant signed offsets and optional shader MinLod clamps.
+Scalar/vector results up to the declared texel width (at most four) narrow
+the four-component runtime result. Compute/unannotated stages, other
+shapes, non-heap handles, comparison samplers and dynamic/undefined offsets
+still reject. Existing SPIR-V bias handling and comparison execution are
+unchanged; no new Vulkan sampler implementation or LOD-zero approximation
+is added.
+
+One LIT fixture and two unit tests cover exact operands/result shaping,
+idempotence/reflection, admission and compiled execution. Both derivative
+axes, distinct mip/texel/component values, divergent negative/zero/positive
+bias and zero/two clamps, helper-only lanes, partial waves, guards, masks
+and repeated invocation are checked. Existing native SDK DXC import and
+normal/reference/AOT compute rejection still pass, not owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes **898** in **9.42 seconds**. Full
+FeMe LIT passes **4,119**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,144** discovered tests in **65.33 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Other biased shapes/
+stages, gradient mapping/execution, broader sampling conformance,
+bound/static descriptor materialization and owned D3D12 execution remain
+open. **No real Vulkan CTS pass is claimed**; the external runner remains
+unavailable.
+
 ## W2(a)/W3(b) biased-sampling compiler regression scope (2026-11-23)
 
 The [biased-sampling compiler follow-up](W0WindowsIntegrationProbe.md#w2aw3b-biased-sampling-compiler-mapping-vm-2026-11-23)

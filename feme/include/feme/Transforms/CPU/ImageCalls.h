@@ -1319,21 +1319,21 @@ llvm::Function *getOrInsertImageCall(llvm::Module &M, ImageCallKind Kind);
 /// anisotropic filtering, a multi-tap anisotropic footprint) instead of
 /// always reading mip level 0 -- pass zero constants for a caller with none
 /// to give (a non-fragment stage, or an explicit-LOD sample, where they are
-/// ignored either way). \p Bias (roadmap L58) is SPIR-V's own `Bias` image
-/// operand, added to the raw implicit LOD before the sampler's own
-/// bias/clamp runs, never combined with an explicit LOD -- pass a zero
-/// constant for a caller with none to give (including every explicit-LOD
-/// sample, where SPIR-V forbids `Bias` outright). \p OffsetX/\p OffsetY
-/// (roadmap L26) are SPIR-V's
-/// own compile-time-constant `ConstOffset` image operand, an integer texel
-/// offset added to every fetched texel's own address before the sampler's
-/// addressing mode is applied -- pass zero constants for a caller with
-/// none to give (DXIL's own `Texture2D::Sample`, which does not thread a
+/// ignored either way). \p Bias (roadmap L58) is SPIR-V's `Bias` image
+/// operand or DXIL's `Texture2D::SampleBias` bias, added to the raw implicit
+/// LOD before the sampler's own bias/clamp runs, never combined with an
+/// explicit LOD -- pass a zero constant for a caller with none to give
+/// (including every explicit-LOD sample, where SPIR-V forbids `Bias` outright).
+/// \p OffsetX/\p OffsetY (roadmap L26) are SPIR-V's compile-time-constant
+/// `ConstOffset` image operand or DXIL's constant SampleBias offsets, an
+/// integer texel offset added to every fetched texel's own address before the
+/// sampler's addressing mode is applied -- pass zero constants for a caller
+/// with none to give (DXIL's own `Texture2D::Sample`, which does not thread a
 /// real offset through this pass yet). \p MinLodClamp (roadmap L26) is
 /// SPIR-V's own `MinLod` image operand (HLSL's `Texture2D::Sample`'s
-/// trailing `clamp` argument), an additional floor on the implicit LOD
-/// alongside the sampler's own `minLod` -- pass negative infinity (a
-/// no-op floor) for a caller with none to give.
+/// trailing `clamp` argument) or DXIL SampleBias's shader clamp, an additional
+/// floor on the implicit LOD alongside the sampler's own `minLod` -- pass
+/// negative infinity (a no-op floor) for a caller with none to give.
 llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                const ImageCallEnv &Env, llvm::Value *ImageIndex,
                                llvm::Value *SamplerIndex, llvm::Value *U,

@@ -58,10 +58,17 @@ Error checkSupportedRaisedOps(const Module &M) {
     switch (F.getIntrinsicID()) {
     case Intrinsic::dx_resource_samplebias:
     case Intrinsic::dx_resource_samplebias_clamp:
+      if (llvm::all_of(F.users(), [](const User *U) {
+            const auto *CI = dyn_cast<CallInst>(U);
+            return CI && isSupportedDXILSampleBias(*CI);
+          }))
+        continue;
       return createStringError(
           inconvertibleErrorCode(),
-          "unsupported raised operation: '%s' requires derivative-aware DXIL "
-          "biased sampling lowering, which is not yet supported",
+          "unsupported raised operation: '%s' requires heap-backed FP32 "
+          "Texture2D fragment biased sampling with a default sampler, "
+          "shape-matched coordinates and constant signed offsets; other "
+          "stages/shapes are not yet supported",
           F.getName().str().c_str());
     case Intrinsic::dx_resource_samplecmp:
     case Intrinsic::dx_resource_samplecmp_clamp:
