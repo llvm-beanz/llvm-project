@@ -9,6 +9,10 @@
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D CLAMP /Fo %t/cube-clamp.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /Fo %t/cube-array-plain.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CUBE /D ARRAY /D CLAMP /Fo %t/cube-array.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /Fo %t/one.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D CLAMP /Fo %t/one-clamp.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D ARRAY /Fo %t/one-array.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D ONE /D ARRAY /D CLAMP /Fo %t/one-array-clamp.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,PLAIN
 # RUN: feme-translate --import-dxil %t/clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,CLAMP
 # RUN: feme-translate --import-dxil %t/zero.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=TWO,ZERO
@@ -18,6 +22,10 @@
 # RUN: feme-translate --import-dxil %t/cube-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBE,CLAMP
 # RUN: feme-translate --import-dxil %t/cube-array-plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,PLAIN
 # RUN: feme-translate --import-dxil %t/cube-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=CUBEARRAY,CLAMP
+# RUN: feme-translate --import-dxil %t/one.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONE,PLAIN
+# RUN: feme-translate --import-dxil %t/one-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONE,CLAMP
+# RUN: feme-translate --import-dxil %t/one-array.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONEARRAY,PLAIN
+# RUN: feme-translate --import-dxil %t/one-array-clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=ONEARRAY,CLAMP
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -26,6 +34,8 @@
 # ARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 7)
 # CUBE: call target("dx.Texture", <4 x float>, 0, 0, 1, 5)
 # CUBEARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 9)
+# ONE: call target("dx.Texture", <4 x float>, 0, 0, 1, 1)
+# ONEARRAY: call target("dx.Texture", <4 x float>, 0, 0, 1, 6)
 # PLAIN: call <4 x float> @llvm.dx.resource.samplebias.v4f32
 # PLAIN-NOT: call %dx.types.ResRet.f32 @dx.op.sampleBias
 # CLAMP: call <4 x float> @llvm.dx.resource.samplebias.clamp.v4f32
@@ -43,6 +53,15 @@ TextureCube<float4> Input : register(t0);
 #define COORD uv.xyz
 #endif
 #define OFFSET
+#elif defined(ONE)
+#ifdef ARRAY
+Texture1DArray<float4> Input : register(t0);
+#define COORD uv.xy
+#else
+Texture1D<float4> Input : register(t0);
+#define COORD uv.x
+#endif
+#define OFFSET , -1
 #else
 #ifdef ARRAY
 Texture2DArray<float4> Input : register(t0);

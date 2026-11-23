@@ -2696,13 +2696,13 @@ two-/three-/four-component FP32 texels and default samplers. Result uses
 and operand types are validated before adding a sample; unsupported
 status/aggregate uses and malformed calls remain unraised without an
 extra read.
-Heap-backed FP32 `SampleBias` on 2D/cube textures, including arrays, now
+Heap-backed FP32 `SampleBias` on 1D/2D/cube textures, including arrays, now
 executes in compiled fragment stages through the shared sampling helpers.
 The shared read-only predicate gates early
 admission, signature growth and lowering on a default sampler, shape-matched FP32
 coordinates and supported offsets. Scalar/vector results
 up to the declared FP32 texel width (at most four) narrow the shared
-four-component result. Real coarse U/V derivatives, implicit LOD, bias,
+four-component result. Real coarse spatial/direction derivatives, implicit LOD, bias,
 offsets and optional shader MinLod clamp are passed to the existing runtime.
 Sampler reflection and post-traversal dead-handle cleanup are retained.
 A combined compiled test checks every scalar/vector return width, both
@@ -2722,8 +2722,17 @@ runtime. A cube-array element is passed separately and never differentiated.
 Unused scalar cube offsets accept poison/undef or zero only; nonzero/dynamic
 offsets reject. Compiled execution checks all six faces, both elements,
 both derivative axes, biased/clamped mip selection, every result component
-and guarded partial waves. 1D/3D biased execution remains unsupported.
-Array sampling passes the third FP32 coordinate separately as the layer;
+and guarded partial waves.
+1D sampling uses `createSample1D`/`createSample1DArray`, with scalar U,
+coarse dU/dX and dU/dY, bias, one constant signed scalar i32 offset and an
+optional shader MinLod clamp. Arrays extract the second coordinate as the
+layer, never differentiated or spatially offset. Compiled tests check
+mip-0/mip-1 footprints, both derivative axes, distinct layer/mip/texel/
+component values, divergent layers/bias/clamps, scalar/vector results,
+helpers, partial waves, guards, masks and repeated invocation. Malformed
+coordinates and dynamic/poison/undefined 1D offsets reject. Ordinary DXIL
+1D sampling/loading is unchanged; 3D biased execution remains unsupported.
+2D array sampling passes the third FP32 coordinate separately as the layer;
 it never differentiates the layer or offsets it spatially. A compiled array
 test checks complementary mip values across two layers, distinct texels/
 components, divergent layers and -1/0/+1 bias, dynamic zero/two clamps,

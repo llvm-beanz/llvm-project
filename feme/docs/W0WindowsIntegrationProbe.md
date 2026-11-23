@@ -27,6 +27,43 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) 1D biased-sampling CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `Texture1D`/`Texture1DArray::SampleBias` now executes in
+compiled fragment stages through the existing 1D sampler helpers. Plain
+1D uses scalar FP32 U and one constant signed scalar i32 offset. Arrays
+add a separate second layer coordinate; only U is differentiated and the
+offset remains spatial. Bias, optional shader MinLod clamps, scalar/vector
+result shaping, sampler reflection and post-traversal dead-handle cleanup
+are retained. The shared matcher gates admission, signature growth and
+lowering without broadening ordinary DXIL 1D sampling/loading. Malformed
+coordinates, dynamic/poison/undefined offsets and compute/unannotated
+stages still reject explicitly.
+
+One new LIT fixture and two unit tests cover exact operands/result shaping,
+idempotence/reflection, admission and compiled execution. Distinct layer/
+mip/texel/component values, mip-0/mip-1 footprints, both screen derivative
+axes, divergent layers and -1/0/+1 bias, dynamic zero/two clamps, scalar/
+vector widths one through four, helper-only lanes, wave sizes 4/8, one/
+three quads, partial final waves, output guards, result masks and repeated
+invocation pass. Expanded fixtures verify native SDK DXC plain/clamped
+1D/array import and shape-specific normal/reference/AOT compute rejection.
+Native import is not native DXC execution through an owned D3D12 device.
+
+Expanded CPU/DXIL/comparison LIT passes **907** in **10.19 seconds**. Full
+FeMe LIT passes **4,128**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,153** discovered tests in **66.09 seconds**. Three added tests add
+three passes. Assertions, disabled PCH, sccache and the two-worker build
+limit remain; timings are not controlled speedups.
+
+Existing 2D/cube biased sampling (including arrays), comparison execution,
+ordinary DXIL sampling, SPIR-V bias handling, artifact ABI 8 and argument
+layouts are unchanged. 3D biased execution, other stages, gradient mapping/
+execution, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. `CreateDevice`
+remains `E_NOTIMPL`; W0(c), W0(g), W1 and W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) cube biased-sampling CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 `TextureCube`/`TextureCubeArray::SampleBias` now executes

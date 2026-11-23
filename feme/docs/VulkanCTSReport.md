@@ -1,5 +1,37 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) 1D biased-sampling CPU regression scope (2026-11-23)
+
+The [1D biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-1d-biased-sampling-cpu-execution-vm-2026-11-23)
+executes heap-backed FP32 DXIL `Texture1D`/`Texture1DArray::SampleBias` in
+compiled fragment stages. Shared 1D helpers receive scalar U, real coarse
+dU/dX and dU/dY, bias, one constant signed scalar i32 offset and an optional
+shader MinLod clamp. Arrays add a separate layer coordinate, never
+differentiated or spatially offset. Malformed coordinates, dynamic/poison/
+undefined offsets and compute/unannotated stages reject. Ordinary DXIL
+1D sampling/loading is unchanged; no new Vulkan sampler implementation or
+LOD-zero approximation is added.
+
+One LIT fixture and two unit tests cover exact operands/result shaping,
+idempotence/reflection, admission and compiled execution. Mip-0/mip-1
+footprints, both derivative axes, distinct layer/mip/texel/component values,
+divergent layers/bias/clamps, scalar/vector results, helper-only lanes,
+partial waves, guards, masks and repeated invocation are checked. Expanded
+fixtures verify native SDK DXC plain/clamped 1D/array import and normal/
+reference/AOT compute rejection, not owned-device execution.
+
+Expanded CPU/DXIL/comparison LIT passes **907** in **10.19 seconds**. Full
+FeMe LIT passes **4,128**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,153** discovered tests in **66.09 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. 3D biased execution,
+other stages, gradient mapping/execution, broader sampling conformance,
+bound/static descriptor materialization and owned D3D12 execution remain
+open. **No real Vulkan CTS pass is claimed**; the external runner remains
+unavailable.
+
 ## W2(a)/W3(b) cube biased-sampling CPU regression scope (2026-11-23)
 
 The [cube biased-sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-cube-biased-sampling-cpu-execution-vm-2026-11-23)

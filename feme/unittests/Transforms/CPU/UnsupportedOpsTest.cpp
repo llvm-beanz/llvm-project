@@ -326,6 +326,51 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragmentCubeBiasedSampling) {
   }
 }
 
+TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragment1DBiasedSampling) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @plain(i32 %offset) #0 {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_1t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call float @llvm.dx.resource.samplebias.f32.tdx.Texture_v4f32_0_0_0_1t.tdx.Sampler_0t.f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 1) %t, target("dx.Sampler", 0) %s, float 0.5, float 1.0, i32 -1)
+      ret float %r
+    }
+    define <2 x float> @array(i32 %offset) #0 {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_6t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call <2 x float> @llvm.dx.resource.samplebias.clamp.v2f32.tdx.Texture_v4f32_0_0_0_6t.tdx.Sampler_0t.v2f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 6) %t, target("dx.Sampler", 0) %s, <2 x float> zeroinitializer, float -1.0, i32 1, float 2.0)
+      ret <2 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_1t(i32)
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_6t(i32)
+    declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+    declare float @llvm.dx.resource.samplebias.f32.tdx.Texture_v4f32_0_0_0_1t.tdx.Sampler_0t.f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 1), target("dx.Sampler", 0), float, float, i32)
+    declare <2 x float> @llvm.dx.resource.samplebias.clamp.v2f32.tdx.Texture_v4f32_0_0_0_6t.tdx.Sampler_0t.v2f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 6), target("dx.Sampler", 0), <2 x float>, float, i32, float)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  for (StringRef Name : {"plain", "array"}) {
+    SCOPED_TRACE(Name.str());
+    Function *F = M->getFunction(Name);
+    auto *Sample = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    Value *Offset = Sample->getArgOperand(4);
+    Sample->setArgOperand(4, F->getArg(0));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(4, UndefValue::get(Offset->getType()));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(4, PoisonValue::get(Offset->getType()));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(4, Offset);
+    F->addFnAttr("feme.shader.stage", "compute");
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    F->removeFnAttr("feme.shader.stage");
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    F->addFnAttr("feme.shader.stage", "fragment");
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  }
+}
+
 TEST(UnsupportedOpsTest, RejectsNonHeapBiasedSamplingInEveryStage) {
   LLVMContext Ctx;
   auto M = parseIR(Ctx, R"(
@@ -353,7 +398,7 @@ TEST(UnsupportedOpsTest, RejectsNonHeapBiasedSamplingInEveryStage) {
               &StringError::getMessage,
               testing::HasSubstr(
                   "requires heap-backed FP32 "
-                  "2D/cube (including array) fragment biased sampling"))));
+                  "1D/2D/cube (including array) fragment biased sampling"))));
     }
     F->eraseFromParent();
   }

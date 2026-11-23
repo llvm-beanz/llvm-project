@@ -1561,14 +1561,14 @@ without introducing a second read. Tests check seven-shape forward/reverse
 roundtrips, exact coordinate/layer/bias/offset/clamp values, idempotence and
 native SDK DXC pixel-shader import.
 
-Heap-backed FP32 `SampleBias` on 2D/cube textures, including arrays, now
+Heap-backed FP32 `SampleBias` on 1D/2D/cube textures, including arrays, now
 executes in compiled fragment stages through the existing sampling helpers.
 A shared matcher gates
 admission, signature growth and lowering on fragment stage, heap handles,
 default sampler, shape-matched FP32 coordinates and supported offsets.
 Scalar/vector FP32 results up to the texture's declared width (at most four)
 are extracted/shuffled from the runtime's four-component result. Real
-coarse U/V derivatives select implicit LOD; bias, offsets and optional
+coarse spatial/direction derivatives select implicit LOD; bias, offsets and optional
 shader MinLod clamps survive. Sampler reflection and post-traversal dead
 handle cleanup are retained. Compiled execution checks both derivative
 axes, distinct mip/texel/component values, divergent negative/zero/positive
@@ -1578,7 +1578,7 @@ comparison samplers and dynamic/undefined spatial offsets still reject explicitl
 normal/reference/AOT compute rejection is tested. Ordinary sampling,
 comparison execution and SPIR-V bias handling are unchanged. This does not
 materialize descriptors or establish native D3D12 rendering.
-For arrays, the third FP32 coordinate selects the layer separately; only
+For 2D arrays, the third FP32 coordinate selects the layer separately; only
 U/V are differentiated and both signed offsets remain spatial. Compiled
 array execution uses distinct layer/mip/texel/component values, divergent
 layers/bias/clamps and guarded partial waves to detect wrong layer or LOD
@@ -1590,7 +1590,14 @@ fourth element coordinate, never differentiated. The unused scalar offset
 must be poison/undef or zero; nonzero/dynamic cube offsets reject. Compiled
 tests distinguish all six faces, both elements, biased/clamped mip selection
 and result components across both derivative axes and guarded partial waves.
-1D/3D biased execution remains unsupported.
+1D sampling uses scalar FP32 U and a constant signed scalar i32 offset.
+1D arrays use (U, layer), differentiating only U and keeping the offset
+spatial. Shared 1D helpers preserve bias and optional shader MinLod clamps.
+Compiled tests distinguish mip-0/mip-1 footprints, signed offsets,
+layer/mip/component values, divergent layers/bias/clamps and guarded partial
+waves. Dynamic/poison/undefined 1D offsets and malformed coordinates reject.
+Ordinary DXIL 1D sampling/loading is unchanged; 3D biased execution remains
+unsupported.
 
 Gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered

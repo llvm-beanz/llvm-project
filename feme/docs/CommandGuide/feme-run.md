@@ -116,7 +116,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   MinLod clamps survive. Undefined/poison clamps select the plain intrinsic;
   real zero/nonzero/dynamic clamps remain clamped. Seven-shape LLVM roundtrips
   and native DXC pixel-shader import are tested.
-  Heap-backed FP32 2D/cube biased sampling, including arrays, now executes
+  Heap-backed FP32 1D/2D/cube biased sampling, including arrays, now executes
   in the separate compiled fragment-stage path, with real spatial/direction
   derivatives, implicit LOD, bias, supported offsets and optional shader MinLod clamps.
   Scalar/vector results up to the declared texel width (at most four) narrow
@@ -126,7 +126,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   reference/AOT dispatch. Other shapes/stages, non-heap handles, comparison
   samplers and dynamic/undefined spatial offsets also reject explicitly; no
   descriptor materialization or owned-device execution is enabled.
-  Biased arrays use FP32 (U, V, layer); only U/V are differentiated and
+  Biased 2D arrays use FP32 (U, V, layer); only U/V are differentiated and
   the two offsets remain spatial. Compiled array tests check divergent
   layers/bias/clamps, layer/mip/offset/component selection and guarded
   partial waves. Missing-layer coordinates still reject explicitly.
@@ -134,7 +134,15 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   separate cube-array element is never differentiated. Unused scalar offsets
   must be poison/undef or zero. Compiled tests check all faces, both elements,
   biased/clamped mip selection and components with guarded partial waves.
-  Nonzero/dynamic cube offsets and 1D/3D biased execution remain unsupported.
+  Nonzero/dynamic cube offsets remain unsupported.
+  Biased 1D sampling uses scalar U and a constant signed scalar i32 offset;
+  arrays use (U, layer), differentiating only U and keeping offsets spatial.
+  Compiled tests check mip-0/mip-1 footprints, both derivative axes,
+  layer/mip/offset/component selection, divergent layers/bias/clamps and
+  guarded partial waves. This compute runner still rejects both forms.
+  Malformed coordinates and dynamic/poison/undefined 1D offsets reject.
+  Ordinary DXIL 1D sampling/loading is unchanged; 3D biased execution remains
+  unsupported.
   This is binding preflight, not descriptor/table
   preparation or full shader/root compatibility.
   Descriptor-backed CBVs and cbuffer arrays are not promoted. This works in

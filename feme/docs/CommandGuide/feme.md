@@ -142,7 +142,7 @@ coverage" in [../Design.md](../Design.md).
   real zero/nonzero/dynamic clamps select `llvm.dx.resource.samplebias.clamp`.
   Scalar and two-/three-/four-component FP32 texels use default samplers.
   Seven-shape LLVM roundtrips and native DXC pixel-shader import are tested.
-  Heap-backed FP32 2D/cube biased sampling, including arrays, now executes
+  Heap-backed FP32 1D/2D/cube biased sampling, including arrays, now executes
   in compiled fragment stages with real spatial/direction derivatives,
   implicit LOD, bias, supported offsets
   and optional shader MinLod clamps. Scalar/vector results up to the declared
@@ -152,7 +152,7 @@ coverage" in [../Design.md](../Design.md).
   non-heap handles, comparison samplers and dynamic/undefined spatial offsets
   reject explicitly; normal/reference/AOT compute rejection is tested.
   Descriptor materialization and owned D3D12 rendering remain unsupported.
-  Biased arrays use FP32 (U, V, layer), with only U/V differentiated and
+  Biased 2D arrays use FP32 (U, V, layer), with only U/V differentiated and
   two spatial offsets. Compiled array tests check divergent layers/bias/
   clamps and observable layer/mip/offset/component selection; missing-layer
   coordinates still fail admission.
@@ -160,7 +160,14 @@ coverage" in [../Design.md](../Design.md).
   separate cube-array element is never differentiated. Unused scalar offsets
   must be poison/undef or zero. Compiled tests check all faces, both elements,
   biased/clamped mip selection and components with guarded partial waves.
-  Nonzero/dynamic cube offsets and 1D/3D biased execution remain unsupported.
+  Nonzero/dynamic cube offsets remain unsupported.
+  Biased 1D sampling uses scalar U and a constant signed scalar i32 offset;
+  arrays use (U, layer), differentiating only U and keeping offsets spatial.
+  Compiled tests check mip-0/mip-1 footprints, both derivative axes,
+  layer/mip/offset/component selection, divergent layers/bias/clamps and
+  guarded partial waves. Malformed coordinates and dynamic/poison/undefined
+  1D offsets reject. Ordinary DXIL 1D sampling/loading is unchanged; 3D
+  biased execution remains unsupported.
   General descriptor-backed CBVs and cbuffer arrays remain unsupported.
   This is binding preflight, not descriptor/table preparation or full
   shader/root compatibility. This applies to DXIL and original DXBC input

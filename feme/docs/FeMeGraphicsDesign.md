@@ -3106,7 +3106,7 @@ documented reason rather than an oversight:
   survive. Undefined/poison clamps select the plain intrinsic; zero and
   dynamic clamps remain clamped. Status/aggregate uses and malformed calls
   stay unraised without an extra sample. Seven-shape roundtrips, idempotence
-  and native DXC import pass. Heap-backed FP32 2D/cube biased sampling,
+  and native DXC import pass. Heap-backed FP32 1D/2D/cube biased sampling,
   including arrays, now executes in compiled fragment stages through shared
   helpers, with real coarse spatial/direction derivatives, implicit LOD, bias, supported offsets
   and optional shader MinLod clamps. Scalar/vector results up to the
@@ -3116,7 +3116,7 @@ documented reason rather than an oversight:
   unannotated stages, other shapes, non-heap handles, comparison samplers
   and dynamic/undefined spatial offsets reject explicitly; normal/reference/AOT
   compute rejection is tested. No descriptor materialization is enabled.
-  Biased arrays pass a separate third FP32 layer coordinate; only U/V are
+  Biased 2D arrays pass a separate third FP32 layer coordinate; only U/V are
   differentiated and both offsets remain spatial. Compiled array execution
   checks distinct layer/mip/texel/component values, divergent layers/bias/
   clamps, helpers and guarded partial waves. Missing-layer coordinates
@@ -3126,14 +3126,22 @@ documented reason rather than an oversight:
   offsets accept poison/undef or zero only. All six faces, both elements,
   both derivative axes, biased/clamped mip selection and result components
   pass compiled tests with guarded partial waves. Nonzero/dynamic cube
-  offsets and 1D/3D biased execution remain unsupported.
+  offsets remain unsupported.
+  Biased 1D sampling uses scalar U and a constant signed scalar i32 offset.
+  Arrays use (U, layer); only U is differentiated and the offset remains
+  spatial. Existing 1D helpers preserve bias and optional shader MinLod
+  clamps. Compiled tests check mip-0/mip-1 footprints, both derivative axes,
+  layer/mip/texel/component values, divergent layers/bias/clamps and guarded
+  partial waves. Malformed coordinates and dynamic/poison/undefined 1D
+  offsets reject. Ordinary DXIL 1D sampling/loading is unchanged; 3D biased
+  execution remains unsupported.
   For remaining gather forms, the DXIL import half is still
   blocked upstream; gradient sampling is not yet raised despite existing
   LLVM forward lowering. Update (roadmap L58): an ordinary, non-comparison
   `Bias` operand is now implemented on the SPIR-V import side, scoped to
   `Plain2D`/`Cube` only (matching roadmap L26's own `MinLodClamp` scope
   precedent); ordinary DXIL `Sample`/`SampleLevel` still pass zero bias to
-  the CPU runtime, while heap-backed FP32 2D/cube `SampleBias` (including arrays) passes real
+  the CPU runtime, while heap-backed FP32 1D/2D/cube `SampleBias` (including arrays) passes real
   bias in fragment stages. A `Dref`+`Bias`
   combination (depth-comparison sampling with a bias) remains entirely
   unimplemented on both frontends. Update (roadmap L59): explicit-`Grad`

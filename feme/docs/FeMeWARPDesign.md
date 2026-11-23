@@ -140,7 +140,7 @@ The original compute-only baseline is no longer current:
   undefined/poison clamps select the plain intrinsic. Status/aggregate uses
   and malformed calls stay unraised without an extra sample. Seven-shape
   roundtrips, idempotence and native DXC pixel-shader import pass.
-  Heap-backed FP32 2D/cube biased sampling, including arrays, now executes
+  Heap-backed FP32 1D/2D/cube biased sampling, including arrays, now executes
   in compiled fragment stages with real coarse spatial/direction derivatives,
   implicit LOD, bias, supported offsets and optional shader MinLod clamps.
   Scalar/vector results up to the
@@ -152,7 +152,7 @@ The original compute-only baseline is no longer current:
   handles, comparison samplers and dynamic/undefined spatial offsets reject explicitly;
   normal/reference/AOT compute rejection is tested. This does not materialize
   descriptors or establish owned D3D12 execution.
-  Biased array sampling passes a separate third FP32 layer coordinate;
+  Biased 2D array sampling passes a separate third FP32 layer coordinate;
   only U/V are differentiated and the two signed offsets remain spatial.
   Distinct layer/mip/texel/component values, divergent layers/bias/clamps,
   helpers and guarded partial waves are tested. Missing-layer coordinates
@@ -161,8 +161,14 @@ The original compute-only baseline is no longer current:
   runtime; the separate cube-array element is never differentiated. Unused
   scalar offsets accept poison/undef or zero only. All six faces, both
   elements, biased/clamped mip selection, components and guarded partial
-  waves are tested. Nonzero/dynamic cube offsets and 1D/3D biased execution
-  remain unsupported.
+  waves are tested. Nonzero/dynamic cube offsets remain unsupported.
+  Biased 1D sampling uses scalar U and a constant signed scalar i32 offset.
+  Arrays add a separate second layer coordinate; only U is differentiated
+  and the offset remains spatial. Compiled tests check mip-0/mip-1
+  footprints, both derivative axes, layer/mip/texel/component values,
+  divergent layers/bias/clamps and guarded partial waves. Malformed
+  coordinates and dynamic/poison/undefined 1D offsets reject. Ordinary DXIL
+  1D sampling/loading is unchanged; 3D biased execution remains unsupported.
   Counter/promise compatibility remains separate. The check does not
   materialize tables, prepare dynamic descriptors, enable unsupported
   operations or establish full shader/root compatibility.
