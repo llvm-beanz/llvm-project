@@ -737,17 +737,25 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
               Zero, Zero, Zero, Zero, Builder.getTrue(), CI->getArgOperand(3),
               Zero, NoClamp, Builder.getTrue(), CI->getName());
         }
-      } else if (Kind == dxil::ResourceKind::Texture1D) {
-        NewCall = createSampleCmp1D(Builder, Env, ImageIndex, SamplerIndex, U,
-                                    Zero, Zero, Zero, Builder.getTrue(),
-                                    CI->getArgOperand(3), Zero, OffsetX,
-                                    NoClamp, Builder.getTrue(), CI->getName());
-      } else if (Kind == dxil::ResourceKind::Texture1DArray) {
-        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
-        NewCall = createSampleCmpArray1D(
-            Builder, Env, ImageIndex, SamplerIndex, U, Layer, Zero, Zero, Zero,
-            Builder.getTrue(), CI->getArgOperand(3), Zero, OffsetX, NoClamp,
-            Builder.getTrue(), CI->getName());
+      } else if (Kind == dxil::ResourceKind::Texture1D ||
+                 Kind == dxil::ResourceKind::Texture1DArray) {
+        SampleDerivatives1D D =
+            IsComparisonImplicit
+                ? getOrSynthesizeSample1DDerivatives(Builder, F, U)
+                : SampleDerivatives1D{Zero, Zero};
+        if (Kind == dxil::ResourceKind::Texture1DArray) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
+          NewCall = createSampleCmpArray1D(
+              Builder, Env, ImageIndex, SamplerIndex, U, Layer, D.DUdX, D.DUdY,
+              Zero, Builder.getInt1(!IsComparisonImplicit),
+              CI->getArgOperand(3), Zero, OffsetX, MinLodClamp,
+              Builder.getTrue(), CI->getName());
+        } else {
+          NewCall = createSampleCmp1D(
+              Builder, Env, ImageIndex, SamplerIndex, U, D.DUdX, D.DUdY, Zero,
+              Builder.getInt1(!IsComparisonImplicit), CI->getArgOperand(3),
+              Zero, OffsetX, MinLodClamp, Builder.getTrue(), CI->getName());
+        }
       } else {
         Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
         Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
@@ -1225,7 +1233,9 @@ bool feme::cpu::isSupportedDXILSampleCmp(const CallInst &CI) {
   auto *TextureTy =
       dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
   return TextureTy && TextureTy->getNumIntParameters() == 4 &&
-         (TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
+         (TextureTy->getDimension() == dxil::ResourceKind::Texture1D ||
+          TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray ||
+          TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
           TextureTy->getDimension() == dxil::ResourceKind::Texture2DArray) &&
          isSupportedDXILComparisonSample(CI);
 }

@@ -105,7 +105,7 @@ The original compute-only baseline is no longer current:
   mapping, including preserved real zero/nonzero/dynamic MinLod clamps.
   Undefined/poison clamps select the plain canonical intrinsic.
   Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
-  Heap-backed scalar FP32 `Texture2D`/`Texture2DArray` implicit comparison executes in
+  Heap-backed scalar FP32 1D/2D implicit comparison, including arrays, executes in
   compiled fragment stages through shared helpers, with real coarse quad
   derivatives, implicit LOD, constant signed offsets and the optional shader
   MinLod clamp. Tests distinguish mip 1 from explicit zero and clamped mip 2,
@@ -114,6 +114,12 @@ The original compute-only baseline is no longer current:
   offsets. Complementary layer depths, divergent layers/references and dynamic
   zero/two clamps make wrong layer/mip selection observable. Missing-layer
   coordinates still reject; native DXC plain/clamped array import is tested.
+  Plain 1D uses scalar U/offset; 1D arrays add a separate FP32 layer.
+  Only U is differentiated. Compiled plain/array tests distinguish implicit,
+  explicit-zero and shader-clamped mips with X- and Y-derived footprints,
+  divergent layers/references, dynamic clamps and guarded partial waves.
+  Native DXC plain/clamped 1D/array import is tested; ordinary DXIL 1D
+  sampling/loading eligibility remains unchanged.
   Compute/unannotated stages and other implicit shapes still fail explicit
   admission; no implicit LOD is replaced with zero. Other dimensions,
   dynamic/undefined offsets, broader comparison conformance and half/vector

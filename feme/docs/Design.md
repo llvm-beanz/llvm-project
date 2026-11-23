@@ -1510,8 +1510,8 @@ dynamic values, raise to `llvm.dx.resource.samplecmp.clamp`. Malformed
 clamps and unsupported result uses remain unraised without an extra read.
 Real LLVM roundtrips cover all six comparison texture shapes; native SDK
 DXC pixel shaders cover plain and dynamic-clamp import. Heap-backed scalar
-FP32 `Texture2D`/`Texture2DArray` implicit comparison lowers in fragment stages through
-the existing shared comparison helper with real coarse quad derivatives,
+FP32 1D/2D implicit comparison, including array forms, lowers in fragment
+stages through existing shared comparison helpers with coarse spatial derivatives,
 implicit LOD and the optional shader MinLod clamp. Constant signed spatial
 offsets, comparison references, sampler reflection and dead-handle cleanup
 are retained. Admission and lowering share a read-only predicate; compute,
@@ -1528,6 +1528,13 @@ divergent layers/references and per-lane dynamic zero/two MinLod clamps.
 Changing only the layer cannot change the sampled mip. Missing-layer
 coordinates and compute array access still reject explicitly; native SDK
 DXC plain/clamped array pixel shaders pass import/raising coverage.
+For 1D, U and the signed constant offset are scalars; arrays add a second
+FP32 coordinate for the layer. The two coarse U derivatives feed the
+existing 1D comparison helpers; the layer is never differentiated.
+Compiled plain/array execution tests both X- and Y-derived mip selection,
+dynamic zero/two clamps, divergent references/layers and guarded partial
+waves. Actual SDK DXC plain/clamped 1D/array pixel shaders pass import/
+raising; ordinary DXIL 1D sampling/loading eligibility remains unchanged.
 
 Bias/gradient sampling remains outside FeMe's DXIL access raiser, despite
 LLVM forward lowering. Remaining gather forms still lack matching numbered

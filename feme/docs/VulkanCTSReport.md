@@ -1,5 +1,35 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) 1D fragment comparison CPU regression scope (2026-11-23)
+
+The [1D fragment comparison follow-up](W0WindowsIntegrationProbe.md#w2aw3b-1d-fragment-comparison-cpu-execution-vm-2026-11-23)
+executes heap-backed scalar FP32 DXIL `Texture1D`/`Texture1DArray::SampleCmp`
+in compiled fragment stages. Shared 1D comparison helpers receive two
+coarse U derivatives, implicit LOD, scalar signed constant offsets,
+comparison references and optional shader MinLod clamps. Array layers
+stay separate and are never differentiated. Compute/unannotated stages,
+other implicit shapes, missing-layer coordinates and dynamic/undefined
+offsets still reject. Ordinary DXIL 1D sampling/loading is unchanged;
+no new Vulkan sampler implementation or LOD-zero approximation is added.
+
+Two LIT fixtures and two unit tests cover lowering/idempotence/reflection,
+admission, native SDK DXC plain/clamped 1D/array import and compiled
+execution. X- and Y-derived footprints, distinct mip/layer depths,
+divergent references/layers, dynamic zero/two clamps, helper-only lanes,
+partial waves, output guards, masks and repeated invocation are checked.
+Native import is not owned-device execution.
+
+Selected CPU/comparison LIT passes **828** in **8.59 seconds**. Full FeMe
+LIT passes **4,107**, with **15 Skipped, 10 Unsupported and zero failures**,
+from **4,132** discovered tests in **69.41 seconds**. Timings are not
+controlled speedups.
+
+Artifact ABI 8, argument layouts, Vulkan semantics/advertisements, pinned
+inventory and adapter-matrix results are unchanged. Implicit cube/array,
+other stages, broader sampling conformance, bound/static descriptor
+materialization and owned D3D12 execution remain open. **No real Vulkan CTS
+pass is claimed**; the external runner remains unavailable.
+
 ## W2(a)/W3(b) array fragment comparison CPU regression scope (2026-11-23)
 
 The [array fragment comparison follow-up](W0WindowsIntegrationProbe.md#w2aw3b-array-fragment-comparison-cpu-execution-vm-2026-11-23)

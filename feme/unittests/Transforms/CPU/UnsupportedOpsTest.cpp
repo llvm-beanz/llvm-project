@@ -74,7 +74,7 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragmentComparison) {
       Failed<StringError>(testing::Property(
           &StringError::getMessage,
           testing::HasSubstr(
-              "Texture2D/Texture2DArray fragment comparison sampling"))));
+              "1D/2D (including array) fragment comparison sampling"))));
   Sample->setArgOperand(4, Offset);
   Main->addFnAttr("feme.shader.stage", "compute");
   EXPECT_THAT_ERROR(
@@ -118,6 +118,52 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragmentArrayComparison) {
           testing::HasSubstr("other stages/shapes is not yet supported"))));
   Main->removeFnAttr("feme.shader.stage");
   EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+}
+
+TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragment1DComparisons) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @plain(i32 %offset) #0 {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_1t(i32 0)
+      %s = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32 0)
+      %r = call float @llvm.dx.resource.samplecmp.f32.tdx.Texture_v4f32_0_0_1_1t.tdx.Sampler_1t.f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 1) %t, target("dx.Sampler", 1) %s, float 0.0, float 0.5, i32 -1)
+      ret float %r
+    }
+    define float @array(i32 %offset) #0 {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 1, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_6t(i32 0)
+      %s = call target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32 0)
+      %r = call float @llvm.dx.resource.samplecmp.clamp.f32.tdx.Texture_v4f32_0_0_1_6t.tdx.Sampler_1t.v2f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 6) %t, target("dx.Sampler", 1) %s, <2 x float> zeroinitializer, float 0.5, i32 1, float 2.0)
+      ret float %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 1, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_1t(i32)
+    declare target("dx.Texture", <4 x float>, 0, 0, 1, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_6t(i32)
+    declare target("dx.Sampler", 1) @llvm.dx.resource.handlefromheap.tdx.Sampler_1t(i32)
+    declare float @llvm.dx.resource.samplecmp.f32.tdx.Texture_v4f32_0_0_1_1t.tdx.Sampler_1t.f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 1), target("dx.Sampler", 1), float, float, i32)
+    declare float @llvm.dx.resource.samplecmp.clamp.f32.tdx.Texture_v4f32_0_0_1_6t.tdx.Sampler_1t.v2f32.i32(target("dx.Texture", <4 x float>, 0, 0, 1, 6), target("dx.Sampler", 1), <2 x float>, float, i32, float)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  for (StringRef Name : {"plain", "array"}) {
+    SCOPED_TRACE(Name.str());
+    Function *F = M->getFunction(Name);
+    auto *Sample = dyn_cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    ASSERT_NE(Sample, nullptr);
+    Value *Offset = Sample->getArgOperand(4);
+    Sample->setArgOperand(4, F->getArg(0));
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    Sample->setArgOperand(4, Offset);
+    F->addFnAttr("feme.shader.stage", "compute");
+    EXPECT_THAT_ERROR(
+        checkSupportedRaisedOps(*M),
+        Failed<StringError>(testing::Property(
+            &StringError::getMessage,
+            testing::HasSubstr("other stages/shapes is not yet supported"))));
+    F->removeFnAttr("feme.shader.stage");
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+    F->addFnAttr("feme.shader.stage", "fragment");
+    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+  }
 }
 
 TEST(UnsupportedOpsTest, RejectsUnraisedDXOpCall) {

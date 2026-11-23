@@ -2602,9 +2602,9 @@ now has checked scalar FP32 opcode-64 forward/reverse mapping. Undefined/
 poison clamps select the plain intrinsic; real zero,
 nonzero and dynamic clamps survive as `samplecmp.clamp`. Six-shape LLVM
 roundtrips and native SDK DXC pixel-shader import verify this compiler
-mapping. Heap-backed scalar FP32 `Texture2D`/`Texture2DArray` implicit comparison executes
-in the compiled fragment-stage path. Both plain and clamped forms reuse
-`createSampleCmp2D`/`createSampleCmpArray2D`, with coarse U/V quad derivatives, implicit LOD,
+mapping. Heap-backed scalar FP32 1D/2D implicit comparison, including array
+forms, executes in the compiled fragment-stage path. Plain/clamped forms
+reuse existing 1D/2D comparison helpers with coarse spatial derivatives, implicit LOD,
 zero bias and the optional shader MinLod clamp. The shared read-only matcher
 gates admission, signature growth and lowering on fragment stage, comparison
 sampler, FP32 coordinates and constant signed offsets. Compute, missing
@@ -2650,6 +2650,18 @@ Canonical and actual SDK DXC coverage checks point/linear comparison,
 signed offsets, divergent coordinates/layers, partial waves and guarded
 repeated normal/reference/AOT dispatches. Dynamic scalar offsets fail
 admission. Ordinary DXIL 1D `SampleLevel` eligibility remains unchanged.
+Implicit fragment 1D/array comparison also reuses these helpers, with real
+coarse U derivatives, implicit LOD and the optional shader MinLod clamp.
+Only U is differentiated, never the array layer. A combined plain/array
+compiled test distinguishes implicit mip 1, explicit mip 0 and clamped
+mip 2 using both X- and Y-derived footprints. Complementary array-layer
+depths, divergent references/layers, per-lane dynamic zero/two clamps,
+helper-only lanes, wave sizes 4/8, one/three quads, partial final waves,
+output guards, result masks and repeated invocation pass. Transform tests
+check exact scalar offset/reference/clamp/derivative operands, idempotence,
+sampler reflection, missing-layer and dynamic-offset rejection. Admission
+rejects compute/unannotated stages for both shapes. Native SDK DXC plain/
+clamped 1D/array pixel shaders pass import/raising, not bound execution.
 
 Cube comparison uses three FP32 direction components and, for an array,
 a fourth FP32 cube-element coordinate. The existing

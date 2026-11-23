@@ -3064,7 +3064,7 @@ documented reason rather than an oversight:
   alongside `SampleCmpLevelZero` (65). Undefined/poison wire clamps select
   the plain intrinsic; real zero/nonzero/dynamic MinLod clamps are retained.
   Six-shape LLVM roundtrips and native SDK DXC pixel-shader import pass.
-  Heap-backed scalar FP32 `Texture2D`/`Texture2DArray` implicit comparison executes in
+  Heap-backed scalar FP32 1D/2D implicit comparison, including arrays, executes in
   compiled fragment stages with real coarse quad derivatives and the optional
   shader MinLod clamp. The shared comparison runtime receives implicit LOD,
   the reference and constant signed offsets; sampler reflection and dead-handle
@@ -3077,6 +3077,11 @@ documented reason rather than an oversight:
   three mips, divergent layers/references, dynamic zero/two MinLod clamps,
   helper lanes, partial waves and guards. Missing-layer and compute array
   calls reject; native DXC plain/clamped array import/raising is also tested.
+  1D uses scalar U and a scalar constant signed offset; 1D arrays add a
+  separate layer coordinate. Only U is differentiated. Combined compiled
+  1D/array execution tests X- and Y-derived mip selection, dynamic clamps,
+  divergent references/layers, helpers and guarded partial waves. Native
+  DXC plain/clamped 1D/array pixel shaders pass import/raising coverage.
   Level-zero comparison now raises and executes
   on the CPU for heap-backed scalar FP32 1D/2D/cube textures, including arrays,
   with constant texel offsets through shared comparison image helpers. Other dimensions,
