@@ -7771,6 +7771,54 @@ TEST_F(ImageSamplingTest, Store1DArrayOutOfRangeLayerIsANoOp) {
   EXPECT_FLOAT_EQ(Storage[0][0][0], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, Load1DAndArrayCheckMipWidthsAndLayers) {
+  float Storage[56];
+  std::fill_n(Storage, 56, 7.0f);
+  FemeImageSubresourceLayout BaseLayout;
+  auto Plain = makeImage1D(Storage, sizeof(Storage), 4,
+                           ResourceFormat::R32G32B32A32_FLOAT, BaseLayout);
+  FemeImageSubresourceLayout PlainMips[] = {
+      {0, 64, 64, 0}, {64, 32, 32, 0}, {96, 16, 16, 0}};
+  FemeImageSubresourceLayout ArrayMips[] = {
+      {0, 64, 64, 0}, {128, 32, 32, 0}, {192, 16, 16, 0}};
+  Plain.MipLayouts = PlainMips;
+  Plain.MipLevels = Plain.MipLayoutCount = 3;
+  auto Array = Plain;
+  Array.Dimension = static_cast<uint32_t>(ImageDimension::Texture1DArray);
+  Array.ArrayLayers = 2;
+  Array.MipLayouts = ArrayMips;
+  Function *PlainWrapper = addWrapper("load1d", "feme.cpu.image.load.1d.v4f32");
+  Function *ArrayWrapper =
+      addWrapper("load1darray", "feme.cpu.image.load.1darray.v4f32");
+  Load1DFn Load = resolve<Load1DFn>(PlainWrapper);
+  Load1DArrayFn LoadArray = resolve<Load1DArrayFn>(ArrayWrapper);
+  float Out[4];
+  for (uint32_t Mip : {0u, 1u, 2u, 3u, 32u, 0xffffffffu}) {
+    int Size = Mip < 3 ? 4 >> Mip : 1;
+    for (int X : {-1, 0, Size - 1, Size}) {
+      SCOPED_TRACE(testing::Message() << "mip=" << Mip << " x=" << X);
+      Load(&Plain, 1, 0, X, Mip, 0, true, Out);
+      for (float C : Out)
+        EXPECT_FLOAT_EQ(C, Mip < 3 && X >= 0 && X < Size ? 7.0f : 0.0f);
+      for (int Layer : {-1, 0, 1, 2}) {
+        SCOPED_TRACE(Layer);
+        LoadArray(&Array, 1, 0, X, Layer, Mip, 0, true, Out);
+        for (float C : Out)
+          EXPECT_FLOAT_EQ(C, Mip < 3 && X >= 0 && X < Size && Layer >= 0 &&
+                                     Layer < 2
+                                 ? 7.0f
+                                 : 0.0f);
+      }
+    }
+  }
+  Load(&Plain, 1, 0, 0, 0, 0, false, Out);
+  for (float C : Out)
+    EXPECT_FLOAT_EQ(C, 0.0f);
+  LoadArray(&Array, 1, 0, 0, 0, 0, 0, false, Out);
+  for (float C : Out)
+    EXPECT_FLOAT_EQ(C, 0.0f);
+}
+
 // Roadmap H19c: `feme.cpu.image.load.3d.v4f32`/`.v4i32`/
 // `feme.cpu.image.store.3d.v4f32`/`.v4i32`, the plain-3D counterparts,
 // addressing a real depth slice via `SlicePitch` (like an array layer)

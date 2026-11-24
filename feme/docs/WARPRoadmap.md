@@ -1585,6 +1585,54 @@ descriptors and owned D3D12 execution remain open; `CreateDevice` remains
 `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) FP32 1D/array texel-load CPU execution progress (2026-11-24):
+heap-backed `Texture1D::Load` and `Texture1DArray::Load` now execute in any
+stage through the existing FP32 1D helpers. Shared admission/lowering
+requires scalar i32 X or paired `(X,layer)` coordinates, an i32 mip,
+constant signed scalar spatial offsets and scalar/vector FP32 results up
+to the declared texel width (one through four). Offsets use wrapping
+integer adds on X only; layers remain separate. Loads need no sampler or
+derivatives. Native omitted undefined/poison spatial offsets raise to zero;
+canonical dynamic/undefined/poison offsets remain rejected.
+
+The shared FP32 1D/array runtime now checks per-mip width and invalid mips
+before fetching, rather than allowing higher-mip X to alias another
+subresource. Array layers are checked independently and are not mip-scaled;
+invalid accesses return zero. Existing SPIR-V FP32 loads share this runtime
+bounds correction; SPIR-V lowering is unchanged.
+
+Transform tests cover coordinate/offset forwarding, separate layers,
+result narrowing, reflection, image-only signature growth, handle cleanup
+and idempotence. Malformed coordinates/offset shapes, integer texels,
+too-wide results, non-heap handles and dynamic/undefined/poison offsets
+remain unsupported. Admission tests check supported and rejected offsets
+in fragment, vertex, compute and unannotated functions. Runtime tests
+cover per-mip widths, layers, invalid mips and false masks.
+
+Compiled normal/reference compute tests distinguish mips 0/1/2, layers,
+X and components with all four result widths, positive/negative offsets,
+bounds, invalid mips, wave sizes 4/8, five lanes, guards and repeated
+prepared dispatches. Fragment tests cover divergent mips/layers,
+invalid coordinates/layers/mips, helper masks, one/three quads, partial
+waves, guards and repeats. Actual SDK DXC SM6.6 bindless plain/array
+shaders execute through normal/reference/AOT paths with offsets, omitted
+offsets, components, invalid mips, five lanes, guards and repeats on one
+mip; runner YAML still prepares one mip. Dynamic-offset admission rejects
+in all three paths.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 994 in 23.51 seconds; full FeMe LIT
+passes 4,205 with 15 skipped, 10 unsupported and zero failures among
+4,230 discovered tests in 77.10 seconds. Eight new tests add eight passes;
+timings are not controlled speedups. Integer 1D/array loads, non-32-bit
+3D loads, non-fragment implicit sampling and real shader MinLod clamps on
+ordinary `Sample` remain unsupported. Existing 3D loads, sampling,
+artifact ABI 8 and argument layouts are unchanged. Native import plus
+canonical CPU execution is not owned D3D12 execution. Broader conformance,
+bound/static descriptors and owned D3D12 execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

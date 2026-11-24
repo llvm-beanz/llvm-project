@@ -63,15 +63,21 @@ Error checkSupportedRaisedOps(const Module &M) {
         const auto *Ty =
             CI ? dyn_cast<dxil::TextureExtType>(CI->getArgOperand(0)->getType())
                : nullptr;
-        if (Ty && Ty->getDimension() == dxil::ResourceKind::Texture3D &&
-            !isSupportedDXILLoad3D(*CI))
+        bool Is1D =
+            Ty && (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
+                   Ty->getDimension() == dxil::ResourceKind::Texture1DArray);
+        if (Ty &&
+            (Is1D || Ty->getDimension() == dxil::ResourceKind::Texture3D) &&
+            !isSupportedDXILLoad(*CI))
           return createStringError(
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed "
-              "FP32/i32 "
-              "3D texel loading with three-component i32 coordinates, an i32 "
-              "mip and constant signed XYZ offsets",
-              F.getName().str().c_str());
+              "%s %s texel loading with %s i32 coordinates, an i32 "
+              "mip and constant signed %s offsets",
+              F.getName().str().c_str(), Is1D ? "FP32" : "FP32/i32",
+              Is1D ? "1D/array" : "3D",
+              Is1D ? "scalar/paired" : "three-component",
+              Is1D ? "scalar" : "XYZ");
       }
       continue;
     case Intrinsic::dx_resource_sample:

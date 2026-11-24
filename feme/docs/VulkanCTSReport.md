@@ -1,5 +1,42 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) FP32 1D/array texel-load CPU regression scope (2026-11-24)
+
+The [FP32 1D/array texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fp32-1darray-texel-load-cpu-execution-vm-2026-11-24)
+adds heap-backed `Texture1D::Load`/`Texture1DArray::Load` CPU execution in
+any stage. Scalar i32 X or paired `(X,layer)` coordinates, an i32 mip,
+constant signed scalar spatial offsets and scalar/vector FP32 results up
+to the declared texel width (one through four) use the existing helpers.
+Offsets affect only X; layers remain separate. No sampler or derivatives
+are needed. Native omitted undefined/poison spatial offsets normalize to
+zero, while canonical undefined/poison offsets remain rejected.
+
+The shared FP32 runtime now checks per-mip width and invalid mips before
+fetching; layers are independently bounded, not mip-scaled. Invalid
+accesses return zero instead of aliasing another subresource. Existing
+SPIR-V FP32 users share this runtime bounds correction; lowering is
+unchanged. Runtime tests cover widths, layers, invalid mips and false masks.
+Compiled normal/reference compute tests distinguish three mips, layers,
+X and components, all result widths, signed offsets, bounds, invalid mips,
+partial waves, guards and repeats. Fragment tests add divergent mips/layers
+and helper masks. Native SDK DXC plain/array bindless shaders execute
+through normal/reference/AOT paths on one mip; runner YAML still prepares
+one mip. Malformed shapes, integer texels, too-wide results, non-heap
+handles and dynamic/undefined/poison offsets stay rejected, including
+dynamic-offset admission in all three paths.
+
+Focused CPU/DXIL/sampling LIT passes 994; full FeMe LIT passes 4,205 with
+15 skipped, 10 unsupported and zero failures among 4,230 discovered tests.
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, bound/static descriptor
+materialization or owned D3D12 execution is claimed. Native SDK import
+plus canonical CPU execution remains distinct from owned-device execution.
+Integer 1D/array loads remain unsupported; existing 3D loads, sampling,
+artifact ABI 8 and argument layouts are unchanged.
+Broader conformance and W2(a)/W2(b)/W3(b) remain open;
+`CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) integer 3D texel-load CPU regression scope (2026-11-24)
 
 The [integer 3D texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-integer-3d-texel-load-cpu-execution-vm-2026-11-24)

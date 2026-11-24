@@ -167,7 +167,7 @@ coverage" in [../Design.md](../Design.md).
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. Malformed coordinates and dynamic/poison/undefined
   1D offsets reject. Implicit DXIL 1D sampling outside fragment stages and
-  1D loading remain unsupported.
+  integer 1D/array loading remain unsupported.
   Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
   three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
   both screen axes, signed XYZ offsets, biased/clamped mips and components
@@ -223,6 +223,19 @@ coverage" in [../Design.md](../Design.md).
   dimensions, SPIR-V lowering, artifact ABI 8 and argument layouts are
   unchanged; SPIR-V integer loads share the runtime bounds correction.
   No bound/static descriptors or owned D3D12 execution are added.
+  Heap-backed FP32 1D/array `Load` now compiles in any stage, including
+  native AOT, with scalar i32 X or paired `(X,layer)` coordinates, an i32
+  mip, constant signed scalar spatial offsets and scalar/vector FP32
+  results up to the declared texel width (one through four). Wrapping
+  adds affect only X, not layers. Existing helpers use explicit mip and
+  sample zero without samplers/derivatives. Native omitted undefined/
+  poison spatial offsets normalize to zero; canonical dynamic/undefined/
+  poison offsets reject. Invalid mips, per-mip X bounds and independent
+  layer bounds return zero. Native SDK DXC shaders execute through normal/
+  reference/AOT paths on one mip. Integer 1D/array loads remain unsupported.
+  Existing 3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument
+  layouts are unchanged; SPIR-V FP32 loads share the runtime bounds
+  correction. No bound/static descriptors or owned D3D12 execution are added.
   Heap-backed FP32 3D implicit `Sample` now lowers in fragment stages with
   default samplers, three-component U/V/W coordinates, constant signed XYZ
   offsets and scalar/vector results up to the declared texel width (at most
@@ -242,8 +255,8 @@ coverage" in [../Design.md](../Design.md).
   shaders pass import/raising; real shader-clamped variants remain unraised.
   Non-fragment calls and malformed/dynamic/undefined/poison offsets remain
   unsupported; normal/reference/AOT compute admission rejects even valid
-  constant-offset calls. This does not enable DXIL 1D loading, change
-  other ordinary shapes or materialize bound/static descriptors.
+  constant-offset calls. This does not change other ordinary shapes
+  or materialize bound/static descriptors.
   Owned D3D12 rendering remains open.
   FP32 `SampleGrad` now has checked opcode-63 import/raising for 1D/array,
   2D/array, 3D and cube/array textures, with scalar/vector FP32 texels up to

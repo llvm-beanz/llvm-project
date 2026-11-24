@@ -3095,7 +3095,7 @@ documented reason rather than an oversight:
   dynamic/undefined offsets and half/vector results remain unsupported.
   Plain 1D uses scalar U/offset; array forms add a final FP32 layer
   coordinate and retain spatial-only offsets (one for 1D, two for 2D).
-  Implicit DXIL 1D sampling outside fragment stages and 1D loading remain
+  Implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading remain
   unsupported.
   Cubes use three-component direction vectors, with a fourth cube-array
   element coordinate, and no spatial offsets. Unused scalar offsets
@@ -3206,6 +3206,22 @@ documented reason rather than an oversight:
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   SPIR-V integer users share the runtime bounds correction. No bound/static
   descriptors or owned-device execution are added.
+  Heap-backed FP32 1D/array `Load` now executes in any stage with scalar
+  i32 X or paired `(X,layer)` coordinates, an i32 mip, constant signed
+  scalar spatial offsets and scalar/vector FP32 results up to the texel
+  width (one through four). Wrapping adds offset only X; layers stay
+  separate. Existing helpers need no sampler/derivatives. Native omitted
+  undefined/poison spatial offsets normalize to zero; canonical dynamic/
+  undefined/poison offsets reject. Per-mip width, invalid mip and independent
+  layer checks return zero for invalid accesses, preventing higher-mip
+  aliasing; SPIR-V FP32 users share the runtime correction. Compiled
+  normal/reference compute tests cover three mips, layers, components,
+  all result widths, offsets, bounds, partial waves, guards and repeats.
+  Fragment tests add divergent mips/layers and helper masks. Native SDK
+  DXC shaders execute through normal/reference/AOT paths on one mip.
+  Integer 1D/array loads remain unsupported. Existing 3D loads, sampling,
+  SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
+  no bound/static descriptors or owned-device execution are added.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

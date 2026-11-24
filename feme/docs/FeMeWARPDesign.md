@@ -168,7 +168,7 @@ The original compute-only baseline is no longer current:
   footprints, both derivative axes, layer/mip/texel/component values,
   divergent layers/bias/clamps and guarded partial waves. Malformed
   coordinates and dynamic/poison/undefined 1D offsets reject. Implicit DXIL
-  1D sampling outside fragment stages and 1D loading remain unsupported.
+  1D sampling outside fragment stages and integer 1D/array loading remain unsupported.
   Biased 3D sampling passes FP32 (U, V, W), six coarse spatial derivatives
   and three constant signed i32 offsets to the existing shared 3D helper.
   Compiled tests isolate each coordinate's LOD contribution on both screen
@@ -239,6 +239,23 @@ The original compute-only baseline is no longer current:
   are unchanged; existing SPIR-V integer loads share the runtime bounds
   correction. Bound/static descriptors, owned D3D12 execution and
   W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
+  Heap-backed FP32 1D/array `Load` now executes in any stage with scalar
+  i32 X or paired `(X,layer)` coordinates, an i32 mip, constant signed
+  scalar spatial offsets and scalar/vector FP32 results up to the texel
+  width (one through four). Wrapping adds offset only X; layers remain
+  separate. Existing helpers need no sampler/derivatives. Native omitted
+  undefined/poison spatial offsets normalize to zero; canonical dynamic/
+  undefined/poison offsets reject. Runtime checks per-mip width, invalid
+  mips and independent layer bounds, returning zero instead of aliasing
+  another subresource; SPIR-V FP32 users share the runtime correction.
+  Compiled normal/reference compute tests distinguish three mips, layers,
+  X and components with all result widths, offsets, bounds, partial waves,
+  guards and repeats. Fragment tests add divergent mips/layers and helper
+  masks. Native SDK DXC shaders execute through normal/reference/AOT paths
+  on one mip. Integer 1D/array loads remain unsupported. Existing 3D loads,
+  sampling, SPIR-V lowering, artifact ABI 8 and argument layouts are
+  unchanged. Bound/static descriptors, owned D3D12 execution and
+  W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at
@@ -263,7 +280,7 @@ The original compute-only baseline is no longer current:
   pixel shaders pass import/raising; real shader-clamped variants remain
   unraised. Non-fragment calls and malformed/dynamic/undefined/poison offsets
   remain rejected, including normal/reference/AOT compute admission.
-  DXIL 1D loading, other ordinary shapes and explicit LOD are unchanged.
+  Other ordinary shapes and explicit LOD are unchanged.
   No bound/static descriptor materialization or owned D3D12 execution is added.
   FP32 `SampleGrad` now has checked opcode-63 import/raising against LLVM's
   existing forward lowering for all seven sampled texture shapes. Scalar/

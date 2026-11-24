@@ -497,6 +497,50 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedFragment1DSampling) {
   }
 }
 
+TEST(UnsupportedOpsTest, AdmitsOnlySupported1DLoadsInEveryStage) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @plain(i32 %coord, i32 %mip, i32 %offset) {
+      %t = call target("dx.Texture", float, 0, 0, 0, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_f32_0_0_0_1t(i32 0)
+      %r = call float @llvm.dx.resource.load.level.f32.tdx.Texture_f32_0_0_0_1t.i32.i32.i32(target("dx.Texture", float, 0, 0, 0, 1) %t, i32 %coord, i32 %mip, i32 -1)
+      ret float %r
+    }
+    define <2 x float> @array(<2 x i32> %coord, i32 %mip, i32 %offset) {
+      %t = call target("dx.Texture", <2 x float>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v2f32_0_0_0_6t(i32 0)
+      %r = call <2 x float> @llvm.dx.resource.load.level.v2f32.tdx.Texture_v2f32_0_0_0_6t.v2i32.i32.i32(target("dx.Texture", <2 x float>, 0, 0, 0, 6) %t, <2 x i32> %coord, i32 %mip, i32 1)
+      ret <2 x float> %r
+    }
+    declare target("dx.Texture", float, 0, 0, 0, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_f32_0_0_0_1t(i32)
+    declare target("dx.Texture", <2 x float>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v2f32_0_0_0_6t(i32)
+    declare float @llvm.dx.resource.load.level.f32.tdx.Texture_f32_0_0_0_1t.i32.i32.i32(target("dx.Texture", float, 0, 0, 0, 1), i32, i32, i32)
+    declare <2 x float> @llvm.dx.resource.load.level.v2f32.tdx.Texture_v2f32_0_0_0_6t.v2i32.i32.i32(target("dx.Texture", <2 x float>, 0, 0, 0, 6), <2 x i32>, i32, i32)
+  )");
+  ASSERT_TRUE(M);
+  for (StringRef Name : {"plain", "array"}) {
+    Function *F = M->getFunction(Name);
+    auto *Load = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    Value *Offset = Load->getArgOperand(3);
+    for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
+      SCOPED_TRACE((Name + ": " + Stage).str());
+      F->removeFnAttr("feme.shader.stage");
+      if (!Stage.empty())
+        F->addFnAttr("feme.shader.stage", Stage);
+      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+      Value *BadOffsets[] = {F->getArg(2), UndefValue::get(Offset->getType()),
+                             PoisonValue::get(Offset->getType())};
+      for (Value *Bad : BadOffsets) {
+        Load->setArgOperand(3, Bad);
+        EXPECT_THAT_ERROR(
+            checkSupportedRaisedOps(*M),
+            Failed<StringError>(testing::Property(
+                &StringError::getMessage,
+                testing::HasSubstr("FP32 1D/array texel loading"))));
+      }
+      Load->setArgOperand(3, Offset);
+    }
+  }
+}
+
 TEST(UnsupportedOpsTest, AdmitsOnlySupported3DLoadsInEveryStage) {
   LLVMContext Ctx;
   auto M = parseIR(Ctx, R"(

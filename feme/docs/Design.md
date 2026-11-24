@@ -1501,7 +1501,7 @@ component for a cube-array element. The canonical unused scalar i32 offset
 must be poison/undef or zero and is not passed to the runtime. Cube calls
 reuse shared face selection/comparison helpers with six zero derivatives;
 nonzero/dynamic offsets and malformed direction/layer shapes fail admission.
-Implicit DXIL 1D sampling outside fragment stages and 1D loading remain
+Implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading remain
 unsupported; bounded implicit/explicit-LOD execution is described below.
 
 Implicit `SampleCmp` preserves its comparison reference, coordinates,
@@ -1535,7 +1535,7 @@ existing 1D comparison helpers; the layer is never differentiated.
 Compiled plain/array execution tests both X- and Y-derived mip selection,
 dynamic zero/two clamps, divergent references/layers and guarded partial
 waves. Actual SDK DXC plain/clamped 1D/array pixel shaders pass import/
-raising; implicit DXIL 1D sampling outside fragment stages and 1D loading
+raising; implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading
 remain unsupported.
 For cubes, six coarse derivatives of the raw three-component direction
 feed the existing cube projection/LOD runtime. Cube arrays pass their fourth
@@ -1597,7 +1597,7 @@ spatial. Shared 1D helpers preserve bias and optional shader MinLod clamps.
 Compiled tests distinguish mip-0/mip-1 footprints, signed offsets,
 layer/mip/component values, divergent layers/bias/clamps and guarded partial
 waves. Dynamic/poison/undefined 1D offsets and malformed coordinates reject.
-Implicit DXIL 1D sampling outside fragment stages and 1D loading remain
+Implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading remain
 unsupported.
 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and three
 constant signed i32 offsets through the existing `createSample3D` helper.
@@ -1683,6 +1683,26 @@ layouts are unchanged; existing SPIR-V integer loads share the runtime
 bounds correction. No bound/static descriptors or owned D3D12 execution
 are added.
 
+Heap-backed FP32 `Texture1D::Load` and `Texture1DArray::Load` now execute
+in any stage with scalar i32 X or paired `(X,layer)` coordinates, an i32
+mip, constant signed scalar spatial offsets and scalar/vector results up
+to the declared FP32 texel width (one through four). Wrapping integer adds
+offset only X; array layers stay separate. Existing FP32 1D helpers receive
+sample zero and explicit mip without samplers or derivatives. Native omitted
+undefined/poison spatial offsets normalize to zero; canonical dynamic/
+undefined/poison offsets remain rejected. Per-mip width, invalid mip and
+independent layer bounds return zero on invalid accesses, preventing
+higher-mip aliasing; SPIR-V FP32 users share the runtime correction.
+Transforms and stage-independent admission test shape/offset guards,
+narrowing, reflection, cleanup and idempotence. Compiled normal/reference
+compute tests cover three mips, layers, all four result widths, offsets,
+bounds, partial waves, guards and repeats; fragment tests add helper masks
+and divergent mips/layers. Native SDK DXC shaders execute through normal/
+reference/AOT paths on one mip. Integer 1D/array loads remain unsupported.
+Existing 3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument
+layouts are unchanged; no bound/static descriptors or owned D3D12 execution
+are added.
+
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ
 offsets and scalar/vector results up to the declared texel width (at most
@@ -1712,7 +1732,7 @@ guards and repeats. Native SDK DXC plain/array pixel shaders pass import/
 raising; shader-clamped variants remain unraised. Malformed shapes and
 dynamic/undefined/poison offsets remain unsupported. Compute, vertex and
 unannotated implicit 1D calls remain rejected, including normal/reference/
-AOT compute admission. DXIL 1D loading, other ordinary shapes, explicit LOD,
+AOT compute admission. Other ordinary shapes, explicit LOD,
 biased/comparison/gradient execution and SPIR-V behavior are unchanged.
 Bound/static descriptor materialization and owned D3D12 execution remain open.
 

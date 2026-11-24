@@ -9540,9 +9540,10 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DV4F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
-  if (!Img.Data)
+  if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
+      Mip >= 32)
     return Zero;
-  if (X < 0 || (uint32_t)X >= Img.Width)
+  if (X < 0 || (uint32_t)X >= femeRTMipExtent(Img.Width, Mip))
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel1D(&Img, Mip, X, Sample, /*UseBorder=*/0, NoBorder,
@@ -9625,9 +9626,10 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DArrayV4F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
-  if (!Img.Data)
+  if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
+      Mip >= 32)
     return Zero;
-  if (X < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
+  if (X < 0 || Layer < 0 || (uint32_t)X >= femeRTMipExtent(Img.Width, Mip) ||
       (uint32_t)Layer >= Img.ArrayLayers)
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};

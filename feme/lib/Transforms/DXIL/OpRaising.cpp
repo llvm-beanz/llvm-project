@@ -1728,7 +1728,9 @@ bool raiseTextureLoad(CallInst &CI) {
   Value *Coord = packTextureVector(Builder, Coords);
   Value *Offset = packTextureVector(Builder, Offsets);
   // DXIL omits an all-zero offset by leaving every spatial operand undefined.
-  if (HandleTy->getDimension() == dxil::ResourceKind::Texture3D &&
+  if ((HandleTy->getDimension() == dxil::ResourceKind::Texture3D ||
+       HandleTy->getDimension() == dxil::ResourceKind::Texture1D ||
+       HandleTy->getDimension() == dxil::ResourceKind::Texture1DArray) &&
       llvm::all_of(Offsets, [](Value *V) { return isa<UndefValue>(V); }))
     Offset = Constant::getNullValue(Offset->getType());
   if (!Offset)

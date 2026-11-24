@@ -716,25 +716,45 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
-    if (isSupportedDXILLoad3D(*CI)) {
+    if (isSupportedDXILLoad(*CI)) {
       IRBuilder<> Builder(CI);
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
       Value *Coord = CI->getArgOperand(1);
-      auto *Offset = cast<Constant>(CI->getArgOperand(3));
-      Value *XYZ[3];
-      for (unsigned Axis = 0; Axis < 3; ++Axis)
-        XYZ[Axis] = Builder.CreateAdd(
-            Builder.CreateExtractElement(Coord, uint64_t{Axis}),
-            Offset->getAggregateElement(Axis));
-      Value *Loaded =
-          CI->getType()->getScalarType()->isIntegerTy(32)
-              ? createLoad3DI32(Builder, Env, Image->getArgOperand(0), XYZ[0],
-                                XYZ[1], XYZ[2], CI->getArgOperand(2),
-                                Builder.getTrue(), CI->getName())
-              : createLoad3D(Builder, Env, Image->getArgOperand(0), XYZ[0],
-                             XYZ[1], XYZ[2], CI->getArgOperand(2),
-                             Builder.getInt32(0), Builder.getTrue(),
-                             CI->getName());
+      Value *Offset = CI->getArgOperand(3);
+      auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
+      Value *Loaded;
+      if (Kind == dxil::ResourceKind::Texture3D) {
+        Value *XYZ[3];
+        for (unsigned Axis = 0; Axis < 3; ++Axis)
+          XYZ[Axis] = Builder.CreateAdd(
+              Builder.CreateExtractElement(Coord, uint64_t{Axis}),
+              cast<Constant>(Offset)->getAggregateElement(Axis));
+        Loaded =
+            CI->getType()->getScalarType()->isIntegerTy(32)
+                ? createLoad3DI32(Builder, Env, Image->getArgOperand(0), XYZ[0],
+                                  XYZ[1], XYZ[2], CI->getArgOperand(2),
+                                  Builder.getTrue(), CI->getName())
+                : createLoad3D(Builder, Env, Image->getArgOperand(0), XYZ[0],
+                               XYZ[1], XYZ[2], CI->getArgOperand(2),
+                               Builder.getInt32(0), Builder.getTrue(),
+                               CI->getName());
+      } else {
+        Value *X = Coord->getType()->isIntegerTy(32)
+                       ? Coord
+                       : Builder.CreateExtractElement(Coord, uint64_t{0});
+        X = Builder.CreateAdd(X, Offset);
+        if (Kind == dxil::ResourceKind::Texture1DArray) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
+          Loaded =
+              createLoad1DArray(Builder, Env, Image->getArgOperand(0), X, Layer,
+                                CI->getArgOperand(2), Builder.getInt32(0),
+                                Builder.getTrue(), CI->getName());
+        } else {
+          Loaded = createLoad1D(Builder, Env, Image->getArgOperand(0), X,
+                                CI->getArgOperand(2), Builder.getInt32(0),
+                                Builder.getTrue(), CI->getName());
+        }
+      }
       CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
       CI->eraseFromParent();
       SampleHandles.insert(Image);
@@ -1197,7 +1217,7 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
-    if (isSupportedDXILLoad3D(*CI) || isSupportedDXILSampleLevel(*CI) ||
+    if (isSupportedDXILLoad(*CI) || isSupportedDXILSampleLevel(*CI) ||
         isSupportedDXILSample(*CI))
       return true;
     if (ID == Intrinsic::dx_resource_samplegrad ||
@@ -1478,7 +1498,7 @@ bool feme::cpu::isSupportedDXILSample(const CallInst &CI) {
   return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_sample);
 }
 
-bool feme::cpu::isSupportedDXILLoad3D(const CallInst &CI) {
+bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
   if (getIntrinsicID(&CI) != Intrinsic::dx_resource_load_level ||
       CI.arg_size() != 4)
     return false;
@@ -1486,21 +1506,31 @@ bool feme::cpu::isSupportedDXILLoad3D(const CallInst &CI) {
   auto *Ty = dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
   if (!Image ||
       getIntrinsicID(Image) != Intrinsic::dx_resource_handlefromheap || !Ty ||
-      Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4 ||
-      Ty->getDimension() != dxil::ResourceKind::Texture3D)
+      Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4)
+    return false;
+  auto Kind = Ty->getDimension();
+  bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
+              Kind == dxil::ResourceKind::Texture1DArray;
+  if (!Is1D && Kind != dxil::ResourceKind::Texture3D)
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
-  if (!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32))
+  if (!ScalarTy->isFloatTy() && (Is1D || !ScalarTy->isIntegerTy(32)))
     return false;
   unsigned TextureWidth = getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
   unsigned ResultWidth = getTexelWidth(CI.getType(), ScalarTy);
-  Type *XYZTy = FixedVectorType::get(Type::getInt32Ty(CI.getContext()), 3);
+  Type *IntTy = Type::getInt32Ty(CI.getContext());
+  Type *CoordTy = Kind == dxil::ResourceKind::Texture1D
+                      ? IntTy
+                      : FixedVectorType::get(IntTy, Is1D ? 2 : 3);
+  Type *OffsetTy = Is1D ? IntTy : FixedVectorType::get(IntTy, 3);
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
-      CI.getArgOperand(1)->getType() != XYZTy ||
+      CI.getArgOperand(1)->getType() != CoordTy ||
       !CI.getArgOperand(2)->getType()->isIntegerTy(32) ||
-      CI.getArgOperand(3)->getType() != XYZTy)
+      CI.getArgOperand(3)->getType() != OffsetTy)
     return false;
   auto *Offset = dyn_cast<Constant>(CI.getArgOperand(3));
+  if (Is1D)
+    return isa_and_nonnull<ConstantInt>(Offset);
   if (!Offset)
     return false;
   for (unsigned Axis = 0; Axis < 3; ++Axis)

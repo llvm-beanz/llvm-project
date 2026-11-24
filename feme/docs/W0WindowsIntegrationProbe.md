@@ -27,6 +27,55 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) FP32 1D/array texel-load CPU execution (VM, 2026-11-24)
+
+Heap-backed FP32 `Texture1D::Load` and `Texture1DArray::Load` now execute
+in any stage. Shared admission/lowering requires scalar i32 X or paired
+`(X,layer)` coordinates, an i32 mip, constant signed scalar spatial offsets
+and scalar/vector results up to the declared FP32 texel width (one through
+four). Wrapping integer adds offset only X; layers stay separate. The
+existing FP32 helpers receive explicit mip and sample zero, without
+samplers or stage derivatives. Native omitted undefined/poison spatial
+offsets normalize to zero; canonical undefined/poison offsets still reject.
+
+The shared FP32 1D/array runtime now checks per-mip width and invalid mips
+before fetching. Array layers remain independently bounded, not mip-scaled;
+invalid accesses read zero instead of aliasing another subresource.
+Existing SPIR-V FP32 users share this runtime bounds correction;
+SPIR-V lowering is unchanged.
+
+Transforms check coordinate/offset forwarding, separate layers, narrowing,
+reflection, image-only signature growth, handle cleanup and idempotence.
+Malformed shapes, integer texels, too-wide results, non-heap handles and
+dynamic/undefined/poison offsets remain rejected. Admission tests cover
+fragment, vertex, compute and unannotated functions; runtime tests check
+per-mip widths, layer bounds, invalid mips and false masks.
+
+Compiled normal/reference compute tests distinguish mips 0/1/2, layers,
+X and components with all four result widths, signed offsets, bounds,
+invalid mips, wave sizes 4/8, five lanes, guards and repeated prepared
+dispatches. Fragment tests add divergent mips/layers, invalid accesses,
+helpers, one/three quads, partial waves, masks, guards and repeats.
+Actual SDK DXC SM6.6 bindless plain/array shaders execute through normal/
+reference/AOT paths with signed/omitted offsets, components, invalid mips,
+five lanes, guards and repeats on one mip; runner YAML still prepares one
+mip. Dynamic-offset admission rejects in all three paths.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 994 in 23.51 seconds; full FeMe LIT
+passes 4,205, skips 15 and marks 10 unsupported, with zero failures among
+4,230 discovered tests in 77.10 seconds. Eight new tests add eight passes;
+timings are not controlled speedups.
+
+Integer 1D/array loads, non-32-bit 3D loads, non-fragment implicit sampling
+and real shader MinLod clamps on ordinary `Sample` remain unsupported.
+Existing 3D loads, sampling, artifact ABI 8 and argument layouts are
+unchanged. Native SDK import plus canonical CPU execution is not owned
+D3D12 execution. Broader conformance, bound/static descriptors and owned
+D3D12 execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) integer 3D texel-load CPU execution (VM, 2026-11-24)
 
 Heap-backed signed/unsigned i32 `Texture3D::Load` now executes in any stage.
