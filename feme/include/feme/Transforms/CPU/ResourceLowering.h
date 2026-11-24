@@ -52,9 +52,10 @@
 // spatial/direction gradients in any stage; array elements are never
 // differentiated, no stage derivatives are synthesized, and supported
 // offsets/clamps survive.
-// FP32 1D/2D (including array) and 3D SampleLevel preserve explicit LOD and
-// constant signed spatial offsets in any stage with zero derivatives/bias and
-// separate layers. Fragment-only FP32 1D/array and 3D Sample use coarse spatial
+// FP32 1D/2D/3D/cube (including array) SampleLevel preserves explicit LOD in
+// any stage with zero derivatives/bias and separate layers. Spatial offsets
+// are constant signed values; cubes have an unused scalar offset.
+// Fragment-only FP32 1D/array and 3D Sample use coarse spatial
 // derivatives and constant signed spatial offsets with zero bias; layers are
 // not differentiated. FP32/i32 1D/array and 3D heap-backed Load preserve
 // integer coordinates, separate array layers, explicit mip levels and constant
@@ -97,10 +98,11 @@ bool isSupportedDXILSampleBias(const llvm::CallInst &CI);
 /// (zero/undef/poison) scalar offset. No fragment-stage restriction is needed.
 bool isSupportedDXILSampleGrad(const llvm::CallInst &CI);
 
-/// Tests heap-backed FP32 1D/2D (including array) or 3D explicit-LOD sampling
+/// Tests heap-backed FP32 1D/2D/3D/cube (including array) explicit-LOD sampling
 /// with a default sampler, shape-matched coordinates, scalar/vector results and
 /// constant signed spatial offsets (scalar for 1D, XY for 2D, XYZ for 3D).
-/// Other ordinary sampling/loading eligibility is unchanged.
+/// Cubes use direction coordinates and an unused zero/undef/poison scalar
+/// offset. Other ordinary sampling/loading eligibility is unchanged.
 bool isSupportedDXILSampleLevel(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32 1D/array or 3D implicit sampling in a fragment stage

@@ -113,11 +113,14 @@ Error checkSupportedRaisedOps(const Module &M) {
         bool Is2D =
             Ty && (Ty->getDimension() == dxil::ResourceKind::Texture2D ||
                    Ty->getDimension() == dxil::ResourceKind::Texture2DArray);
+        bool IsCube =
+            Ty && (Ty->getDimension() == dxil::ResourceKind::TextureCube ||
+                   Ty->getDimension() == dxil::ResourceKind::TextureCubeArray);
         if (Ty &&
             (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
              Ty->getDimension() == dxil::ResourceKind::Texture1DArray ||
              Ty->getDimension() == dxil::ResourceKind::Texture3D ||
-             (Is2D &&
+             ((Is2D || IsCube) &&
               F.getIntrinsicID() == Intrinsic::dx_resource_samplelevel)) &&
             !(F.getIntrinsicID() == Intrinsic::dx_resource_sample
                   ? isSupportedDXILSample(*CI)
@@ -126,18 +129,21 @@ Error checkSupportedRaisedOps(const Module &M) {
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed FP32 "
               "%s %s sampling with a default sampler, "
-              "shape-matched coordinates and constant signed %s offsets",
+              "shape-matched coordinates and %s offsets",
               F.getName().str().c_str(),
-              Is2D ? "2D/array"
+              IsCube ? "cube/array"
+              : Is2D ? "2D/array"
               : Ty->getDimension() == dxil::ResourceKind::Texture3D
                   ? "3D"
                   : "1D/array",
               F.getIntrinsicID() == Intrinsic::dx_resource_sample
                   ? "fragment implicit"
                   : "explicit-LOD",
-              Is2D                                                  ? "XY"
-              : Ty->getDimension() == dxil::ResourceKind::Texture3D ? "XYZ"
-                                                                    : "scalar");
+              IsCube ? "unused (zero/undef/poison) scalar"
+              : Is2D ? "constant signed XY"
+              : Ty->getDimension() == dxil::ResourceKind::Texture3D
+                  ? "constant signed XYZ"
+                  : "constant signed scalar");
       }
       continue;
     case Intrinsic::dx_resource_samplebias:

@@ -2079,6 +2079,48 @@ bound/static D3D12 descriptors and owned-device execution remain open.
 Artifact ABI 8 and argument layouts are unchanged; `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) FP32 cube/array explicit-LOD sampling progress (2026-11-24):
+heap-backed `TextureCube::SampleLevel` and `TextureCubeArray::SampleLevel`
+now use the shared checked sampling path in any stage. Default samplers,
+three-component directions or four-component direction/array-element
+coordinates, FP32 LOD and scalar/vector results up to the declared FP32
+texel width (one through four) are supported. Cubes have no spatial
+offset: the canonical unused scalar i32 placeholder may be zero, undef
+or poison, matching existing cube bias/gradient conventions.
+
+The cube helpers receive live LOD with `UseExplicitLod=true`, six zero
+direction derivatives, zero bias and no shader MinLod clamp. Array
+elements remain separate. Admission, lowering and signature-growth
+matching agree; all `SampleLevel` calls now avoid the legacy fallback,
+which retains only implicit 2D/cube sampling. Malformed coordinates,
+padded/nonzero/dynamic offsets, comparison samplers, non-heap handles,
+non-FP32 texels and too-wide results reject consistently. Other sampling
+and runtime/SPIR-V lowering are unchanged.
+
+Transforms verify LOD/explicit flag, zero derivatives/bias, result widths,
+layer forwarding, reflection, cleanup and idempotence, including negative
+fallback checks. Every-stage admission checks all supported placeholders
+and nonzero/dynamic rejection. Compiled fragment tests distinguish all
+six faces, two array elements, three mips, spatial/component values and
+widths one through four with helper-only lanes, waves 4/8, one/three
+quads, output masks, guards and repeated invocations. Actual SDK DXC
+SM6.6 cube/plain-array shaders execute two real mips through normal waves
+4/8, reference and ARM64 AOT-object paths, with exact FP32-bit half-mip
+blends, negative/upper LOD, sampler MinLod=MaxLod=1, all faces/elements,
+thirteen lanes, guards and repeat 2. Invalid padded canonical offsets
+explicitly fail normal/reference/AOT admission.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes. Relevant CPU transforms/units, runner and runtime
+LIT passes 1,635 with 4 unsupported and zero failures in 76.36 seconds;
+three new fixtures and two units add five passes. This completes bounded
+shared FP32 explicit-LOD sampling for the seven ordinary raised texture
+shapes, not broader sampling conformance or owned-device execution. No
+new full-suite, adapter-matrix or external Vulkan CTS result is claimed.
+Bound/static D3D12 descriptors, MS sampling and owned-device execution
+remain open. Artifact ABI 8 and argument layouts are unchanged;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

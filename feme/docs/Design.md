@@ -1609,6 +1609,28 @@ fragment stages and non-32-bit 3D loading remain unsupported. This completes bou
 fragment biased execution for the seven raised texture shapes, not broader
 sampling conformance.
 
+Heap-backed FP32 `TextureCube::SampleLevel`/`TextureCubeArray::SampleLevel`
+now use shared checked sampling in any stage with default samplers,
+three-component directions or four-component direction/array-element
+coordinates, FP32 LOD and result widths one through four up to the
+declared texel width. The unused scalar i32 offset may be zero, undef
+or poison; cubes have no spatial offsets. Helpers receive live explicit
+LOD, six zero direction derivatives, zero bias, separate elements and
+no shader MinLod clamp. Sampler LOD behavior is unchanged.
+
+All `SampleLevel` calls now use checked admission/lowering and avoid the
+legacy implicit-only fallback. Malformed coordinates/offsets, non-heap
+handles, comparison samplers, non-FP32 texels and too-wide results reject.
+Transforms check narrowing, reflection, cleanup and idempotence; every-
+stage admission checks placeholders. Compiled fragments distinguish
+six faces, two cubes, three mips, spatial/components and all widths,
+with helpers, masks, partial waves, guards and repeats. Native SDK DXC
+cube/plain-array shaders execute two real mips, exact FP32-bit half-mip
+blends, negative/upper LOD and sampler clamps through normal waves 4/8,
+reference and AOT-object paths. Other sampling, runtime/SPIR-V lowering,
+artifact ABI 8 and argument layouts are unchanged; no bound/static
+D3D12 descriptors or owned-device execution are added.
+
 Heap-backed FP32 `Texture2D::SampleLevel`/`Texture2DArray::SampleLevel`
 now use the shared checked sampling path in any stage, replacing the
 zero-offset-only fallback. Default samplers, FP32 U/V or U/V/layer

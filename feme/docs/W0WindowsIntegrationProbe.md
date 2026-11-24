@@ -27,6 +27,40 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) FP32 cube/array explicit-LOD sampling (VM, 2026-11-24)
+
+Heap-backed FP32 `TextureCube::SampleLevel`/`TextureCubeArray::SampleLevel`
+now share checked admission/lowering in any stage. Default samplers,
+three-component directions or four-component direction/array-element
+coordinates, FP32 LOD and result widths one through four up to the
+declared texel width are supported. The unused scalar i32 offset may be
+zero, undef or poison; no spatial cube offset is introduced. Helpers
+receive live explicit LOD, six zero derivatives, zero bias, separate
+elements and no shader MinLod clamp. Sampler LOD behavior is unchanged.
+
+All `SampleLevel` calls now use checked matching; the legacy fallback
+retains only implicit 2D/cube sampling. Transforms verify narrowing,
+reflection, cleanup, idempotence and malformed fallback exclusion.
+Every-stage admission checks placeholders and invalid offsets. Compiled
+fragments distinguish all six faces, two cubes, three mips, spatial/
+component values and all result widths, with helper-only lanes, one/
+three quads, waves 4/8, masks, guards and repeats. Actual SDK DXC SM6.6
+cube/plain-array shaders execute two real mips through normal waves 4/8,
+reference and ARM64 AOT-object paths, checking exact FP32-bit half-mip
+blends, negative/upper LOD, sampler clamps at mip 1, all faces/elements,
+thirteen lanes, guards and repeat 2. Padded canonical offsets explicitly
+fail all three compilation paths.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes. Relevant CPU transforms/units, runner and runtime
+LIT passes 1,635 with 4 unsupported and zero failures in 76.36 seconds.
+Three fixtures and two units add five passes. This is targeted native
+CPU execution evidence, not a new full-suite, adapter-matrix or external
+Vulkan CTS result. Other sampling, runtime/SPIR-V lowering, artifact ABI 8
+and argument layouts are unchanged. Broader conformance, MS sampling,
+bound/static D3D12 descriptors and owned-device execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native 1D/array and 3D multi-mip explicit-LOD sampling (VM, 2026-11-24)
 
 The existing SDK DXC SM6.6 FP32 `SampleLevel` fixtures now also execute

@@ -2637,6 +2637,17 @@ the first shader-facing milestone rather than alongside it.
    regressions remain. Focused LIT passes 2/2 in 11.91 seconds. No
    implementation change, new discovered test, full-suite/CTS result,
    D3D12 mip/format support or owned-device execution is claimed.
+   Cube/array `SampleLevel` follow-up (2026-11-24): shared checked FP32
+   matching now covers all seven ordinary raised texture shapes. Cube
+   helpers receive live explicit LOD, six zero derivatives, zero bias
+   and separate elements, retaining unused scalar zero/undef/poison
+   offsets. The legacy fallback now handles only implicit sampling;
+   malformed explicit calls cannot bypass validation. Native two-mip
+   exact-bit half-mip/clamp/all-face/element tests and compiled fragment
+   three-mip/all-width/helper/mask tests pass. Relevant CPU transforms/
+   units, runner and runtime LIT passes 1,635 with 4 unsupported and
+   zero failures in 76.36 seconds; the affected ARM64 build passes.
+   This adds no owned D3D12 execution or W2/W3/conformance closure.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

@@ -175,6 +175,20 @@ coverage" in [../Design.md](../Design.md).
   dynamic or partially undefined offsets reject. Implicit DXIL 3D sampling
   outside fragment stages and non-32-bit 3D loading remain unsupported; seven-shape
   biased execution is not broader sampling conformance.
+  Heap-backed FP32 cube/array `SampleLevel` now compiles through shared
+  checked lowering in any stage, including native AOT. Default samplers,
+  FP32 direction/array-element coordinates, FP32 LOD and result widths
+  one through four up to the declared texel width are supported. Cubes
+  retain an unused scalar zero/undef/poison offset. Helpers receive live
+  explicit LOD, six zero derivatives, zero bias, separate elements and
+  no shader MinLod clamp. All `SampleLevel` calls now avoid the legacy
+  implicit-only fallback; malformed calls reject consistently.
+  Native DXC cube/plain-array shaders execute two mips, exact FP32-bit
+  half-mip blends and image/sampler clamps through normal waves 4/8,
+  reference and AOT-object paths with guards and repeats. Compiled
+  fragment tests add all widths, six faces, two cubes, three mips,
+  helpers and masks. Other sampling, runtime/SPIR-V lowering, ABI 8
+  and argument layouts are unchanged; owned-device gaps remain open.
   Heap-backed FP32 2D/array `SampleLevel` now uses shared checked lowering
   in any stage with default samplers, FP32 U/V or U/V/layer coordinates,
   FP32 LOD, constant signed XY offsets and results up to the declared

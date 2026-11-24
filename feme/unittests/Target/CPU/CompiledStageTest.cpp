@@ -5673,6 +5673,172 @@ TEST(CompiledStageTest, Fragment1DBiasedSamplingSelectsLayerMipAndOffsets) {
   }
 }
 
+TEST(CompiledStageTest, FragmentCubeExplicitLodSelectsFaceElementAndMip) {
+  constexpr char IR[] = R"(
+    define void @ps_main() #0 {
+      %x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %lod = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 0)
+      %layer = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      %d0 = insertelement <3 x float> poison, float %x, i32 0
+      %d1 = insertelement <3 x float> %d0, float %y, i32 1
+      %dir = insertelement <3 x float> %d1, float %z, i32 2
+      %wide = shufflevector <3 x float> %dir, <3 x float> poison, <4 x i32> <i32 0, i32 1, i32 2, i32 poison>
+      %coord = insertelement <4 x float> %wide, float %layer, i32 3
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_5t(i32 0)
+      %a = call target("dx.Texture", <4 x float>, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_9t(i32 1)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call float @llvm.dx.resource.samplelevel.f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5) %t, target("dx.Sampler", 0) %s, <3 x float> %dir, float %lod, i32 0)
+      %rg = call <2 x float> @llvm.dx.resource.samplelevel.v2f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5) %t, target("dx.Sampler", 0) %s, <3 x float> %dir, float %lod, i32 undef)
+      %rgb = call <3 x float> @llvm.dx.resource.samplelevel.v3f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9) %a, target("dx.Sampler", 0) %s, <4 x float> %coord, float %lod, i32 poison)
+      %rgba = call <4 x float> @llvm.dx.resource.samplelevel.v4f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9) %a, target("dx.Sampler", 0) %s, <4 x float> %coord, float %lod, i32 0)
+      %g = extractelement <2 x float> %rg, i32 1
+      %b = extractelement <3 x float> %rgb, i32 2
+      %alpha = extractelement <4 x float> %rgba, i32 3
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %r, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %g, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %b, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float %alpha, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_5t(i32)
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_9t(i32)
+    declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+    declare float @llvm.dx.resource.samplelevel.f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5), target("dx.Sampler", 0), <3 x float>, float, i32)
+    declare <2 x float> @llvm.dx.resource.samplelevel.v2f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5), target("dx.Sampler", 0), <3 x float>, float, i32)
+    declare <3 x float> @llvm.dx.resource.samplelevel.v3f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9), target("dx.Sampler", 0), <4 x float>, float, i32)
+    declare <4 x float> @llvm.dx.resource.samplelevel.v4f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9), target("dx.Sampler", 0), <4 x float>, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+  auto Color = [](unsigned Face, unsigned Layer, unsigned Mip, unsigned X,
+                  unsigned Y, unsigned C) {
+    return float(10000 * Layer + 1000 * C + 100 * Face + 10 * Mip + 4 * Y + X +
+                 1);
+  };
+  std::vector<float> CubeTexels(504), ArrayTexels(1008);
+  unsigned CubeOffset = 0, ArrayOffset = 0;
+  for (unsigned Mip = 0; Mip < 3; ++Mip) {
+    unsigned Size = 4u >> Mip;
+    for (unsigned Face = 0; Face < 12; ++Face)
+      for (unsigned Y = 0; Y < Size; ++Y)
+        for (unsigned X = 0; X < Size; ++X)
+          for (unsigned C = 0; C < 4; ++C) {
+            unsigned Index = (Face * Size * Size + Y * Size + X) * 4 + C;
+            float Value = Color(Face % 6, Face / 6, Mip, X, Y, C);
+            ArrayTexels[ArrayOffset + Index] = Value;
+            if (Face < 6)
+              CubeTexels[CubeOffset + Index] = Value;
+          }
+    CubeOffset += 6 * Size * Size * 4;
+    ArrayOffset += 12 * Size * Size * 4;
+  }
+  FemeImageSubresourceLayout CubeMips[] = {
+      {0, 64, 256, 0}, {1536, 32, 64, 0}, {1920, 16, 16, 0}};
+  FemeImageSubresourceLayout ArrayMips[] = {
+      {0, 64, 256, 0}, {3072, 32, 64, 0}, {3840, 16, 16, 0}};
+  FemeImageDescriptor Images[2]{};
+  Images[0].Data = CubeTexels.data();
+  Images[0].SizeInBytes = CubeTexels.size() * sizeof(float);
+  Images[0].Dimension = static_cast<uint32_t>(ImageDimension::TextureCube);
+  Images[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Images[0].Width = Images[0].Height = 4;
+  Images[0].Depth = Images[0].PlaneCount = Images[0].SampleCount = 1;
+  Images[0].ArrayLayers = 6;
+  Images[0].MipLevels = Images[0].MipLayoutCount = 3;
+  Images[0].MipLayouts = CubeMips;
+  Images[0].Flags = FEME_IMAGE_SAMPLED;
+  Images[1] = Images[0];
+  Images[1].Data = ArrayTexels.data();
+  Images[1].SizeInBytes = ArrayTexels.size() * sizeof(float);
+  Images[1].Dimension = static_cast<uint32_t>(ImageDimension::TextureCubeArray);
+  Images[1].ArrayLayers = 12;
+  Images[1].MipLayouts = ArrayMips;
+  FemeSamplerDescriptor Sampler{};
+  Sampler.MaxLod = 2.0f;
+  Sampler.AddressU = Sampler.AddressV =
+      static_cast<uint32_t>(SamplerAddressMode::ClampToEdge);
+
+  EntrySignature Sig;
+  FemeStageElement InputElements[2]{}, OutputElements[3]{};
+  for (unsigned ID = 0; ID < 3; ++ID) {
+    auto Element = ID < 2 ? makeFloatInput(ID) : makeFloatOutput(ID);
+    Element.ComponentCount = ID == 1 ? 1 : 4;
+    Sig.Elements.push_back(Element);
+    auto &Layout = ID < 2 ? InputElements[ID] : OutputElements[ID];
+    Layout.ElementID = ID;
+    Layout.ComponentCount = Element.ComponentCount;
+    Layout.RowCount = 1;
+    Layout.ComponentStride = 4;
+    Layout.InvocationStride = ID < 2 ? 20 : 16;
+    Layout.DataOffset = ID == 1 ? 16 : 0;
+  }
+  FemeStageLayout InputLayout{}, OutputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 2;
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 3;
+  for (unsigned WaveSize : {4u, 8u}) {
+    Context Ctx;
+    auto Stage = compileGraphicsStage(Ctx, IR, "ps_main", Sig,
+                                      ShaderStage::Fragment, WaveSize);
+    ASSERT_THAT_EXPECTED(Stage, Succeeded());
+    EXPECT_TRUE((*Stage)->getResourceInfo().UsesSamplerHeap);
+    for (unsigned QuadCount : {1u, 3u})
+      for (unsigned Face = 0; Face < 6; ++Face) {
+        SCOPED_TRACE(testing::Message() << "wave=" << WaveSize << " quads="
+                                        << QuadCount << " face=" << Face);
+        std::vector<float> Inputs(20 * QuadCount);
+        for (unsigned Lane = 0; Lane < 4 * QuadCount; ++Lane)
+          Inputs[Lane * 5 + Face / 2] = Face & 1 ? -1.0f : 1.0f;
+        std::vector<float> Outputs(16 * QuadCount + 2, -42.0f);
+        std::vector<FemeFragmentInvocation> Invocations(QuadCount);
+        std::vector<FemeFragmentResult> Results(QuadCount);
+        for (auto &Invocation : Invocations) {
+          Invocation.LiveMask = 0xf;
+          Invocation.SideEffectMask = 0x5;
+        }
+        FragmentResources Resources;
+        Resources.ImageHeap = Images;
+        Resources.SamplerHeap = ArrayRef<FemeSamplerDescriptor>(&Sampler, 1);
+        Resources.InputLayout = &InputLayout;
+        Resources.Inputs = Inputs.data();
+        Resources.OutputLayout = &OutputLayout;
+        Resources.Outputs = Outputs.data() + 1;
+        Resources.Invocations = Invocations;
+        Resources.Results = Results;
+        auto Prepared = PreparedFragmentBatch::create(
+            (*Stage)->getResourceInfo(), Resources);
+        for (unsigned Repeat = 0; Repeat < 3; ++Repeat) {
+          for (unsigned Lane = 0; Lane < 4 * QuadCount; ++Lane) {
+            Inputs[Lane * 5 + 3] = float((Lane / 2 + Repeat) % 3);
+            Inputs[Lane * 5 + 4] = float((Lane ^ (Lane >> 1) ^ Repeat) & 1);
+          }
+          std::fill(Outputs.begin(), Outputs.end(), -42.0f);
+          ASSERT_THAT_ERROR((*Stage)->invokeFragments(Prepared), Succeeded());
+          EXPECT_EQ(Outputs.front(), -42.0f);
+          EXPECT_EQ(Outputs.back(), -42.0f);
+          for (unsigned Lane = 0; Lane < 4 * QuadCount; ++Lane) {
+            unsigned Mip = (Lane / 2 + Repeat) % 3;
+            unsigned Layer = unsigned(Inputs[Lane * 5 + 4]);
+            unsigned Center = (4u >> Mip) / 2;
+            for (unsigned C = 0; C < 4; ++C)
+              EXPECT_EQ(Outputs[1 + Lane * 4 + C],
+                        Lane & 1 ? -42.0f
+                                 : Color(Face, C < 2 ? 0 : Layer, Mip, Center,
+                                         Center, C));
+          }
+          for (const auto &Result : Results) {
+            EXPECT_EQ(Result.LiveMask, 0xfu);
+            EXPECT_EQ(Result.SideEffectMask, 0x5u);
+          }
+        }
+      }
+  }
+}
+
 TEST(CompiledStageTest, FragmentCubeExplicitGradientsSelectFaceElementAndMip) {
   constexpr char IR[] = R"(
     define void @ps_main() #0 {

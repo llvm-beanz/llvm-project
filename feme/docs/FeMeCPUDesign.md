@@ -2757,9 +2757,38 @@ rejection. Array admission also rejects dynamic/undefined offsets and
 missing stage identity. Native DXC plain/clamped array import is distinct
 from canonical compiled execution; bound descriptors remain unsupported.
 
+Heap-backed FP32 cube/array `SampleLevel` now shares
+`isSupportedDXILSampleLevel` admission, lowering and signature-growth
+matching with 1D/2D/3D. Default samplers, three-component directions or
+four-component direction/array-element coordinates, FP32 LOD and
+scalar/vector results up to the declared FP32 texel width (one through
+four) are supported in any stage. The unused scalar i32 offset may be
+zero, undef or poison, matching cube bias/gradient conventions.
+`createSampleCube`/`createSampleCubeArray` receive the live LOD,
+`UseExplicitLod=true`, six zero direction derivatives, zero bias,
+separate array elements and a negative-infinity shader MinLod clamp.
+Sampler LOD behavior is unchanged; no stage derivatives are synthesized.
+
+All `SampleLevel` calls now avoid the legacy fallback, which retains
+only implicit 2D/cube sampling. Malformed coordinates, padded/nonzero/
+dynamic offsets, non-heap handles, comparison samplers, non-FP32 texels
+and too-wide results reject consistently. Transforms verify forwarding,
+narrowing, reflection, cleanup and idempotence. Every-stage admission
+checks placeholders and invalid offsets. Compiled fragment tests
+distinguish all six faces, two cubes, three mips, spatial/component
+values and all result widths, with helper-only lanes, waves 4/8, one/
+three quads, masks, guards and repeats. Native SDK DXC cube/plain-array
+shaders execute two real mips through normal waves 4/8, reference and
+ARM64 AOT-object paths, checking exact FP32-bit half-mip blends, negative/
+upper LOD, sampler MinLod=MaxLod=1, all faces/elements, thirteen lanes,
+guards and repeat 2. Padded offsets reject in all compilation paths.
+Other sampling, runtime/SPIR-V lowering, artifact ABI 8 and argument
+layouts are unchanged; no bound/static D3D12 descriptors or owned-device
+execution are added.
+
 Heap-backed FP32 2D/array `SampleLevel` now shares
 `isSupportedDXILSampleLevel` admission, lowering and signature-growth
-matching with 1D/3D, replacing its zero-offset-only fallback. Default
+matching with 1D/3D/cube, replacing its zero-offset-only fallback. Default
 samplers, paired U/V or three-component U/V/layer FP32 coordinates,
 FP32 LOD, constant signed XY offsets and result widths one through four
 up to the declared FP32 texel width are supported in any stage.

@@ -863,6 +863,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                Builder.CreateExtractElement(DY, uint64_t{1}),
                Builder.CreateExtractElement(DX, uint64_t{2}),
                Builder.CreateExtractElement(DY, uint64_t{2})};
+        } else if (IsLevel) {
+          D = {Zero, Zero, Zero, Zero, Zero, Zero};
         } else {
           D = getOrSynthesizeSampleCubeDerivatives(Builder, F, U, V, Z);
         }
@@ -871,13 +873,13 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
           Loaded = createSampleCubeArray(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
               U, V, Z, D.DDirXdX, D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX,
-              D.DDirZdY, Layer, Zero, Builder.getFalse(), Bias, MinLodClamp,
-              Builder.getTrue(), CI->getName());
+              D.DDirZdY, Layer, Lod, Builder.getInt1(IsLevel), Bias,
+              MinLodClamp, Builder.getTrue(), CI->getName());
         } else {
           Loaded = createSampleCube(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
               U, V, Z, D.DDirXdX, D.DDirXdY, D.DDirYdX, D.DDirYdY, D.DDirZdX,
-              D.DDirZdY, Zero, Builder.getFalse(), Bias, MinLodClamp,
+              D.DDirZdY, Lod, Builder.getInt1(IsLevel), Bias, MinLodClamp,
               Builder.getTrue(), CI->getName());
         }
       } else {
@@ -1040,28 +1042,22 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Changed = true;
       continue;
     }
-    bool IsSample = ID == Intrinsic::dx_resource_sample;
-    bool IsSampleLevel = ID == Intrinsic::dx_resource_samplelevel;
-    if (!IsSample && !IsSampleLevel)
+    if (ID != Intrinsic::dx_resource_sample)
       continue;
 
     IRBuilder<> Builder(CI);
     Value *Mask = Builder.getTrue();
 
-    // Sample/SampleLevel: (handle, sampler, coord, [lod,] offset).
+    // Legacy implicit 2D/cube Sample: (handle, sampler, coord, offset).
     std::optional<ImageHandle> Img = classifyImageHandle(CI->getArgOperand(0));
     std::optional<CallInst *> Sampler =
         classifySamplerHandle(CI->getArgOperand(1));
-    unsigned OffsetIdx = IsSample ? 3 : 4;
-    if (!Img || !Sampler || !isZeroOffset(CI->getArgOperand(OffsetIdx)) ||
-        (IsSampleLevel && (Img->Shape == ImageShape::Plain2D ||
-                           Img->Shape == ImageShape::Array2D)))
+    if (!Img || !Sampler || !isZeroOffset(CI->getArgOperand(3)))
       continue;
 
     Value *Coord = CI->getArgOperand(2);
-    Value *Lod = IsSampleLevel ? CI->getArgOperand(3)
-                               : ConstantFP::get(Builder.getFloatTy(), 0.0);
-    Value *UseExplicitLod = Builder.getInt1(IsSampleLevel);
+    Value *Lod = ConstantFP::get(Builder.getFloatTy(), 0.0);
+    Value *UseExplicitLod = Builder.getFalse();
     Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
     Value *SamplerIndex = (*Sampler)->getArgOperand(0);
 
@@ -1070,23 +1066,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     case ImageShape::Plain2D: {
       Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
-      // Roadmap H7i: an implicit-LOD sample's real mip level (and, when
-      // enabled, an anisotropic footprint) needs this sample's own
-      // screen-space derivatives of (U, V), synthesized only in the
-      // fragment stage -- the only stage HLSL's implicit `Sample()` is
-      // ever legal from; an explicit-LOD `SampleLevel` ignores them, so
-      // zero constants (no extra IR) are passed instead.
       SampleDerivatives D =
-          IsSample ? getOrSynthesizeSample2DDerivatives(
-                        Builder, *CI->getFunction(), U, V)
-                   : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0),
-                                      ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0),
-                                      ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0),
-                                      ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0)};
+          getOrSynthesizeSample2DDerivatives(Builder, *CI->getFunction(), U, V);
       // DXIL's own `Texture2D::Sample` offset/clamp overloads are not
       // threaded through this pass yet (the `isZeroOffset` gate above
       // already requires the offset operand to be compile-time zero
@@ -1113,16 +1094,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       // -- Array2D now threads a real screen-space derivative pair
       // through too.
       SampleDerivatives D =
-          IsSample ? getOrSynthesizeSample2DDerivatives(
-                        Builder, *CI->getFunction(), U, V)
-                   : SampleDerivatives{ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0),
-                                      ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0),
-                                      ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0),
-                                      ConstantFP::get(Builder.getFloatTy(),
-                                                       0.0)};
+          getOrSynthesizeSample2DDerivatives(Builder, *CI->getFunction(), U, V);
       // Ordinary Sample retains zero bias/offset and no shader
       // clamp here. SampleBias uses its dedicated path above.
       Value *ZeroOffset = Builder.getInt32(0);
@@ -1147,20 +1119,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                                      /*Negative=*/true);
       // SampleBias is handled separately above; ordinary sampling has no bias.
       Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
-      // Roadmap L56: mirror Plain2D's own implicit-vs-explicit-LOD
-      // derivative gating above, but for the raw direction vector (X, Y,
-      // Z) rather than an already-face-local 2D coordinate -- see
-      // `getOrSynthesizeSampleCubeDerivatives`'s doc.
-      CubeDirectionDerivatives CD =
-          IsSample ? getOrSynthesizeSampleCubeDerivatives(
-                        Builder, *CI->getFunction(), X, Y, Z)
-                   : CubeDirectionDerivatives{
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0)};
+      CubeDirectionDerivatives CD = getOrSynthesizeSampleCubeDerivatives(
+          Builder, *CI->getFunction(), X, Y, Z);
       NewCall = createSampleCube(Builder, Env, ImageIndex, SamplerIndex, X, Y,
                                  Z, CD.DDirXdX, CD.DDirXdY, CD.DDirYdX,
                                  CD.DDirYdY, CD.DDirZdX, CD.DDirZdY, Lod,
@@ -1173,22 +1133,14 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
       Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{3});
-      // Ordinary Sample/SampleLevel have no bias here; their clamp overload
+      // Ordinary Sample has no bias here; its clamp overload
       // is not yet threaded through. SampleBias is handled separately above.
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
       Value *ZeroBias = ConstantFP::get(Builder.getFloatTy(), 0.0);
       // Roadmap L56: same derivative synthesis as Cube above.
-      CubeDirectionDerivatives CD =
-          IsSample ? getOrSynthesizeSampleCubeDerivatives(
-                        Builder, *CI->getFunction(), X, Y, Z)
-                   : CubeDirectionDerivatives{
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0),
-                        ConstantFP::get(Builder.getFloatTy(), 0.0)};
+      CubeDirectionDerivatives CD = getOrSynthesizeSampleCubeDerivatives(
+          Builder, *CI->getFunction(), X, Y, Z);
       NewCall = createSampleCubeArray(Builder, Env, ImageIndex, SamplerIndex,
                                       X, Y, Z, CD.DDirXdX, CD.DDirXdY,
                                       CD.DDirYdX, CD.DDirYdY, CD.DDirZdX,
@@ -1244,9 +1196,7 @@ bool hasImageAccesses(const Function &F) {
         return true;
       continue;
     }
-    bool IsSample = ID == Intrinsic::dx_resource_sample;
-    bool IsSampleLevel = ID == Intrinsic::dx_resource_samplelevel;
-    if (!IsSample && !IsSampleLevel)
+    if (ID != Intrinsic::dx_resource_sample)
       continue;
 
     // Mirrors `lowerImageAccesses`'s own eligibility check exactly (without
@@ -1257,12 +1207,9 @@ bool hasImageAccesses(const Function &F) {
     // `ResourceLoweringPass::run`'s module-function loop may revisit for a
     // handle it left deliberately unrewritten (see the header comment's
     // "per-access" note).
-    unsigned OffsetIdx = IsSample ? 3 : 4;
     auto Image = classifyImageHandle(CI->getArgOperand(0));
     if (Image && classifySamplerHandle(CI->getArgOperand(1)) &&
-        isZeroOffset(CI->getArgOperand(OffsetIdx)) &&
-        (!IsSampleLevel || (Image->Shape != ImageShape::Plain2D &&
-                            Image->Shape != ImageShape::Array2D)))
+        isZeroOffset(CI->getArgOperand(3)))
       return true;
   }
   return false;
@@ -1438,10 +1385,7 @@ static bool isSupportedDXILFloatingSample(const CallInst &CI,
   }
   bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
               Kind == dxil::ResourceKind::Texture1DArray;
-  bool Is2D = Kind == dxil::ResourceKind::Texture2D ||
-              Kind == dxil::ResourceKind::Texture2DArray;
-  if ((IsImplicit || (IsLevel && !Is2D)) && !Is1D &&
-      Kind != dxil::ResourceKind::Texture3D)
+  if (IsImplicit && !Is1D && Kind != dxil::ResourceKind::Texture3D)
     return false;
   bool IsCube = Kind == dxil::ResourceKind::TextureCube ||
                 Kind == dxil::ResourceKind::TextureCubeArray;

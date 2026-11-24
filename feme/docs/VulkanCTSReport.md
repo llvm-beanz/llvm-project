@@ -1,5 +1,33 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) FP32 cube/array explicit-LOD sampling scope (2026-11-24)
+
+The [cube explicit-LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fp32-cubearray-explicit-lod-sampling-vm-2026-11-24)
+adds checked heap-backed FP32 `SampleLevel` in any stage with a default
+sampler, shape-matched direction/element coordinates and result widths
+one through four. Cubes retain unused scalar zero/undef/poison offsets.
+Existing helpers receive live explicit LOD, six zero derivatives, zero
+bias, separate elements and no shader MinLod clamp. All `SampleLevel`
+calls now bypass the legacy implicit-only fallback.
+
+Transforms/admission verify malformed-call rejection, narrowing,
+reflection, cleanup and idempotence. Compiled fragments check six faces,
+two cubes, three mips, spatial/component values, all result widths,
+helpers, partial waves, masks, guards and repeats. Native SDK DXC
+cube/plain-array shaders execute two real mips through normal waves 4/8,
+reference and ARM64 AOT-object paths, with exact FP32-bit half-mip
+blends, image/sampler clamps, all faces/elements, thirteen lanes, guards
+and repeat 2. Invalid padded offsets reject in all three CPU paths.
+
+The affected ARM64 build passes. Relevant CPU transforms/units, runner
+and runtime LIT passes 1,635 with 4 unsupported and zero failures in
+76.36 seconds; three fixtures and two units add five passes. This is not
+a new full-suite, adapter-matrix or external Vulkan CTS result. Other
+sampling, runtime/SPIR-V lowering, artifact ABI 8 and argument layouts
+are unchanged. Broader conformance, MS sampling, bound/static D3D12
+descriptors and owned-device execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native 1D/array and 3D multi-mip explicit-LOD sampling scope (2026-11-24)
 
 The [native explicit-LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-1darray-and-3d-multi-mip-explicit-lod-sampling-vm-2026-11-24)

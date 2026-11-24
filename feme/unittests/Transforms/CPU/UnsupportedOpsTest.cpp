@@ -846,6 +846,58 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupported3DLevelSamplingInEveryStage) {
   }
 }
 
+TEST(UnsupportedOpsTest, AdmitsOnlySupportedCubeLevelSamplingInEveryStage) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @cube(i32 %offset, <3 x float> %coord, float %lod) {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_5t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call float @llvm.dx.resource.samplelevel.f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5) %t, target("dx.Sampler", 0) %s, <3 x float> %coord, float %lod, i32 0)
+      ret float %r
+    }
+    define <4 x float> @array(i32 %offset, <4 x float> %coord, float %lod) {
+      %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_9t(i32 0)
+      %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
+      %r = call <4 x float> @llvm.dx.resource.samplelevel.v4f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9) %t, target("dx.Sampler", 0) %s, <4 x float> %coord, float %lod, i32 undef)
+      ret <4 x float> %r
+    }
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_5t(i32)
+    declare target("dx.Texture", <4 x float>, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_9t(i32)
+    declare target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32)
+    declare float @llvm.dx.resource.samplelevel.f32.tdx.Texture_v4f32_0_0_0_5t.tdx.Sampler_0t.v3f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 5), target("dx.Sampler", 0), <3 x float>, float, i32)
+    declare <4 x float> @llvm.dx.resource.samplelevel.v4f32.tdx.Texture_v4f32_0_0_0_9t.tdx.Sampler_0t.v4f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 9), target("dx.Sampler", 0), <4 x float>, float, i32)
+  )");
+  ASSERT_TRUE(M);
+  for (StringRef Name : {"cube", "array"}) {
+    Function *F = M->getFunction(Name);
+    auto *Sample = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    Type *OffsetTy = Sample->getArgOperand(4)->getType();
+    Constant *Offsets[] = {ConstantInt::get(OffsetTy, 0),
+                           UndefValue::get(OffsetTy),
+                           PoisonValue::get(OffsetTy)};
+    for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
+      SCOPED_TRACE((Name + ": " + Stage).str());
+      if (!Stage.empty())
+        F->addFnAttr("feme.shader.stage", Stage);
+      for (Constant *Offset : Offsets) {
+        Sample->setArgOperand(4, Offset);
+        EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+      }
+      Value *BadOffsets[] = {ConstantInt::get(OffsetTy, 1), F->getArg(0)};
+      for (Value *Offset : BadOffsets) {
+        Sample->setArgOperand(4, Offset);
+        EXPECT_THAT_ERROR(
+            checkSupportedRaisedOps(*M),
+            Failed<StringError>(testing::Property(
+                &StringError::getMessage,
+                testing::HasSubstr("cube/array explicit-LOD sampling"))));
+      }
+      Sample->setArgOperand(4, Offsets[0]);
+      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+    }
+  }
+}
+
 TEST(UnsupportedOpsTest, AdmitsOnlySupported2DLevelSamplingInEveryStage) {
   LLVMContext Ctx;
   auto M = parseIR(Ctx, R"(
