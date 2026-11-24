@@ -2955,10 +2955,35 @@ layers/components, all result widths, offsets, bounds, waves 4/8, five
 lanes, guards and repeats; fragment tests add divergent mips/layers,
 both bounds axes, invalid layers/mips and helper masks. Native SDK DXC
 plain/array shaders execute through normal/reference/AOT paths on one
-mip; runner YAML still prepares one mip. Integer 2D/array and multisampled
+mip; runner YAML still prepares one mip. Multisampled
 DXIL loads remain outside this extension. Existing 1D/3D loads, sampling,
 artifact ABI 8 and argument layouts are unchanged; no bound/static
 descriptors or owned D3D12 execution are added.
+
+Heap-backed signed/unsigned i32 2D/array `Load` now uses
+`createLoad2DI32`/`createLoad2DArrayI32` with the same shared matcher,
+coordinate/mip/offset rules and widths one through four. Matching
+result/texel scalar types and shared narrowing preserve exact bits
+without FP32 conversions; calls pass sample zero. Integer runtime
+per-mip X/Y, invalid mip and independent layer checks now match FP32.
+Invalid accesses read zero; SPIR-V integer users share this runtime
+bounds correction without lowering changes.
+
+Transforms test offsets, mip/sample/mask, narrowing, reflection, cleanup
+and idempotence. Every-stage admission covers both scalar types and
+each undefined/poison XY component. Runtime tests verify exact
+signed/unsigned components, rectangular extents, layer bounds, invalid
+mips and masks. Compiled normal/reference compute tests distinguish
+rectangular mips, X/Y/layers/components, all result widths, offsets,
+bounds, waves 4/8, five lanes, guards and repeats, including high-bit/
+negative and adjacent non-FP32-exact values. Fragment array tests add
+integer outputs, divergent mips/layers and helper masks. Native SDK DXC
+plain/array `int4`/`uint4` shaders execute through normal/reference/AOT
+paths on one mip. Mixed scalar types, non-32-bit texels, too-wide results,
+non-heap handles and dynamic/undefined/poison or partial offsets reject.
+Existing FP32 loads, 1D/3D loads, sampling, artifact ABI 8 and argument
+layouts are unchanged; no bound/static descriptors or owned D3D12
+execution are added.
 
 Heap-backed FP32 `Texture3D::Sample` now executes through `createSample3D`
 in fragment stages. Shared admission/lowering requires default samplers,

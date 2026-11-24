@@ -1,0 +1,85 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/sint.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D UNSIGNED /Fo %t/uint.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/sint.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-translate --import-dxil %t/uint.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/sint.yaml %t/sint.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/sint.yaml %t/sint.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/sint.dxil -o %t/sint.o
+# RUN: feme-run --object --repeat=2 --heap=%t/sint.yaml %t/sint.o | FileCheck %s
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/uint.yaml %t/uint.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/uint.yaml %t/uint.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint.dxil -o %t/uint.o
+# RUN: feme-run --object --repeat=2 --heap=%t/uint.yaml %t/uint.o | FileCheck %s
+# Native import plus CPU execution, not owned D3D12; YAML prepares one mip.
+# RAISE: call <4 x i32> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> splat (i32 1))
+# RAISE: call <4 x i32> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> splat (i32 -1))
+# RAISE: call <4 x i32> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> splat (i32 -1))
+# RAISE: call <4 x i32> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> zeroinitializer)
+# RAISE-NOT: call %dx.types.ResRet.i32 @dx.op.textureLoad
+# CHECK: heap[2]: 42 2147483659 0 0 0 2147483663 0 0 0 0 2147483649 2147483750 0 0 2147483653 0 0 0 0 0 0 42
+#--- shader.hlsl
+#ifdef UNSIGNED
+#define TEXEL uint4
+#else
+#define TEXEL int4
+#endif
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture2D<TEXEL> t = ResourceDescriptorHeap[0];
+  Texture2DArray<TEXEL> a = ResourceDescriptorHeap[1];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  int x = int(tid.x) - 1;
+  int layer = int(tid.x % 4) - 1;
+  TEXEL p = t.Load(int3(x, 0, 0), int2(1, 1));
+  TEXEL n = t.Load(int3(x, 1, 0), int2(-1, -1));
+  TEXEL ap = a.Load(int4(x, 1, layer, 0), int2(-1, -1));
+  TEXEL invalid = a.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : 1));
+  outBuffer.Store(4 + tid.x * 16, asuint(p.a));
+  outBuffer.Store(8 + tid.x * 16, asuint(n.g));
+  outBuffer.Store(12 + tid.x * 16, asuint(ap.b));
+  outBuffer.Store(16 + tid.x * 16, asuint(invalid.r));
+}
+#--- sint.yaml
+resource-heap:
+  - index: 2
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [2, 2]
+    format: r32g32b32a32_sint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [2, 2]
+    format: r32g32b32a32_sint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483748, 2147483749, 2147483750, 2147483751, 2147483752, 2147483753, 2147483754, 2147483755, 2147483756, 2147483757, 2147483758, 2147483759, 2147483760, 2147483761, 2147483762, 2147483763]
+#--- uint.yaml
+resource-heap:
+  - index: 2
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [2, 2]
+    format: r32g32b32a32_uint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [2, 2]
+    format: r32g32b32a32_uint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483748, 2147483749, 2147483750, 2147483751, 2147483752, 2147483753, 2147483754, 2147483755, 2147483756, 2147483757, 2147483758, 2147483759, 2147483760, 2147483761, 2147483762, 2147483763]

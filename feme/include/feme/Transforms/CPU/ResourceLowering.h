@@ -60,7 +60,7 @@
 // FP32/i32 1D/array and 3D heap-backed Load preserve integer coordinates,
 // separate array layers, explicit mip levels and constant signed spatial
 // offsets in every stage, without a sampler.
-// FP32 2D/array Load shares this path with paired XY spatial offsets.
+// FP32/i32 2D/array Load shares this path with paired XY spatial offsets.
 //
 //===----------------------------------------------------------------------===//
 
@@ -75,11 +75,11 @@ class CallInst;
 
 namespace feme::cpu {
 
-/// Tests heap-backed FP32 2D/array or FP32/i32 1D/array/3D loading in any stage
-/// with shape-matched i32 coordinates, an i32 mip, constant signed spatial
-/// offsets (scalar for 1D, XY for 2D, XYZ for 3D) and scalar/vector results up
-/// to the declared texel width (at most four). Array layers are passed
-/// separately.
+/// Tests heap-backed FP32/i32 1D/2D (including array) or 3D loading in any
+/// stage with shape-matched i32 coordinates, an i32 mip, constant signed
+/// spatial offsets (scalar for 1D, XY for 2D, XYZ for 3D) and scalar/vector
+/// results up to the declared texel width (at most four). Array layers are
+/// passed separately.
 bool isSupportedDXILLoad(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32 1D/2D/3D/cube (including array) biased sampling in a

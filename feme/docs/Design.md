@@ -1739,10 +1739,28 @@ correction without lowering changes. Compiled normal/reference compute
 tests cover rectangular mips, X/Y/layers/components, all result widths,
 offsets, bounds, partial waves, guards and repeats; fragment tests add
 divergent mips/layers and helper masks. Native SDK DXC plain/array shaders
-execute through normal/reference/AOT paths on one mip. Integer 2D/array
-and multisampled DXIL loads remain outside this extension. Existing 1D/3D
+execute through normal/reference/AOT paths on one mip.
+Multisampled DXIL loads remain outside this extension. Existing 1D/3D
 loads, sampling, artifact ABI 8 and argument layouts are unchanged;
 no bound/static descriptors or owned D3D12 execution are added.
+
+Heap-backed signed/unsigned i32 2D/array `Load` now follows the same
+stage-independent coordinate/mip/offset rules. Matching result/texel
+scalar types and widths one through four use existing integer helpers
+and shared narrowing without FP32 conversions. Integer per-mip X/Y,
+invalid mip and independent layer checks now match FP32, returning zero
+instead of aliasing another subresource; SPIR-V integer users share
+the runtime correction. Compiled normal/reference compute tests verify
+exact high-bit/negative and adjacent non-FP32-exact components,
+rectangular mips, X/Y/layers, all result widths, offsets, bounds, partial
+waves, guards and repeats. Fragment array tests add integer outputs,
+divergent mips/layers and helper masks. Native SDK DXC plain/array
+`int4`/`uint4` shaders execute through normal/reference/AOT paths on one
+mip. Mixed scalar types, non-32-bit texels, too-wide results, non-heap
+handles and dynamic/undefined/poison or partial offsets remain rejected.
+Existing FP32 loads, 1D/3D loads, sampling, SPIR-V lowering, artifact ABI 8
+and argument layouts are unchanged; no bound/static descriptors or owned
+D3D12 execution are added.
 
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ

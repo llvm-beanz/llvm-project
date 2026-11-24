@@ -1739,6 +1739,57 @@ remain open; `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) integer 2D/array texel-load CPU execution progress (2026-11-24):
+heap-backed signed/unsigned i32 `Texture2D::Load` and
+`Texture2DArray::Load` now execute in any stage through the existing
+integer helpers. Shared admission/lowering retains paired `(X,Y)` or
+three-component `(X,Y,layer)` i32 coordinates, an i32 mip and constant
+signed XY offsets. Matching result/texel scalar types, scalar/vector
+widths one through four and shared narrowing preserve exact bits without
+FP32 conversions. Wrapping adds affect only X/Y; layers stay separate.
+Calls pass sample zero without samplers or derivatives. Native
+omitted-offset raising is unchanged.
+
+The integer runtime now checks both per-mip spatial extents and invalid
+mips, matching the FP32 helpers. Independent layer bounds are not
+mip-scaled; invalid accesses return zero instead of aliasing another
+row/subresource. Existing SPIR-V integer users share this runtime bounds
+correction; SPIR-V lowering is unchanged.
+
+Transforms verify integer offsets, explicit mip/sample/mask, narrowing,
+reflection, image-only signature growth, cleanup and idempotence.
+Mixed scalar types, non-32-bit texels, too-wide results, non-heap handles
+and dynamic/undefined/poison or partial offsets remain rejected. The
+existing admission unit now checks FP32/i32 and each undefined/poison XY
+component in fragment, vertex, compute and unannotated functions.
+Runtime tests verify exact signed/unsigned components, rectangular
+per-mip X/Y bounds, layers, invalid mips and false masks.
+
+Compiled normal/reference compute tests distinguish rectangular mips
+0/1/2, X/Y, layers and components with all result widths, signed offsets,
+bounds, invalid mips, wave sizes 4/8, five lanes, guards and repeats.
+High-bit/negative values and adjacent non-FP32-exact integers test exact
+bits. Fragment array tests add integer outputs, divergent mips/layers,
+each lower/upper XY/layer/mip bound, helpers, partial waves, masks, guards
+and repeats. Actual SDK DXC SM6.6 plain/array `int4`/`uint4` bindless
+shaders execute through normal/reference/AOT paths with signed/omitted
+offsets, exact components, invalid mips, five lanes, guards and repeats
+on one mip; runner YAML still prepares one mip. Dynamic-offset admission
+rejects in all three paths.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling plus runtime LIT passes 1,322 in 40.45 seconds;
+full FeMe LIT passes 4,225 with 15 skipped, 10 unsupported and zero
+failures among 4,250 discovered tests in 87.71 seconds. Six new tests add
+six passes; timings are not controlled speedups. Existing FP32 loads,
+1D/3D loads, sampling, artifact ABI 8 and argument layouts are unchanged.
+Non-32-bit texels and multisampled DXIL loads remain outside this
+milestone. Native import plus canonical CPU execution is not owned D3D12
+execution. Broader conformance, bound/static descriptors and owned D3D12
+execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

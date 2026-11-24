@@ -290,10 +290,28 @@ The original compute-only baseline is no longer current:
   all result widths, offsets, bounds, partial waves, guards and repeats;
   fragment tests add divergent mips/layers and helper masks. Native SDK
   DXC plain/array shaders execute through normal/reference/AOT paths on
-  one mip. Integer 2D/array and multisampled DXIL loads remain outside
+  one mip. Multisampled DXIL loads remain outside
   this extension. Existing 1D/3D loads, sampling, SPIR-V lowering,
   artifact ABI 8 and argument layouts are unchanged. Bound/static
   descriptors, owned D3D12 execution and W2(a)/W2(b)/W3(b) remain open;
+  `CreateDevice` remains `E_NOTIMPL`.
+  Heap-backed signed/unsigned i32 2D/array `Load` now also executes in any
+  stage with matching result/texel scalar types, widths one through four
+  and the same coordinate/mip/offset rules. Integer helpers and shared
+  narrowing preserve exact bits without FP32 conversions. Integer
+  per-mip X/Y, invalid mip and independent layer checks match FP32,
+  returning zero for invalid accesses; SPIR-V integer users share the
+  runtime correction. Compiled normal/reference compute tests verify
+  high-bit/negative and adjacent non-FP32-exact components, rectangular
+  mips, X/Y/layers, all result widths, offsets, bounds, partial waves,
+  guards and repeats. Fragment array tests add integer outputs,
+  divergent mips/layers and helper masks. Native SDK DXC plain/array
+  `int4`/`uint4` shaders execute through normal/reference/AOT paths on one
+  mip. Mixed scalar types, non-32-bit texels, too-wide results, non-heap
+  handles and dynamic/undefined/poison or partial offsets reject.
+  Existing FP32 loads, 1D/3D loads, sampling, SPIR-V lowering, artifact
+  ABI 8 and argument layouts are unchanged. Bound/static descriptors,
+  owned D3D12 execution and W2(a)/W2(b)/W3(b) remain open;
   `CreateDevice` remains `E_NOTIMPL`.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed

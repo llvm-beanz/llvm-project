@@ -744,14 +744,25 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                               cast<Constant>(Offset)->getAggregateElement(1u));
         if (Kind == dxil::ResourceKind::Texture2DArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
-          Loaded = createLoad2DArray(Builder, Env, Image->getArgOperand(0), X,
-                                     Y, Layer, CI->getArgOperand(2),
-                                     Builder.getInt32(0), Builder.getTrue(),
-                                     CI->getName());
+          Loaded =
+              IsInteger
+                  ? createLoad2DArrayI32(Builder, Env, Image->getArgOperand(0),
+                                         X, Y, Layer, CI->getArgOperand(2),
+                                         Builder.getInt32(0), Builder.getTrue(),
+                                         CI->getName())
+                  : createLoad2DArray(Builder, Env, Image->getArgOperand(0), X,
+                                      Y, Layer, CI->getArgOperand(2),
+                                      Builder.getInt32(0), Builder.getTrue(),
+                                      CI->getName());
         } else {
-          Loaded = createLoad2D(Builder, Env, Image->getArgOperand(0), X, Y,
-                                CI->getArgOperand(2), Builder.getInt32(0),
-                                Builder.getTrue(), CI->getName());
+          Loaded =
+              IsInteger
+                  ? createLoad2DI32(Builder, Env, Image->getArgOperand(0), X, Y,
+                                    CI->getArgOperand(2), Builder.getInt32(0),
+                                    Builder.getTrue(), CI->getName())
+                  : createLoad2D(Builder, Env, Image->getArgOperand(0), X, Y,
+                                 CI->getArgOperand(2), Builder.getInt32(0),
+                                 Builder.getTrue(), CI->getName());
         }
       } else {
         Value *X = Coord->getType()->isIntegerTy(32)
@@ -1491,7 +1502,7 @@ bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
   if (!Is1D && !Is2D && Kind != dxil::ResourceKind::Texture3D)
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
-  if (!ScalarTy->isFloatTy() && (Is2D || !ScalarTy->isIntegerTy(32)))
+  if (!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32))
     return false;
   unsigned TextureWidth = getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
   unsigned ResultWidth = getTexelWidth(CI.getType(), ScalarTy);

@@ -76,9 +76,9 @@ Error checkSupportedRaisedOps(const Module &M) {
           return createStringError(
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed "
-              "%s %s texel loading with %s i32 coordinates, an i32 "
+              "FP32/i32 %s texel loading with %s i32 coordinates, an i32 "
               "mip and constant signed %s offsets",
-              F.getName().str().c_str(), Is2D ? "FP32" : "FP32/i32",
+              F.getName().str().c_str(),
               Is1D   ? "1D/array"
               : Is2D ? "2D/array"
                      : "3D",

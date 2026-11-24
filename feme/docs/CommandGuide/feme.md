@@ -260,11 +260,23 @@ coverage" in [../Design.md](../Design.md).
   poison XY offsets raise to zero; canonical offsets remain strict.
   Invalid mips, per-mip spatial bounds and independent layer bounds read
   zero. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one mip. Integer 2D/array and multisampled DXIL
+  reference/AOT paths on one mip. Multisampled DXIL
   loads remain outside this extension. Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   SPIR-V FP32 users share the runtime bounds correction. No bound/static
   descriptors or owned D3D12 execution are added.
+  Heap-backed signed/unsigned i32 2D/array `Load` now also compiles in
+  any stage, including native AOT, with the same coordinate/mip/offset
+  rules and widths one through four. Matching result/texel scalar types
+  and integer helpers preserve exact bits without FP32 conversions.
+  Invalid mips, per-mip X/Y bounds and independent layer bounds read
+  zero. Native SDK DXC plain/array `int4`/`uint4` shaders execute through
+  normal/reference/AOT paths on one mip. Mixed scalar types, non-32-bit
+  texels, too-wide results, non-heap handles and dynamic/undefined/
+  poison or partial offsets reject. Existing FP32 loads, 1D/3D loads,
+  sampling, SPIR-V lowering, artifact ABI 8 and argument layouts are
+  unchanged; SPIR-V integer users share the runtime bounds correction.
+  No bound/static descriptors or owned D3D12 execution are added.
   Heap-backed FP32 3D implicit `Sample` now lowers in fragment stages with
   default samplers, three-component U/V/W coordinates, constant signed XYZ
   offsets and scalar/vector results up to the declared texel width (at most
