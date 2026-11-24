@@ -290,8 +290,8 @@ The original compute-only baseline is no longer current:
   all result widths, offsets, bounds, partial waves, guards and repeats;
   fragment tests add divergent mips/layers and helper masks. Native SDK
   DXC plain/array shaders execute through normal/reference/AOT paths on
-  one mip. Multisampled DXIL loads remain outside
-  this extension. Existing 1D/3D loads, sampling, SPIR-V lowering,
+  one mip. Integer MS CPU loads and runner MS preparation remain open.
+  Existing 1D/3D loads, sampling, SPIR-V lowering,
   artifact ABI 8 and argument layouts are unchanged. Bound/static
   descriptors, owned D3D12 execution and W2(a)/W2(b)/W3(b) remain open;
   `CreateDevice` remains `E_NOTIMPL`.
@@ -313,6 +313,25 @@ The original compute-only baseline is no longer current:
   ABI 8 and argument layouts are unchanged. Bound/static descriptors,
   owned D3D12 execution and W2(a)/W2(b)/W3(b) remain open;
   `CreateDevice` remains `E_NOTIMPL`.
+  Heap-backed FP32 `Texture2DMS::Load`/`Texture2DMSArray::Load` now execute
+  in any stage. Native `dx.MSTexture` opcode 66 raises to
+  `llvm.dx.resource.load.ms`, keeping the sample index separate from the
+  integer coordinates and signed XY offsets. Shared matching retains
+  FP32 scalar/vector widths one through four and heap-backed handles.
+  Existing 2D/array helpers receive mip zero, the live sample and separate
+  layers without samplers or derivatives. FP32 runtime sample bounds now
+  prevent invalid samples from aliasing another texel/row/layer; SPIR-V
+  FP32 users share this correction without lowering changes. Compiled
+  normal/reference compute and fragment array tests cover samples,
+  components, offsets, bounds, helper masks, partial waves, guards and
+  repeats. SDK DXC FP32 plain/array shaders pass import/raising and AOT
+  compilation only: runner YAML still rejects MS image preparation.
+  Integer native MS loads raise but explicitly fail CPU admission.
+  MS sampling and dynamic/undefined/poison or partial offsets remain
+  unsupported. Integer MS CPU loads, runner MS preparation, bound/static
+  descriptors and owned D3D12 execution remain open. Artifact ABI 8 and
+  argument layouts are unchanged; `CreateDevice` remains `E_NOTIMPL`;
+  W2(a)/W2(b)/W3(b) are not closed.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

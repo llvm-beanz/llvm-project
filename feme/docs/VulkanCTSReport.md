@@ -1,5 +1,34 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) FP32 multisample texel-load CPU regression scope (2026-11-24)
+
+The [FP32 multisample follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fp32-multisample-texel-load-cpu-execution-vm-2026-11-24)
+adds heap-backed FP32 `Texture2DMS::Load`/`Texture2DMSArray::Load`
+CPU execution in any stage. Native opcode 66 now raises MS textures to
+`llvm.dx.resource.load.ms`, preserving the sample index separately from
+the integer coordinates and signed XY offsets. Existing 2D/array helpers
+use mip zero and the live sample; layers remain separate.
+FP32 runtime sample bounds now prevent invalid sample indices from
+aliasing another texel/row/layer. SPIR-V FP32 users share the runtime
+correction; SPIR-V lowering is unchanged.
+
+Runtime tests cover sample counts 1/2/4, rectangular extents, components,
+invalid samples/mips and masks. Compiled normal/reference compute tests
+distinguish four samples, X/Y/layers/components, all result widths,
+offsets, bounds, partial waves, guards and repeats. Fragment array tests
+add divergent samples/layers and helper masks. SDK DXC plain/array FP32
+shaders pass native import/raising and AOT compilation; native integer
+MS loads raise but remain explicitly unsupported on CPU. Runner YAML
+still rejects MS images, so native MS execution is not claimed.
+
+The ARM64 `-j2` build passes; focused LIT passes 1,330; full LIT passes
+4,233 with 15 skipped, 10 unsupported and zero failures among 4,258
+discovered tests. No new Vulkan CTS run, adapter-matrix result,
+bound/static descriptors or owned D3D12 execution is claimed. Integer
+MS CPU loads and runner MS preparation remain open. Artifact ABI 8 and
+argument layouts are unchanged; W2(a)/W2(b)/W3(b) remain open;
+`CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) integer 2D/array texel-load CPU regression scope (2026-11-24)
 
 The [integer 2D/array texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-integer-2darray-texel-load-cpu-execution-vm-2026-11-24)

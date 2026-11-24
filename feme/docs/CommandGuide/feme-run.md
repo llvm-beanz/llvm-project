@@ -267,8 +267,8 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   DXC plain/array shaders execute in all three paths with signed/omitted
   offsets, components, invalid mips, five lanes, guards and repeats on
   one mip; runner YAML still prepares one mip. Dynamic-offset admission
-  rejects in all three paths. Multisampled DXIL loads
-  remain outside this extension. Existing 1D/3D loads, sampling, SPIR-V
+  rejects in all three paths. Integer MS CPU loads and runner MS
+  preparation remain open. Existing 1D/3D loads, sampling, SPIR-V
   lowering, artifact ABI 8 and argument layouts are unchanged; SPIR-V
   FP32 users share the runtime bounds correction. No bound/static
   descriptors or owned D3D12 execution are added.
@@ -291,6 +291,23 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   lowering, artifact ABI 8 and argument layouts are unchanged; SPIR-V
   integer users share the runtime bounds correction. No bound/static
   descriptors or owned D3D12 execution are added.
+  Heap-backed FP32 `Texture2DMS::Load`/`Texture2DMSArray::Load` now has
+  stage-independent CPU lowering with shape-matched i32 coordinates,
+  an i32 sample, constant signed XY offsets and scalar/vector FP32
+  results up to the declared width (one through four). Native opcode 66
+  raises to `llvm.dx.resource.load.ms`; existing 2D/array helpers receive
+  mip zero, the live sample and separate layers. Invalid samples return
+  zero without aliasing another texel/row/layer. Compiled normal/reference
+  compute tests distinguish four samples, components, coordinates/layers,
+  offsets, bounds, partial waves, guards and repeats; fragment array tests
+  add divergent samples/layers and helper masks. SDK DXC FP32 plain/array
+  shaders pass import/raising and AOT compilation only. **Runner YAML
+  still rejects MS image preparation**, so native MS execution through
+  this runner is not claimed. Integer native MS loads raise but explicitly
+  fail CPU admission. MS sampling and dynamic/undefined/poison or partial
+  offsets remain unsupported, including dynamic-offset rejection in
+  normal/reference/AOT paths. Artifact ABI 8 and argument layouts are
+  unchanged; no bound/static descriptors or owned D3D12 execution are added.
   Heap-backed FP32 3D implicit `Sample` now has fragment-stage CPU lowering
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

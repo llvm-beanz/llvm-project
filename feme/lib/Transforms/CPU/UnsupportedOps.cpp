@@ -57,6 +57,19 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
 
     switch (F.getIntrinsicID()) {
+    case Intrinsic::dx_resource_load_ms:
+      for (const User *U : F.users()) {
+        const auto *CI = dyn_cast<CallInst>(U);
+        if (!CI || !isSupportedDXILLoad(*CI))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "unsupported raised operation: '%s' requires heap-backed "
+              "FP32 2DMS/array texel loading with paired/three-component "
+              "i32 coordinates, an i32 sample index and constant signed "
+              "XY offsets",
+              F.getName().str().c_str());
+      }
+      continue;
     case Intrinsic::dx_resource_load_level:
       for (const User *U : F.users()) {
         const auto *CI = dyn_cast<CallInst>(U);

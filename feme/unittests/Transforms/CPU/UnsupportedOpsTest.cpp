@@ -564,6 +564,59 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupported2DLoadsInEveryStage) {
   }
 }
 
+TEST(UnsupportedOpsTest, AdmitsOnlySupportedMSLoadsInEveryStage) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define float @plain(<2 x i32> %coord, i32 %sample, <2 x i32> %offset) {
+      %t = call target("dx.MSTexture", float, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap.tdx.MSTexture_f32_0_4_0_3t(i32 0)
+      %v = call float @llvm.dx.resource.load.ms.f32.tdx.MSTexture_f32_0_4_0_3t.v2i32.v2i32(target("dx.MSTexture", float, 0, 4, 0, 3) %t, <2 x i32> %coord, i32 %sample, <2 x i32> <i32 1, i32 -1>)
+      ret float %v
+    }
+    define <2 x float> @array(<3 x i32> %coord, i32 %sample, <2 x i32> %offset) {
+      %t = call target("dx.MSTexture", <2 x float>, 0, 0, 0, 8) @llvm.dx.resource.handlefromheap.tdx.MSTexture_v2f32_0_0_0_8t(i32 0)
+      %v = call <2 x float> @llvm.dx.resource.load.ms.v2f32.tdx.MSTexture_v2f32_0_0_0_8t.v3i32.v2i32(target("dx.MSTexture", <2 x float>, 0, 0, 0, 8) %t, <3 x i32> %coord, i32 %sample, <2 x i32> <i32 -1, i32 1>)
+      ret <2 x float> %v
+    }
+    declare target("dx.MSTexture", float, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap.tdx.MSTexture_f32_0_4_0_3t(i32)
+    declare target("dx.MSTexture", <2 x float>, 0, 0, 0, 8) @llvm.dx.resource.handlefromheap.tdx.MSTexture_v2f32_0_0_0_8t(i32)
+    declare float @llvm.dx.resource.load.ms.f32.tdx.MSTexture_f32_0_4_0_3t.v2i32.v2i32(target("dx.MSTexture", float, 0, 4, 0, 3), <2 x i32>, i32, <2 x i32>)
+    declare <2 x float> @llvm.dx.resource.load.ms.v2f32.tdx.MSTexture_v2f32_0_0_0_8t.v3i32.v2i32(target("dx.MSTexture", <2 x float>, 0, 0, 0, 8), <3 x i32>, i32, <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  for (StringRef Name : {"plain", "array"}) {
+    Function *F = M->getFunction(Name);
+    auto *Load = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    auto *Offset = cast<Constant>(Load->getArgOperand(3));
+    for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
+      SCOPED_TRACE((Name + ": " + Stage).str());
+      F->removeFnAttr("feme.shader.stage");
+      if (!Stage.empty())
+        F->addFnAttr("feme.shader.stage", Stage);
+      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+      Value *BadOffsets[] = {F->getArg(2), UndefValue::get(Offset->getType()),
+                             PoisonValue::get(Offset->getType())};
+      for (Value *Bad : BadOffsets) {
+        Load->setArgOperand(3, Bad);
+        EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+      }
+      for (unsigned Axis = 0; Axis < 2; ++Axis)
+        for (bool Poison : {false, true}) {
+          Constant *Components[] = {Offset->getAggregateElement(0u),
+                                    Offset->getAggregateElement(1u)};
+          Components[Axis] = Poison ? PoisonValue::get(Type::getInt32Ty(Ctx))
+                                    : UndefValue::get(Type::getInt32Ty(Ctx));
+          Load->setArgOperand(3, ConstantVector::get(Components));
+          EXPECT_THAT_ERROR(
+              checkSupportedRaisedOps(*M),
+              Failed<StringError>(testing::Property(
+                  &StringError::getMessage,
+                  testing::HasSubstr("FP32 2DMS/array texel loading"))));
+        }
+      Load->setArgOperand(3, Offset);
+    }
+  }
+}
+
 TEST(UnsupportedOpsTest, AdmitsOnlySupported1DLoadsInEveryStage) {
   LLVMContext Ctx;
   auto M = parseIR(Ctx, R"(

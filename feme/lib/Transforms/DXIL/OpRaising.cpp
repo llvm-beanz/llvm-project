@@ -1314,10 +1314,8 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 /// /`load_level`'s `coord` operand packs (see Design.md's "Decision: texture
 /// and sampler handle kinds" -- `Dim` is exactly `TextureExtType::
 /// getDimension()`). An array dimension adds one component (the array
-/// slice) beyond its non-array counterpart. Returns 0 for a dimension this
-/// pass does not raise texture accesses for (multisampled and feedback
-/// textures; MSTexture's `Load` op takes a sample index DXIL encodes
-/// differently, and no feedback-texture op is raised at all yet).
+/// slice) beyond its non-array counterpart. Returns 0 for multisampled and
+/// feedback textures; multisampled loads handle their dimensions separately.
 unsigned getTextureCoordComponents(dxil::ResourceKind Dim) {
   switch (Dim) {
   case dxil::ResourceKind::Texture1D:
@@ -1696,9 +1694,10 @@ bool raiseSampleCmp(CallInst &CI, bool IsLevelZero) {
 }
 
 /// Raises a `dx.op.textureLoad` (opcode 66) call on an already-raised
-/// `dx.Texture` handle into `llvm.dx.resource.load.level`: an explicit-mip,
-/// no-sampler texel fetch (see `lowerTextureLoad` in DXILOpLowering.cpp, the
-/// forward direction this inverts). Coordinates are integer, unlike
+/// texture handle into `llvm.dx.resource.load.level` or `load.ms`: a
+/// no-sampler texel fetch. Opcode 66's mip slot carries the sample index
+/// for `dx.MSTexture`; `load.ms` models that distinction explicitly.
+/// Coordinates are integer, unlike
 /// `Sample`'s floating-point ones, so no separate offset-component helper is
 /// needed -- `TextureLoad`'s own 3-wide `Coord0..2`/`Offset0..2` operand
 /// pairs are simply truncated to \p Dim's component count.
@@ -1707,14 +1706,26 @@ bool raiseTextureLoad(CallInst &CI) {
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
   auto *HandleTy =
-      Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType()) : nullptr;
-  if (!HandleTy)
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || !isa<dxil::TextureExtType, dxil::MSTextureExtType>(HandleTy))
     return false;
-
-  unsigned NumCoords = getTextureCoordComponents(HandleTy->getDimension());
+  bool IsMS = isa<dxil::MSTextureExtType>(HandleTy);
+  auto Dim = IsMS ? cast<dxil::MSTextureExtType>(HandleTy)->getDimension()
+                  : cast<dxil::TextureExtType>(HandleTy)->getDimension();
+  if (IsMS && Dim != dxil::ResourceKind::Texture2DMS &&
+      Dim != dxil::ResourceKind::Texture2DMSArray)
+    return false;
+  unsigned NumCoords = IsMS ? (Dim == dxil::ResourceKind::Texture2DMS ? 2 : 3)
+                            : getTextureCoordComponents(Dim);
   if (NumCoords == 0 || NumCoords > 3)
     return false;
-  unsigned NumOffsets = getTextureOffsetComponents(HandleTy->getDimension());
+  unsigned NumOffsets = IsMS ? 2 : getTextureOffsetComponents(Dim);
+  Type *ElemTy = HandleTy->getTypeParameter(0);
+  unsigned Width = isa<FixedVectorType>(ElemTy)
+                       ? cast<FixedVectorType>(ElemTy)->getNumElements()
+                       : 1;
+  if (!getResRetExtracts(CI, Width))
+    return false;
 
   IRBuilder<> Builder(&CI);
   Value *MipLevel = CI.getArgOperand(2);
@@ -1728,24 +1739,26 @@ bool raiseTextureLoad(CallInst &CI) {
   Value *Coord = packTextureVector(Builder, Coords);
   Value *Offset = packTextureVector(Builder, Offsets);
   // DXIL omits an all-zero offset by leaving every spatial operand undefined.
-  if ((HandleTy->getDimension() == dxil::ResourceKind::Texture3D ||
-       HandleTy->getDimension() == dxil::ResourceKind::Texture1D ||
-       HandleTy->getDimension() == dxil::ResourceKind::Texture1DArray ||
-       HandleTy->getDimension() == dxil::ResourceKind::Texture2D ||
-       HandleTy->getDimension() == dxil::ResourceKind::Texture2DArray) &&
+  if ((Dim == dxil::ResourceKind::Texture3D ||
+       Dim == dxil::ResourceKind::Texture1D ||
+       Dim == dxil::ResourceKind::Texture1DArray ||
+       Dim == dxil::ResourceKind::Texture2D ||
+       Dim == dxil::ResourceKind::Texture2DArray ||
+       Dim == dxil::ResourceKind::Texture2DMS ||
+       Dim == dxil::ResourceKind::Texture2DMSArray) &&
       llvm::all_of(Offsets, [](Value *V) { return isa<UndefValue>(V); }))
     Offset = Constant::getNullValue(Offset->getType());
   if (!Offset)
     Offset = PoisonValue::get(Type::getInt32Ty(CI.getContext()));
 
-  Type *ElemTy = HandleTy->getResourceType();
-  unsigned Width = isa<FixedVectorType>(ElemTy)
-                       ? cast<FixedVectorType>(ElemTy)->getNumElements()
-                       : 1;
+  SmallVector<Type *, 5> Overloads{ElemTy, HandleTy, Coord->getType()};
+  if (!IsMS)
+    Overloads.push_back(MipLevel->getType());
+  Overloads.push_back(Offset->getType());
   Function *LoadLevelFn = Intrinsic::getOrInsertDeclaration(
-      CI.getModule(), Intrinsic::dx_resource_load_level,
-      {ElemTy, HandleTy, Coord->getType(), MipLevel->getType(),
-       Offset->getType()});
+      CI.getModule(),
+      IsMS ? Intrinsic::dx_resource_load_ms : Intrinsic::dx_resource_load_level,
+      Overloads);
   Value *Loaded =
       Builder.CreateCall(LoadLevelFn, {Handle, Coord, MipLevel, Offset});
   if (!replaceResRetExtracts(CI, Width, Loaded, Builder))

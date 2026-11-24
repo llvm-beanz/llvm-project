@@ -2955,9 +2955,9 @@ layers/components, all result widths, offsets, bounds, waves 4/8, five
 lanes, guards and repeats; fragment tests add divergent mips/layers,
 both bounds axes, invalid layers/mips and helper masks. Native SDK DXC
 plain/array shaders execute through normal/reference/AOT paths on one
-mip; runner YAML still prepares one mip. Multisampled
-DXIL loads remain outside this extension. Existing 1D/3D loads, sampling,
-artifact ABI 8 and argument layouts are unchanged; no bound/static
+mip; runner YAML still prepares one mip. Integer MS CPU loads and runner
+MS preparation remain open. Existing 1D/3D loads, sampling, artifact ABI 8
+and argument layouts are unchanged; no bound/static
 descriptors or owned D3D12 execution are added.
 
 Heap-backed signed/unsigned i32 2D/array `Load` now uses
@@ -2984,6 +2984,30 @@ non-heap handles and dynamic/undefined/poison or partial offsets reject.
 Existing FP32 loads, 1D/3D loads, sampling, artifact ABI 8 and argument
 layouts are unchanged; no bound/static descriptors or owned D3D12
 execution are added.
+
+Heap-backed FP32 `Texture2DMS::Load`/`Texture2DMSArray::Load` now use
+`createLoad2D`/`createLoad2DArray` in any stage. Native opcode 66 raising
+chooses `llvm.dx.resource.load.ms` for `dx.MSTexture`, preserving the
+wire sample index instead of treating it as a mip. Shared admission
+requires FP32 texels and matching scalar/vector results up to the
+declared width (one through four), shape-matched i32 coordinates,
+i32 samples and constant signed XY offsets. Wrapping adds affect X/Y
+only; helpers receive separate layers, mip zero and the live sample.
+No sampler or derivatives are needed; MS sampling remains unsupported.
+The FP32 runtime rejects samples outside the descriptor count before
+they alias another texel/row/layer; SPIR-V FP32 users share the correction.
+Runtime tests cover counts 1/2/4, rectangular bounds, components, invalid
+samples/mips and masks. Compiled normal/reference compute tests cover
+four samples, all result widths, X/Y/layers/components, offsets, bounds,
+waves 4/8, five lanes, guards and repeats. Fragment array tests add
+divergent samples/layers and helper masks. Native SDK DXC FP32 shaders
+pass import/raising and AOT compilation; integer MS shaders raise but
+explicitly fail CPU admission. Native omitted offsets normalize to zero;
+canonical dynamic/undefined/poison or partial offsets remain rejected.
+Status/aggregate native uses stay raw without duplicate loads.
+Integer MS CPU loads, runner YAML MS preparation, bound/static
+descriptors and owned D3D12 execution remain open. Artifact ABI 8 and
+argument layouts are unchanged.
 
 Heap-backed FP32 `Texture3D::Sample` now executes through `createSample3D`
 in fragment stages. Shared admission/lowering requires default samplers,

@@ -690,7 +690,7 @@ Value *narrowImageResult(IRBuilder<> &Builder, Value *Loaded, Type *ResultTy) {
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
 /// `samplebias[.clamp]`/`samplegrad[.clamp]`/`samplecmp[.clamp]`/
-/// `samplecmplevelzero`/`load.level`
+/// `samplecmplevelzero`/`load.level`/`load.ms`
 /// calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
@@ -716,7 +716,11 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
       Value *Coord = CI->getArgOperand(1);
       Value *Offset = CI->getArgOperand(3);
-      auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
+      auto Kind = static_cast<dxil::ResourceKind>(
+          cast<TargetExtType>(Image->getType())->getIntParameter(3));
+      bool IsMS = ID == Intrinsic::dx_resource_load_ms;
+      Value *Mip = IsMS ? Builder.getInt32(0) : CI->getArgOperand(2);
+      Value *Sample = IsMS ? CI->getArgOperand(2) : Builder.getInt32(0);
       bool IsInteger = CI->getType()->getScalarType()->isIntegerTy(32);
       Value *Loaded;
       if (Kind == dxil::ResourceKind::Texture3D) {
@@ -735,34 +739,32 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                Builder.getInt32(0), Builder.getTrue(),
                                CI->getName());
       } else if (Kind == dxil::ResourceKind::Texture2D ||
-                 Kind == dxil::ResourceKind::Texture2DArray) {
+                 Kind == dxil::ResourceKind::Texture2DArray || IsMS) {
         Value *X =
             Builder.CreateAdd(Builder.CreateExtractElement(Coord, uint64_t{0}),
                               cast<Constant>(Offset)->getAggregateElement(0u));
         Value *Y =
             Builder.CreateAdd(Builder.CreateExtractElement(Coord, uint64_t{1}),
                               cast<Constant>(Offset)->getAggregateElement(1u));
-        if (Kind == dxil::ResourceKind::Texture2DArray) {
+        if (Kind == dxil::ResourceKind::Texture2DArray ||
+            Kind == dxil::ResourceKind::Texture2DMSArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
           Loaded =
               IsInteger
                   ? createLoad2DArrayI32(Builder, Env, Image->getArgOperand(0),
-                                         X, Y, Layer, CI->getArgOperand(2),
-                                         Builder.getInt32(0), Builder.getTrue(),
-                                         CI->getName())
+                                         X, Y, Layer, Mip, Sample,
+                                         Builder.getTrue(), CI->getName())
                   : createLoad2DArray(Builder, Env, Image->getArgOperand(0), X,
-                                      Y, Layer, CI->getArgOperand(2),
-                                      Builder.getInt32(0), Builder.getTrue(),
+                                      Y, Layer, Mip, Sample, Builder.getTrue(),
                                       CI->getName());
         } else {
           Loaded =
               IsInteger
                   ? createLoad2DI32(Builder, Env, Image->getArgOperand(0), X, Y,
-                                    CI->getArgOperand(2), Builder.getInt32(0),
-                                    Builder.getTrue(), CI->getName())
+                                    Mip, Sample, Builder.getTrue(),
+                                    CI->getName())
                   : createLoad2D(Builder, Env, Image->getArgOperand(0), X, Y,
-                                 CI->getArgOperand(2), Builder.getInt32(0),
-                                 Builder.getTrue(), CI->getName());
+                                 Mip, Sample, Builder.getTrue(), CI->getName());
         }
       } else {
         Value *X = Coord->getType()->isIntegerTy(32)
@@ -1485,24 +1487,31 @@ bool feme::cpu::isSupportedDXILSample(const CallInst &CI) {
 }
 
 bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
-  if (getIntrinsicID(&CI) != Intrinsic::dx_resource_load_level ||
+  bool IsMS = getIntrinsicID(&CI) == Intrinsic::dx_resource_load_ms;
+  if ((!IsMS && getIntrinsicID(&CI) != Intrinsic::dx_resource_load_level) ||
       CI.arg_size() != 4)
     return false;
   auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
-  auto *Ty = dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
+  auto *Ty = dyn_cast<TargetExtType>(CI.getArgOperand(0)->getType());
   if (!Image ||
       getIntrinsicID(Image) != Intrinsic::dx_resource_handlefromheap || !Ty ||
+      (IsMS ? !isa<dxil::MSTextureExtType>(Ty)
+            : !isa<dxil::TextureExtType>(Ty)) ||
       Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4)
     return false;
-  auto Kind = Ty->getDimension();
+  auto Kind = static_cast<dxil::ResourceKind>(Ty->getIntParameter(3));
   bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
               Kind == dxil::ResourceKind::Texture1DArray;
-  bool Is2D = Kind == dxil::ResourceKind::Texture2D ||
-              Kind == dxil::ResourceKind::Texture2DArray;
+  bool Is2D = IsMS ? Kind == dxil::ResourceKind::Texture2DMS ||
+                         Kind == dxil::ResourceKind::Texture2DMSArray
+                   : Kind == dxil::ResourceKind::Texture2D ||
+                         Kind == dxil::ResourceKind::Texture2DArray;
+  if (IsMS && !Is2D)
+    return false;
   if (!Is1D && !Is2D && Kind != dxil::ResourceKind::Texture3D)
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
-  if (!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32))
+  if (!ScalarTy->isFloatTy() && (IsMS || !ScalarTy->isIntegerTy(32)))
     return false;
   unsigned TextureWidth = getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
   unsigned ResultWidth = getTexelWidth(CI.getType(), ScalarTy);
@@ -1511,7 +1520,10 @@ bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
       Kind == dxil::ResourceKind::Texture1D
           ? IntTy
           : FixedVectorType::get(
-                IntTy, Is1D || Kind == dxil::ResourceKind::Texture2D ? 2 : 3);
+                IntTy, Is1D || Kind == dxil::ResourceKind::Texture2D ||
+                               Kind == dxil::ResourceKind::Texture2DMS
+                           ? 2
+                           : 3);
   Type *OffsetTy = Is1D ? IntTy : FixedVectorType::get(IntTy, Is2D ? 2 : 3);
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
       CI.getArgOperand(1)->getType() != CoordTy ||

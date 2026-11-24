@@ -1,0 +1,40 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/float.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D INTEGER /Fo %t/integer.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/float.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=FLOAT
+# RUN: feme-translate --import-dxil %t/integer.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=INTEGER
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/float.dxil -o %t/float.o
+# RUN: not feme --target=%feme_host_triple %t/integer.dxil -o %t/integer.o 2>&1 | FileCheck %s --check-prefix=REJECT
+# Native import and AOT compilation only: runner YAML still rejects MS images.
+# FLOAT: call <4 x float> @llvm.dx.resource.load.ms
+# FLOAT-SAME: <2 x i32> <i32 1, i32 -1>)
+# FLOAT: call <4 x float> @llvm.dx.resource.load.ms
+# FLOAT-SAME: <2 x i32> zeroinitializer)
+# FLOAT-NOT: call %dx.types.ResRet.f32 @dx.op.textureLoad
+# INTEGER: call <4 x i32> @llvm.dx.resource.load.ms
+# INTEGER-SAME: <2 x i32> <i32 1, i32 -1>)
+# INTEGER: call <4 x i32> @llvm.dx.resource.load.ms
+# INTEGER-SAME: <2 x i32> zeroinitializer)
+# REJECT: requires heap-backed FP32 2DMS/array texel loading
+#--- shader.hlsl
+#ifdef INTEGER
+#define TEXEL uint4
+#else
+#define TEXEL float4
+#endif
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture2DMS<TEXEL, 4> t = ResourceDescriptorHeap[0];
+  Texture2DMSArray<TEXEL, 4> a = ResourceDescriptorHeap[1];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  int sampleIndex = int(tid.x) - 1;
+  TEXEL p = t.Load(int2(0, 1), sampleIndex, int2(1, -1));
+  TEXEL q = a.Load(int3(0, 0, tid.x & 1), sampleIndex);
+  outBuffer.Store(4 + tid.x * 8, asuint(p.b));
+  outBuffer.Store(8 + tid.x * 8, asuint(q.a));
+}

@@ -260,8 +260,8 @@ coverage" in [../Design.md](../Design.md).
   poison XY offsets raise to zero; canonical offsets remain strict.
   Invalid mips, per-mip spatial bounds and independent layer bounds read
   zero. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one mip. Multisampled DXIL
-  loads remain outside this extension. Existing 1D/3D loads, sampling,
+  reference/AOT paths on one mip. Integer MS CPU loads and runner MS
+  preparation remain open. Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   SPIR-V FP32 users share the runtime bounds correction. No bound/static
   descriptors or owned D3D12 execution are added.
@@ -276,6 +276,20 @@ coverage" in [../Design.md](../Design.md).
   poison or partial offsets reject. Existing FP32 loads, 1D/3D loads,
   sampling, SPIR-V lowering, artifact ABI 8 and argument layouts are
   unchanged; SPIR-V integer users share the runtime bounds correction.
+  No bound/static descriptors or owned D3D12 execution are added.
+  Heap-backed FP32 `Texture2DMS::Load`/`Texture2DMSArray::Load` now also
+  compiles in any stage, including native AOT. Native opcode 66 raises
+  `dx.MSTexture` loads to `llvm.dx.resource.load.ms`, preserving the i32
+  sample index rather than treating it as a mip. Shape-matched integer
+  coordinates, constant signed XY offsets and scalar/vector FP32 results
+  up to the declared width (one through four) use existing 2D/array helpers
+  with mip zero, the live sample and separate layers. Invalid samples
+  return zero without aliasing another texel/row/layer. SDK DXC FP32
+  plain/array shaders pass import/raising and AOT compilation; integer MS
+  loads raise but explicitly fail CPU admission. MS sampling and
+  dynamic/undefined/poison or partial offsets remain unsupported.
+  Runner YAML still rejects MS image preparation; native MS execution is
+  not claimed. Artifact ABI 8 and argument layouts are unchanged.
   No bound/static descriptors or owned D3D12 execution are added.
   Heap-backed FP32 3D implicit `Sample` now lowers in fragment stages with
   default samplers, three-component U/V/W coordinates, constant signed XYZ

@@ -27,6 +27,44 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) FP32 multisample texel-load CPU execution (VM, 2026-11-24)
+
+Heap-backed `Texture2DMS::Load`/`Texture2DMSArray::Load` now execute in
+any stage with FP32 results of widths one through four, shape-matched
+i32 coordinates, an i32 sample and constant signed XY offsets. Native
+opcode 66 raises to `llvm.dx.resource.load.ms` for `dx.MSTexture`,
+preserving the sample index instead of interpreting it as a mip.
+Existing 2D/array helpers receive mip zero and the live sample index.
+Offsets affect only X/Y; layers remain separate. Loads need no sampler
+or derivatives; MS sampling is still unsupported.
+
+FP32 runtime sample bounds now prevent invalid samples from aliasing
+another texel/row/layer, including negative indices. Existing mip,
+spatial/layer bounds and masks remain enforced. SPIR-V FP32 users share
+the correction without lowering changes. Runtime tests cover rectangular
+extents, components, sample counts 1/2/4, invalid samples/mips and masks.
+Compiled normal/reference compute tests distinguish four samples,
+X/Y/layers/components, all result widths, signed offsets, bounds,
+waves 4/8, five lanes, guards and repeats. Fragment array tests cover
+divergent samples/layers, all lower/upper bounds, helper masks,
+one/three quads, partial waves, guards and repeats.
+Native SDK DXC SM6.6 plain/array FP32 shaders pass import/raising and
+AOT compilation; integer shaders raise but explicitly fail CPU admission.
+Runner YAML still rejects MS image preparation: native MS execution is
+not claimed. Dynamic/undefined/poison or partial offsets remain rejected.
+Status/aggregate result uses remain raw without duplicate raised loads.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused LIT passes 1,330 in 36.64 seconds; full LIT passes 4,233 with
+15 skipped, 10 unsupported and zero failures among 4,258 discovered
+tests in 78.46 seconds. Eight new tests add eight passes.
+
+Integer MS CPU loads, runner MS preparation, bound/static descriptors
+and owned D3D12 execution remain open. Artifact ABI 8 and argument
+layouts are unchanged; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed. No new adapter-matrix or external
+Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) integer 2D/array texel-load CPU execution (VM, 2026-11-24)
 
 Heap-backed signed/unsigned i32 `Texture2D::Load`/`Texture2DArray::Load`
