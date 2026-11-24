@@ -3328,6 +3328,13 @@ documented reason rather than an oversight:
   half-mip blending. Native SDK DXC FP32/SINT/UINT 2D/plain-array fixtures
   execute two real mips with signed offsets, layers/components, invalid
   mips, exact integer bits, partial waves, guards and repeats.
+  Native FP32/SINT/UINT 1D/plain-array and 3D load fixtures also execute
+  three real mips through all three CPU paths, retaining original
+  one-mip checks. Widths 5/2/1 keep fixed array layers; rectangular 3D
+  extents 4x2x2/2x1x1/1x1x1 shrink depth. Signed offsets, first/last
+  texels/components, invalid X/layers/mips and upper XYZ bounds are
+  checked with exact integer bits, waves 4/8, five lanes, guards and
+  repeat 2. No compiler/runtime implementation change was needed.
   Image-binding preparation is checked without bound-image execution.
   This is CPU storage/execution, not D3D12 mip/format support or
   owned-device execution; artifact ABI 8 and argument layouts are unchanged.

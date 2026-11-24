@@ -476,6 +476,14 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   layers/components, invalid mips, exact integer bits, waves 4/8, partial
   waves, guards and repeats. Canonical fixtures add non-power-of-two
   1D/2D arrays, 3D depth, mip-31 bounds, zero-fill and cube mip blending.
+  Native SDK DXC FP32/SINT/UINT 1D/plain-array and 3D load fixtures also
+  execute three real mips through normal/reference/AOT-object paths.
+  Widths 5/2/1 keep fixed array layers; rectangular 3D extents
+  4x2x2/2x1x1/1x1x1 shrink depth. Signed offsets select first/last
+  texels and components. Invalid X/layers/mips and upper XYZ bounds
+  read zero, with exact integer bits, native raising, waves 4/8, five
+  lanes, guards and repeat 2 checked. Original one-mip coverage remains.
+  This evidence required no compiler/runtime implementation change.
   Image-binding preparation does not imply bound-image or owned D3D12
   execution; MS sampling and owned-device gaps remain open.
 

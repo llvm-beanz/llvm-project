@@ -3065,7 +3065,14 @@ non-power-of-two geometry, mip-31 bounds, trailing zero-fill and cube
 half-mip blending. Native SDK DXC FP32/SINT/UINT 2D/plain-array fixtures
 also execute two mips with exact components, signed offsets, bounds,
 waves 4/8, guards and repeats. Image-binding preparation is checked
-separately, without bound-image execution. CPU storage counts are not
+separately, without bound-image execution. Native FP32/SINT/UINT
+1D/plain-array and 3D load fixtures also execute three mips through all
+three CPU paths. Widths 5/2/1 retain fixed layers; 3D extents
+4x2x2/2x1x1/1x1x1 shrink depth. Signed offsets select first/last texels
+and components. Invalid X/layers/mips and upper XYZ bounds read zero.
+Exact integer bits, native raising, waves 4/8, five lanes, guards and
+repeat 2 are checked; original one-mip checks remain. No lowering/
+runtime implementation change was needed. CPU storage counts are not
 D3D12 mip/format support; artifact ABI 8 and owned-device gaps are unchanged.
 
 Heap-backed FP32 `Texture3D::Sample` now executes through `createSample3D`

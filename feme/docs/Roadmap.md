@@ -2613,6 +2613,12 @@ the first shader-facing milestone rather than alongside it.
    mips, depth/layer/mip bounds, trailing zero-fill and cube half-mip
    blending. Native SDK DXC FP32/SINT/UINT 2D/plain-array fixtures now
    execute two real mips through normal/reference/AOT-object paths.
+   Native 1D/plain-array and 3D FP32/SINT/UINT fixtures also execute
+   three real mips in all three CPU paths, with signed offsets,
+   first/last texels/components, fixed layers, shrinking depth,
+   invalid X/layers/mips and upper XYZ bounds, exact bits, waves 4/8,
+   partial waves, guards and repeat 2. Original one-mip checks remain;
+   no compiler/runtime implementation change was needed.
    This is CPU storage/execution, not owned D3D12 mip/format support.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`

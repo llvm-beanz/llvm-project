@@ -1980,6 +1980,36 @@ change is made. Non-32-bit DXIL texels, MS sampling, broader conformance,
 bound/static D3D12 descriptors and owned D3D12 execution remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) native 1D/array and 3D multi-mip load execution evidence
+(2026-11-24): the existing SDK DXC SM6.6 FP32/SINT/UINT fixtures now also
+execute three real mips through normal/reference/AOT-object paths.
+This supersedes the preceding milestone's native 1D/3D evidence boundary;
+no compiler, runtime, runner schema or artifact ABI change was needed.
+
+The 1D fixture uses widths 5/2/1, retaining two independent array layers
+at every mip. Signed scalar offsets select first/last texels and distinct
+components. Negative/upper mips, upper X and negative/upper array layers
+read zero. The 3D fixture uses rectangular extents 4x2x2, 2x1x1 and 1x1x1,
+with signed XYZ offsets selecting first/last texels and components.
+Per-mip upper X/Y/Z and negative/upper mips read zero rather than fetching
+another row, slice or mip. Signed/unsigned results preserve high-bit/
+negative and adjacent non-FP32-exact integers without floating conversion.
+
+All six added DXC variants pass native import/raising with operand checks,
+normal execution at waves 4/8, reference execution and ARM64 AOT-object
+execution, each repeated twice. Five lanes exercise partial waves; guard
+words remain intact. Original single-mip import/normal/reference/AOT
+coverage is retained in all four fixtures.
+
+Focused LIT passes all four changed fixtures with zero failures in
+4.01 seconds. These are expanded existing tests, not new discovered
+tests. No C++/runtime implementation changed, so no new build or broader
+suite run was needed; no full-suite, adapter-matrix or external Vulkan
+CTS result is claimed. Non-32-bit DXIL texels, MS sampling, broader
+conformance, bound/static D3D12 descriptors and owned D3D12 execution
+remain open. Artifact ABI 8 and argument layouts are unchanged;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

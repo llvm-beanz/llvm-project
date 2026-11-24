@@ -217,8 +217,8 @@ coverage" in [../Design.md](../Design.md).
   the texel; exact integer bits are preserved without FP32 conversions.
   Invalid mips and lower/upper per-mip XYZ bounds read zero. Native SDK
   DXC `Texture3D<int4>` and `Texture3D<uint4>` shaders execute through
-  normal/reference/AOT paths on one mip. Mixed scalar types, non-32-bit
-  texels, too-wide results, non-heap handles and dynamic/undefined/poison
+  normal/reference/AOT paths on one and three real mips. Mixed scalar
+  types, non-32-bit texels, too-wide results, non-heap handles and dynamic/undefined/poison
   offsets remain unsupported. Existing FP32 loads, sampling, other
   dimensions, SPIR-V lowering, artifact ABI 8 and argument layouts are
   unchanged; SPIR-V integer loads share the runtime bounds correction.
@@ -232,7 +232,8 @@ coverage" in [../Design.md](../Design.md).
   poison spatial offsets normalize to zero; canonical dynamic/undefined/
   poison offsets reject. Invalid mips, per-mip X bounds and independent
   layer bounds return zero. Native SDK DXC shaders execute through normal/
-  reference/AOT paths on one mip. Non-32-bit 1D/array loads remain unsupported.
+  reference/AOT paths on one and three real mips.
+  Non-32-bit 1D/array loads remain unsupported.
   Existing 3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument
   layouts are unchanged; SPIR-V FP32 loads share the runtime bounds
   correction. No bound/static descriptors or owned D3D12 execution are added.
@@ -242,8 +243,8 @@ coverage" in [../Design.md](../Design.md).
   integer helpers preserve exact bits without FP32 conversions. Invalid
   mips, per-mip X bounds and independent layer bounds read zero. Native
   SDK DXC plain/array `int4`/`uint4` shaders execute through normal/
-  reference/AOT paths on one mip. Mixed scalar types, non-32-bit texels,
-  too-wide results, non-heap handles and dynamic/undefined/poison offsets
+  reference/AOT paths on one and three real mips. Mixed scalar types,
+  non-32-bit texels, too-wide results, non-heap handles and dynamic/undefined/poison offsets
   remain unsupported. Existing FP32 loads, 3D loads, sampling, SPIR-V
   lowering, artifact ABI 8 and argument layouts are unchanged; SPIR-V
   integer users share the runtime bounds correction. No bound/static
@@ -314,6 +315,11 @@ coverage" in [../Design.md](../Design.md).
   using checked mip-major layouts with shrinking spatial extents/3D
   depth and fixed array/cube layers. Native FP32/SINT/UINT 2D/plain-array
   two-mip fixtures execute through normal/reference/AOT-object paths;
+  native 1D/plain-array and 3D fixtures also execute three real mips.
+  Widths 5/2/1 retain fixed layers, rectangular 3D depth shrinks and
+  signed offsets select first/last texels/components. Invalid X/layers/
+  mips and upper XYZ bounds, exact integer bits, waves 4/8, partial
+  waves, guards and repeat 2 are checked, with one-mip coverage retained;
   canonical fixtures add three non-power-of-two mips, mip-31 bounds,
   zero-fill and cube half-mip blending. See
   [the runner schema](feme-run.md). This does not change CPU lowering,

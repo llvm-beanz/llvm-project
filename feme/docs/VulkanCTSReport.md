@@ -1,5 +1,27 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) native 1D/array and 3D multi-mip load scope (2026-11-24)
+
+The [native multi-mip follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-1darray-and-3d-multi-mip-loads-vm-2026-11-24)
+extends the existing SDK DXC FP32/SINT/UINT load fixtures to three real
+mips. 1D/plain-array widths 5/2/1 preserve fixed array layers; rectangular
+3D extents 4x2x2, 2x1x1 and 1x1x1 shrink depth. Signed offsets select
+first/last texels and components. Invalid X/layer/mips and per-mip upper
+XYZ bounds read zero. Integer outputs retain exact high/non-FP32-exact bits.
+
+All six added variants pass native import/raising, normal waves 4/8,
+reference and ARM64 AOT-object execution with five lanes, guards and
+repeat 2. Original one-mip coverage is retained. Focused LIT passes all
+four expanded fixtures with zero failures in 4.01 seconds; no new
+discovered tests, implementation build, broader/full-suite run,
+adapter-matrix or external Vulkan CTS result is claimed.
+
+This is native CPU execution evidence, not owned D3D12 execution or
+D3D12 mip/format support. Non-32-bit DXIL texels, MS sampling, broader
+conformance, bound/static D3D12 descriptors and owned-device execution
+remain open. Artifact ABI 8 and argument layouts are unchanged;
+W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) runner mip-chain and native load regression scope (2026-11-24)
 
 The [runner mip-chain follow-up](W0WindowsIntegrationProbe.md#w2aw3b-runner-mip-chain-preparation-and-native-loads-vm-2026-11-24)

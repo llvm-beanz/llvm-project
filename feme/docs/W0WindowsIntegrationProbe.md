@@ -27,6 +27,31 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) native 1D/array and 3D multi-mip loads (VM, 2026-11-24)
+
+The existing SDK DXC SM6.6 FP32/SINT/UINT load fixtures now also execute
+three real mips through normal/reference/AOT-object paths. The 1D/plain
+array fixture uses widths 5/2/1 with two fixed array layers, signed
+offsets, first/last texels, distinct components and invalid X/layer/mips.
+The 3D fixture uses extents 4x2x2, 2x1x1 and 1x1x1 with shrinking depth,
+signed XYZ offsets, first/last texels, distinct components and upper
+X/Y/Z plus lower/upper mip bounds. Integer outputs preserve high-bit/
+negative and non-FP32-exact values.
+
+All six added native variants pass import/raising checks, normal waves
+4/8, reference and ARM64 AOT-object execution with five lanes, guards
+and repeat 2. Original one-mip checks remain. Focused LIT passes all four
+expanded fixtures with zero failures in 4.01 seconds; no new discovered
+test count is claimed. No compiler/runtime implementation changed, so
+no new build or broader suite run was needed.
+
+This extends native CPU execution evidence, not owned D3D12 execution.
+No full-suite, adapter-matrix, external Vulkan CTS or D3D12 mip/format
+support claim is added. Non-32-bit DXIL texels, MS sampling, broader
+conformance, bound/static descriptors and W2(a)/W2(b)/W3(b) remain open.
+Artifact ABI 8 and argument layouts are unchanged;
+`CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) runner mip-chain preparation and native loads (VM, 2026-11-24)
 
 `feme-run` now accepts `mip-levels` in [1, 32], default 1, for

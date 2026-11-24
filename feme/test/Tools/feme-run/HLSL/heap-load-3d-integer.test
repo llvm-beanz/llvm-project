@@ -15,7 +15,22 @@
 # RUN: feme-run --reference --repeat=2 --heap=%t/uint.yaml %t/uint.dxil | FileCheck %s
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint.dxil -o %t/uint.o
 # RUN: feme-run --object --repeat=2 --heap=%t/uint.yaml %t/uint.o | FileCheck %s
-# Native import plus CPU execution, not owned D3D12; YAML prepares one mip.
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /Fo %t/sint-mips.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /D UNSIGNED /Fo %t/uint-mips.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/sint-mips.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-translate --import-dxil %t/uint-mips.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --reference --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/sint-mips.dxil -o %t/sint-mips.o
+# RUN: feme-run --object --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.o | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --reference --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint-mips.dxil -o %t/uint-mips.o
+# RUN: feme-run --object --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.o | FileCheck %s --check-prefix=MIPS
+# Native import plus CPU execution, not owned D3D12. MIPS distinguishes
+# three rectangular levels and depth/XYZ bounds, preserving exact bits.
 # RAISE: call <4 x i32> @llvm.dx.resource.load.level
 # RAISE-SAME: <3 x i32> <i32 1, i32 -1, i32 1>)
 # RAISE: call <4 x i32> @llvm.dx.resource.load.level
@@ -24,6 +39,7 @@
 # RAISE-SAME: <3 x i32> zeroinitializer)
 # RAISE-NOT: call %dx.types.ResRet.i32 @dx.op.textureLoad
 # CHECK: heap[1]: 42 2147483664 0 2147483667 0 2147483668 0 2147483671 0 0 2147483657 0 0 0 2147483661 0 0 0 0 0 0 42
+# MIPS: heap[1]: 42 0 0 0 0 2147483708 2147483649 2147483711 0 16777221 16777218 4294967291 0 16777225 16777226 4294967287 0 0 0 0 0 42
 #--- shader.hlsl
 #ifdef UNSIGNED
 #define TEXEL uint4
@@ -36,9 +52,30 @@ void main(uint3 tid : SV_DispatchThreadID) {
   Texture3D<TEXEL> t = ResourceDescriptorHeap[0];
   RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[1];
   int x = int(tid.x) - 1;
-  TEXEL p = t.Load(int4(x, 1, 0, 0), int3(1, -1, 1));
-  TEXEL n = t.Load(int4(x, 0, 1, 0), int3(-1, 1, -1));
-  TEXEL invalid = t.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : 1));
+  int mip = 0;
+  int py = 1;
+  int pz = 0;
+  int nx = x;
+  int ny = 0;
+  int badX = 0;
+  int badY = 0;
+  int badZ = 0;
+  int invalidMip = (tid.x & 1) ? -1 : 1;
+#ifdef MIPS
+  mip = int(tid.x) - 1;
+  x = (mip == 0) ? 2 : (mip == 1) ? 0 : -1;
+  py = (mip == 0) ? 2 : 1;
+  pz = (mip == 0) ? 0 : -1;
+  nx = 1;
+  ny = -1;
+  badX = (mip == 2) ? 1 : 0;
+  badY = (mip == 1) ? 1 : 0;
+  badZ = (mip == 0) ? 2 : 0;
+  invalidMip = mip;
+#endif
+  TEXEL p = t.Load(int4(x, py, pz, mip), int3(1, -1, 1));
+  TEXEL n = t.Load(int4(nx, ny, 1, mip), int3(-1, 1, -1));
+  TEXEL invalid = t.Load(int4(badX, badY, badZ, invalidMip));
   outBuffer.Store(4 + tid.x * 16, asuint(p.r));
   outBuffer.Store(8 + tid.x * 16, asuint(n.g));
   outBuffer.Store(12 + tid.x * 16, asuint(p.a));
@@ -66,3 +103,41 @@ images:
     extent: [2, 2, 2]
     format: r32g32b32a32_uint
     data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483664, 2147483665, 2147483666, 2147483667, 2147483668, 2147483669, 2147483670, 2147483671, 2147483672, 2147483673, 2147483674, 2147483675, 2147483676, 2147483677, 2147483678, 2147483679]
+#--- sint-mips.yaml
+resource-heap:
+  - {index: 1, size: 88, data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]}
+images:
+  - index: 0
+    dimension: 3d
+    extent: [4, 2, 2]
+    mip-levels: 3
+    format: r32g32b32a32_sint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655,
+           2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663,
+           2147483664, 2147483665, 2147483666, 2147483667, 2147483668, 2147483669, 2147483670, 2147483671,
+           2147483672, 2147483673, 2147483674, 2147483675, 2147483676, 2147483677, 2147483678, 2147483679,
+           2147483680, 2147483681, 2147483682, 2147483683, 2147483684, 2147483685, 2147483686, 2147483687,
+           2147483688, 2147483689, 2147483690, 2147483691, 2147483692, 2147483693, 2147483694, 2147483695,
+           2147483696, 2147483697, 2147483698, 2147483699, 2147483700, 2147483701, 2147483702, 2147483703,
+           2147483704, 2147483705, 2147483706, 2147483707, 2147483708, 2147483709, 2147483710, 2147483711,
+           16777217, 16777218, 2147483649, 4294967295, 16777221, 16777222, 2147483653, 4294967291,
+           16777225, 16777226, 2147483657, 4294967287]
+#--- uint-mips.yaml
+resource-heap:
+  - {index: 1, size: 88, data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]}
+images:
+  - index: 0
+    dimension: 3d
+    extent: [4, 2, 2]
+    mip-levels: 3
+    format: r32g32b32a32_uint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655,
+           2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663,
+           2147483664, 2147483665, 2147483666, 2147483667, 2147483668, 2147483669, 2147483670, 2147483671,
+           2147483672, 2147483673, 2147483674, 2147483675, 2147483676, 2147483677, 2147483678, 2147483679,
+           2147483680, 2147483681, 2147483682, 2147483683, 2147483684, 2147483685, 2147483686, 2147483687,
+           2147483688, 2147483689, 2147483690, 2147483691, 2147483692, 2147483693, 2147483694, 2147483695,
+           2147483696, 2147483697, 2147483698, 2147483699, 2147483700, 2147483701, 2147483702, 2147483703,
+           2147483704, 2147483705, 2147483706, 2147483707, 2147483708, 2147483709, 2147483710, 2147483711,
+           16777217, 16777218, 2147483649, 4294967295, 16777221, 16777222, 2147483653, 4294967291,
+           16777225, 16777226, 2147483657, 4294967287]

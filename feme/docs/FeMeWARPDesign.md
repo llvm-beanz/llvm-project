@@ -367,7 +367,14 @@ The original compute-only baseline is no longer current:
   trailing zero-fill and cube/array half-mip blending. Native SDK DXC
   FP32/SINT/UINT 2D/plain-array fixtures execute two mips with offsets,
   layers/components, invalid mips, exact bits, partial waves, guards
-  and repeats. Image-binding preparation is tested without bound-image
+  and repeats. Native FP32/SINT/UINT 1D/plain-array and 3D load fixtures
+  also execute three mips through normal/reference/AOT-object paths.
+  Widths 5/2/1 keep fixed array layers; 3D extents 4x2x2/2x1x1/1x1x1
+  shrink depth. Signed offsets select first/last texels and components;
+  invalid X/layers/mips and upper XYZ bounds read zero. Native raising,
+  exact integer bits, waves 4/8, five lanes, guards and repeat 2 pass.
+  Original one-mip coverage remains; no implementation change was needed.
+  Image-binding preparation is tested without bound-image
   execution. CPU storage counts are not D3D12 mip/format support;
   owned-device gaps, artifact ABI 8 and argument layouts are unchanged.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages

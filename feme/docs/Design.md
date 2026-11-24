@@ -1825,7 +1825,14 @@ non-power-of-two mips, 1D/2D arrays, 3D depth, mip 31 and trailing
 zero-fill; cube/array gradients test a linear half-mip blend and the
 second cube. Native SDK DXC FP32/SINT/UINT 2D/plain-array loads also
 execute two real mips with exact components, signed offsets, invalid mips,
-partial waves, guards and repeats. Image-binding preparation is tested
+partial waves, guards and repeats. Native FP32/SINT/UINT 1D/plain-array
+and 3D load fixtures also execute three real mips in all three paths.
+Widths 5/2/1 retain fixed array layers; rectangular 3D extents
+4x2x2/2x1x1/1x1x1 shrink depth. Signed offsets select first/last texels
+and components; invalid X/layers/mips and upper XYZ bounds read zero.
+Exact integer bits, waves 4/8, five lanes, guards and repeats are checked,
+with original one-mip coverage retained. No implementation change was
+needed. Image-binding preparation is tested
 without claiming bound-image execution. Counts describe CPU storage,
 not D3D12 mip/format support; owned-device gaps and artifact ABI 8 remain
 unchanged.
