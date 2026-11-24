@@ -25,8 +25,8 @@
 ; CHECK-LABEL: define float @non_heap(
 ; CHECK: call float @llvm.dx.resource.load.level
 ; CHECK-NOT: @feme.cpu.image.load
-; CHECK-LABEL: define i32 @integer_texel(
-; CHECK: call i32 @llvm.dx.resource.load.level
+; CHECK-LABEL: define i64 @wide_integer_texel(
+; CHECK: call i64 @llvm.dx.resource.load.level
 ; CHECK-NOT: @feme.cpu.image.load
 ; CHECK-LABEL: define float @scalar(
 ; CHECK-SAME: ptr %image_heap, i32 %image_heap_count)
@@ -92,22 +92,22 @@ define float @non_heap(target("dx.Texture", <4 x float>, 0, 0, 0, 4) %t) {
   %r = call float @llvm.dx.resource.load.level.f32.tdx.Texture_v4f32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4) %t, <3 x i32> zeroinitializer, i32 0, <3 x i32> zeroinitializer)
   ret float %r
 }
-define i32 @integer_texel() {
-  %t = call target("dx.Texture", i32, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_i32_0_0_0_4t(i32 0)
-  %r = call i32 @llvm.dx.resource.load.level.i32.tdx.Texture_i32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", i32, 0, 0, 0, 4) %t, <3 x i32> zeroinitializer, i32 0, <3 x i32> zeroinitializer)
-  ret i32 %r
+define i64 @wide_integer_texel() {
+  %t = call target("dx.Texture", i64, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_i64_0_0_0_4t(i32 0)
+  %r = call i64 @llvm.dx.resource.load.level.i64.tdx.Texture_i64_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", i64, 0, 0, 0, 4) %t, <3 x i32> zeroinitializer, i32 0, <3 x i32> zeroinitializer)
+  ret i64 %r
 }
 ; CHECK: !feme.cpu.resources = !{![[SCALAR:[0-9]+]], ![[VECTOR:[0-9]+]]}
 ; CHECK: ![[SCALAR]] = !{!"scalar", i32 0, i1 false
 ; CHECK: ![[VECTOR]] = !{!"vector", i32 0, i1 false
 declare target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32)
 declare target("dx.Texture", float, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_f32_0_0_0_4t(i32)
-declare target("dx.Texture", i32, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_i32_0_0_0_4t(i32)
+declare target("dx.Texture", i64, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_i64_0_0_0_4t(i32)
 declare float @llvm.dx.resource.load.level.f32.tdx.Texture_v4f32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), <3 x i32>, i32, <3 x i32>)
 declare <2 x float> @llvm.dx.resource.load.level.v2f32.tdx.Texture_v4f32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), <3 x i32>, i32, <3 x i32>)
 declare float @llvm.dx.resource.load.level.f32.tdx.Texture_v4f32_0_0_0_4t.v2i32.i32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), <2 x i32>, i32, <3 x i32>)
 declare float @llvm.dx.resource.load.level.f32.tdx.Texture_v4f32_0_0_0_4t.v3i32.i32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), <3 x i32>, i32, <2 x i32>)
 declare float @llvm.dx.resource.load.level.f32.tdx.Texture_v4f32_0_0_0_4t.v3i32.i64.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), <3 x i32>, i64, <3 x i32>)
 declare <4 x float> @llvm.dx.resource.load.level.v4f32.tdx.Texture_f32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", float, 0, 0, 0, 4), <3 x i32>, i32, <3 x i32>)
-declare i32 @llvm.dx.resource.load.level.i32.tdx.Texture_i32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", i32, 0, 0, 0, 4), <3 x i32>, i32, <3 x i32>)
+declare i64 @llvm.dx.resource.load.level.i64.tdx.Texture_i64_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", i64, 0, 0, 0, 4), <3 x i32>, i32, <3 x i32>)
 attributes #0 = { "feme.shader.stage"="vertex" }

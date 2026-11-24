@@ -3142,7 +3142,7 @@ documented reason rather than an oversight:
   axes, signed XYZ offsets, biased/clamped mips, scalar/vector results and
   guarded partial waves. Malformed coordinates/offset widths and dynamic or
   partially undefined offsets reject. Implicit DXIL 3D sampling outside
-  fragment stages and integer 3D loading remain unsupported. All seven raised
+  fragment stages and non-32-bit 3D loading remain unsupported. All seven raised
   texture shapes have bounded fragment biased execution; broader sampling
   conformance remains open.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage with
@@ -3170,7 +3170,7 @@ documented reason rather than an oversight:
   normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
   Malformed shapes, non-heap handles, comparison samplers and dynamic/
   undefined/poison or partially undefined offsets remain unsupported.
-  Non-fragment implicit DXIL 3D sampling, integer 3D loading, other ordinary shapes
+  Non-fragment implicit DXIL 3D sampling, non-32-bit 3D loading, other ordinary shapes
   and SPIR-V behavior are unchanged. No bound/static descriptor materialization or
   owned-device execution is enabled.
   Heap-backed FP32 3D `Load` now executes in any stage with three-component
@@ -3185,11 +3185,27 @@ documented reason rather than an oversight:
   compute tests cover mips, XYZ/components, all result widths, offsets,
   bounds, partial waves, guards and repeats; fragment tests add helper
   masks and divergent mips. Native SDK DXC bindless shaders execute through
-  normal/reference/AOT paths on one mip. Malformed shapes, integer texels,
+  normal/reference/AOT paths on one mip. Malformed shapes, non-32-bit texels,
   non-heap handles and dynamic/undefined/poison offsets remain unsupported.
   Other loading/sampling, SPIR-V lowering, artifact ABI 8 and argument
   layouts are unchanged; bound/static descriptors and owned D3D12 execution
   remain open.
+  Heap-backed signed/unsigned i32 3D `Load` now also executes in any stage
+  with the same coordinate/mip/offset rules and widths one through four.
+  Result scalar types must match the declared texel; the integer helper
+  preserves exact bits without FP32 conversions. Integer runtime bounds
+  now check every per-mip XYZ extent and invalid mips, returning zero for
+  invalid accesses. Compiled signed/unsigned tests distinguish high-bit/
+  negative values, mips, XYZ and components through normal/reference
+  compute paths, all result widths, offsets, bounds, partial waves, guards
+  and repeats. Fragment tests add integer outputs, divergent mips and
+  helper masks. Native SDK DXC `int4`/`uint4` shaders execute through normal/
+  reference/AOT paths on one mip. Mixed scalar types, non-32-bit texels,
+  too-wide results, non-heap handles and dynamic/undefined/poison offsets
+  remain rejected. Existing FP32 loads, sampling, other dimensions,
+  SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
+  SPIR-V integer users share the runtime bounds correction. No bound/static
+  descriptors or owned-device execution are added.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at
@@ -3200,7 +3216,7 @@ documented reason rather than an oversight:
   guards and repeats. Native SDK DXC pixel shaders pass import/raising;
   real shader-clamped variants stay raw. Non-fragment calls and malformed/
   dynamic/undefined/poison offsets remain rejected, including normal/
-  reference/AOT compute admission. Integer DXIL 3D loading, other sampling, SPIR-V,
+  reference/AOT compute admission. Non-32-bit DXIL 3D loading, other sampling, SPIR-V,
   artifact ABI 8 and argument layouts are unchanged; bound/static
   descriptors and owned D3D12 execution remain open.
   Heap-backed FP32 1D/array implicit `Sample` now executes in fragment

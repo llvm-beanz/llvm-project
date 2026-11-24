@@ -1,0 +1,68 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/sint.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D UNSIGNED /Fo %t/uint.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/sint.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-translate --import-dxil %t/uint.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/sint.yaml %t/sint.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/sint.yaml %t/sint.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/sint.dxil -o %t/sint.o
+# RUN: feme-run --object --repeat=2 --heap=%t/sint.yaml %t/sint.o | FileCheck %s
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/uint.yaml %t/uint.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/uint.yaml %t/uint.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint.dxil -o %t/uint.o
+# RUN: feme-run --object --repeat=2 --heap=%t/uint.yaml %t/uint.o | FileCheck %s
+# Native import plus CPU execution, not owned D3D12; YAML prepares one mip.
+# RAISE: call <4 x i32> @llvm.dx.resource.load.level
+# RAISE-SAME: <3 x i32> <i32 1, i32 -1, i32 1>)
+# RAISE: call <4 x i32> @llvm.dx.resource.load.level
+# RAISE-SAME: <3 x i32> <i32 -1, i32 1, i32 -1>)
+# RAISE: call <4 x i32> @llvm.dx.resource.load.level
+# RAISE-SAME: <3 x i32> zeroinitializer)
+# RAISE-NOT: call %dx.types.ResRet.i32 @dx.op.textureLoad
+# CHECK: heap[1]: 42 2147483664 0 2147483667 0 2147483668 0 2147483671 0 0 2147483657 0 0 0 2147483661 0 0 0 0 0 0 42
+#--- shader.hlsl
+#ifdef UNSIGNED
+#define TEXEL uint4
+#else
+#define TEXEL int4
+#endif
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture3D<TEXEL> t = ResourceDescriptorHeap[0];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[1];
+  int x = int(tid.x) - 1;
+  TEXEL p = t.Load(int4(x, 1, 0, 0), int3(1, -1, 1));
+  TEXEL n = t.Load(int4(x, 0, 1, 0), int3(-1, 1, -1));
+  TEXEL invalid = t.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : 1));
+  outBuffer.Store(4 + tid.x * 16, asuint(p.r));
+  outBuffer.Store(8 + tid.x * 16, asuint(n.g));
+  outBuffer.Store(12 + tid.x * 16, asuint(p.a));
+  outBuffer.Store(16 + tid.x * 16, asuint(invalid.r));
+}
+#--- sint.yaml
+resource-heap:
+  - index: 1
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 3d
+    extent: [2, 2, 2]
+    format: r32g32b32a32_sint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483664, 2147483665, 2147483666, 2147483667, 2147483668, 2147483669, 2147483670, 2147483671, 2147483672, 2147483673, 2147483674, 2147483675, 2147483676, 2147483677, 2147483678, 2147483679]
+#--- uint.yaml
+resource-heap:
+  - index: 1
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 3d
+    extent: [2, 2, 2]
+    format: r32g32b32a32_uint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483664, 2147483665, 2147483666, 2147483667, 2147483668, 2147483669, 2147483670, 2147483671, 2147483672, 2147483673, 2147483674, 2147483675, 2147483676, 2147483677, 2147483678, 2147483679]

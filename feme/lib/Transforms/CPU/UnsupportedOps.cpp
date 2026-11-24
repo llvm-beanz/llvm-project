@@ -67,7 +67,8 @@ Error checkSupportedRaisedOps(const Module &M) {
             !isSupportedDXILLoad3D(*CI))
           return createStringError(
               inconvertibleErrorCode(),
-              "unsupported raised operation: '%s' requires heap-backed FP32 "
+              "unsupported raised operation: '%s' requires heap-backed "
+              "FP32/i32 "
               "3D texel loading with three-component i32 coordinates, an i32 "
               "mip and constant signed XYZ offsets",
               F.getName().str().c_str());

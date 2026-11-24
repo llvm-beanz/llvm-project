@@ -27,6 +27,59 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) integer 3D texel-load CPU execution (VM, 2026-11-24)
+
+Heap-backed signed/unsigned i32 `Texture3D::Load` now executes in any stage.
+Shared admission/lowering requires three-component i32 XYZ coordinates,
+an i32 mip, constant signed XYZ offsets and scalar/vector results up to
+the declared texel width (one through four), with matching scalar types.
+The existing integer volume-load helper, shared wrapping coordinate adds
+and result narrowing preserve exact bits without FP32 conversions,
+samplers or stage derivatives. Native omitted-offset raising is unchanged.
+
+Integer runtime loads now check all three per-mip extents and invalid mips
+before fetching, like FP32 loads. Negative/out-of-range coordinates and
+invalid mips read zero instead of aliasing another row/slice at smaller
+mips. Existing SPIR-V integer users share this bounds correction;
+SPIR-V lowering is unchanged.
+
+Transforms check integer offset arithmetic, explicit mip/mask, narrowing,
+reflection, image-only signature growth, handle cleanup and idempotence.
+Mixed float/integer results, too-wide results, non-32-bit texels, non-heap
+handles and dynamic/undefined/poison offsets stay unsupported. The old
+FP32 fixture retains i64 texel rejection instead of rejecting valid i32
+loads. Admission checks every undefined/poison XYZ offset component in
+fragment, vertex, compute and unannotated functions for both scalar types.
+Runtime tests check exact signed/unsigned component bits, all lower/upper
+per-mip bounds, invalid mips and a false mask.
+
+Compiled normal/reference compute tests distinguish mips 0/1/2, XYZ and
+components with all four result widths, signed offsets, bounds, invalid
+mips, wave sizes 4/8, five lanes, guards and repeated prepared dispatches.
+High-bit/negative values and adjacent non-FP32-exact integers verify
+exact-bit preservation. Fragment tests add divergent mips, integer
+outputs, helpers, partial waves, masks, guards and repeats. Actual SDK
+DXC SM6.6 `Texture3D<int4>`/`Texture3D<uint4>` bindless shaders execute
+through normal/reference/AOT paths with offsets, exact components,
+divergent coordinates, invalid mips, five lanes, guards and repeats on one
+mip; runner YAML still prepares one mip. Dynamic-offset admission rejects
+in all three paths.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 987 in 34.39 seconds; full FeMe LIT
+passes 4,197, skips 15 and marks 10 unsupported, with zero failures among
+4,222 discovered tests in 105.68 seconds. Six new tests add six passes;
+timings are not controlled speedups.
+
+Existing FP32 loads, sampling, other dimensions, artifact ABI 8 and argument
+layouts are unchanged. Non-32-bit 3D loads, non-fragment implicit 3D sampling
+and real shader MinLod clamps on ordinary `Sample` remain unsupported.
+Native SDK import plus canonical CPU execution is not owned D3D12
+execution. Broader conformance, bound/static descriptors and owned D3D12
+execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) 3D texel-load CPU execution (VM, 2026-11-24)
 
 Heap-backed FP32 `Texture3D::Load` now executes in any stage with

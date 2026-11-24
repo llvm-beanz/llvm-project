@@ -9751,9 +9751,13 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad3DV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
-  if (!Img.Data)
+  if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
+      Mip >= 32)
     return Zero;
-  if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
+  if (X < 0 || Y < 0 || Z < 0 ||
+      (uint32_t)X >= femeRTMipExtent(Img.Width, Mip) ||
+      (uint32_t)Y >= femeRTMipExtent(Img.Height, Mip) ||
+      (uint32_t)Z >= femeRTMipExtent(Img.Depth, Mip))
     return Zero;
   return femeRTFetchTexel3DI32(&Img, Mip, X, Y, Z, /*ApplySwizzle=*/0);
 }

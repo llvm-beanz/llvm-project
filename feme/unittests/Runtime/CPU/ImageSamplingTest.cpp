@@ -7870,6 +7870,49 @@ TEST_F(ImageSamplingTest, Load3DI32FetchesIntegerTexel) {
   EXPECT_EQ(Out[3], 40);
 }
 
+TEST_F(ImageSamplingTest, Load3DI32PreservesBitsAndChecksMipExtents) {
+  const uint32_t Bits[] = {0x80000001u, 0xffffffffu, 0x7fffffffu, 0x12345679u};
+  uint32_t Storage[292];
+  for (unsigned I = 0; I < 292; ++I)
+    Storage[I] = Bits[I % 4];
+  FemeImageSubresourceLayout BaseLayout;
+  auto Img = makeImage3D(Storage, sizeof(Storage), 4, 4, 4,
+                         ResourceFormat::R32G32B32A32_SINT, BaseLayout);
+  FemeImageSubresourceLayout Layouts[] = {
+      {0, 64, 256, 0}, {1024, 32, 64, 0}, {1152, 16, 16, 0}};
+  Img.MipLayouts = Layouts;
+  Img.MipLevels = Img.MipLayoutCount = 3;
+  Load3DI32Fn Fn = resolve<Load3DI32Fn>(
+      addWrapper("load3di32", "feme.cpu.image.load.3d.v4i32"));
+  uint32_t Out[4];
+  for (auto Format :
+       {ResourceFormat::R32G32B32A32_SINT, ResourceFormat::R32G32B32A32_UINT}) {
+    Img.Format = static_cast<uint32_t>(Format);
+    for (uint32_t Mip : {0u, 1u, 2u}) {
+      int32_t Size = 4 >> Mip;
+      for (unsigned Axis = 0; Axis < 3; ++Axis)
+        for (int32_t Coord : {-1, 0, Size - 1, Size}) {
+          SCOPED_TRACE(testing::Message()
+                       << "format=" << Img.Format << " mip=" << Mip
+                       << " axis=" << Axis << " coord=" << Coord);
+          int32_t XYZ[3] = {0, 0, 0};
+          XYZ[Axis] = Coord;
+          Fn(&Img, 1, 0, XYZ[0], XYZ[1], XYZ[2], Mip, true, Out);
+          for (unsigned C = 0; C < 4; ++C)
+            EXPECT_EQ(Out[C], Coord < 0 || Coord >= Size ? 0u : Bits[C]);
+        }
+    }
+    for (uint32_t Mip : {3u, 32u, 0xffffffffu}) {
+      Fn(&Img, 1, 0, 0, 0, 0, Mip, true, Out);
+      for (uint32_t C : Out)
+        EXPECT_EQ(C, 0u);
+    }
+    Fn(&Img, 1, 0, 0, 0, 0, 0, false, Out);
+    for (uint32_t C : Out)
+      EXPECT_EQ(C, 0u);
+  }
+}
+
 TEST_F(ImageSamplingTest, Store3DWritesTexelIntoTheAddressedSliceOnly) {
   float Storage[2][2][2][4] = {}; // [Z][Y][X][Channel].
   FemeImageSubresourceLayout Layout;

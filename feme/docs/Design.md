@@ -1605,7 +1605,7 @@ Compiled tests isolate each coordinate's contribution to LOD on both screen
 axes, signed XYZ offsets, biased/clamped mip selection, result components
 and guarded partial waves. Malformed coordinates/offset widths and dynamic
 or partially undefined offsets reject. Implicit DXIL 3D sampling outside
-fragment stages and integer 3D loading remain unsupported. This completes bounded
+fragment stages and non-32-bit 3D loading remain unsupported. This completes bounded
 fragment biased execution for the seven raised texture shapes, not broader
 sampling conformance.
 
@@ -1636,7 +1636,7 @@ guards and repeats. Native SDK DXC bindless 3D shaders execute through
 normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
 Malformed shapes, non-heap handles, comparison samplers and dynamic/
 undefined/poison or partially undefined offsets remain unsupported.
-Non-fragment implicit 3D sampling, integer 3D loading, other ordinary shapes,
+Non-fragment implicit 3D sampling, non-32-bit 3D loading, other ordinary shapes,
 existing 1D execution, biased/comparison/gradient execution and SPIR-V
 behavior are unchanged.
 No bound/static descriptor materialization or owned D3D12 execution is added.
@@ -1656,11 +1656,32 @@ values with all four result widths, signed offsets, bounds, partial waves,
 guards and repeats. Fragment tests cover divergent mips, each bounds axis
 and helper masks. Native SDK DXC bindless shaders execute through normal/
 reference/AOT paths on one mip; runner YAML still prepares one mip.
-Malformed shapes, non-heap handles, integer texels, out-of-texel-width
+Malformed shapes, non-heap handles, non-32-bit texels, out-of-texel-width
 results and dynamic/undefined/poison or partially undefined offsets remain
 unsupported. Other loading/sampling, SPIR-V lowering, artifact ABI 8 and
 argument layouts are unchanged. This adds no bound/static descriptors or
 owned D3D12 execution.
+
+Heap-backed signed/unsigned i32 `Texture3D::Load` now follows the same
+stage-independent admission and integer-coordinate/offset rules. Matching
+requires result and declared texel scalar types to agree, with widths one
+through four and no result wider than the texel. The existing i32 volume
+helper and shared result narrowing preserve exact bits without floating
+conversions. Its lower/upper per-mip XYZ bounds and invalid mip checks now
+match the FP32 load helper; invalid accesses read zero. Runtime and compiled
+tests distinguish negative/high-bit values, adjacent values above FP32's
+exact-integer range, mips, XYZ and components in signed/unsigned formats.
+Compiled compute tests cover normal/reference paths, all four result widths,
+offsets, invalid mips, bounds, partial waves, guards and repeats; fragment
+tests cover divergent mips, integer outputs and helper masks. Native SDK DXC
+`Texture3D<int4>` and `Texture3D<uint4>` shaders execute through normal/
+reference/AOT paths on one mip; runner YAML still prepares one mip.
+Mixed float/integer results, non-32-bit texels, non-heap handles and
+dynamic/undefined/poison offsets remain unsupported. Existing FP32 loads,
+sampling, other dimensions, SPIR-V lowering, artifact ABI 8 and argument
+layouts are unchanged; existing SPIR-V integer loads share the runtime
+bounds correction. No bound/static descriptors or owned D3D12 execution
+are added.
 
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ
@@ -1674,7 +1695,7 @@ Native SDK DXC pixel shaders pass import/raising; real shader-clamped
 variants remain unraised. Malformed shapes, non-heap handles, comparison
 samplers and dynamic/undefined/poison or partially undefined offsets remain
 unsupported. Compute, vertex and unannotated calls stay rejected, including
-normal/reference/AOT compute admission. Integer DXIL 3D loading, existing 1D
+normal/reference/AOT compute admission. Non-32-bit DXIL 3D loading, existing 1D
 execution, explicit LOD, biased/comparison/gradient execution, SPIR-V
 behavior, artifact ABI 8 and argument layouts are unchanged. This adds no
 bound/static descriptor materialization or owned D3D12 execution.

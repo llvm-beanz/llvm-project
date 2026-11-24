@@ -1,5 +1,43 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) integer 3D texel-load CPU regression scope (2026-11-24)
+
+The [integer 3D texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-integer-3d-texel-load-cpu-execution-vm-2026-11-24)
+adds heap-backed signed/unsigned i32 `Texture3D::Load` CPU execution in any
+stage with three-component i32 XYZ coordinates, an i32 mip, constant signed
+XYZ offsets and scalar/vector results up to the declared texel width
+(one through four). Matching scalar types, wrapping coordinate adds and
+the integer volume-load helper preserve exact bits without FP32 conversions,
+samplers or derivatives. Native omitted-offset raising is unchanged.
+
+Integer runtime loads now check every per-mip XYZ extent and invalid mips,
+preventing higher-mip X/Y aliasing; invalid accesses read zero. Existing
+SPIR-V integer users share this runtime bounds correction; their lowering
+is unchanged. Runtime tests check signed/unsigned component bits, every
+lower/upper per-mip XYZ bound, invalid mips and a false mask. Compiled
+normal/reference compute tests distinguish mips 0/1/2, XYZ and components,
+all result widths, offsets, bounds, invalid mips, partial waves, guards
+and repeats. High-bit/negative values and adjacent non-FP32-exact integers
+verify exact-bit preservation. Fragment tests add integer outputs,
+divergent mips and helper masks. Native SDK DXC `int4`/`uint4` bindless
+shaders execute through normal/reference/AOT paths on one mip; runner
+YAML still prepares one mip. Mixed scalar types, too-wide results,
+non-32-bit texels, non-heap handles and dynamic/undefined/poison offsets
+remain rejected, including dynamic-offset admission in all three paths.
+
+Focused CPU/DXIL/sampling LIT passes 987; full FeMe LIT passes 4,197 with
+15 skipped, 10 unsupported and zero failures among 4,222 discovered tests.
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, bound/static descriptor
+materialization or owned D3D12 execution is claimed. Native SDK import
+plus canonical CPU execution remains distinct from owned-device execution.
+Existing FP32 loads, sampling, other dimensions, artifact ABI 8 and argument
+layouts are unchanged. Non-32-bit 3D loads, non-fragment implicit 3D sampling
+and real shader MinLod clamps on ordinary `Sample` remain unsupported.
+Broader conformance and W2(a)/W2(b)/W3(b) remain open;
+`CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) 3D texel-load CPU regression scope (2026-11-24)
 
 The [3D texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-3d-texel-load-cpu-execution-vm-2026-11-24)

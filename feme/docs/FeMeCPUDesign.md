@@ -2742,7 +2742,7 @@ selection, scalar/vector widths one through four, helper-only lanes,
 partial waves, output guards, masks and repeated invocation. Malformed
 coordinates/offset widths and dynamic, poison, undefined or partially
 undefined offsets reject. Implicit DXIL 3D sampling outside fragment stages
-and integer 3D loading remain unsupported.
+and non-32-bit 3D loading remain unsupported.
 All seven raised texture shapes now have bounded fragment biased execution;
 other stages and broader sampling conformance remain open.
 2D array sampling passes the third FP32 coordinate separately as the layer;
@@ -2801,7 +2801,7 @@ with sampler minimum/maximum LOD clamps. Native SDK DXC bindless 3D
 shaders execute through normal/reference/AOT paths on one mip; runner
 YAML still prepares one mip. This is native import plus CPU execution,
 not owned D3D12 execution or bound/static descriptor materialization.
-Non-fragment implicit DXIL 3D sampling, integer 3D loading, other ordinary shapes,
+Non-fragment implicit DXIL 3D sampling, non-32-bit 3D loading, other ordinary shapes,
 existing 1D execution, biased/comparison/gradient execution, SPIR-V behavior,
 artifact ABI 8 and argument layouts are unchanged.
 
@@ -2824,7 +2824,7 @@ shared bounds correction, not a SPIR-V lowering change.
 Transforms verify XYZ offset arithmetic, explicit mip, sample/mask,
 narrowing, reflection, image-only signature growth, handle cleanup and
 idempotence without derivatives. Malformed coordinates/offset widths,
-non-i32 mips, non-heap handles, integer texels, out-of-texel-width results
+non-i32 mips, non-heap handles, non-32-bit texels, out-of-texel-width results
 and dynamic/undefined/poison or partially undefined offsets remain
 unsupported. Admission tests check every undefined/poison XYZ component
 in fragment, vertex, compute and unannotated functions. Runtime tests
@@ -2839,6 +2839,41 @@ prepares one mip. Dynamic-offset admission rejects in all three paths.
 Other loading/sampling, SPIR-V lowering, artifact ABI 8 and argument layouts
 are unchanged. No bound/static descriptor materialization or owned D3D12
 execution is added.
+
+Heap-backed signed/unsigned i32 `Texture3D::Load` now executes through
+`createLoad3DI32` in any stage. The same matcher checks i32 coordinates/mip,
+constant signed XYZ offsets and scalar/vector widths one through four,
+requiring the result scalar type to match the declared texel scalar type.
+FP32 sampling still requires FP32 texels/results. Integer loads use the
+shared wrapping coordinate adds and result narrowing, but no FP32
+conversion or sample operand. Signless i32 IR preserves bits; signedness
+comes from the image format.
+
+The integer volume-load runtime now checks all three per-mip extents and
+rejects invalid mips before fetching, like FP32 loads. Negative/out-of-range
+coordinates and invalid mips return zero rather than aliasing another
+row/slice. Existing SPIR-V integer users share this runtime bounds
+correction; their lowering is unchanged.
+
+Transforms verify exact integer offset arithmetic, explicit mip/mask,
+scalar/vector narrowing, reflection, image-only signature growth, handle
+cleanup and idempotence without derivatives. Mixed float/integer results,
+too-wide results, non-32-bit texels, non-heap handles and dynamic/undefined/
+poison offsets remain unsupported. Admission checks every undefined/poison
+XYZ offset component in fragment, vertex, compute and unannotated functions
+for FP32 and i32 loads. Runtime tests check all lower/upper per-mip bounds,
+invalid mips, false masks and exact signed/unsigned component bits.
+Compiled normal/reference compute tests distinguish mips 0/1/2, XYZ and
+components with all four result widths, signed offsets, bounds, invalid
+mips, wave sizes 4/8, five lanes, guards and repeated prepared dispatches.
+High-bit, negative and adjacent non-FP32-exact integers test exact-bit
+preservation. Fragment tests add divergent mips, integer outputs, helper
+masks, partial waves, guards and repeats. Native SDK DXC `int4`/`uint4`
+bindless 3D shaders execute through normal/reference/AOT paths on one mip;
+runner YAML still prepares one mip. Dynamic-offset admission rejects in
+all three paths. Existing FP32 loads, sampling, other dimensions, artifact
+ABI 8 and argument layouts are unchanged. No bound/static descriptors or
+owned D3D12 execution are added.
 
 Heap-backed FP32 `Texture3D::Sample` now executes through `createSample3D`
 in fragment stages. Shared admission/lowering requires default samplers,
@@ -2862,7 +2897,7 @@ and repeated prepared invocations. Native SDK DXC pixel shaders pass
 import/raising; real shader-clamped variants remain unraised. Non-fragment
 calls stay rejected, including normal/reference/AOT compute admission.
 Native import is distinct from canonical CPU execution; no bound/static
-descriptors or owned D3D12 execution are added. Integer DXIL 3D loading, existing
+descriptors or owned D3D12 execution are added. Non-32-bit DXIL 3D loading, existing
 1D execution, explicit LOD, biased/comparison/gradient execution, SPIR-V
 behavior, artifact ABI 8 and argument layouts are unchanged.
 

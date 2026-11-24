@@ -507,39 +507,51 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupported3DLoadsInEveryStage) {
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32)
     declare <4 x float> @llvm.dx.resource.load.level.v4f32.tdx.Texture_v4f32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), <3 x i32>, i32, <3 x i32>)
+    define <4 x i32> @integer(<3 x i32> %coord, i32 %mip, <3 x i32> %offset) {
+      %t = call target("dx.Texture", <4 x i32>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4i32_0_0_0_4t(i32 0)
+      %r = call <4 x i32> @llvm.dx.resource.load.level.v4i32.tdx.Texture_v4i32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", <4 x i32>, 0, 0, 0, 4) %t, <3 x i32> %coord, i32 %mip, <3 x i32> <i32 1, i32 -1, i32 2>)
+      ret <4 x i32> %r
+    }
+    declare target("dx.Texture", <4 x i32>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4i32_0_0_0_4t(i32)
+    declare <4 x i32> @llvm.dx.resource.load.level.v4i32.tdx.Texture_v4i32_0_0_0_4t.v3i32.i32.v3i32(target("dx.Texture", <4 x i32>, 0, 0, 0, 4), <3 x i32>, i32, <3 x i32>)
   )");
   ASSERT_TRUE(M);
-  Function *F = M->getFunction("main");
-  auto *Load = cast<CallInst>(F->back().getTerminator()->getOperand(0));
-  auto *Offset = cast<Constant>(Load->getArgOperand(3));
-  for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
-    SCOPED_TRACE(Stage.str());
-    F->removeFnAttr("feme.shader.stage");
-    if (!Stage.empty())
-      F->addFnAttr("feme.shader.stage", Stage);
+  for (StringRef Name : {"main", "integer"}) {
+    SCOPED_TRACE(Name.str());
+    Function *F = M->getFunction(Name);
+    auto *Load = cast<CallInst>(F->back().getTerminator()->getOperand(0));
+    auto *Offset = cast<Constant>(Load->getArgOperand(3));
+    for (StringRef Stage : {"", "fragment", "vertex", "compute"}) {
+      SCOPED_TRACE(Stage.str());
+      F->removeFnAttr("feme.shader.stage");
+      if (!Stage.empty())
+        F->addFnAttr("feme.shader.stage", Stage);
+      Load->setArgOperand(3, Offset);
+      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+      Value *BadOffsets[] = {F->getArg(2), UndefValue::get(Offset->getType()),
+                             PoisonValue::get(Offset->getType())};
+      for (Value *Bad : BadOffsets) {
+        Load->setArgOperand(3, Bad);
+        EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+      }
+      for (unsigned Axis = 0; Axis < 3; ++Axis) {
+        Constant *Components[] = {Offset->getAggregateElement(0u),
+                                  Offset->getAggregateElement(1u),
+                                  Offset->getAggregateElement(2u)};
+        Components[Axis] = UndefValue::get(Type::getInt32Ty(Ctx));
+        Load->setArgOperand(3, ConstantVector::get(Components));
+        EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
+        Components[Axis] = PoisonValue::get(Type::getInt32Ty(Ctx));
+        Load->setArgOperand(3, ConstantVector::get(Components));
+        EXPECT_THAT_ERROR(
+            checkSupportedRaisedOps(*M),
+            Failed<StringError>(testing::Property(
+                &StringError::getMessage,
+                testing::HasSubstr(
+                    "3D texel loading with three-component i32"))));
+      }
+    }
     Load->setArgOperand(3, Offset);
-    EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
-    Value *BadOffsets[] = {F->getArg(2), UndefValue::get(Offset->getType()),
-                           PoisonValue::get(Offset->getType())};
-    for (Value *Bad : BadOffsets) {
-      Load->setArgOperand(3, Bad);
-      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
-    }
-    for (unsigned Axis = 0; Axis < 3; ++Axis) {
-      Constant *Components[] = {Offset->getAggregateElement(0u),
-                                Offset->getAggregateElement(1u),
-                                Offset->getAggregateElement(2u)};
-      Components[Axis] = UndefValue::get(Type::getInt32Ty(Ctx));
-      Load->setArgOperand(3, ConstantVector::get(Components));
-      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Failed());
-      Components[Axis] = PoisonValue::get(Type::getInt32Ty(Ctx));
-      Load->setArgOperand(3, ConstantVector::get(Components));
-      EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M),
-                        Failed<StringError>(testing::Property(
-                            &StringError::getMessage,
-                            testing::HasSubstr(
-                                "3D texel loading with three-component i32"))));
-    }
   }
 }
 

@@ -671,11 +671,11 @@ bool isZeroOffset(const Value *Offset) {
   return C && C->isNullValue();
 }
 
-unsigned getFP32Width(Type *Ty) {
-  if (Ty->isFloatTy())
+unsigned getTexelWidth(Type *Ty, Type *ScalarTy) {
+  if (Ty == ScalarTy)
     return 1;
   auto *VecTy = dyn_cast<FixedVectorType>(Ty);
-  return VecTy && VecTy->getElementType()->isFloatTy() &&
+  return VecTy && VecTy->getElementType() == ScalarTy &&
                  VecTy->getNumElements() <= 4
              ? VecTy->getNumElements()
              : 0;
@@ -727,9 +727,14 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
             Builder.CreateExtractElement(Coord, uint64_t{Axis}),
             Offset->getAggregateElement(Axis));
       Value *Loaded =
-          createLoad3D(Builder, Env, Image->getArgOperand(0), XYZ[0], XYZ[1],
-                       XYZ[2], CI->getArgOperand(2), Builder.getInt32(0),
-                       Builder.getTrue(), CI->getName());
+          CI->getType()->getScalarType()->isIntegerTy(32)
+              ? createLoad3DI32(Builder, Env, Image->getArgOperand(0), XYZ[0],
+                                XYZ[1], XYZ[2], CI->getArgOperand(2),
+                                Builder.getTrue(), CI->getName())
+              : createLoad3D(Builder, Env, Image->getArgOperand(0), XYZ[0],
+                             XYZ[1], XYZ[2], CI->getArgOperand(2),
+                             Builder.getInt32(0), Builder.getTrue(),
+                             CI->getName());
       CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
       CI->eraseFromParent();
       SampleHandles.insert(Image);
@@ -1394,8 +1399,10 @@ static bool isSupportedDXILFloatingSample(const CallInst &CI,
       SamplerTy->getNumIntParameters() != 1 ||
       SamplerTy->getSamplerType() != dxil::SamplerType::Default)
     return false;
-  unsigned TextureWidth = getFP32Width(TextureTy->getTypeParameter(0));
-  unsigned ResultWidth = getFP32Width(CI.getType());
+  Type *FloatTy = Type::getFloatTy(CI.getContext());
+  unsigned TextureWidth =
+      getTexelWidth(TextureTy->getTypeParameter(0), FloatTy);
+  unsigned ResultWidth = getTexelWidth(CI.getType(), FloatTy);
   auto Kind = TextureTy->getDimension();
   unsigned NumCoords;
   switch (Kind) {
@@ -1482,8 +1489,11 @@ bool feme::cpu::isSupportedDXILLoad3D(const CallInst &CI) {
       Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4 ||
       Ty->getDimension() != dxil::ResourceKind::Texture3D)
     return false;
-  unsigned TextureWidth = getFP32Width(Ty->getTypeParameter(0));
-  unsigned ResultWidth = getFP32Width(CI.getType());
+  Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
+  if (!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32))
+    return false;
+  unsigned TextureWidth = getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
+  unsigned ResultWidth = getTexelWidth(CI.getType(), ScalarTy);
   Type *XYZTy = FixedVectorType::get(Type::getInt32Ty(CI.getContext()), 3);
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
       CI.getArgOperand(1)->getType() != XYZTy ||
