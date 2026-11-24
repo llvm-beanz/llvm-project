@@ -27,6 +27,44 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) integer multisample texel-load CPU execution (VM, 2026-11-24)
+
+Heap-backed signed/unsigned i32 `Texture2DMS::Load`/
+`Texture2DMSArray::Load` now execute in any stage with paired/three-component
+i32 coordinates, an i32 sample and constant signed XY offsets. Matching
+scalar types and result/texel widths one through four use existing integer
+helpers and shared narrowing without FP32 conversions. Mip zero, the
+live sample and separate layers need no sampler or derivatives. Native
+opcode 66 raising and omitted-offset normalization are unchanged.
+
+Integer runtime sample bounds now match FP32, preventing negative/upper
+samples from aliasing another texel/row/layer. SPIR-V integer users share
+the correction without lowering changes. Runtime tests cover exact
+signed/unsigned components, counts 1/2/4, rectangular spatial/layer
+bounds, invalid samples/mips and masks. Compiled normal/reference
+compute tests distinguish four samples, X/Y/layers/components, all
+result widths, signed offsets, bounds, waves 4/8, five lanes, guards and
+repeats. High-bit/negative and adjacent non-FP32-exact values verify exact
+bits. Fragment array tests add integer outputs, divergent samples/layers,
+all lower/upper bounds, helper masks, one/three quads, guards and repeats.
+SDK DXC SM6.6 plain/array `int4`/`uint4` shaders pass native import/raising
+and AOT compilation only; runner YAML still rejects MS image preparation.
+Mixed scalar types, non-32-bit texels, too-wide results, non-heap handles
+and dynamic/undefined/poison or partial offsets remain rejected.
+Every-stage admission covers FP32/i32 and each undefined/poison XY
+component; dynamic integer offsets fail normal/reference/AOT admission.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused LIT passes 1,335 in 44.00 seconds; full LIT passes 4,238 with
+15 skipped, 10 unsupported and zero failures among 4,263 discovered
+tests in 85.76 seconds. Five new tests add five passes.
+
+MS sampling, runner MS preparation, bound/static descriptors and owned
+D3D12 execution remain open. Existing FP32 MS/single-sample loads,
+sampling, artifact ABI 8 and argument layouts are unchanged;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) FP32 multisample texel-load CPU execution (VM, 2026-11-24)
 
 Heap-backed `Texture2DMS::Load`/`Texture2DMSArray::Load` now execute in

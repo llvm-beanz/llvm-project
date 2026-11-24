@@ -2955,8 +2955,8 @@ layers/components, all result widths, offsets, bounds, waves 4/8, five
 lanes, guards and repeats; fragment tests add divergent mips/layers,
 both bounds axes, invalid layers/mips and helper masks. Native SDK DXC
 plain/array shaders execute through normal/reference/AOT paths on one
-mip; runner YAML still prepares one mip. Integer MS CPU loads and runner
-MS preparation remain open. Existing 1D/3D loads, sampling, artifact ABI 8
+mip; runner YAML still prepares one mip. Runner MS preparation remains
+open. Existing 1D/3D loads, sampling, artifact ABI 8
 and argument layouts are unchanged; no bound/static
 descriptors or owned D3D12 execution are added.
 
@@ -3001,13 +3001,36 @@ samples/mips and masks. Compiled normal/reference compute tests cover
 four samples, all result widths, X/Y/layers/components, offsets, bounds,
 waves 4/8, five lanes, guards and repeats. Fragment array tests add
 divergent samples/layers and helper masks. Native SDK DXC FP32 shaders
-pass import/raising and AOT compilation; integer MS shaders raise but
-explicitly fail CPU admission. Native omitted offsets normalize to zero;
+pass import/raising and AOT compilation; integer MS execution is covered
+below. Native omitted offsets normalize to zero;
 canonical dynamic/undefined/poison or partial offsets remain rejected.
 Status/aggregate native uses stay raw without duplicate loads.
-Integer MS CPU loads, runner YAML MS preparation, bound/static
+Runner YAML MS preparation, bound/static
 descriptors and owned D3D12 execution remain open. Artifact ABI 8 and
 argument layouts are unchanged.
+
+Heap-backed signed/unsigned i32 MS `Load` now uses
+`createLoad2DI32`/`createLoad2DArrayI32` under the same shared matcher.
+Matching scalar types and result widths one through four preserve exact
+bits without FP32 conversions. Calls pass mip zero, the live sample and
+separate layers; wrapping adds affect only X/Y. Integer runtime sample
+bounds now match FP32, preventing negative/upper samples from aliasing
+another texel/row/layer. SPIR-V integer users share the runtime correction
+without lowering changes. Runtime tests cover counts 1/2/4, exact
+signed/unsigned components, rectangular bounds, invalid samples/mips and
+masks. Compiled normal/reference compute tests distinguish four samples,
+all result widths, X/Y/layers/components, offsets, bounds, waves 4/8,
+five lanes, guards and repeats; high-bit/negative and adjacent
+non-FP32-exact values test bit preservation. Fragment array tests add
+integer outputs, divergent samples/layers and helper masks. Every-stage
+admission now covers FP32/i32 and each undefined/poison XY component.
+Mixed scalar types, non-32-bit texels, too-wide results, non-heap handles
+and dynamic/undefined/poison or partial offsets remain rejected.
+SDK DXC plain/array `int4`/`uint4` shaders pass import/raising and AOT
+compilation only; runner YAML still rejects MS image preparation.
+Native raising, FP32 MS/single-sample loads, sampling, artifact ABI 8 and
+argument layouts are unchanged; bound/static descriptors and owned
+D3D12 execution remain open.
 
 Heap-backed FP32 `Texture3D::Sample` now executes through `createSample3D`
 in fragment stages. Shared admission/lowering requires default samplers,

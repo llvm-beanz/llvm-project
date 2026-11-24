@@ -1841,6 +1841,54 @@ bound/static descriptors and owned D3D12 execution remain open.
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) integer multisample texel-load CPU execution progress (2026-11-24):
+heap-backed signed/unsigned i32 `Texture2DMS::Load` and
+`Texture2DMSArray::Load` now execute in any stage. Shared admission
+retains paired `(X,Y)` or three-component `(X,Y,layer)` i32 coordinates,
+an i32 sample and constant signed XY offsets. Matching result/texel
+scalar types and scalar/vector widths one through four use the existing
+integer helpers and shared narrowing without FP32 conversions. Wrapping
+adds affect only X/Y; layers and samples remain separate. Helpers receive
+mip zero and the live sample without samplers or derivatives.
+Native opcode 66 raising and omitted-offset normalization are unchanged.
+
+Integer runtime sample bounds now match FP32, preventing negative/upper
+sample indices from aliasing another texel/row/layer. Existing spatial,
+layer, mip and mask checks remain enforced. SPIR-V integer users share
+this runtime correction; SPIR-V lowering is unchanged.
+Transforms verify integer offsets, mip/sample/mask forwarding, narrowing,
+reflection, image-only signature growth, cleanup and idempotence.
+Mixed scalar types, non-32-bit texels, too-wide results, non-heap handles
+and dynamic/undefined/poison or partial offsets remain rejected.
+Every-stage admission checks FP32/i32 loads and each individually
+undefined/poison XY offset component. Dynamic integer offsets fail
+normal/reference/AOT admission.
+
+Runtime tests preserve exact signed/unsigned components with sample
+counts 1/2/4, rectangular spatial/layer bounds, invalid samples/mips and
+false masks. Compiled normal/reference compute tests distinguish all
+four samples, X/Y/layers/components and result widths, signed offsets,
+bounds, waves 4/8, five lanes, guards and repeats. High-bit/negative and
+adjacent non-FP32-exact integers verify bit preservation. Fragment array
+tests add integer outputs, divergent samples/layers, each lower/upper
+X/Y/layer/sample bound, helper masks, one/three quads, partial waves,
+guards and repeats. Actual SDK DXC SM6.6 plain/array `int4`/`uint4`
+shaders pass native import/raising and AOT compilation. Native MS
+execution through runner YAML is not claimed: MS image preparation
+remains rejected.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling plus runtime LIT passes 1,335 in 44.00 seconds;
+full FeMe LIT passes 4,238 with 15 skipped, 10 unsupported and zero
+failures among 4,263 discovered tests in 85.76 seconds. Five new tests
+add five passes; timings are not controlled speedups. Existing FP32 MS
+loads, single-sample loads, sampling, artifact ABI 8 and argument layouts
+are unchanged. Non-32-bit texels, MS sampling, runner MS preparation,
+broader conformance, bound/static descriptors and owned D3D12 execution
+remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

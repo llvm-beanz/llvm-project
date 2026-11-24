@@ -1511,7 +1511,7 @@ bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
   if (!Is1D && !Is2D && Kind != dxil::ResourceKind::Texture3D)
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
-  if (!ScalarTy->isFloatTy() && (IsMS || !ScalarTy->isIntegerTy(32)))
+  if (!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32))
     return false;
   unsigned TextureWidth = getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
   unsigned ResultWidth = getTexelWidth(CI.getType(), ScalarTy);

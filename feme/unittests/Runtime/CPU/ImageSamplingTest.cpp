@@ -7908,6 +7908,84 @@ TEST_F(ImageSamplingTest, LoadMSChecksSamplesWithoutAliasingTexelsOrLayers) {
   }
 }
 
+TEST_F(ImageSamplingTest, IntegerLoadMSPreservesBitsAndChecksSampleBounds) {
+  constexpr uint32_t Bits[] = {0x80000001u, 0xffffffffu, 0x01000001u,
+                               0x01000002u};
+  uint32_t Storage[2 * 2 * 3 * 4 * 4];
+  FemeImageSubresourceLayout Layout{};
+  Layout.SampleStride = 4 * sizeof(uint32_t);
+  FemeImageDescriptor Plain{};
+  Plain.Data = Storage;
+  Plain.SizeInBytes = sizeof(Storage);
+  Plain.Dimension = static_cast<uint32_t>(ImageDimension::Texture2DMS);
+  Plain.Width = 3;
+  Plain.Height = 2;
+  Plain.Depth = Plain.ArrayLayers = Plain.PlaneCount = 1;
+  Plain.MipLevels = Plain.MipLayoutCount = 1;
+  Plain.MipLayouts = &Layout;
+  Plain.Flags = FEME_IMAGE_SAMPLED;
+  auto Array = Plain;
+  Array.Dimension = static_cast<uint32_t>(ImageDimension::Texture2DMSArray);
+  Array.ArrayLayers = 2;
+  Function *PlainWrapper = addWrapper("loadms", "feme.cpu.image.load.2d.v4i32");
+  Function *ArrayWrapper =
+      addWrapper("loadmsarray", "feme.cpu.image.load.2darray.v4i32");
+  auto Load = resolve<LoadI32Fn>(PlainWrapper);
+  auto LoadArray = resolve<LoadArrayI32Fn>(ArrayWrapper);
+  for (auto Format :
+       {ResourceFormat::R32G32B32A32_SINT, ResourceFormat::R32G32B32A32_UINT})
+    for (unsigned Samples : {1u, 2u, 4u}) {
+      Plain.Format = Array.Format = static_cast<uint32_t>(Format);
+      Plain.SampleCount = Array.SampleCount = Samples;
+      Layout.RowPitch = 3 * Samples * Layout.SampleStride;
+      Layout.SlicePitch = 2 * Layout.RowPitch;
+      for (unsigned Layer = 0; Layer < 2; ++Layer)
+        for (unsigned Y = 0; Y < 2; ++Y)
+          for (unsigned X = 0; X < 3; ++X)
+            for (unsigned Sample = 0; Sample < Samples; ++Sample)
+              for (unsigned C = 0; C < 4; ++C)
+                Storage[(((Layer * 2 + Y) * 3 + X) * Samples + Sample) * 4 +
+                        C] =
+                    Bits[C] + 1000 * Layer + 100 * Y + 20 * X + 4 * Sample;
+      for (int X : {-1, 0, 2, 3})
+        for (int Y : {-1, 0, 1, 2})
+          for (uint32_t Sample : {0u, Samples - 1, Samples, 0xffffffffu}) {
+            SCOPED_TRACE(testing::Message()
+                         << "format=" << Plain.Format << " samples=" << Samples
+                         << " sample=" << Sample << " x=" << X << " y=" << Y);
+            uint32_t Out[4];
+            bool Valid = X >= 0 && X < 3 && Y >= 0 && Y < 2 && Sample < Samples;
+            Load(&Plain, 1, 0, X, Y, 0, Sample, true, Out);
+            for (unsigned C = 0; C < 4; ++C)
+              EXPECT_EQ(Out[C],
+                        Valid ? Bits[C] + 100 * Y + 20 * X + 4 * Sample : 0u);
+            for (int Layer : {-1, 0, 1, 2}) {
+              LoadArray(&Array, 1, 0, X, Y, Layer, 0, Sample, true, Out);
+              for (unsigned C = 0; C < 4; ++C)
+                EXPECT_EQ(Out[C], Valid && Layer >= 0 && Layer < 2
+                                      ? Bits[C] + 1000 * Layer + 100 * Y +
+                                            20 * X + 4 * Sample
+                                      : 0u);
+            }
+          }
+      uint32_t Out[4];
+      for (uint32_t Mip : {1u, 32u, 0xffffffffu}) {
+        Load(&Plain, 1, 0, 0, 0, Mip, 0, true, Out);
+        for (uint32_t V : Out)
+          EXPECT_EQ(V, 0u);
+        LoadArray(&Array, 1, 0, 0, 0, 0, Mip, 0, true, Out);
+        for (uint32_t V : Out)
+          EXPECT_EQ(V, 0u);
+      }
+      Load(&Plain, 1, 0, 0, 0, 0, 0, false, Out);
+      for (uint32_t V : Out)
+        EXPECT_EQ(V, 0u);
+      LoadArray(&Array, 1, 0, 0, 0, 0, 0, 0, false, Out);
+      for (uint32_t V : Out)
+        EXPECT_EQ(V, 0u);
+    }
+}
+
 TEST_F(ImageSamplingTest, Load2DAndArrayCheckMipExtentsAndLayers) {
   float Storage[88];
   std::fill_n(Storage, 88, 7.0f);

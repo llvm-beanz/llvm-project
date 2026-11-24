@@ -1740,7 +1740,7 @@ tests cover rectangular mips, X/Y/layers/components, all result widths,
 offsets, bounds, partial waves, guards and repeats; fragment tests add
 divergent mips/layers and helper masks. Native SDK DXC plain/array shaders
 execute through normal/reference/AOT paths on one mip.
-Integer MS CPU loads and runner MS preparation remain open. Existing
+Runner MS preparation remains open. Existing
 1D/3D loads, sampling, artifact ABI 8 and argument layouts are unchanged;
 no bound/static descriptors or owned D3D12 execution are added.
 
@@ -1768,8 +1768,8 @@ in any stage. Native `dx.MSTexture` opcode 66 loads raise to
 not a mip. Plain/array integer coordinates and signed XY offsets stay
 separate from samples/layers; omitted native offsets normalize to zero,
 while partial offsets remain strict at CPU admission. Status/aggregate
-uses remain unraised without duplicate loads. Integer MS loads also
-raise but remain explicitly unsupported on CPU.
+uses remain unraised without duplicate loads. Integer MS loads share
+this native encoding, with CPU execution covered below.
 The shared matcher accepts heap-backed FP32 texels, scalar/vector
 results up to the declared width (one through four), paired/three-component
 i32 coordinates, i32 samples and constant signed XY offsets. Existing
@@ -1780,9 +1780,26 @@ correction without lowering changes. Compiled normal/reference compute
 and fragment array tests cover samples, coordinates/layers, components,
 bounds, helper masks, partial waves, guards and repeats. SDK DXC FP32
 plain/array shaders pass import/raising and AOT compilation only:
-runner YAML still rejects MS image preparation. MS sampling, integer MS
-CPU loads, bound/static descriptors and owned D3D12 execution remain open.
+runner YAML still rejects MS image preparation. MS sampling,
+bound/static descriptors and owned D3D12 execution remain open.
 Artifact ABI 8 and argument layouts are unchanged.
+
+Heap-backed signed/unsigned i32 MS `Load` now follows the same
+stage-independent coordinate/sample/offset rules. Matching scalar types
+and widths one through four use integer helpers and shared narrowing
+without FP32 conversions. Integer runtime sample bounds now match FP32,
+returning zero instead of aliasing another texel/row/layer; SPIR-V integer
+users share the correction. Runtime and compiled normal/reference compute
+tests preserve high-bit/negative and adjacent non-FP32-exact components,
+distinguish samples/coordinates/layers and exercise bounds, masks, partial
+waves, guards and repeats. Fragment array tests add integer outputs,
+divergent samples/layers and helper masks. SDK DXC `int4`/`uint4` shaders
+pass native import/raising and AOT compilation only; runner YAML still
+rejects MS preparation. Mixed scalar types, non-32-bit texels, too-wide
+results, non-heap handles and dynamic/undefined/poison or partial offsets
+remain rejected. Native raising, FP32 MS/single-sample loads, sampling,
+artifact ABI 8 and argument layouts are unchanged; bound/static
+descriptors and owned D3D12 execution remain open.
 
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ

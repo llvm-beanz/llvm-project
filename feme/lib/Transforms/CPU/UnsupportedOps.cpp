@@ -64,7 +64,7 @@ Error checkSupportedRaisedOps(const Module &M) {
           return createStringError(
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed "
-              "FP32 2DMS/array texel loading with paired/three-component "
+              "FP32/i32 2DMS/array texel loading with paired/three-component "
               "i32 coordinates, an i32 sample index and constant signed "
               "XY offsets",
               F.getName().str().c_str());

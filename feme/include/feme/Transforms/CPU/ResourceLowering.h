@@ -61,7 +61,7 @@
 // separate array layers, explicit mip levels and constant signed spatial
 // offsets in every stage, without a sampler.
 // FP32/i32 2D/array Load shares this path with paired XY spatial offsets.
-// FP32 2DMS/array Load uses mip zero and an explicit i32 sample index.
+// FP32/i32 2DMS/array Load uses mip zero and an explicit i32 sample index.
 //
 //===----------------------------------------------------------------------===//
 
@@ -81,7 +81,8 @@ namespace feme::cpu {
 /// spatial offsets (scalar for 1D, XY for 2D, XYZ for 3D) and scalar/vector
 /// results up to the declared texel width (at most four). Array layers are
 /// passed separately.
-/// FP32 2DMS/array loads instead carry an i32 sample index and use mip zero.
+/// FP32/i32 2DMS/array loads instead carry an i32 sample index and use mip
+/// zero.
 bool isSupportedDXILLoad(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32 1D/2D/3D/cube (including array) biased sampling in a

@@ -3255,8 +3255,8 @@ documented reason rather than an oversight:
   layers/components, all result widths, offsets, bounds, partial waves,
   guards and repeats; fragment tests add divergent mips/layers and helper
   masks. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one mip. Integer MS CPU loads and runner MS
-  preparation remain open. Existing 1D/3D loads, sampling,
+  reference/AOT paths on one mip. Runner MS preparation remains open.
+  Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   no bound/static descriptors or owned-device execution are added.
   Heap-backed signed/unsigned i32 2D/array `Load` now also executes in any
@@ -3289,11 +3289,27 @@ documented reason rather than an oversight:
   components, coordinates/layers, bounds, helper masks, partial waves,
   guards and repeats. SDK DXC FP32 shaders pass import/raising and AOT
   compilation, not native MS execution through runner YAML, which still
-  rejects MS image preparation. Integer native MS loads raise but remain
-  explicitly unsupported on CPU. MS sampling and canonical dynamic/
+  rejects MS image preparation. Integer MS execution is covered below.
+  MS sampling and canonical dynamic/
   undefined/poison or partial offsets remain rejected. Artifact ABI 8,
   argument layouts and SPIR-V lowering are unchanged; bound/static
   descriptors and owned-device execution remain open.
+  Heap-backed signed/unsigned i32 MS `Load` now also executes in any stage
+  under the same coordinate/sample/offset rules. Integer helpers and
+  shared narrowing preserve exact bits for matching scalar types and
+  widths one through four. Runtime sample bounds now match FP32,
+  preventing invalid samples from aliasing another texel/row/layer;
+  SPIR-V integer users share the correction. Runtime and compiled
+  normal/reference compute tests distinguish exact components, samples,
+  coordinates/layers, offsets and bounds with partial waves, guards and
+  repeats; fragment array tests add integer outputs, divergent samples/
+  layers and helper masks. SDK DXC `int4`/`uint4` shaders pass native
+  import/raising and AOT compilation only; runner YAML still rejects MS
+  preparation. Mixed scalar types, non-32-bit texels, too-wide results,
+  non-heap handles and dynamic/undefined/poison or partial offsets remain
+  rejected. Native raising, FP32 MS/single-sample loads, sampling, artifact
+  ABI 8 and argument layouts are unchanged; bound/static descriptors and
+  owned-device execution remain open.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

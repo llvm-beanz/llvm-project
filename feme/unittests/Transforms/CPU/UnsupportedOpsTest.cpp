@@ -581,9 +581,23 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedMSLoadsInEveryStage) {
     declare target("dx.MSTexture", <2 x float>, 0, 0, 0, 8) @llvm.dx.resource.handlefromheap.tdx.MSTexture_v2f32_0_0_0_8t(i32)
     declare float @llvm.dx.resource.load.ms.f32.tdx.MSTexture_f32_0_4_0_3t.v2i32.v2i32(target("dx.MSTexture", float, 0, 4, 0, 3), <2 x i32>, i32, <2 x i32>)
     declare <2 x float> @llvm.dx.resource.load.ms.v2f32.tdx.MSTexture_v2f32_0_0_0_8t.v3i32.v2i32(target("dx.MSTexture", <2 x float>, 0, 0, 0, 8), <3 x i32>, i32, <2 x i32>)
+    define i32 @integer_plain(<2 x i32> %coord, i32 %sample, <2 x i32> %offset) {
+      %t = call target("dx.MSTexture", i32, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap.tdx.MSTexture_i32_0_4_0_3t(i32 0)
+      %v = call i32 @llvm.dx.resource.load.ms.i32.tdx.MSTexture_i32_0_4_0_3t.v2i32.v2i32(target("dx.MSTexture", i32, 0, 4, 0, 3) %t, <2 x i32> %coord, i32 %sample, <2 x i32> <i32 1, i32 -1>)
+      ret i32 %v
+    }
+    define <2 x i32> @integer_array(<3 x i32> %coord, i32 %sample, <2 x i32> %offset) {
+      %t = call target("dx.MSTexture", <2 x i32>, 0, 0, 0, 8) @llvm.dx.resource.handlefromheap.tdx.MSTexture_v2i32_0_0_0_8t(i32 0)
+      %v = call <2 x i32> @llvm.dx.resource.load.ms.v2i32.tdx.MSTexture_v2i32_0_0_0_8t.v3i32.v2i32(target("dx.MSTexture", <2 x i32>, 0, 0, 0, 8) %t, <3 x i32> %coord, i32 %sample, <2 x i32> <i32 -1, i32 1>)
+      ret <2 x i32> %v
+    }
+    declare target("dx.MSTexture", i32, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap.tdx.MSTexture_i32_0_4_0_3t(i32)
+    declare target("dx.MSTexture", <2 x i32>, 0, 0, 0, 8) @llvm.dx.resource.handlefromheap.tdx.MSTexture_v2i32_0_0_0_8t(i32)
+    declare i32 @llvm.dx.resource.load.ms.i32.tdx.MSTexture_i32_0_4_0_3t.v2i32.v2i32(target("dx.MSTexture", i32, 0, 4, 0, 3), <2 x i32>, i32, <2 x i32>)
+    declare <2 x i32> @llvm.dx.resource.load.ms.v2i32.tdx.MSTexture_v2i32_0_0_0_8t.v3i32.v2i32(target("dx.MSTexture", <2 x i32>, 0, 0, 0, 8), <3 x i32>, i32, <2 x i32>)
   )");
   ASSERT_TRUE(M);
-  for (StringRef Name : {"plain", "array"}) {
+  for (StringRef Name : {"plain", "array", "integer_plain", "integer_array"}) {
     Function *F = M->getFunction(Name);
     auto *Load = cast<CallInst>(F->back().getTerminator()->getOperand(0));
     auto *Offset = cast<Constant>(Load->getArgOperand(3));
@@ -610,7 +624,7 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupportedMSLoadsInEveryStage) {
               checkSupportedRaisedOps(*M),
               Failed<StringError>(testing::Property(
                   &StringError::getMessage,
-                  testing::HasSubstr("FP32 2DMS/array texel loading"))));
+                  testing::HasSubstr("FP32/i32 2DMS/array texel loading"))));
         }
       Load->setArgOperand(3, Offset);
     }

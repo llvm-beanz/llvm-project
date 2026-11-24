@@ -5,10 +5,13 @@
 # RUN: split-file %s %t
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/float.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D INTEGER /Fo %t/integer.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D SIGNED /Fo %t/signed.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/float.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=FLOAT
 # RUN: feme-translate --import-dxil %t/integer.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=INTEGER
+# RUN: feme-translate --import-dxil %t/signed.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=INTEGER
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/float.dxil -o %t/float.o
-# RUN: not feme --target=%feme_host_triple %t/integer.dxil -o %t/integer.o 2>&1 | FileCheck %s --check-prefix=REJECT
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/integer.dxil -o %t/integer.o
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/signed.dxil -o %t/signed.o
 # Native import and AOT compilation only: runner YAML still rejects MS images.
 # FLOAT: call <4 x float> @llvm.dx.resource.load.ms
 # FLOAT-SAME: <2 x i32> <i32 1, i32 -1>)
@@ -19,9 +22,11 @@
 # INTEGER-SAME: <2 x i32> <i32 1, i32 -1>)
 # INTEGER: call <4 x i32> @llvm.dx.resource.load.ms
 # INTEGER-SAME: <2 x i32> zeroinitializer)
-# REJECT: requires heap-backed FP32 2DMS/array texel loading
+# INTEGER-NOT: call %dx.types.ResRet.i32 @dx.op.textureLoad
 #--- shader.hlsl
-#ifdef INTEGER
+#ifdef SIGNED
+#define TEXEL int4
+#elif defined(INTEGER)
 #define TEXEL uint4
 #else
 #define TEXEL float4

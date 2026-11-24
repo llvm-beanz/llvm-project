@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) integer multisample texel-load CPU regression scope (2026-11-24)
+
+The [integer multisample follow-up](W0WindowsIntegrationProbe.md#w2aw3b-integer-multisample-texel-load-cpu-execution-vm-2026-11-24)
+adds heap-backed signed/unsigned i32 `Texture2DMS::Load`/
+`Texture2DMSArray::Load` CPU execution in any stage. Shared FP32/i32
+matching uses shape-matched i32 coordinates, an i32 sample, constant
+signed XY offsets and scalar/vector widths one through four. Integer
+helpers preserve exact bits with mip zero, live samples and separate
+layers. Native raising is unchanged. Integer runtime sample bounds now
+match FP32, preventing invalid samples from aliasing another texel/row/
+layer; SPIR-V integer users share the correction without lowering changes.
+
+Runtime tests cover exact signed/unsigned components, counts 1/2/4,
+rectangular bounds, invalid samples/mips and masks. Compiled
+normal/reference compute tests distinguish four samples,
+X/Y/layers/components, all result widths, offsets, bounds, partial waves,
+guards and repeats, including high-bit/negative and adjacent non-FP32-exact
+values. Fragment array tests add integer outputs, divergent samples/
+layers and helper masks. SDK DXC plain/array `int4`/`uint4` shaders pass
+native import/raising and AOT compilation only: runner YAML still
+rejects MS images. Dynamic integer offsets fail normal/reference/AOT
+admission; undefined/poison or partial offsets remain rejected.
+
+The ARM64 `-j2` build passes; focused LIT passes 1,335; full LIT passes
+4,238 with 15 skipped, 10 unsupported and zero failures among 4,263
+discovered tests. No new Vulkan CTS run, adapter-matrix result,
+bound/static descriptors or owned D3D12 execution is claimed. MS sampling
+and runner MS preparation remain open. Existing FP32 MS/single-sample
+loads, sampling, artifact ABI 8 and argument layouts are unchanged;
+W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) FP32 multisample texel-load CPU regression scope (2026-11-24)
 
 The [FP32 multisample follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fp32-multisample-texel-load-cpu-execution-vm-2026-11-24)

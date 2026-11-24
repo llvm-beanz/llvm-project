@@ -7649,7 +7649,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DV4I32(
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
-      Mip >= 32)
+      Mip >= 32 || Sample >= Img.SampleCount)
     return Zero;
   if (X < 0 || Y < 0 || (uint32_t)X >= femeRTMipExtent(Img.Width, Mip) ||
       (uint32_t)Y >= femeRTMipExtent(Img.Height, Mip))
@@ -10760,7 +10760,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
-      Mip >= 32)
+      Mip >= 32 || Sample >= Img.SampleCount)
     return Zero;
   if (X < 0 || Y < 0 || Layer < 0 ||
       (uint32_t)X >= femeRTMipExtent(Img.Width, Mip) ||

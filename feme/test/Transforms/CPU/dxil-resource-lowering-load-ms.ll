@@ -4,7 +4,7 @@
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-; CHECK-LABEL: define float @integer(
+; CHECK-LABEL: define float @mixed_scalar(
 ; CHECK: call float @llvm.dx.resource.load.ms
 ; CHECK-NOT: @feme.cpu.image.load
 ; CHECK-LABEL: define float @bad_coord(
@@ -42,7 +42,7 @@ define <2 x float> @array(<3 x i32> %coord, i32 %sample) #0 {
   %r = call <2 x float> @llvm.dx.resource.load.ms.v2f32.tdx.MSTexture_v4f32_0_4_0_8t.v3i32.v2i32(target("dx.MSTexture", <4 x float>, 0, 4, 0, 8) %t, <3 x i32> %coord, i32 %sample, <2 x i32> <i32 1, i32 -1>)
   ret <2 x float> %r
 }
-define float @integer() {
+define float @mixed_scalar() {
   %t = call target("dx.MSTexture", i32, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap.tdx.MSTexture_i32_0_4_0_3t(i32 0)
   %r = call float @llvm.dx.resource.load.ms.f32.tdx.MSTexture_i32_0_4_0_3t.v2i32.v2i32(target("dx.MSTexture", i32, 0, 4, 0, 3) %t, <2 x i32> zeroinitializer, i32 0, <2 x i32> zeroinitializer)
   ret float %r
