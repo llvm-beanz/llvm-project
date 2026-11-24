@@ -373,14 +373,14 @@ TEST(ResourceLoweringTest, LowersTexture2DArrayLoadToImageLoadArray) {
           @llvm.dx.resource.handlefromheap.timg2darrl(i32 0)
       %r = call <4 x float> @llvm.dx.resource.load.level.timg2darrl(
           target("dx.Texture", <4 x float>, 0, 0, 0, 7) %tex,
-          <3 x i32> %xyz, i32 0, <3 x i32> zeroinitializer)
+          <3 x i32> %xyz, i32 0, <2 x i32> zeroinitializer)
       ret <4 x float> %r
     }
     declare target("dx.Texture", <4 x float>, 0, 0, 0, 7)
         @llvm.dx.resource.handlefromheap.timg2darrl(i32)
     declare <4 x float> @llvm.dx.resource.load.level.timg2darrl(
         target("dx.Texture", <4 x float>, 0, 0, 0, 7), <3 x i32>, i32,
-        <3 x i32>)
+        <2 x i32>)
   )");
   ASSERT_TRUE(M);
   runPass(*M);

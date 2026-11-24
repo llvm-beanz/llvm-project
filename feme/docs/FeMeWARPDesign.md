@@ -273,6 +273,28 @@ The original compute-only baseline is no longer current:
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged.
   Bound/static descriptors, owned D3D12 execution and W2(a)/W2(b)/W3(b)
   remain open; `CreateDevice` remains `E_NOTIMPL`.
+  The existing heap-backed FP32 2D/array `Load` path now shares
+  stage-independent admission/lowering with paired `(X,Y)` or
+  three-component `(X,Y,layer)` i32 coordinates, an i32 mip, constant
+  signed XY offsets and scalar/vector results up to the declared FP32
+  texel width (one through four). Wrapping adds offset only X/Y; layers
+  stay separate. Existing helpers need no sampler/derivatives. The old
+  zero-offset-only fallback is removed. Malformed coordinates, padded
+  array offsets, integer/non-FP32 texels, too-wide results, non-heap
+  handles and dynamic/undefined/poison or partial offsets reject.
+  Native omitted undefined/poison XY offsets raise to zero; canonical
+  offsets remain strict. Per-mip spatial extents, invalid mip and
+  independent layer checks return zero for invalid accesses; SPIR-V FP32
+  users share the runtime bounds correction. Compiled normal/reference
+  compute tests distinguish rectangular mips, X/Y, layers/components,
+  all result widths, offsets, bounds, partial waves, guards and repeats;
+  fragment tests add divergent mips/layers and helper masks. Native SDK
+  DXC plain/array shaders execute through normal/reference/AOT paths on
+  one mip. Integer 2D/array and multisampled DXIL loads remain outside
+  this extension. Existing 1D/3D loads, sampling, SPIR-V lowering,
+  artifact ABI 8 and argument layouts are unchanged. Bound/static
+  descriptors, owned D3D12 execution and W2(a)/W2(b)/W3(b) remain open;
+  `CreateDevice` remains `E_NOTIMPL`.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

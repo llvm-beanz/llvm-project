@@ -1,5 +1,44 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) FP32 2D/array texel-load CPU regression scope (2026-11-24)
+
+The [FP32 2D/array texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fp32-2darray-texel-load-cpu-execution-vm-2026-11-24)
+extends the existing heap-backed `Texture2D::Load`/`Texture2DArray::Load`
+CPU path with constant signed XY offsets and scalar/vector FP32 results
+up to the declared texel width (one through four) in any stage. Paired
+`(X,Y)` or three-component `(X,Y,layer)` i32 coordinates and an i32 mip
+use the existing helpers with sample zero and no samplers/derivatives.
+Offsets affect only X/Y; layers remain separate.
+
+Shared admission/lowering replaces the zero-offset-only fallback.
+Malformed coordinates, padded three-component array offsets, integer/
+non-FP32 texels, too-wide results, non-heap handles and dynamic/undefined/
+poison or partial offsets stay rejected. Native omitted undefined/poison
+XY offsets raise to zero; canonical undefined/poison offsets stay strict.
+The FP32 runtime now checks both per-mip spatial extents and invalid mips,
+with independent layer bounds. Invalid accesses read zero instead of
+aliasing another row/subresource. Existing SPIR-V FP32 users share this
+runtime correction; lowering is unchanged.
+
+Runtime tests cover rectangular extents, layers, invalid mips and masks.
+Compiled normal/reference compute tests distinguish three rectangular
+mips, X/Y, layers and components, all result widths, signed offsets,
+bounds, partial waves, guards and repeats. Fragment tests add divergent
+mips/layers and helper masks. Native SDK DXC plain/array shaders execute
+through normal/reference/AOT paths on one mip; runner YAML still prepares
+one mip. Dynamic-offset admission rejects in all three paths.
+
+Focused CPU/DXIL/sampling plus runtime LIT passes 1,316; full FeMe LIT
+passes 4,219 with 15 skipped, 10 unsupported and zero failures among
+4,244 discovered tests. The assertions-enabled, PCH-disabled, sccache
+ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, bound/static descriptors or
+owned D3D12 execution is claimed. Integer 2D/array and multisampled DXIL
+loads remain outside this milestone. Existing 1D/3D loads, sampling,
+artifact ABI 8 and argument layouts are unchanged. Broader conformance
+and W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) integer 1D/array texel-load CPU regression scope (2026-11-24)
 
 The [integer 1D/array texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-integer-1darray-texel-load-cpu-execution-vm-2026-11-24)

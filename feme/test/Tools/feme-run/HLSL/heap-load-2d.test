@@ -1,0 +1,57 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# Native import plus CPU execution, not owned D3D12; YAML prepares one mip.
+# RAISE: call <4 x float> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> splat (i32 1))
+# RAISE: call <4 x float> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> splat (i32 -1))
+# RAISE: call <4 x float> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> splat (i32 -1))
+# RAISE: call <4 x float> @llvm.dx.resource.load.level
+# RAISE-SAME: <2 x i32> zeroinitializer)
+# RAISE-NOT: call %dx.types.ResRet.f32 @dx.op.textureLoad
+# CHECK: heap[2]: 42 12 0 0 0 16 0 0 0 0 2 14 0 0 6 0 0 0 0 0 0 42
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture2D<float4> t = ResourceDescriptorHeap[0];
+  Texture2DArray<float4> a = ResourceDescriptorHeap[1];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  int x = int(tid.x) - 1;
+  int layer = int(tid.x % 4) - 1;
+  float4 p = t.Load(int3(x, 0, 0), int2(1, 1));
+  float4 n = t.Load(int3(x, 1, 0), int2(-1, -1));
+  float4 ap = a.Load(int4(x, 1, layer, 0), int2(-1, -1));
+  float4 invalid = a.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : 1));
+  outBuffer.Store(4 + tid.x * 16, (uint)p.a);
+  outBuffer.Store(8 + tid.x * 16, (uint)n.g);
+  outBuffer.Store(12 + tid.x * 16, (uint)ap.b);
+  outBuffer.Store(16 + tid.x * 16, (uint)invalid.r);
+}
+#--- heap.yaml
+resource-heap:
+  - index: 2
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [2, 2]
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040, 1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [2, 2]
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040, 1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648, 1098907648, 1097859072, 1096810496, 1095761920, 1094713344, 1093664768, 1092616192, 1091567616, 1090519040, 1088421888, 1086324736, 1084227584, 1082130432, 1077936128, 1073741824, 1065353216]

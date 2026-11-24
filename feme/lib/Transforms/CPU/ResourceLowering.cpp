@@ -659,13 +659,8 @@ std::optional<CallInst *> classifySamplerHandle(Value *V) {
   return CI;
 }
 
-/// Returns whether \p Offset is a compile-time-zero constant: the only
-/// texel-offset value `lowerImageAccesses` currently lowers, since
-/// `runtime/CPU`'s sampling/loading helpers do not yet accept one (see
-/// feme/docs/FeMeGraphicsDesign.md's "Canonical image operations" --
-/// offsets are scoped out of roadmap R30's initial implementation). A
-/// nonzero or non-constant offset is left unraised rather than silently
-/// dropped, since dropping it would be a real (if rare) semantic change.
+/// Tests the zero-offset gate for the remaining ordinary 2D/cube sampling
+/// path. Unsupported offsets are left untouched rather than dropped.
 bool isZeroOffset(const Value *Offset) {
   const auto *C = dyn_cast<Constant>(Offset);
   return C && C->isNullValue();
@@ -739,6 +734,25 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                XYZ[1], XYZ[2], CI->getArgOperand(2),
                                Builder.getInt32(0), Builder.getTrue(),
                                CI->getName());
+      } else if (Kind == dxil::ResourceKind::Texture2D ||
+                 Kind == dxil::ResourceKind::Texture2DArray) {
+        Value *X =
+            Builder.CreateAdd(Builder.CreateExtractElement(Coord, uint64_t{0}),
+                              cast<Constant>(Offset)->getAggregateElement(0u));
+        Value *Y =
+            Builder.CreateAdd(Builder.CreateExtractElement(Coord, uint64_t{1}),
+                              cast<Constant>(Offset)->getAggregateElement(1u));
+        if (Kind == dxil::ResourceKind::Texture2DArray) {
+          Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
+          Loaded = createLoad2DArray(Builder, Env, Image->getArgOperand(0), X,
+                                     Y, Layer, CI->getArgOperand(2),
+                                     Builder.getInt32(0), Builder.getTrue(),
+                                     CI->getName());
+        } else {
+          Loaded = createLoad2D(Builder, Env, Image->getArgOperand(0), X, Y,
+                                CI->getArgOperand(2), Builder.getInt32(0),
+                                Builder.getTrue(), CI->getName());
+        }
       } else {
         Value *X = Coord->getType()->isIntegerTy(32)
                        ? Coord
@@ -1015,49 +1029,11 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     }
     bool IsSample = ID == Intrinsic::dx_resource_sample;
     bool IsSampleLevel = ID == Intrinsic::dx_resource_samplelevel;
-    bool IsLoadLevel = ID == Intrinsic::dx_resource_load_level;
-    if (!IsSample && !IsSampleLevel && !IsLoadLevel)
+    if (!IsSample && !IsSampleLevel)
       continue;
 
     IRBuilder<> Builder(CI);
     Value *Mask = Builder.getTrue();
-
-    if (IsLoadLevel) {
-      // (handle, coord, level, offset) -> <4 x float>. `TextureCube`/
-      // `TextureCubeArray` have no `Load` method in HLSL/DXIL at all (the
-      // same restriction `OpImageFetch` has against SPIR-V's `Dim::Cube`),
-      // so only Plain2D/Array2D are ever accepted here.
-      std::optional<ImageHandle> Img =
-          classifyImageHandle(CI->getArgOperand(0));
-      if (!Img || !isZeroOffset(CI->getArgOperand(3)) ||
-          (Img->Shape != ImageShape::Plain2D &&
-           Img->Shape != ImageShape::Array2D))
-        continue;
-      Value *Coord = CI->getArgOperand(1);
-      Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
-      Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
-      Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
-      // DXIL's `Load`/`LoadLevel` has no multisample-index operand of its
-      // own here (a real multisampled `Texture2DMS` load always goes
-      // through `llvm.dx.resource.load_level`'s own sample argument
-      // elsewhere, not this level-only path), so this always reads sample
-      // 0 -- like `feme.stage.subpass.load`'s own default (roadmap F8c).
-      CallInst *NewCall;
-      if (Img->Shape == ImageShape::Array2D) {
-        Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
-        NewCall = createLoad2DArray(Builder, Env, ImageIndex, X, Y, Layer,
-                                    CI->getArgOperand(2),
-                                    Builder.getInt32(0), Mask, CI->getName());
-      } else {
-        NewCall = createLoad2D(Builder, Env, ImageIndex, X, Y,
-                               CI->getArgOperand(2), Builder.getInt32(0),
-                               Mask, CI->getName());
-      }
-      CI->replaceAllUsesWith(NewCall);
-      CI->eraseFromParent();
-      Changed = true;
-      continue;
-    }
 
     // Sample/SampleLevel: (handle, sampler, coord, [lod,] offset).
     std::optional<ImageHandle> Img = classifyImageHandle(CI->getArgOperand(0));
@@ -1255,8 +1231,7 @@ bool hasImageAccesses(const Function &F) {
     }
     bool IsSample = ID == Intrinsic::dx_resource_sample;
     bool IsSampleLevel = ID == Intrinsic::dx_resource_samplelevel;
-    bool IsLoadLevel = ID == Intrinsic::dx_resource_load_level;
-    if (!IsSample && !IsSampleLevel && !IsLoadLevel)
+    if (!IsSample && !IsSampleLevel)
       continue;
 
     // Mirrors `lowerImageAccesses`'s own eligibility check exactly (without
@@ -1267,16 +1242,6 @@ bool hasImageAccesses(const Function &F) {
     // `ResourceLoweringPass::run`'s module-function loop may revisit for a
     // handle it left deliberately unrewritten (see the header comment's
     // "per-access" note).
-    if (IsLoadLevel) {
-      std::optional<ImageHandle> Img =
-          classifyImageHandle(CI->getArgOperand(0));
-      if (Img &&
-          (Img->Shape == ImageShape::Plain2D ||
-           Img->Shape == ImageShape::Array2D) &&
-          isZeroOffset(CI->getArgOperand(3)))
-        return true;
-      continue;
-    }
     unsigned OffsetIdx = IsSample ? 3 : 4;
     if (classifyImageHandle(CI->getArgOperand(0)) &&
         classifySamplerHandle(CI->getArgOperand(1)) &&
@@ -1521,18 +1486,22 @@ bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
   auto Kind = Ty->getDimension();
   bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
               Kind == dxil::ResourceKind::Texture1DArray;
-  if (!Is1D && Kind != dxil::ResourceKind::Texture3D)
+  bool Is2D = Kind == dxil::ResourceKind::Texture2D ||
+              Kind == dxil::ResourceKind::Texture2DArray;
+  if (!Is1D && !Is2D && Kind != dxil::ResourceKind::Texture3D)
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
-  if (!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32))
+  if (!ScalarTy->isFloatTy() && (Is2D || !ScalarTy->isIntegerTy(32)))
     return false;
   unsigned TextureWidth = getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
   unsigned ResultWidth = getTexelWidth(CI.getType(), ScalarTy);
   Type *IntTy = Type::getInt32Ty(CI.getContext());
-  Type *CoordTy = Kind == dxil::ResourceKind::Texture1D
-                      ? IntTy
-                      : FixedVectorType::get(IntTy, Is1D ? 2 : 3);
-  Type *OffsetTy = Is1D ? IntTy : FixedVectorType::get(IntTy, 3);
+  Type *CoordTy =
+      Kind == dxil::ResourceKind::Texture1D
+          ? IntTy
+          : FixedVectorType::get(
+                IntTy, Is1D || Kind == dxil::ResourceKind::Texture2D ? 2 : 3);
+  Type *OffsetTy = Is1D ? IntTy : FixedVectorType::get(IntTy, Is2D ? 2 : 3);
   if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
       CI.getArgOperand(1)->getType() != CoordTy ||
       !CI.getArgOperand(2)->getType()->isIntegerTy(32) ||
@@ -1543,7 +1512,7 @@ bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
     return isa_and_nonnull<ConstantInt>(Offset);
   if (!Offset)
     return false;
-  for (unsigned Axis = 0; Axis < 3; ++Axis)
+  for (unsigned Axis = 0; Axis < (Is2D ? 2u : 3u); ++Axis)
     if (!isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(Axis)))
       return false;
   return true;

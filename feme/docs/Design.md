@@ -1721,6 +1721,29 @@ remain rejected. Existing FP32 loads, 3D loads, sampling, SPIR-V lowering,
 artifact ABI 8 and argument layouts are unchanged; no bound/static
 descriptors or owned D3D12 execution are added.
 
+The existing heap-backed FP32 2D/array `Load` path now uses shared
+stage-independent admission/lowering with paired `(X,Y)` or
+three-component `(X,Y,layer)` i32 coordinates, an i32 mip, constant signed
+XY offsets and scalar/vector results up to the declared FP32 texel width
+(one through four). Wrapping adds offset only X/Y; layers stay separate.
+The existing helpers receive sample zero without samplers or derivatives.
+The old zero-offset-only fallback is removed. Malformed coordinates,
+padded three-component array offsets, integer/non-FP32 texels, too-wide
+results, non-heap handles and dynamic/undefined/poison or partial offsets
+reject. Native omitted undefined/poison XY offsets raise to zero;
+canonical undefined/poison offsets remain strict.
+Both per-mip spatial extents and invalid mips are checked before fetching,
+with independent layer bounds; invalid accesses read zero instead of
+aliasing another subresource. SPIR-V FP32 users share this runtime bounds
+correction without lowering changes. Compiled normal/reference compute
+tests cover rectangular mips, X/Y/layers/components, all result widths,
+offsets, bounds, partial waves, guards and repeats; fragment tests add
+divergent mips/layers and helper masks. Native SDK DXC plain/array shaders
+execute through normal/reference/AOT paths on one mip. Integer 2D/array
+and multisampled DXIL loads remain outside this extension. Existing 1D/3D
+loads, sampling, artifact ABI 8 and argument layouts are unchanged;
+no bound/static descriptors or owned D3D12 execution are added.
+
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ
 offsets and scalar/vector results up to the declared texel width (at most

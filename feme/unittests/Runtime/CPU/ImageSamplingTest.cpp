@@ -7771,6 +7771,61 @@ TEST_F(ImageSamplingTest, Store1DArrayOutOfRangeLayerIsANoOp) {
   EXPECT_FLOAT_EQ(Storage[0][0][0], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, Load2DAndArrayCheckMipExtentsAndLayers) {
+  float Storage[88];
+  std::fill_n(Storage, 88, 7.0f);
+  FemeImageSubresourceLayout PlainMips[] = {
+      {0, 64, 128, 0}, {128, 32, 32, 0}, {160, 16, 16, 0}};
+  FemeImageSubresourceLayout ArrayMips[] = {
+      {0, 64, 128, 0}, {256, 32, 32, 0}, {320, 16, 16, 0}};
+  FemeImageDescriptor Plain{};
+  Plain.Data = Storage;
+  Plain.SizeInBytes = sizeof(Storage);
+  Plain.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Plain.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Plain.Width = 4;
+  Plain.Height = 2;
+  Plain.Depth = Plain.ArrayLayers = Plain.PlaneCount = Plain.SampleCount = 1;
+  Plain.MipLevels = Plain.MipLayoutCount = 3;
+  Plain.MipLayouts = PlainMips;
+  Plain.Flags = FEME_IMAGE_SAMPLED;
+  auto Array = Plain;
+  Array.Dimension = static_cast<uint32_t>(ImageDimension::Texture2DArray);
+  Array.ArrayLayers = 2;
+  Array.MipLayouts = ArrayMips;
+  Function *PlainWrapper = addWrapper("load2d", "feme.cpu.image.load.2d.v4f32");
+  Function *ArrayWrapper =
+      addWrapper("load2darray", "feme.cpu.image.load.2darray.v4f32");
+  auto Load = resolve<LoadFn>(PlainWrapper);
+  auto LoadArray = resolve<LoadArrayFn>(ArrayWrapper);
+  float Out[4];
+  for (uint32_t Mip : {0u, 1u, 2u, 3u, 32u, 0xffffffffu}) {
+    int Width = Mip < 3 ? 4 >> Mip : 1;
+    int Height = Mip == 0 ? 2 : 1;
+    for (int X : {-1, 0, Width - 1, Width})
+      for (int Y : {-1, 0, Height - 1, Height}) {
+        SCOPED_TRACE(testing::Message()
+                     << "mip=" << Mip << " x=" << X << " y=" << Y);
+        bool Valid = Mip < 3 && X >= 0 && X < Width && Y >= 0 && Y < Height;
+        Load(&Plain, 1, 0, X, Y, Mip, 0, true, Out);
+        for (float C : Out)
+          EXPECT_FLOAT_EQ(C, Valid ? 7.0f : 0.0f);
+        for (int Layer : {-1, 0, 1, 2}) {
+          SCOPED_TRACE(Layer);
+          LoadArray(&Array, 1, 0, X, Y, Layer, Mip, 0, true, Out);
+          for (float C : Out)
+            EXPECT_FLOAT_EQ(C, Valid && Layer >= 0 && Layer < 2 ? 7.0f : 0.0f);
+        }
+      }
+  }
+  Load(&Plain, 1, 0, 0, 0, 0, 0, false, Out);
+  for (float C : Out)
+    EXPECT_FLOAT_EQ(C, 0.0f);
+  LoadArray(&Array, 1, 0, 0, 0, 0, 0, 0, false, Out);
+  for (float C : Out)
+    EXPECT_FLOAT_EQ(C, 0.0f);
+}
+
 TEST_F(ImageSamplingTest, IntegerLoad1DAndArrayPreserveBitsAndMipBounds) {
   const uint32_t Bits[] = {0x80000001u, 0xffffffffu, 0x01000001u, 0x01000003u};
   uint32_t Storage[56];

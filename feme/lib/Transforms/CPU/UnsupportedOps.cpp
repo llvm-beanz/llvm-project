@@ -66,17 +66,28 @@ Error checkSupportedRaisedOps(const Module &M) {
         bool Is1D =
             Ty && (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
                    Ty->getDimension() == dxil::ResourceKind::Texture1DArray);
+        bool Is2D =
+            Ty && (Ty->getDimension() == dxil::ResourceKind::Texture2D ||
+                   Ty->getDimension() == dxil::ResourceKind::Texture2DArray);
         if (Ty &&
-            (Is1D || Ty->getDimension() == dxil::ResourceKind::Texture3D) &&
+            (Is1D || Is2D ||
+             Ty->getDimension() == dxil::ResourceKind::Texture3D) &&
             !isSupportedDXILLoad(*CI))
           return createStringError(
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed "
-              "FP32/i32 %s texel loading with %s i32 coordinates, an i32 "
+              "%s %s texel loading with %s i32 coordinates, an i32 "
               "mip and constant signed %s offsets",
-              F.getName().str().c_str(), Is1D ? "1D/array" : "3D",
-              Is1D ? "scalar/paired" : "three-component",
-              Is1D ? "scalar" : "XYZ");
+              F.getName().str().c_str(), Is2D ? "FP32" : "FP32/i32",
+              Is1D   ? "1D/array"
+              : Is2D ? "2D/array"
+                     : "3D",
+              Is1D   ? "scalar/paired"
+              : Is2D ? "paired/three-component"
+                     : "three-component",
+              Is1D   ? "scalar"
+              : Is2D ? "XY"
+                     : "XYZ");
       }
       continue;
     case Intrinsic::dx_resource_sample:

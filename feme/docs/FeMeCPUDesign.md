@@ -2929,6 +2929,37 @@ paths on one mip; runner YAML still prepares one mip. Existing FP32
 loads, 3D loads, sampling, artifact ABI 8 and argument layouts are
 unchanged; no bound/static descriptors or owned D3D12 execution are added.
 
+Heap-backed FP32 2D/array `Load` now shares `isSupportedDXILLoad`
+admission/lowering rather than a separate zero-offset-only fallback.
+Paired `(X,Y)` or three-component `(X,Y,layer)` i32 coordinates, an i32
+mip, constant signed XY offsets and scalar/vector results up to the
+declared FP32 texel width (one through four) execute in any stage.
+Wrapping adds affect only X/Y; layers stay separate.
+`createLoad2D`/`createLoad2DArray` receive explicit mip, sample zero and
+true mask without samplers/derivatives. Shared narrowing, reflection,
+image-only signature growth, deferred handle cleanup and idempotence
+apply to 2D as well. Malformed coordinates, padded three-component array
+offsets, integer/non-FP32 texels, too-wide results, non-heap handles and
+dynamic/undefined/poison or partial offsets reject. Native omitted
+undefined/poison XY offsets normalize to zero; canonical offsets remain
+strict. The legacy array unit now uses two spatial offset components.
+
+The shared FP32 runtime checks both per-mip spatial extents and invalid
+mips before fetching, with independent layer bounds; invalid accesses
+return zero rather than aliasing another row/subresource. Existing SPIR-V
+FP32 users share this bounds correction; lowering is unchanged.
+Runtime tests cover rectangular extents, layers, invalid mips and masks.
+Every-stage admission checks include each undefined/poison XY component.
+Compiled normal/reference compute tests distinguish mips 0/1/2, X/Y,
+layers/components, all result widths, offsets, bounds, waves 4/8, five
+lanes, guards and repeats; fragment tests add divergent mips/layers,
+both bounds axes, invalid layers/mips and helper masks. Native SDK DXC
+plain/array shaders execute through normal/reference/AOT paths on one
+mip; runner YAML still prepares one mip. Integer 2D/array and multisampled
+DXIL loads remain outside this extension. Existing 1D/3D loads, sampling,
+artifact ABI 8 and argument layouts are unchanged; no bound/static
+descriptors or owned D3D12 execution are added.
+
 Heap-backed FP32 `Texture3D::Sample` now executes through `createSample3D`
 in fragment stages. Shared admission/lowering requires default samplers,
 three-component U/V/W coordinates, constant signed XYZ offsets and

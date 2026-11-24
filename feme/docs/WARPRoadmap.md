@@ -1684,6 +1684,61 @@ bound/static descriptors and owned D3D12 execution remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) FP32 2D/array texel-load CPU execution progress (2026-11-24):
+the existing heap-backed `Texture2D::Load`/`Texture2DArray::Load` path now
+uses shared admission/lowering with constant signed XY offsets and
+scalar/vector FP32 results up to the declared texel width (one through
+four). Paired `(X,Y)` or three-component `(X,Y,layer)` i32 coordinates
+and an i32 mip are required. Wrapping integer adds affect only X/Y;
+layers remain separate. Calls use the existing FP32 helpers with sample
+zero, without samplers or derivatives, in any stage.
+
+The old zero-offset-only fallback is removed from both lowering and the
+image-access scan. Malformed coordinate types, padded three-component
+array offsets, integer/non-FP32 texels, too-wide results, non-heap handles
+and dynamic/undefined/poison or partially undefined offsets stay rejected.
+The legacy array unit fixture now uses two spatial offset components,
+not an offset for the layer. Native omitted undefined/poison XY offsets
+raise to zero; partial offsets are preserved and remain unsupported by
+CPU admission. This normalization applies to native DXIL only.
+
+The shared FP32 2D/array runtime now checks both per-mip spatial extents
+and invalid mips before fetching. Layers remain independently bounded,
+not mip-scaled; invalid accesses read zero instead of aliasing another
+row/subresource at higher mips. Existing SPIR-V FP32 users share this
+runtime bounds correction; SPIR-V lowering is unchanged.
+
+Transforms verify offset arithmetic, explicit mip/sample/mask, narrowing,
+reflection, image-only signature growth, handle cleanup and idempotence.
+Admission tests check valid and dynamic/undefined/poison offsets,
+including each XY component, in fragment, vertex, compute and
+unannotated functions. Runtime tests cover rectangular per-mip extents,
+layers, invalid mips and false masks.
+
+Compiled normal/reference compute tests distinguish rectangular mips
+0/1/2, X/Y, layers and components with all four result widths, signed
+offsets, bounds, invalid mips, wave sizes 4/8, five lanes, guards and
+repeated prepared dispatches. Fragment tests add divergent mips/layers,
+each spatial bounds axis, invalid layers/mips, helpers, partial waves,
+masks, guards and repeats. Actual SDK DXC SM6.6 plain/array bindless
+shaders execute through normal/reference/AOT paths with signed/omitted
+XY offsets, components, invalid mips, five lanes, guards and repeats on
+one mip; runner YAML still prepares one mip. Dynamic-offset admission
+rejects in all three paths.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling plus runtime LIT passes 1,316 in 46.95 seconds;
+full FeMe LIT passes 4,219 with 15 skipped, 10 unsupported and zero
+failures among 4,244 discovered tests in 85.88 seconds. Eight new tests
+add eight passes; timings are not controlled speedups. Integer 2D/array
+and multisampled DXIL loads remain outside this milestone. Existing
+1D/3D loads, sampling, artifact ABI 8 and argument layouts are unchanged.
+Native import plus canonical CPU execution is not owned D3D12 execution.
+Broader conformance, bound/static descriptors and owned D3D12 execution
+remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

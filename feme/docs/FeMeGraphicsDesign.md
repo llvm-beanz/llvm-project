@@ -3238,6 +3238,27 @@ documented reason rather than an oversight:
   remain rejected. Existing FP32 loads, 3D loads, sampling, SPIR-V lowering,
   artifact ABI 8 and argument layouts are unchanged; no bound/static
   descriptors or owned-device execution are added.
+  The existing heap-backed FP32 2D/array `Load` path now shares
+  stage-independent admission/lowering with paired `(X,Y)` or
+  three-component `(X,Y,layer)` i32 coordinates, an i32 mip, constant
+  signed XY offsets and scalar/vector results up to the declared FP32
+  texel width (one through four). Wrapping adds offset only X/Y; layers
+  stay separate. Existing helpers receive sample zero without samplers/
+  derivatives. The old zero-offset-only fallback is removed. Malformed
+  coordinates, padded array offsets, integer/non-FP32 texels, too-wide
+  results, non-heap handles and dynamic/undefined/poison or partial offsets
+  reject. Native omitted undefined/poison XY offsets raise to zero;
+  canonical offsets remain strict. Runtime checks both per-mip spatial
+  extents, invalid mips and independent layer bounds, returning zero for
+  invalid accesses; SPIR-V FP32 users share the correction. Compiled
+  normal/reference compute tests distinguish rectangular mips, X/Y,
+  layers/components, all result widths, offsets, bounds, partial waves,
+  guards and repeats; fragment tests add divergent mips/layers and helper
+  masks. Native SDK DXC plain/array shaders execute through normal/
+  reference/AOT paths on one mip. Integer 2D/array and multisampled DXIL
+  loads remain outside this extension. Existing 1D/3D loads, sampling,
+  SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
+  no bound/static descriptors or owned-device execution are added.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at
@@ -3364,6 +3385,13 @@ documented reason rather than an oversight:
   offset operand is a compile-time-zero constant; a nonzero offset is left
   as an unraised `llvm.dx.resource.*`/`llvm.spv.resource.*` call rather
   than silently dropped.
+  Update (W2(a)/W3(b)): this describes the initial zero-offset-only path.
+  The bounded DXIL FP32 2D/array load path now preserves constant signed
+  XY offsets as wrapping integer coordinate adds; array layers are never
+  offset. Its shared matcher rejects malformed/dynamic/undefined/poison
+  offsets rather than dropping them. Other bounded DXIL load/sample
+  follow-ups are described above; this update makes no new SPIR-V
+  lowering or external CTS claim.
 
 **Update (roadmap E26, closed):** an integer-format image can now be
 fetched. `feme::cpu::ImageCalls` gained `ImageCallKind::Load2DI32`/
