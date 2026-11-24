@@ -2620,6 +2620,12 @@ the first shader-facing milestone rather than alongside it.
    partial waves, guards and repeat 2. Original one-mip checks remain;
    no compiler/runtime implementation change was needed.
    This is CPU storage/execution, not owned D3D12 mip/format support.
+   The 2D/array `SampleLevel` follow-up (2026-11-24) now uses shared
+   checked FP32 admission/lowering in any stage with constant signed XY
+   offsets, live explicit LOD, zero derivatives and separate layers.
+   Native three-mip/half-mip/clamp fixtures and compiled fragment helper/
+   mask tests pass; malformed calls cannot bypass validation through
+   the old zero-offset fallback. This adds no owned D3D12 execution.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

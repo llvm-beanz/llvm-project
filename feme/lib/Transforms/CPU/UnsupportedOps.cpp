@@ -110,10 +110,15 @@ Error checkSupportedRaisedOps(const Module &M) {
         const auto *Ty =
             CI ? dyn_cast<dxil::TextureExtType>(CI->getArgOperand(0)->getType())
                : nullptr;
+        bool Is2D =
+            Ty && (Ty->getDimension() == dxil::ResourceKind::Texture2D ||
+                   Ty->getDimension() == dxil::ResourceKind::Texture2DArray);
         if (Ty &&
             (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
              Ty->getDimension() == dxil::ResourceKind::Texture1DArray ||
-             Ty->getDimension() == dxil::ResourceKind::Texture3D) &&
+             Ty->getDimension() == dxil::ResourceKind::Texture3D ||
+             (Is2D &&
+              F.getIntrinsicID() == Intrinsic::dx_resource_samplelevel)) &&
             !(F.getIntrinsicID() == Intrinsic::dx_resource_sample
                   ? isSupportedDXILSample(*CI)
                   : isSupportedDXILSampleLevel(*CI)))
@@ -123,13 +128,16 @@ Error checkSupportedRaisedOps(const Module &M) {
               "%s %s sampling with a default sampler, "
               "shape-matched coordinates and constant signed %s offsets",
               F.getName().str().c_str(),
-              Ty->getDimension() == dxil::ResourceKind::Texture3D ? "3D"
-                                                                  : "1D/array",
+              Is2D ? "2D/array"
+              : Ty->getDimension() == dxil::ResourceKind::Texture3D
+                  ? "3D"
+                  : "1D/array",
               F.getIntrinsicID() == Intrinsic::dx_resource_sample
                   ? "fragment implicit"
                   : "explicit-LOD",
-              Ty->getDimension() == dxil::ResourceKind::Texture3D ? "XYZ"
-                                                                  : "scalar");
+              Is2D                                                  ? "XY"
+              : Ty->getDimension() == dxil::ResourceKind::Texture3D ? "XYZ"
+                                                                    : "scalar");
       }
       continue;
     case Intrinsic::dx_resource_samplebias:

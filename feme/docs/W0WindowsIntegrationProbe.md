@@ -27,6 +27,37 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) FP32 2D/array explicit-LOD sampling (VM, 2026-11-24)
+
+Heap-backed FP32 `Texture2D::SampleLevel`/`Texture2DArray::SampleLevel`
+now use shared checked admission/lowering in any stage. Default samplers,
+shape-matched U/V or U/V/layer coordinates, FP32 LOD, constant signed XY
+offsets and scalar/vector results no wider than the declared texel
+(one through four) are supported. The old zero-offset fallback no longer
+admits malformed 2D explicit sampling. Helpers receive live explicit LOD,
+zero derivatives/bias, separate layers and no shader MinLod clamp;
+sampler LOD limits remain in the runtime.
+
+Transforms and every-stage admission verify offsets/shapes, zero
+derivatives, narrowing, reflection and idempotence. Compiled fragment
+arrays vary mips/layers/coordinates with all result widths, helpers,
+partial waves, masks, guards and repeats. Native SDK DXC SM6.6 plain/
+array shaders execute three rectangular mips through normal/reference/
+ARM64 AOT-object paths, including signed/omitted offsets, rows/layers/
+components, half-mip blends, negative/upper LOD and sampler min/max
+clamps, waves 4/8, five lanes, guards and repeat 2. Invalid canonical
+offsets fail normal/reference/AOT admission explicitly.
+
+The assertions-enabled ARM64 affected-tool/CPU-unit build passes with
+the existing runner switch warning. Focused CPU transforms/units,
+runner and runtime LIT passes 1,630 with 4 unsupported and zero failures
+in 77.38 seconds. Three fixtures and two units add five passes. No new
+full-suite, adapter-matrix or external Vulkan CTS result is claimed.
+Implicit 2D/cube sampling, runtime/SPIR-V lowering, artifact ABI 8 and
+argument layouts are unchanged. Broader conformance, bound/static
+D3D12 descriptors and owned-device execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native 1D/array and 3D multi-mip loads (VM, 2026-11-24)
 
 The existing SDK DXC SM6.6 FP32/SINT/UINT load fixtures now also execute

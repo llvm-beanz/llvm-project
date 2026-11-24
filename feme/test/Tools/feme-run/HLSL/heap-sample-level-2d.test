@@ -1,0 +1,80 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# Signed XY offsets, distinct mips/rows/layers/components, linear half-mip
+# blends, negative/upper LOD and sampler clamps, partial waves and guarded repeats.
+# Native import plus CPU execution, not owned D3D12.
+# RAISE: call <4 x float> @llvm.dx.resource.samplelevel
+# RAISE-SAME: <2 x i32> <i32 1, i32 -1>)
+# RAISE: call <4 x float> @llvm.dx.resource.samplelevel
+# RAISE-SAME: <2 x i32> <i32 -1, i32 1>)
+# CHECK: heap[2]: 42 12 18 11 17 33 67 26 26 61 61 33 75 40 34 71 65 33 67 42 38 83 79 33 75 44 42 83 81 33 67 42
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture2D<float4> t = ResourceDescriptorHeap[0];
+  Texture2DArray<float4> a = ResourceDescriptorHeap[1];
+  SamplerState s = SamplerDescriptorHeap[0];
+  SamplerState limited = SamplerDescriptorHeap[1];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  float lod = (tid.x == 0) ? -1.0 : (tid.x == 4) ? 3.0 : float(tid.x) * 0.5;
+  float2 coord = float2(0.375, 0.75);
+  float3 ac = float3(coord, tid.x & 1);
+  float4 p = t.SampleLevel(s, coord, lod, int2(1, -1));
+  float4 n = t.SampleLevel(s, coord, lod, int2(-1, 1));
+  float4 ap = a.SampleLevel(s, ac, lod, int2(1, -1));
+  float4 an = a.SampleLevel(s, ac, lod, int2(-1, 1));
+  float4 c = t.SampleLevel(limited, coord, lod);
+  float4 ca = a.SampleLevel(limited, ac, lod);
+  outBuffer.Store(4 + tid.x * 24, (uint)p.a);
+  outBuffer.Store(8 + tid.x * 24, (uint)n.g);
+  outBuffer.Store(12 + tid.x * 24, (uint)ap.b);
+  outBuffer.Store(16 + tid.x * 24, (uint)an.r);
+  outBuffer.Store(20 + tid.x * 24, (uint)c.r);
+  outBuffer.Store(24 + tid.x * 24, (uint)ca.b);
+}
+#--- heap.yaml
+resource-heap:
+  - {index: 2, size: 128, data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]}
+images:
+  - index: 0
+    dimension: 2d
+    extent: [4, 2]
+    mip-levels: 3
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040,
+           1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648,
+           1099431936, 1099956224, 1100480512, 1101004800, 1101529088, 1102053376, 1102577664, 1103101952,
+           1103626240, 1104150528, 1104674816, 1105199104, 1105723392, 1106247680, 1106771968, 1107296256,
+           1107558400, 1107820544, 1108082688, 1108344832, 1108606976, 1108869120, 1109131264, 1109393408,
+           1109655552, 1109917696, 1110179840, 1110441984]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [4, 2]
+    mip-levels: 3
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040,
+           1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648,
+           1099431936, 1099956224, 1100480512, 1101004800, 1101529088, 1102053376, 1102577664, 1103101952,
+           1103626240, 1104150528, 1104674816, 1105199104, 1105723392, 1106247680, 1106771968, 1107296256,
+           1107558400, 1107820544, 1108082688, 1108344832, 1108606976, 1108869120, 1109131264, 1109393408,
+           1109655552, 1109917696, 1110179840, 1110441984, 1110704128, 1110966272, 1111228416, 1111490560,
+           1111752704, 1112014848, 1112276992, 1112539136, 1112801280, 1113063424, 1113325568, 1113587712,
+           1113849856, 1114112000, 1114374144, 1114636288, 1114898432, 1115160576, 1115422720, 1115684864,
+           1115815936, 1115947008, 1116078080, 1116209152, 1116340224, 1116471296, 1116602368, 1116733440,
+           1116864512, 1116995584, 1117126656, 1117257728, 1117388800, 1117519872, 1117650944, 1117782016,
+           1117913088, 1118044160, 1118175232, 1118306304, 1118437376, 1118568448, 1118699520, 1118830592]
+samplers:
+  - {index: 0, mip-filter: linear, address-u: clamp-to-edge, address-v: clamp-to-edge}
+  - {index: 1, mip-filter: linear, address-u: clamp-to-edge, address-v: clamp-to-edge, min-lod: 1.0, max-lod: 1.0}

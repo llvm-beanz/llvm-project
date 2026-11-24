@@ -2757,6 +2757,28 @@ rejection. Array admission also rejects dynamic/undefined offsets and
 missing stage identity. Native DXC plain/clamped array import is distinct
 from canonical compiled execution; bound descriptors remain unsupported.
 
+Heap-backed FP32 2D/array `SampleLevel` now shares
+`isSupportedDXILSampleLevel` admission, lowering and signature-growth
+matching with 1D/3D, replacing its zero-offset-only fallback. Default
+samplers, paired U/V or three-component U/V/layer FP32 coordinates,
+FP32 LOD, constant signed XY offsets and result widths one through four
+up to the declared FP32 texel width are supported in any stage.
+`createSample2D`/`createSample2DArray` receive the live LOD,
+`UseExplicitLod=true`, zero derivatives/bias, separate layers and a
+negative-infinity shader MinLod clamp. Sampler LOD limits are unchanged.
+Malformed coordinates/offset widths, dynamic/undefined/poison or
+partial offsets, non-heap handles, comparison samplers, non-FP32 texels
+and too-wide results reject without falling through to legacy lowering.
+Transforms verify forwarding, narrowing, reflection and idempotence;
+every-stage admission checks each undefined/poison XY component.
+Compiled fragment arrays verify mips/layers/components, all widths,
+helpers, partial waves, masks, guards and repeats. Native DXC plain/
+array fixtures execute three rectangular mips, signed/omitted offsets,
+half-mip blends, negative/upper LOD and sampler min/max clamps through
+normal/reference/AOT-object paths with waves 4/8, guards and repeats.
+Implicit 2D/cube sampling, runtime/SPIR-V lowering, artifact ABI 8 and
+argument layouts are unchanged; owned-device gaps remain open.
+
 Heap-backed FP32 `Texture1D::SampleLevel` and `Texture1DArray::SampleLevel`
 now execute through `createSample1D`/`createSample1DArray`. The shared FP32
 sampling matcher requires default samplers, scalar U or `(U,layer)`,
@@ -2775,8 +2797,8 @@ with signed offsets, layers, all four result widths, helpers, partial
 waves, guards and repeats. Normal/reference compute tests select divergent
 mips, independent layers and sampler minimum/maximum LOD clamps with
 repeated prepared invocations. Native SDK DXC bindless 1D/array shaders
-execute through normal/reference/AOT paths on one mip; runner YAML still
-prepares one mip. This is CPU execution, not owned D3D12 execution or
+execute through normal/reference/AOT paths in the original one-mip
+fixture. This is CPU execution, not owned D3D12 execution or
 bound/static descriptor materialization. Other ordinary sampling/loading
 shapes, biased/comparison/gradient
 execution, SPIR-V behavior, artifact ABI 8 and argument layouts are unchanged.

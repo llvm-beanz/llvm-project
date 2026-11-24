@@ -151,6 +151,21 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   rejects plain/clamped 3D bias in normal/reference/AOT dispatch. Implicit
   DXIL 3D sampling outside fragment stages and non-32-bit 3D loading remain unsupported;
   no descriptor materialization or owned-device execution is enabled.
+  Heap-backed FP32 2D/array `SampleLevel` now executes through the shared
+  checked path with default samplers, FP32 U/V or U/V/layer coordinates,
+  FP32 LOD, constant signed XY offsets and results up to the declared
+  texel width (one through four). Explicit LOD, zero derivatives/bias,
+  separate layers and no shader MinLod clamp reach the existing helpers.
+  Malformed shapes/offsets, comparison samplers, non-heap handles,
+  non-FP32 texels and too-wide results reject in normal/reference/AOT
+  admission, including through the old zero-offset fallback. Native
+  SDK DXC plain/array fixtures execute three rectangular mips, signed/
+  omitted offsets, half-mip blends, negative/upper LOD and sampler min/
+  max clamps with waves 4/8, five lanes, guards and repeat 2 through all
+  three CPU paths. Compiled fragment tests add all result widths,
+  divergent mips/layers/coordinates, helper masks and repeated batches.
+  Implicit 2D/cube sampling, runtime/SPIR-V lowering, artifact ABI 8 and
+  owned-device gaps are unchanged.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage through
   normal/reference/AOT paths with default samplers, scalar U or `(U,layer)`
   coordinates, constant signed scalar offsets and scalar/vector results

@@ -178,6 +178,22 @@ The original compute-only baseline is no longer current:
   fragment stages and non-32-bit 3D loading remain unsupported. Seven-shape fragment
   biased execution is bounded compiler/executor coverage, not descriptor
   materialization or owned-device execution.
+  Heap-backed FP32 2D/array `SampleLevel` now uses shared checked
+  admission/lowering in any stage with default samplers, FP32 U/V or
+  U/V/layer coordinates, FP32 LOD, constant signed XY offsets and results
+  up to the declared texel width (one through four). Helpers receive live
+  explicit LOD, zero derivatives/bias, separate layers and no shader
+  MinLod clamp. Malformed shapes/offsets, comparison samplers, non-heap
+  handles, non-FP32 texels and too-wide results reject, including through
+  the old zero-offset fallback. Transforms/admission check forwarding,
+  narrowing, reflection, idempotence and every-stage invalid offsets.
+  Compiled fragment arrays cover all widths, mips/layers/coordinates,
+  helpers, masks, partial waves, guards and repeats. Native DXC plain/
+  array shaders execute three rectangular mips, signed/omitted offsets,
+  half-mip blends and sampler clamps through normal/reference/AOT-object
+  paths with waves 4/8. Implicit 2D/cube sampling, runtime/SPIR-V
+  lowering, artifact ABI 8 and argument layouts are unchanged; no owned
+  D3D12 execution or W2(a)/W2(b)/W3(b) closure is added.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage with
   default samplers, scalar U or `(U,layer)` coordinates, constant signed
   scalar offsets and scalar/vector results up to the declared texel width

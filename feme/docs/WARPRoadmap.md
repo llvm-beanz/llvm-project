@@ -2010,6 +2010,49 @@ conformance, bound/static D3D12 descriptors and owned D3D12 execution
 remain open. Artifact ABI 8 and argument layouts are unchanged;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) FP32 2D/array explicit-LOD sampling progress (2026-11-24):
+heap-backed `Texture2D::SampleLevel` and `Texture2DArray::SampleLevel`
+now use the shared checked FP32 sampling path in any stage, replacing
+their old zero-offset-only fallback. Default samplers, paired `(U,V)`
+or three-component `(U,V,layer)` FP32 coordinates, FP32 LOD, constant
+signed XY offsets and scalar/vector results up to the declared texel
+width (one through four) are supported. Layers remain separate from
+spatial offsets.
+
+The existing 2D/array helpers receive the live explicit LOD with
+`UseExplicitLod=true`, four zero derivatives, zero bias and no shader
+MinLod clamp. Sampler-owned LOD limits remain in the shared runtime.
+Admission, lowering and signature-growth matching agree: malformed
+coordinates, padded offsets, dynamic/undefined/poison or partial
+offsets, non-heap handles, comparison samplers, non-FP32 texels and
+too-wide results are rejected, including through the old fallback.
+Native omitted XY offsets still normalize to zero during DXIL raising.
+Implicit 2D and cube sampling eligibility/lowering remain unchanged.
+
+Transforms verify signed offsets, live LOD/explicit flag, zero
+derivatives/bias, separate layers, widths one through four, reflection,
+cleanup and idempotence. Every-stage admission checks valid offsets
+and each undefined/poison XY component. Compiled fragment array tests
+vary mips/layers/coordinates with all result widths, signed offsets,
+helper-only lanes, one/three quads, waves 4/8, guards, masks and repeats.
+Actual SDK DXC SM6.6 2D/plain-array shaders execute through normal/
+reference/AOT-object paths with three rectangular mips, signed/omitted
+offsets, distinct rows/layers/components, fractional LOD blends at
+0.5/1.5, negative/upper LOD, sampler min/max clamps, waves 4/8, five
+lanes, guards and repeat 2. Invalid canonical XY offsets explicitly
+fail normal/reference/AOT admission.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build of
+affected tools and CPU units passes with the existing runner
+`X8_D24_UNORM` warning. Focused CPU transforms/CPU units/runner/runtime
+LIT passes 1,630 with 4 unsupported and zero failures in 77.38 seconds.
+Three new fixtures and two unit tests add five passes. This is targeted
+validation, not a new full-suite, adapter-matrix or external Vulkan CTS
+result. Runtime/SPIR-V lowering, artifact ABI 8 and argument layouts are
+unchanged. Broader sampling conformance, bound/static D3D12 descriptors
+and owned D3D12 execution remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

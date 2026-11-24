@@ -920,15 +920,15 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{2});
           Loaded = createSample2DArray(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
-              U, V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero,
-              Builder.getFalse(), Bias, OffsetX, OffsetY, MinLodClamp,
+              U, V, Layer, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
+              Builder.getInt1(IsLevel), Bias, OffsetX, OffsetY, MinLodClamp,
               Builder.getTrue(), CI->getName());
         } else {
           Loaded = createSample2D(
               Builder, Env, Image->getArgOperand(0), Sampler->getArgOperand(0),
-              U, V, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Zero, Builder.getFalse(),
-              Bias, OffsetX, OffsetY, MinLodClamp, Builder.getTrue(),
-              CI->getName());
+              U, V, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
+              Builder.getInt1(IsLevel), Bias, OffsetX, OffsetY, MinLodClamp,
+              Builder.getTrue(), CI->getName());
         }
       }
       CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
@@ -1053,7 +1053,9 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     std::optional<CallInst *> Sampler =
         classifySamplerHandle(CI->getArgOperand(1));
     unsigned OffsetIdx = IsSample ? 3 : 4;
-    if (!Img || !Sampler || !isZeroOffset(CI->getArgOperand(OffsetIdx)))
+    if (!Img || !Sampler || !isZeroOffset(CI->getArgOperand(OffsetIdx)) ||
+        (IsSampleLevel && (Img->Shape == ImageShape::Plain2D ||
+                           Img->Shape == ImageShape::Array2D)))
       continue;
 
     Value *Coord = CI->getArgOperand(2);
@@ -1091,7 +1093,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       // before reaching here) -- pass zero offset and a negative-infinity
       // (no-op) `MinLodClamp` constant, matching roadmap L26's SPIR-V-only
       // scope for ordinary sampling. SampleBias uses its dedicated path
-      // above; Sample/SampleLevel retain zero bias here.
+      // above; Sample retains zero bias here. SampleLevel uses the shared path.
       Value *ZeroOffset = Builder.getInt32(0);
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
                                                      /*Negative=*/true);
@@ -1121,7 +1123,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                                        0.0),
                                       ConstantFP::get(Builder.getFloatTy(),
                                                        0.0)};
-      // Ordinary Sample/SampleLevel retain zero bias/offset and no shader
+      // Ordinary Sample retains zero bias/offset and no shader
       // clamp here. SampleBias uses its dedicated path above.
       Value *ZeroOffset = Builder.getInt32(0);
       Value *NoMinLodClamp = ConstantFP::getInfinity(Builder.getFloatTy(),
@@ -1256,9 +1258,11 @@ bool hasImageAccesses(const Function &F) {
     // handle it left deliberately unrewritten (see the header comment's
     // "per-access" note).
     unsigned OffsetIdx = IsSample ? 3 : 4;
-    if (classifyImageHandle(CI->getArgOperand(0)) &&
-        classifySamplerHandle(CI->getArgOperand(1)) &&
-        isZeroOffset(CI->getArgOperand(OffsetIdx)))
+    auto Image = classifyImageHandle(CI->getArgOperand(0));
+    if (Image && classifySamplerHandle(CI->getArgOperand(1)) &&
+        isZeroOffset(CI->getArgOperand(OffsetIdx)) &&
+        (!IsSampleLevel || (Image->Shape != ImageShape::Plain2D &&
+                            Image->Shape != ImageShape::Array2D)))
       return true;
   }
   return false;
@@ -1434,7 +1438,10 @@ static bool isSupportedDXILFloatingSample(const CallInst &CI,
   }
   bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
               Kind == dxil::ResourceKind::Texture1DArray;
-  if ((IsImplicit || IsLevel) && !Is1D && Kind != dxil::ResourceKind::Texture3D)
+  bool Is2D = Kind == dxil::ResourceKind::Texture2D ||
+              Kind == dxil::ResourceKind::Texture2DArray;
+  if ((IsImplicit || (IsLevel && !Is2D)) && !Is1D &&
+      Kind != dxil::ResourceKind::Texture3D)
     return false;
   bool IsCube = Kind == dxil::ResourceKind::TextureCube ||
                 Kind == dxil::ResourceKind::TextureCubeArray;

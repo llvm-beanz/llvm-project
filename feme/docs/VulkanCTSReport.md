@@ -1,5 +1,33 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) FP32 2D/array explicit-LOD sampling scope (2026-11-24)
+
+The [2D explicit-LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fp32-2darray-explicit-lod-sampling-vm-2026-11-24)
+adds checked heap-backed FP32 `SampleLevel` with constant signed XY
+offsets, separate array layers and result widths one through four in
+any stage. The old zero-offset fallback no longer bypasses explicit
+sampling validation. Existing helpers receive live LOD, zero
+derivatives/bias and no shader MinLod clamp.
+
+Transforms and every-stage admission verify shapes/offsets, narrowing,
+reflection and idempotence. Compiled fragment arrays check divergent
+mips/layers/coordinates, helpers, masks, partial waves, guards and
+repeats. Native SDK DXC plain/array shaders execute three rectangular
+mips with signed/omitted offsets, half-mip blends, negative/upper LOD,
+sampler clamps, distinct components, waves 4/8, five lanes and repeats
+through normal/reference/ARM64 AOT-object paths. Invalid canonical
+offsets fail all three compilation paths.
+
+The affected ARM64 build passes with the existing runner switch warning.
+Focused CPU transforms/units, runner and runtime LIT passes 1,630 with
+4 unsupported and zero failures in 77.38 seconds. Three new fixtures
+and two units add five passes. This is not a new full-suite,
+adapter-matrix or external Vulkan CTS result. Implicit 2D/cube sampling,
+runtime/SPIR-V lowering, artifact ABI 8 and argument layouts are
+unchanged. Broader conformance, bound/static D3D12 descriptors and
+owned-device execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native 1D/array and 3D multi-mip load scope (2026-11-24)
 
 The [native multi-mip follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-1darray-and-3d-multi-mip-loads-vm-2026-11-24)
