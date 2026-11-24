@@ -722,6 +722,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *Coord = CI->getArgOperand(1);
       Value *Offset = CI->getArgOperand(3);
       auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
+      bool IsInteger = CI->getType()->getScalarType()->isIntegerTy(32);
       Value *Loaded;
       if (Kind == dxil::ResourceKind::Texture3D) {
         Value *XYZ[3];
@@ -730,7 +731,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
               Builder.CreateExtractElement(Coord, uint64_t{Axis}),
               cast<Constant>(Offset)->getAggregateElement(Axis));
         Loaded =
-            CI->getType()->getScalarType()->isIntegerTy(32)
+            IsInteger
                 ? createLoad3DI32(Builder, Env, Image->getArgOperand(0), XYZ[0],
                                   XYZ[1], XYZ[2], CI->getArgOperand(2),
                                   Builder.getTrue(), CI->getName())
@@ -746,13 +747,22 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         if (Kind == dxil::ResourceKind::Texture1DArray) {
           Value *Layer = Builder.CreateExtractElement(Coord, uint64_t{1});
           Loaded =
-              createLoad1DArray(Builder, Env, Image->getArgOperand(0), X, Layer,
-                                CI->getArgOperand(2), Builder.getInt32(0),
-                                Builder.getTrue(), CI->getName());
+              IsInteger
+                  ? createLoad1DArrayI32(Builder, Env, Image->getArgOperand(0),
+                                         X, Layer, CI->getArgOperand(2),
+                                         Builder.getTrue(), CI->getName())
+                  : createLoad1DArray(Builder, Env, Image->getArgOperand(0), X,
+                                      Layer, CI->getArgOperand(2),
+                                      Builder.getInt32(0), Builder.getTrue(),
+                                      CI->getName());
         } else {
-          Loaded = createLoad1D(Builder, Env, Image->getArgOperand(0), X,
-                                CI->getArgOperand(2), Builder.getInt32(0),
-                                Builder.getTrue(), CI->getName());
+          Loaded = IsInteger
+                       ? createLoad1DI32(Builder, Env, Image->getArgOperand(0),
+                                         X, CI->getArgOperand(2),
+                                         Builder.getTrue(), CI->getName())
+                       : createLoad1D(Builder, Env, Image->getArgOperand(0), X,
+                                      CI->getArgOperand(2), Builder.getInt32(0),
+                                      Builder.getTrue(), CI->getName());
         }
       }
       CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
@@ -1514,7 +1524,7 @@ bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
   if (!Is1D && Kind != dxil::ResourceKind::Texture3D)
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
-  if (!ScalarTy->isFloatTy() && (Is1D || !ScalarTy->isIntegerTy(32)))
+  if (!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32))
     return false;
   unsigned TextureWidth = getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
   unsigned ResultWidth = getTexelWidth(CI.getType(), ScalarTy);

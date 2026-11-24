@@ -1501,7 +1501,7 @@ component for a cube-array element. The canonical unused scalar i32 offset
 must be poison/undef or zero and is not passed to the runtime. Cube calls
 reuse shared face selection/comparison helpers with six zero derivatives;
 nonzero/dynamic offsets and malformed direction/layer shapes fail admission.
-Implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading remain
+Implicit DXIL 1D sampling outside fragment stages and non-32-bit 1D/array loading remain
 unsupported; bounded implicit/explicit-LOD execution is described below.
 
 Implicit `SampleCmp` preserves its comparison reference, coordinates,
@@ -1535,7 +1535,7 @@ existing 1D comparison helpers; the layer is never differentiated.
 Compiled plain/array execution tests both X- and Y-derived mip selection,
 dynamic zero/two clamps, divergent references/layers and guarded partial
 waves. Actual SDK DXC plain/clamped 1D/array pixel shaders pass import/
-raising; implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading
+raising; implicit DXIL 1D sampling outside fragment stages and non-32-bit 1D/array loading
 remain unsupported.
 For cubes, six coarse derivatives of the raw three-component direction
 feed the existing cube projection/LOD runtime. Cube arrays pass their fourth
@@ -1597,7 +1597,7 @@ spatial. Shared 1D helpers preserve bias and optional shader MinLod clamps.
 Compiled tests distinguish mip-0/mip-1 footprints, signed offsets,
 layer/mip/component values, divergent layers/bias/clamps and guarded partial
 waves. Dynamic/poison/undefined 1D offsets and malformed coordinates reject.
-Implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading remain
+Implicit DXIL 1D sampling outside fragment stages and non-32-bit 1D/array loading remain
 unsupported.
 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and three
 constant signed i32 offsets through the existing `createSample3D` helper.
@@ -1698,10 +1698,28 @@ narrowing, reflection, cleanup and idempotence. Compiled normal/reference
 compute tests cover three mips, layers, all four result widths, offsets,
 bounds, partial waves, guards and repeats; fragment tests add helper masks
 and divergent mips/layers. Native SDK DXC shaders execute through normal/
-reference/AOT paths on one mip. Integer 1D/array loads remain unsupported.
+reference/AOT paths on one mip. Non-32-bit 1D/array loads remain unsupported.
 Existing 3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument
 layouts are unchanged; no bound/static descriptors or owned D3D12 execution
 are added.
+
+Heap-backed signed/unsigned i32 1D/array `Load` now follows the same
+stage-independent coordinate/mip/offset rules. Matching result and texel
+scalar types and widths one through four use the existing integer helpers
+and shared narrowing, preserving exact bits without FP32 conversions.
+Integer runtime per-mip width, invalid mip and independent layer checks
+now match FP32, returning zero for invalid accesses; SPIR-V integer users
+share the bounds correction. Runtime and compiled tests distinguish exact
+signed/unsigned components, mips, layers, X, high-bit/negative and adjacent
+non-FP32-exact values. Compiled compute tests cover normal/reference paths,
+all result widths, offsets, bounds, partial waves, guards and repeats;
+fragment tests add integer outputs, divergent mips/layers and helper masks.
+Native SDK DXC plain/array `int4`/`uint4` shaders execute through normal/
+reference/AOT paths on one mip. Mixed scalar types, non-32-bit texels,
+too-wide results, non-heap handles and dynamic/undefined/poison offsets
+remain rejected. Existing FP32 loads, 3D loads, sampling, SPIR-V lowering,
+artifact ABI 8 and argument layouts are unchanged; no bound/static
+descriptors or owned D3D12 execution are added.
 
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ

@@ -168,7 +168,7 @@ The original compute-only baseline is no longer current:
   footprints, both derivative axes, layer/mip/texel/component values,
   divergent layers/bias/clamps and guarded partial waves. Malformed
   coordinates and dynamic/poison/undefined 1D offsets reject. Implicit DXIL
-  1D sampling outside fragment stages and integer 1D/array loading remain unsupported.
+  1D sampling outside fragment stages and non-32-bit 1D/array loading remain unsupported.
   Biased 3D sampling passes FP32 (U, V, W), six coarse spatial derivatives
   and three constant signed i32 offsets to the existing shared 3D helper.
   Compiled tests isolate each coordinate's LOD contribution on both screen
@@ -252,10 +252,27 @@ The original compute-only baseline is no longer current:
   X and components with all result widths, offsets, bounds, partial waves,
   guards and repeats. Fragment tests add divergent mips/layers and helper
   masks. Native SDK DXC shaders execute through normal/reference/AOT paths
-  on one mip. Integer 1D/array loads remain unsupported. Existing 3D loads,
+  on one mip. Non-32-bit 1D/array loads remain unsupported. Existing 3D loads,
   sampling, SPIR-V lowering, artifact ABI 8 and argument layouts are
   unchanged. Bound/static descriptors, owned D3D12 execution and
   W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
+  Heap-backed signed/unsigned i32 1D/array `Load` now also executes in any
+  stage with the same coordinate/mip/offset rules and widths one through
+  four. Matching result/texel scalar types and existing integer helpers
+  preserve exact bits without FP32 conversions. Per-mip width, invalid
+  mip and independent layer checks now match FP32, returning zero for
+  invalid accesses; SPIR-V integer users share the runtime correction.
+  Compiled normal/reference compute tests distinguish high-bit/negative
+  and adjacent non-FP32-exact components, three mips, layers and X with
+  all result widths, offsets, bounds, partial waves, guards and repeats.
+  Fragment tests add integer outputs, divergent mips/layers and helper
+  masks. Native SDK DXC plain/array `int4`/`uint4` shaders execute through
+  normal/reference/AOT paths on one mip. Mixed scalar types, non-32-bit
+  texels, too-wide results, non-heap handles and dynamic/undefined/poison
+  offsets remain rejected. Existing FP32 loads, 3D loads, sampling,
+  SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged.
+  Bound/static descriptors, owned D3D12 execution and W2(a)/W2(b)/W3(b)
+  remain open; `CreateDevice` remains `E_NOTIMPL`.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

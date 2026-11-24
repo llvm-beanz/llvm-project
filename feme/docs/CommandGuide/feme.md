@@ -167,7 +167,7 @@ coverage" in [../Design.md](../Design.md).
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. Malformed coordinates and dynamic/poison/undefined
   1D offsets reject. Implicit DXIL 1D sampling outside fragment stages and
-  integer 1D/array loading remain unsupported.
+  non-32-bit 1D/array loading remain unsupported.
   Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
   three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
   both screen axes, signed XYZ offsets, biased/clamped mips and components
@@ -232,10 +232,22 @@ coverage" in [../Design.md](../Design.md).
   poison spatial offsets normalize to zero; canonical dynamic/undefined/
   poison offsets reject. Invalid mips, per-mip X bounds and independent
   layer bounds return zero. Native SDK DXC shaders execute through normal/
-  reference/AOT paths on one mip. Integer 1D/array loads remain unsupported.
+  reference/AOT paths on one mip. Non-32-bit 1D/array loads remain unsupported.
   Existing 3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument
   layouts are unchanged; SPIR-V FP32 loads share the runtime bounds
   correction. No bound/static descriptors or owned D3D12 execution are added.
+  Heap-backed signed/unsigned i32 1D/array `Load` now also compiles in any
+  stage, including native AOT, with the same coordinate/mip/offset rules
+  and widths one through four. Matching result/texel scalar types and
+  integer helpers preserve exact bits without FP32 conversions. Invalid
+  mips, per-mip X bounds and independent layer bounds read zero. Native
+  SDK DXC plain/array `int4`/`uint4` shaders execute through normal/
+  reference/AOT paths on one mip. Mixed scalar types, non-32-bit texels,
+  too-wide results, non-heap handles and dynamic/undefined/poison offsets
+  remain unsupported. Existing FP32 loads, 3D loads, sampling, SPIR-V
+  lowering, artifact ABI 8 and argument layouts are unchanged; SPIR-V
+  integer users share the runtime bounds correction. No bound/static
+  descriptors or owned D3D12 execution are added.
   Heap-backed FP32 3D implicit `Sample` now lowers in fragment stages with
   default samplers, three-component U/V/W coordinates, constant signed XYZ
   offsets and scalar/vector results up to the declared texel width (at most

@@ -9566,9 +9566,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
-  if (!Img.Data)
+  if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
+      Mip >= 32)
     return Zero;
-  if (X < 0 || (uint32_t)X >= Img.Width)
+  if (X < 0 || (uint32_t)X >= femeRTMipExtent(Img.Width, Mip))
     return Zero;
   return femeRTFetchTexel1DI32(&Img, Mip, X, /*ApplySwizzle=*/0);
 }
@@ -9654,9 +9655,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DArrayV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
-  if (!Img.Data)
+  if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
+      Mip >= 32)
     return Zero;
-  if (X < 0 || Layer < 0 || (uint32_t)X >= Img.Width ||
+  if (X < 0 || Layer < 0 || (uint32_t)X >= femeRTMipExtent(Img.Width, Mip) ||
       (uint32_t)Layer >= Img.ArrayLayers)
     return Zero;
   return femeRTFetchTexel1DArrayI32(&Img, Mip, X, (uint32_t)Layer,

@@ -3095,7 +3095,7 @@ documented reason rather than an oversight:
   dynamic/undefined offsets and half/vector results remain unsupported.
   Plain 1D uses scalar U/offset; array forms add a final FP32 layer
   coordinate and retain spatial-only offsets (one for 1D, two for 2D).
-  Implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading remain
+  Implicit DXIL 1D sampling outside fragment stages and non-32-bit 1D/array loading remain
   unsupported.
   Cubes use three-component direction vectors, with a fourth cube-array
   element coordinate, and no spatial offsets. Unused scalar offsets
@@ -3219,9 +3219,25 @@ documented reason rather than an oversight:
   all result widths, offsets, bounds, partial waves, guards and repeats.
   Fragment tests add divergent mips/layers and helper masks. Native SDK
   DXC shaders execute through normal/reference/AOT paths on one mip.
-  Integer 1D/array loads remain unsupported. Existing 3D loads, sampling,
+  Non-32-bit 1D/array loads remain unsupported. Existing 3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   no bound/static descriptors or owned-device execution are added.
+  Heap-backed signed/unsigned i32 1D/array `Load` now also executes in any
+  stage with the same coordinate/mip/offset rules and widths one through
+  four. Matching result/texel scalar types use integer helpers and shared
+  narrowing without FP32 conversions. Per-mip width, invalid mip and
+  independent layer checks now match FP32, returning zero for invalid
+  accesses; SPIR-V integer users share the runtime correction. Compiled
+  normal/reference compute tests distinguish exact high-bit/negative and
+  adjacent non-FP32-exact components, mips, layers and X with all result
+  widths, offsets, bounds, partial waves, guards and repeats. Fragment
+  tests add integer outputs, divergent mips/layers and helper masks.
+  Native SDK DXC plain/array `int4`/`uint4` shaders execute through normal/
+  reference/AOT paths on one mip. Mixed scalar types, non-32-bit texels,
+  too-wide results, non-heap handles and dynamic/undefined/poison offsets
+  remain rejected. Existing FP32 loads, 3D loads, sampling, SPIR-V lowering,
+  artifact ABI 8 and argument layouts are unchanged; no bound/static
+  descriptors or owned-device execution are added.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

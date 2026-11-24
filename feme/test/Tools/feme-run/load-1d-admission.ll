@@ -5,7 +5,7 @@
 ; Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-; CHECK: requires heap-backed FP32 1D/array texel loading with scalar/paired i32 coordinates, an i32 mip and constant signed scalar offsets
+; CHECK: requires heap-backed FP32/i32 1D/array texel loading with scalar/paired i32 coordinates, an i32 mip and constant signed scalar offsets
 define void @main() #0 {
   %tid = call i32 @llvm.dx.thread.id(i32 0)
   %t = call target("dx.Texture", float, 0, 0, 0, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_f32_0_0_0_1t(i32 0)

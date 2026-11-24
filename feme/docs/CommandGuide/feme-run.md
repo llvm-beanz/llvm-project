@@ -141,7 +141,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. This compute runner still rejects both forms.
   Malformed coordinates and dynamic/poison/undefined 1D offsets reject.
-  Implicit DXIL 1D sampling outside fragment stages and integer 1D/array loading remain
+  Implicit DXIL 1D sampling outside fragment stages and non-32-bit 1D/array loading remain
   unsupported.
   Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
   three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
@@ -227,9 +227,27 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   masks. Native SDK DXC shaders execute in all three paths with signed/
   omitted offsets, invalid mips, five lanes, guards and repeats on one
   mip; runner YAML still prepares one mip. Dynamic-offset admission rejects
-  in all three paths. Integer 1D/array loads remain unsupported. Existing
+  in all three paths. Non-32-bit 1D/array loads remain unsupported. Existing
   3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument layouts
   are unchanged; SPIR-V FP32 loads share the runtime bounds correction.
+  No bound/static descriptors or owned D3D12 execution are added.
+  Heap-backed signed/unsigned i32 1D/array `Load` now also executes through
+  normal/reference/AOT paths with the same coordinate/mip/offset rules
+  and widths one through four. Matching result/texel scalar types and
+  integer helpers preserve exact bits without FP32 conversions. Invalid
+  mips, per-mip X bounds and independent layer bounds read zero. Compiled
+  normal/reference compute tests distinguish exact high-bit/negative and
+  adjacent non-FP32-exact components, mips, layers and X with all result
+  widths, offsets, bounds, partial waves, guards and repeats; fragment
+  tests add integer outputs, divergent mips/layers and helper masks.
+  Native SDK DXC plain/array `int4`/`uint4` shaders execute in all three
+  paths with signed/omitted offsets, exact components, invalid mips, five
+  lanes, guards and repeats on one mip; runner YAML still prepares one
+  mip. Dynamic-offset admission rejects in all three paths. Mixed scalar
+  types, non-32-bit texels, too-wide results, non-heap handles and
+  dynamic/undefined/poison offsets remain unsupported. Existing FP32 loads,
+  3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument layouts
+  are unchanged; SPIR-V integer users share the runtime bounds correction.
   No bound/static descriptors or owned D3D12 execution are added.
   Heap-backed FP32 3D implicit `Sample` now has fragment-stage CPU lowering
   with default samplers, three-component U/V/W coordinates, constant signed

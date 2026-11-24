@@ -514,9 +514,23 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupported1DLoadsInEveryStage) {
     declare target("dx.Texture", <2 x float>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v2f32_0_0_0_6t(i32)
     declare float @llvm.dx.resource.load.level.f32.tdx.Texture_f32_0_0_0_1t.i32.i32.i32(target("dx.Texture", float, 0, 0, 0, 1), i32, i32, i32)
     declare <2 x float> @llvm.dx.resource.load.level.v2f32.tdx.Texture_v2f32_0_0_0_6t.v2i32.i32.i32(target("dx.Texture", <2 x float>, 0, 0, 0, 6), <2 x i32>, i32, i32)
+    define i32 @integer_plain(i32 %coord, i32 %mip, i32 %offset) {
+      %t = call target("dx.Texture", i32, 0, 0, 0, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_i32_0_0_0_1t(i32 0)
+      %r = call i32 @llvm.dx.resource.load.level.i32.tdx.Texture_i32_0_0_0_1t.i32.i32.i32(target("dx.Texture", i32, 0, 0, 0, 1) %t, i32 %coord, i32 %mip, i32 -1)
+      ret i32 %r
+    }
+    define <2 x i32> @integer_array(<2 x i32> %coord, i32 %mip, i32 %offset) {
+      %t = call target("dx.Texture", <2 x i32>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v2i32_0_0_0_6t(i32 0)
+      %r = call <2 x i32> @llvm.dx.resource.load.level.v2i32.tdx.Texture_v2i32_0_0_0_6t.v2i32.i32.i32(target("dx.Texture", <2 x i32>, 0, 0, 0, 6) %t, <2 x i32> %coord, i32 %mip, i32 1)
+      ret <2 x i32> %r
+    }
+    declare target("dx.Texture", i32, 0, 0, 0, 1) @llvm.dx.resource.handlefromheap.tdx.Texture_i32_0_0_0_1t(i32)
+    declare target("dx.Texture", <2 x i32>, 0, 0, 0, 6) @llvm.dx.resource.handlefromheap.tdx.Texture_v2i32_0_0_0_6t(i32)
+    declare i32 @llvm.dx.resource.load.level.i32.tdx.Texture_i32_0_0_0_1t.i32.i32.i32(target("dx.Texture", i32, 0, 0, 0, 1), i32, i32, i32)
+    declare <2 x i32> @llvm.dx.resource.load.level.v2i32.tdx.Texture_v2i32_0_0_0_6t.v2i32.i32.i32(target("dx.Texture", <2 x i32>, 0, 0, 0, 6), <2 x i32>, i32, i32)
   )");
   ASSERT_TRUE(M);
-  for (StringRef Name : {"plain", "array"}) {
+  for (StringRef Name : {"plain", "array", "integer_plain", "integer_array"}) {
     Function *F = M->getFunction(Name);
     auto *Load = cast<CallInst>(F->back().getTerminator()->getOperand(0));
     Value *Offset = Load->getArgOperand(3);
@@ -534,7 +548,7 @@ TEST(UnsupportedOpsTest, AdmitsOnlySupported1DLoadsInEveryStage) {
             checkSupportedRaisedOps(*M),
             Failed<StringError>(testing::Property(
                 &StringError::getMessage,
-                testing::HasSubstr("FP32 1D/array texel loading"))));
+                testing::HasSubstr("FP32/i32 1D/array texel loading"))));
       }
       Load->setArgOperand(3, Offset);
     }
