@@ -27,6 +27,31 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) native 1D/array and 3D multi-mip explicit-LOD sampling (VM, 2026-11-24)
+
+The existing SDK DXC SM6.6 FP32 `SampleLevel` fixtures now also execute
+three real mips. 1D/plain-array widths 5/2/1 preserve two fixed array
+layers; rectangular 3D extents 4x2x2, 2x1x1 and 1x1x1 shrink depth.
+Signed scalar/XYZ offsets and omitted offsets, distinct texels/components
+and alternating array layers distinguish the mip-major storage.
+
+Five lanes use LOD -1, 0.5, 1, 1.5 and 3, checking image LOD clamps,
+half-mip blends and sampler MinLod=MaxLod=1. New outputs store exact FP32
+bits with `asuint`, rather than truncating sampled values to integers.
+Import/raising, normal waves 4/8, reference and ARM64 AOT-object execution
+all pass with guards and repeat 2. Original one-mip regressions remain
+and gain import/raising checks.
+
+Focused LIT passes both expanded fixtures with zero failures in
+11.91 seconds; no new discovered tests are claimed. No compiler/runtime
+implementation changed, so no new build or broader suite was needed.
+This is native CPU execution evidence, not owned D3D12 execution,
+D3D12 mip/format support, an adapter-matrix or external Vulkan CTS result.
+Broader sampling conformance, MS sampling, bound/static descriptors and
+owned-device execution remain open. Artifact ABI 8 and argument layouts
+are unchanged; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) FP32 2D/array explicit-LOD sampling (VM, 2026-11-24)
 
 Heap-backed FP32 `Texture2D::SampleLevel`/`Texture2DArray::SampleLevel`

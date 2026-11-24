@@ -3169,8 +3169,12 @@ documented reason rather than an oversight:
   remains unchanged. Compiled fragment and normal/reference compute tests
   verify multi-mip/layer selection, offsets, components, sampler clamps,
   helpers, partial waves, guards and repeats. Native SDK DXC bindless
-  1D/array shaders execute through normal/reference/AOT paths on one mip;
-  the original YAML fixture uses one mip. Malformed shapes, non-heap handles,
+  1D/array shaders execute through normal/reference/AOT paths with three
+  real mips of widths 5/2/1 and two fixed layers, retaining original
+  one-mip coverage. New exact FP32-bit checks cover signed/omitted
+  offsets, components/layers, negative/upper LOD, half-mip blends and
+  sampler clamps at mip 1, with waves 4/8, five lanes, guards and repeat 2.
+  Malformed shapes, non-heap handles,
   comparison samplers and dynamic/undefined/poison offsets remain rejected.
   Other ordinary texture shapes and SPIR-V behavior are unchanged.
   This does not materialize bound/static
@@ -3183,7 +3187,11 @@ documented reason rather than an oversight:
   Compiled fragment and normal/reference compute tests verify multi-mip
   selection, offsets, components, sampler clamps, helpers, partial waves,
   guards and repeats. Native SDK DXC bindless 3D shaders execute through
-  normal/reference/AOT paths in the original one-mip fixture.
+  normal/reference/AOT paths with three rectangular mips of extents
+  4x2x2, 2x1x1 and 1x1x1, retaining original one-mip coverage. New exact
+  FP32-bit checks cover shrinking depth, signed/omitted XYZ offsets,
+  components, negative/upper LOD, half-mip blends and sampler clamps
+  at mip 1, with waves 4/8, five lanes, guards and repeat 2.
   Malformed shapes, non-heap handles, comparison samplers and dynamic/
   undefined/poison or partially undefined offsets remain unsupported.
   Non-fragment implicit DXIL 3D sampling, non-32-bit 3D loading, other ordinary shapes

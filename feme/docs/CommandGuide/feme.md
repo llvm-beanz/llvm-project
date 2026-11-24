@@ -195,7 +195,11 @@ coverage" in [../Design.md](../Design.md).
   derivatives/bias and unchanged sampler LOD behavior. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison offsets
   remain unsupported. Native SDK DXC bindless 1D/array shaders execute
-  through normal/reference/AOT paths; this does not change other ordinary
+  through normal/reference/AOT paths with three real mips of widths
+  5/2/1 and two fixed layers, retaining the original one-mip regression.
+  New exact FP32-bit checks cover signed/omitted offsets, half-mip
+  blends, negative/upper LOD and sampler clamps at mip 1, with waves
+  4/8, guards and repeat 2; this does not change other ordinary
   shapes, materialize bound/static
   descriptors or establish owned D3D12 rendering.
   Heap-backed FP32 3D `SampleLevel` now also compiles in any stage, including
@@ -203,7 +207,12 @@ coverage" in [../Design.md](../Design.md).
   FP32 LOD, constant signed XYZ offsets and scalar/vector results up to
   the declared texel width (at most four). Explicit LOD survives with six
   zero derivatives/bias and unchanged sampler LOD behavior. Native SDK
-  DXC bindless 3D shaders execute through normal/reference/AOT paths.
+  DXC bindless 3D shaders execute through normal/reference/AOT paths
+  with three rectangular mips of extents 4x2x2, 2x1x1 and 1x1x1,
+  retaining the original one-mip regression. New exact FP32-bit checks
+  cover shrinking depth, signed/omitted XYZ offsets, half-mip blends,
+  negative/upper LOD and sampler clamps at mip 1, with waves 4/8,
+  guards and repeat 2.
   Malformed shapes, non-heap handles, comparison samplers and dynamic/
   undefined/poison or partially undefined offsets remain unsupported.
   This does not enable non-fragment implicit 3D sampling or non-32-bit 3D loading,

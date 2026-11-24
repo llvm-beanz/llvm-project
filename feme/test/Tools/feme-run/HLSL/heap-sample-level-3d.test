@@ -4,13 +4,28 @@
 # REQUIRES: system-dxc-dxil
 # RUN: split-file %s %t
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
 # RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
 # RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
 # RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /Fo %t/mips.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/mips.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/mips.yaml %t/mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/mips.yaml %t/mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --reference --repeat=2 --heap=%t/mips.yaml %t/mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/mips.dxil -o %t/mips.o
+# RUN: feme-run --object --repeat=2 --heap=%t/mips.yaml %t/mips.o | FileCheck %s --check-prefix=MIPS
 # Native SDK import plus normal/reference/AOT execution, not owned D3D12.
-# Multi-mip selection is covered by compiled-stage tests; YAML has one mip.
+# MIPS distinguishes extents 4x2x2/2x1x1/1x1x1, shrinking depth,
+# signed/omitted XYZ offsets, LOD -1/0.5/1/1.5/3 and sampler min/max clamps
+# at mip 1. Stores preserve exact FP32 bits, including half-mip blends.
+# RAISE: call <4 x float> @llvm.dx.resource.samplelevel
+# RAISE-SAME: <3 x i32> <i32 1, i32 -1, i32 1>)
+# RAISE: call <4 x float> @llvm.dx.resource.samplelevel
+# RAISE-SAME: <3 x i32> <i32 -1, i32 1, i32 -1>)
 # CHECK: heap[1]: 42 12 10 10 9 12 10 10 9 12 10 10 9 12 10 10 9 12 10 10 9 42
+# MIPS: heap[1]: 42 1109655552 1099956224 1110179840 1110441984 1115815936 1116209152 1113325568 1109917696 1113849856 1114112000 1115815936 1116209152 1116340224 1115947008 1116602368 1116733440 1115815936 1116209152 1116602368 1116471296 1116864512 1116995584 1115815936 1116209152 1116864512 1116995584 1117126656 1117257728 1115815936 1116209152 42
 #--- shader.hlsl
 [RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
 [numthreads(5, 1, 1)]
@@ -18,14 +33,30 @@ void main(uint3 tid : SV_DispatchThreadID) {
   Texture3D<float4> t = ResourceDescriptorHeap[0];
   SamplerState s = SamplerDescriptorHeap[0];
   RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[1];
+#ifdef MIPS
+  SamplerState limited = SamplerDescriptorHeap[1];
+  float lod = (tid.x == 0) ? -1.0 : (tid.x == 4) ? 3.0 : float(tid.x) * 0.5;
+  float3 coord = float3(0.375, 0.75, 0.25);
+#else
   float lod = (tid.x & 1) ? 2.0 : -1.0;
   float3 coord = float3((tid.x & 1) ? 0.75 : 0.25, 0.75, 0.25);
+#endif
   float4 p = t.SampleLevel(s, coord, lod, int3(1, -1, 1));
   float4 n = t.SampleLevel(s, coord, lod, int3(-1, 1, -1));
+#ifdef MIPS
+  float4 c = t.SampleLevel(limited, coord, lod);
+  outBuffer.Store(4 + tid.x * 24, asuint(p.r));
+  outBuffer.Store(8 + tid.x * 24, asuint(n.g));
+  outBuffer.Store(12 + tid.x * 24, asuint(p.b));
+  outBuffer.Store(16 + tid.x * 24, asuint(p.a));
+  outBuffer.Store(20 + tid.x * 24, asuint(c.r));
+  outBuffer.Store(24 + tid.x * 24, asuint(c.a));
+#else
   outBuffer.Store(4 + tid.x * 16, (uint)p.r);
   outBuffer.Store(8 + tid.x * 16, (uint)n.g);
   outBuffer.Store(12 + tid.x * 16, (uint)p.b);
   outBuffer.Store(16 + tid.x * 16, (uint)p.a);
+#endif
 }
 #--- heap.yaml
 resource-heap:
@@ -43,3 +74,25 @@ samplers:
     address-u: clamp-to-edge
     address-v: clamp-to-edge
     address-w: clamp-to-edge
+#--- mips.yaml
+resource-heap:
+  - {index: 1, size: 128, data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]}
+images:
+  - index: 0
+    dimension: 3d
+    extent: [4, 2, 2]
+    mip-levels: 3
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040,
+           1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648,
+           1099431936, 1099956224, 1100480512, 1101004800, 1101529088, 1102053376, 1102577664, 1103101952,
+           1103626240, 1104150528, 1104674816, 1105199104, 1105723392, 1106247680, 1106771968, 1107296256,
+           1107558400, 1107820544, 1108082688, 1108344832, 1108606976, 1108869120, 1109131264, 1109393408,
+           1109655552, 1109917696, 1110179840, 1110441984, 1110704128, 1110966272, 1111228416, 1111490560,
+           1111752704, 1112014848, 1112276992, 1112539136, 1112801280, 1113063424, 1113325568, 1113587712,
+           1113849856, 1114112000, 1114374144, 1114636288, 1114898432, 1115160576, 1115422720, 1115684864,
+           1115815936, 1115947008, 1116078080, 1116209152, 1116340224, 1116471296, 1116602368, 1116733440,
+           1116864512, 1116995584, 1117126656, 1117257728]
+samplers:
+  - {index: 0, mip-filter: linear, address-u: clamp-to-edge, address-v: clamp-to-edge, address-w: clamp-to-edge}
+  - {index: 1, mip-filter: linear, address-u: clamp-to-edge, address-v: clamp-to-edge, address-w: clamp-to-edge, min-lod: 1.0, max-lod: 1.0}

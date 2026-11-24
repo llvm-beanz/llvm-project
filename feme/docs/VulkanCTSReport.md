@@ -1,5 +1,27 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) native 1D/array and 3D multi-mip explicit-LOD sampling scope (2026-11-24)
+
+The [native explicit-LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-1darray-and-3d-multi-mip-explicit-lod-sampling-vm-2026-11-24)
+extends the existing SDK DXC FP32 `SampleLevel` fixtures to three real
+mips. 1D/plain-array widths 5/2/1 preserve two fixed layers; rectangular
+3D extents 4x2x2, 2x1x1 and 1x1x1 shrink depth. Signed/omitted offsets,
+distinct texels/components and layers, negative/upper LOD, half-mip
+blends at 0.5/1.5 and sampler MinLod=MaxLod=1 are checked.
+
+New outputs preserve exact FP32 bits. Both variants pass import/raising,
+normal waves 4/8, reference and ARM64 AOT-object execution with five
+lanes, guards and repeat 2. Original one-mip coverage remains and gains
+import/raising checks. Focused LIT passes both expanded fixtures with
+zero failures in 11.91 seconds; no new discovered tests, implementation
+build or broader/full-suite run is claimed.
+
+This is native CPU execution evidence, not an external Vulkan CTS,
+adapter-matrix, D3D12 mip/format or owned-device result. Broader sampling
+conformance, MS sampling, bound/static D3D12 descriptors and owned-device
+execution remain open. Artifact ABI 8 and argument layouts are unchanged;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) FP32 2D/array explicit-LOD sampling scope (2026-11-24)
 
 The [2D explicit-LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-fp32-2darray-explicit-lod-sampling-vm-2026-11-24)

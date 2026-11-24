@@ -1639,7 +1639,11 @@ undefined/poison offsets remain rejected. Compiled fragment and normal/
 reference compute tests prove multi-mip/layer selection, offsets,
 components, sampler clamps, helpers, partial waves, guards and repeats.
 Native SDK DXC bindless 1D/array shaders also execute through normal/
-reference/AOT paths in the original one-mip fixture.
+reference/AOT paths with three real mips of widths 5/2/1 and two fixed
+array layers, retaining the original one-mip fixture. New exact FP32-bit
+checks distinguish signed/omitted offsets, negative/upper LOD, half-mip
+blends at 0.5/1.5 and sampler MinLod=MaxLod=1, with waves 4/8, guards
+and repeat 2.
 Other ordinary texture shapes, biased/
 comparison/gradient execution and SPIR-V behavior are unchanged.
 No bound/static descriptor materialization or owned D3D12 execution is added.
@@ -1652,7 +1656,11 @@ unchanged with six zero derivatives, zero bias and no shader MinLod clamp.
 Compiled fragment and normal/reference compute tests verify multi-mip
 selection, XYZ offsets, components, sampler clamps, helpers, partial waves,
 guards and repeats. Native SDK DXC bindless 3D shaders execute through
-normal/reference/AOT paths in the original one-mip fixture.
+normal/reference/AOT paths with three rectangular mips of extents 4x2x2,
+2x1x1 and 1x1x1, retaining the original one-mip fixture. New exact FP32-bit
+checks distinguish shrinking depth, signed/omitted XYZ offsets,
+negative/upper LOD, half-mip blends at 0.5/1.5 and sampler clamps at
+mip 1, with waves 4/8, guards and repeat 2.
 Malformed shapes, non-heap handles, comparison samplers and dynamic/
 undefined/poison or partially undefined offsets remain unsupported.
 Non-fragment implicit 3D sampling, non-32-bit 3D loading, other ordinary shapes,

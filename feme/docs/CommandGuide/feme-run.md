@@ -172,9 +172,12 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   up to the declared texel width (at most four). Explicit LOD is preserved
   with zero derivatives/bias and unchanged sampler LOD behavior.
   Compiled-stage tests verify multi-mip/layer selection and sampler clamps;
-  native SDK DXC bindless 1D/array runner tests cover signed offsets,
-  components, divergent layers/LODs, partial waves, guards and repeats on
-  one mip in the original fixture. Malformed shapes,
+  native SDK DXC bindless 1D/array runner tests also execute three real
+  mips of widths 5/2/1 with two fixed layers, retaining original one-mip
+  coverage. New exact FP32-bit checks cover signed/omitted offsets,
+  components/layers, negative/upper LOD, half-mip blends at 0.5/1.5 and
+  sampler MinLod=MaxLod=1, with waves 4/8, five lanes, guards and repeat 2.
+  Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison offsets
   remain rejected. Other ordinary shapes are unchanged; no bound/static
   descriptor materialization or owned
@@ -185,9 +188,12 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   results up to the declared texel width (at most four). Explicit LOD
   survives with six zero derivatives and zero bias; sampler LOD behavior
   is unchanged. Compiled-stage tests verify multi-mip selection and sampler
-  clamps; native SDK DXC bindless 3D runner tests cover signed XYZ offsets,
-  components, divergent coordinates/LODs, partial waves, guards and repeats
-  in the original one-mip fixture. Malformed shapes,
+  clamps; native SDK DXC bindless 3D runner tests also execute three
+  rectangular mips of extents 4x2x2, 2x1x1 and 1x1x1, retaining original
+  one-mip coverage. New exact FP32-bit checks cover shrinking depth,
+  signed/omitted XYZ offsets, components, negative/upper LOD, half-mip
+  blends at 0.5/1.5 and sampler clamps at mip 1, with waves 4/8,
+  five lanes, guards and repeat 2. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison or
   partially undefined offsets remain rejected. Non-fragment implicit 3D
   sampling, non-32-bit 3D loading and other ordinary shapes are unchanged; no bound/static descriptor

@@ -2797,8 +2797,12 @@ with signed offsets, layers, all four result widths, helpers, partial
 waves, guards and repeats. Normal/reference compute tests select divergent
 mips, independent layers and sampler minimum/maximum LOD clamps with
 repeated prepared invocations. Native SDK DXC bindless 1D/array shaders
-execute through normal/reference/AOT paths in the original one-mip
-fixture. This is CPU execution, not owned D3D12 execution or
+execute through normal/reference/AOT paths with three real mips of
+widths 5/2/1 and two fixed layers, retaining the original one-mip fixture.
+New exact FP32-bit checks cover signed/omitted offsets, distinct
+components/layers, negative/upper LOD, half-mip blends at 0.5/1.5 and
+sampler MinLod=MaxLod=1, with waves 4/8, five lanes, guards and repeat 2.
+This is CPU execution, not owned D3D12 execution or
 bound/static descriptor materialization. Other ordinary sampling/loading
 shapes, biased/comparison/gradient
 execution, SPIR-V behavior, artifact ABI 8 and argument layouts are unchanged.
@@ -2820,8 +2824,12 @@ fragment tests select mips 0/1/2 despite lane-uniform coordinates, with
 signed XYZ offsets, all four result widths, helpers, partial waves,
 guards and repeats. Normal/reference compute tests select divergent mips
 with sampler minimum/maximum LOD clamps. Native SDK DXC bindless 3D
-shaders execute through normal/reference/AOT paths in the original
-one-mip fixture. This is native import plus CPU execution,
+shaders execute through normal/reference/AOT paths with three rectangular
+mips of extents 4x2x2, 2x1x1 and 1x1x1, retaining the original one-mip
+fixture. New exact FP32-bit checks cover shrinking depth, signed/omitted
+XYZ offsets, distinct components, negative/upper LOD, half-mip blends
+at 0.5/1.5 and sampler clamps at mip 1, with waves 4/8, five lanes,
+guards and repeat 2. This is native import plus CPU execution,
 not owned D3D12 execution or bound/static descriptor materialization.
 Non-fragment implicit DXIL 3D sampling, non-32-bit 3D loading, other ordinary shapes,
 existing 1D execution, biased/comparison/gradient execution, SPIR-V behavior,

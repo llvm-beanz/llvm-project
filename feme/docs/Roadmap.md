@@ -2626,6 +2626,17 @@ the first shader-facing milestone rather than alongside it.
    Native three-mip/half-mip/clamp fixtures and compiled fragment helper/
    mask tests pass; malformed calls cannot bypass validation through
    the old zero-offset fallback. This adds no owned D3D12 execution.
+   Native 1D/plain-array and 3D `SampleLevel` follow-up (2026-11-24):
+   existing SDK DXC fixtures also execute three real mips, with widths
+   5/2/1 and fixed layers or rectangular extents 4x2x2, 2x1x1 and
+   1x1x1 with shrinking depth. Exact FP32-bit checks distinguish signed/
+   omitted offsets, components/layers, negative/upper LOD, half-mip
+   blends at 0.5/1.5 and sampler clamps at mip 1. Both expanded fixtures
+   pass import/raising, normal waves 4/8, reference and ARM64 AOT-object
+   execution with five lanes, guards and repeat 2; original single-mip
+   regressions remain. Focused LIT passes 2/2 in 11.91 seconds. No
+   implementation change, new discovered test, full-suite/CTS result,
+   D3D12 mip/format support or owned-device execution is claimed.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

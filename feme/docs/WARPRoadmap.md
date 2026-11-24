@@ -2053,6 +2053,32 @@ unchanged. Broader sampling conformance, bound/static D3D12 descriptors
 and owned D3D12 execution remain open; `CreateDevice` remains
 `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) native 1D/array and 3D multi-mip explicit-LOD sampling
+progress (2026-11-24): the existing SDK DXC SM6.6 FP32 `SampleLevel`
+fixtures now execute three real mips, in addition to their original
+single-mip regressions. 1D/plain-array widths 5/2/1 retain two fixed
+layers; rectangular 3D extents 4x2x2, 2x1x1 and 1x1x1 shrink depth.
+Distinct spatial/component values, constant signed scalar/XYZ offsets
+and omitted offsets distinguish each level and array layer.
+
+Five lanes select LOD -1, 0.5, 1, 1.5 and 3: negative/upper image clamps
+and exact half-mip blends are checked alongside sampler MinLod=MaxLod=1.
+New outputs store FP32 bits with `asuint`, not truncating numeric casts,
+so the expected blend values are checked exactly. Both variants pass
+native import/raising, normal waves 4/8, reference and ARM64 AOT-object
+execution, with output guards and repeat 2. Original one-mip execution
+remains and also gains import/raising checks.
+
+Focused LIT passes both expanded fixtures with zero failures in
+11.91 seconds. These are expanded existing tests, not new discovered
+tests. No compiler/runtime implementation changed, so no new build or
+broader/full-suite run was needed. This is native CPU execution evidence,
+not owned D3D12 execution, D3D12 mip/format support, an adapter-matrix or
+external Vulkan CTS result. Broader sampling conformance, MS sampling,
+bound/static D3D12 descriptors and owned-device execution remain open.
+Artifact ABI 8 and argument layouts are unchanged; `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.
