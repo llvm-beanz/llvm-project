@@ -186,17 +186,16 @@ struct BindingFile {
 /// `kind`/`format` (see `parseImageDimension`/`parseResourceFormat`).
 ///
 /// Scope note: only a single mip level and (for a non-array dimension) a
-/// single array layer are supported for now, and multisample dimensions are
-/// rejected -- multisampling is explicitly a later milestone (G4, roadmap
-/// step R33), and no test yet needs a real mip chain or texture array
-/// through this tool, so their layout arithmetic (mechanical but currently
-/// untested) is deferred rather than shipped unverified.
+/// single array layer are supported for now. Array dimensions and 2D
+/// multisample dimensions use layer-major storage with each texel's samples
+/// contiguous; real mip chains remain deferred.
 struct ImageEntry {
   uint32_t Index = 0;
   std::string Dimension;
   std::vector<uint32_t> Extent;
   std::string Format;
   uint32_t ArrayLayers = 1;
+  uint32_t SampleCount = 1;
   bool Sampled = true;
   bool Storage = false;
   bool Depth = false;
@@ -346,6 +345,7 @@ template <> struct MappingTraits<ImageEntry> {
     Io.mapOptional("extent", Entry.Extent);
     Io.mapOptional("format", Entry.Format);
     Io.mapOptional("array-layers", Entry.ArrayLayers, 1u);
+    Io.mapOptional("sample-count", Entry.SampleCount, 1u);
     Io.mapOptional("sampled", Entry.Sampled, true);
     Io.mapOptional("storage", Entry.Storage, false);
     Io.mapOptional("depth", Entry.Depth, false);
@@ -559,8 +559,7 @@ Expected<HeapStorage> buildHeapStorage(const HeapFile &File) {
 /// Parses an `images` entry's `dimension` string into
 /// `feme::cpu::ImageDimension`, defaulting an empty string to `Texture2D`
 /// (the only dimension a test needs today). Returns an `Error` for any
-/// other, unrecognized spelling, and for either multisample dimension --
-/// see `ImageEntry`'s own comment for why multisampling is out of scope.
+/// other, unrecognized spelling.
 Expected<ImageDimension> parseImageDimension(StringRef Dimension) {
   if (Dimension.empty() || Dimension == "2d")
     return ImageDimension::Texture2D;
@@ -570,18 +569,16 @@ Expected<ImageDimension> parseImageDimension(StringRef Dimension) {
     return ImageDimension::Texture1DArray;
   if (Dimension == "2d-array")
     return ImageDimension::Texture2DArray;
+  if (Dimension == "2d-ms")
+    return ImageDimension::Texture2DMS;
+  if (Dimension == "2d-ms-array")
+    return ImageDimension::Texture2DMSArray;
   if (Dimension == "3d")
     return ImageDimension::Texture3D;
   if (Dimension == "cube")
     return ImageDimension::TextureCube;
   if (Dimension == "cube-array")
     return ImageDimension::TextureCubeArray;
-  if (Dimension == "2d-ms" || Dimension == "2d-ms-array")
-    return createStringError(inconvertibleErrorCode(),
-                             "heap entry image 'dimension: %s' is not yet "
-                             "supported: multisample images are a later "
-                             "milestone (roadmap step R33)",
-                             Dimension.str().c_str());
   return createStringError(inconvertibleErrorCode(),
                            "unknown heap entry image 'dimension': '%s'",
                            Dimension.str().c_str());
@@ -890,7 +887,10 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
 
     bool IsArray = *Dimension == ImageDimension::Texture1DArray ||
                    *Dimension == ImageDimension::Texture2DArray ||
+                   *Dimension == ImageDimension::Texture2DMSArray ||
                    *Dimension == ImageDimension::TextureCubeArray;
+    bool IsMS = *Dimension == ImageDimension::Texture2DMS ||
+                *Dimension == ImageDimension::Texture2DMSArray;
     bool Is3D = *Dimension == ImageDimension::Texture3D;
     bool IsCube = *Dimension == ImageDimension::TextureCube ||
                   *Dimension == ImageDimension::TextureCubeArray;
@@ -904,6 +904,23 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
     uint32_t Width = Entry.Extent.size() > 0 ? Entry.Extent[0] : 1;
     uint32_t Height = Entry.Extent.size() > 1 ? Entry.Extent[1] : 1;
     uint32_t Depth = Is3D && Entry.Extent.size() > 2 ? Entry.Extent[2] : 1;
+    if (!Entry.SampleCount || (!IsMS && Entry.SampleCount != 1))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "heap entry image %u requires a positive 'sample-count' "
+          "(1 for non-MS dimensions)",
+          Entry.Index);
+    if (IsMS && (!Width || !Height || Entry.Extent.size() > 2))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "heap entry image %u requires nonzero XY multisample extents",
+          Entry.Index);
+    if (IsMS && IsArray && !Entry.ArrayLayers)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "heap entry image %u multisample array requires positive "
+          "'array-layers'",
+          Entry.Index);
     uint32_t ArrayLayers =
         IsArray ? std::max<uint32_t>(1, Entry.ArrayLayers) : 1;
     // The descriptor ABI counts physical faces, not logical cubes.
@@ -925,14 +942,20 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
 
     FemeImageSubresourceLayout &Layout = Storage.MipLayouts[Entry.Index];
     Layout.Offset = 0;
-    Layout.RowPitch = (uint64_t)Width * ElemSize;
+    auto RowPitch = checkedMulUnsigned(uint64_t{Width} * ElemSize,
+                                       uint64_t{Entry.SampleCount});
+    if (!RowPitch)
+      return createStringError(inconvertibleErrorCode(),
+                               "heap entry image %u subresource size overflows",
+                               Entry.Index);
+    Layout.RowPitch = *RowPitch;
     auto SlicePitch = checkedMulUnsigned(Layout.RowPitch, uint64_t{Height});
     if (!SlicePitch)
       return createStringError(inconvertibleErrorCode(),
                                "heap entry image %u subresource size overflows",
                                Entry.Index);
     Layout.SlicePitch = *SlicePitch;
-    Layout.SampleStride = 0;
+    Layout.SampleStride = Entry.SampleCount > 1 ? ElemSize : 0;
     uint64_t LayerCount = Is3D ? Depth : ArrayLayers;
     auto ByteSize = checkedMulUnsigned(Layout.SlicePitch, LayerCount);
     if (!ByteSize)
@@ -964,7 +987,7 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
     Desc.MipLevels = 1;
     Desc.ArrayLayers = ArrayLayers;
     Desc.PlaneCount = 1;
-    Desc.SampleCount = 1;
+    Desc.SampleCount = Entry.SampleCount;
     Desc.Flags = (Entry.Sampled ? FEME_IMAGE_SAMPLED : 0u) |
                  (Entry.Storage ? FEME_IMAGE_STORAGE : 0u) |
                  (Entry.Depth ? FEME_IMAGE_DEPTH : 0u);

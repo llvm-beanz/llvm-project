@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) runner multisample and native execution regression scope (2026-11-24)
+
+The [runner multisample follow-up](W0WindowsIntegrationProbe.md#w2aw3b-runner-multisample-preparation-and-native-execution-vm-2026-11-24)
+adds `2d-ms`/`2d-ms-array` heap YAML images with a positive `sample-count`
+and checked sample-interleaved one-mip layouts. Non-MS defaults remain
+unchanged. Invalid counts/extents/layers, row/slice/layer overflow and
+host allocation limits are explicitly rejected, including image-binding
+inputs and object mode.
+
+SDK DXC plain/array `float4`/`int4`/`uint4` MS shaders now execute through
+normal/reference/AOT-object paths with four distinct samples,
+rows/layers/components, signed/omitted offsets, negative/upper samples
+and layers, partial waves, guards and repeats. Integer outputs retain
+high-bit/negative and non-FP32-exact values. Canonical runner fixtures
+add counts 1/2/8, last-row/layer addressing and zero-filled unspecified
+samples in all three paths.
+
+The ARM64 runner build passes with the existing `X8_D24_UNORM` switch
+warning. Focused all runner plus CPU runtime LIT passes 414 with
+4 unsupported and zero failures. This is not a new full-suite or Vulkan
+CTS run. No adapter-matrix, D3D12 MSAA-quality/support, bound/static
+D3D12 descriptors or owned-device execution claim is added. Mip-chain
+YAML, MS sampling and broader conformance remain open. Artifact ABI 8
+and argument layouts are unchanged; W2(a)/W2(b)/W3(b) remain open;
+`CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) integer multisample texel-load CPU regression scope (2026-11-24)
 
 The [integer multisample follow-up](W0WindowsIntegrationProbe.md#w2aw3b-integer-multisample-texel-load-cpu-execution-vm-2026-11-24)

@@ -2597,6 +2597,15 @@ the first shader-facing milestone rather than alongside it.
    (§2.4.3). An image entry additionally needs dimensionality, extent, mip and
    array ranges, format, and layout. Required by every G2 test and by the
    textual image fixtures G3 onward compare against.
+   Runner MS follow-up (2026-11-24): `images`/`image-bindings` now accept
+   `2d-ms`/`2d-ms-array` with a positive `sample-count` and checked one-mip
+   sample-interleaved layouts. This supersedes R31's historical MS-dimension
+   rejection below. Native DXC FP32/SINT/UINT MS loads execute through
+   normal/reference/AOT-object paths with sample/layer bounds, partial
+   waves, guards and repeats. Counts describe CPU storage, not D3D12
+   MSAA-quality/support; mip-chain YAML remains open. See
+   [the runner schema](CommandGuide/feme-run.md) and
+   [the WARP progress evidence](WARPRoadmap.md).
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

@@ -1889,6 +1889,52 @@ remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) runner multisample preparation and native execution progress
+(2026-11-24): `feme-run` heap YAML now accepts `dimension: 2d-ms` and
+`2d-ms-array` with a positive `sample-count` (default 1). Non-MS
+dimensions still require count 1. MS extents must have nonzero X/Y and
+no depth component; MS arrays require positive physical `array-layers`.
+The shared `ImageEntry` schema applies to both `images` and
+`image-bindings`, without adding owned D3D12 descriptor materialization.
+
+The runner extends its existing checked one-mip layout path:
+`RowPitch = Width * ElementSize * SampleCount`, `SlicePitch =
+RowPitch * Height`, with layers outside the slice and each texel's
+samples contiguous. `SampleStride` is the format element size for
+multiple samples, otherwise zero. Row/slice/layer overflow and host
+allocation limits are diagnosed before allocation. Zero-fill, word-data
+copying, single-sample defaults and descriptor lifetimes across repeated
+dispatches are unchanged. Counts are CPU descriptor inputs, not a D3D12
+MSAA-quality/support advertisement.
+
+Canonical runner tests exercise counts 1/2/8, last-row/layer addressing,
+zero-filled unspecified sample data, lower/upper sample bounds, waves
+4/8, ten lanes, guards and repeats in normal/reference/object modes.
+Validation tests reject count zero, non-MS count greater than 1, empty/
+depth MS extents, zero/non-array layer misuse, row/slice/layer overflow
+and host allocation limits, including the image-binding schema and
+object mode. The old MS-dimension rejection fixture now retains unknown
+dimension rejection.
+
+Actual SDK DXC SM6.6 plain/array `float4`/`int4`/`uint4` MS shaders now
+execute through normal/reference/AOT-object paths, not merely compile.
+The four-sample fixture distinguishes samples 0/1/2/3, rows, layers and
+components, with signed/omitted XY offsets, negative/upper samples,
+negative/upper layers, waves 4/8, seven lanes, guards and repeats.
+Integer outputs preserve high-bit/negative and non-FP32-exact values.
+Native import/raising checks remain in the same fixture.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2 feme-run` build
+passes, with the existing `X8_D24_UNORM` switch warning. Focused all
+`feme-run` plus CPU runtime LIT passes 414, marks 4 unsupported and has
+zero failures in 38.03 seconds. Two new fixtures add two passes; the
+existing native fixture now also executes. This is targeted validation,
+not a new full-suite, adapter-matrix or external Vulkan CTS result.
+Mip-chain YAML, non-32-bit DXIL texels, MS sampling, broader conformance,
+bound/static D3D12 descriptors and owned D3D12 execution remain open.
+Artifact ABI 8 and argument layouts are unchanged;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

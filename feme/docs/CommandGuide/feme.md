@@ -260,7 +260,7 @@ coverage" in [../Design.md](../Design.md).
   poison XY offsets raise to zero; canonical offsets remain strict.
   Invalid mips, per-mip spatial bounds and independent layer bounds read
   zero. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one mip. Runner MS preparation remains open.
+  reference/AOT paths on one mip. Mip-chain YAML remains open.
   Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   SPIR-V FP32 users share the runtime bounds correction. No bound/static
@@ -288,21 +288,28 @@ coverage" in [../Design.md](../Design.md).
   plain/array shaders pass import/raising and AOT compilation; integer MS
   execution is covered below. MS sampling and
   dynamic/undefined/poison or partial offsets remain unsupported.
-  Runner YAML still rejects MS image preparation; native MS execution is
-  not claimed. Artifact ABI 8 and argument layouts are unchanged.
+  Runner YAML now prepares MS images, and native MS execution passes
+  normal/reference/AOT-object tests. Artifact ABI 8 and argument layouts
+  are unchanged.
   No bound/static descriptors or owned D3D12 execution are added.
   Heap-backed signed/unsigned i32 MS `Load` now also compiles in any stage,
   including native AOT. The same coordinate/sample/offset rules and
   widths one through four use integer helpers without FP32 conversions.
   Calls pass mip zero, live samples and separate layers. Invalid samples
   read zero without aliasing another texel/row/layer. SDK DXC plain/array
-  `int4`/`uint4` shaders pass native import/raising and AOT compilation;
-  runner YAML still rejects MS preparation. Mixed scalar types,
+  `int4`/`uint4` shaders pass native import/raising and
+  normal/reference/AOT-object execution with runner MS YAML. Mixed scalar types,
   non-32-bit texels, too-wide results, non-heap handles and dynamic/
   undefined/poison or partial offsets remain rejected. Native raising,
   FP32 MS/single-sample loads, sampling, artifact ABI 8 and argument
   layouts are unchanged; no bound/static descriptors or owned D3D12
   execution are added.
+  Runner MS YAML accepts `2d-ms`/`2d-ms-array` with a positive
+  `sample-count` and checked sample-interleaved layouts on one mip.
+  Native FP32/SINT/UINT fixtures distinguish samples, rows/layers,
+  components, signed/omitted offsets, bounds, partial waves, guards
+  and repeats. This remains CPU execution, not owned D3D12 execution
+  or an MSAA-quality/support advertisement.
   Heap-backed FP32 3D implicit `Sample` now lowers in fragment stages with
   default samplers, three-component U/V/W coordinates, constant signed XYZ
   offsets and scalar/vector results up to the declared texel width (at most

@@ -27,6 +27,40 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) runner multisample preparation and native execution (VM, 2026-11-24)
+
+`feme-run` YAML now accepts `2d-ms`/`2d-ms-array` images with a positive
+`sample-count`, default 1. Non-MS dimensions require count 1; MS extents
+require nonzero X/Y with no depth component and MS arrays require
+positive layers. The same schema applies to `images`/`image-bindings`.
+The checked one-mip layout stores each texel's samples contiguously,
+with sample-aware row/slice pitches and separate physical layers.
+Invalid counts/extents/layers, row/slice/layer overflow and host
+allocation limits are explicitly diagnosed. Single-sample defaults,
+zero-fill, data copying and repeated-dispatch ownership are unchanged.
+
+Actual SDK DXC SM6.6 plain/array `float4`/`int4`/`uint4` MS shaders now
+execute through normal/reference/AOT-object paths. The four-sample
+fixture distinguishes all samples, rows/layers/components, signed/
+omitted offsets, negative/upper samples and layers, waves 4/8, seven
+lanes, guards and repeats. Integer outputs preserve high-bit/negative
+and non-FP32-exact values. Separate canonical tests cover counts 1/2/8,
+zero-filled unspecified samples, last-row/layer addressing, ten lanes,
+guards and repeats in all three paths. Invalid YAML tests include
+image bindings and object mode.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2 feme-run` build
+passes with the existing `X8_D24_UNORM` switch warning. Focused all
+runner plus CPU runtime LIT passes 414 with 4 unsupported and zero
+failures in 38.03 seconds. Two new fixtures add two passes.
+No new full-suite, adapter-matrix or external Vulkan CTS run is claimed.
+
+Counts are CPU descriptor inputs, not an MSAA-quality/support claim.
+Mip-chain YAML, MS sampling, broader conformance, bound/static D3D12
+descriptors and owned D3D12 execution remain open. Artifact ABI 8 and
+argument layouts are unchanged; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) integer multisample texel-load CPU execution (VM, 2026-11-24)
 
 Heap-backed signed/unsigned i32 `Texture2DMS::Load`/

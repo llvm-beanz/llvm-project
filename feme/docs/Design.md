@@ -1740,7 +1740,7 @@ tests cover rectangular mips, X/Y/layers/components, all result widths,
 offsets, bounds, partial waves, guards and repeats; fragment tests add
 divergent mips/layers and helper masks. Native SDK DXC plain/array shaders
 execute through normal/reference/AOT paths on one mip.
-Runner MS preparation remains open. Existing
+Runner image YAML still prepares only one mip. Existing
 1D/3D loads, sampling, artifact ABI 8 and argument layouts are unchanged;
 no bound/static descriptors or owned D3D12 execution are added.
 
@@ -1779,8 +1779,8 @@ before they alias another texel/row/layer; SPIR-V FP32 users share the
 correction without lowering changes. Compiled normal/reference compute
 and fragment array tests cover samples, coordinates/layers, components,
 bounds, helper masks, partial waves, guards and repeats. SDK DXC FP32
-plain/array shaders pass import/raising and AOT compilation only:
-runner YAML still rejects MS image preparation. MS sampling,
+plain/array shaders pass import/raising and normal/reference/AOT execution
+with runner MS YAML. MS sampling,
 bound/static descriptors and owned D3D12 execution remain open.
 Artifact ABI 8 and argument layouts are unchanged.
 
@@ -1794,12 +1794,24 @@ tests preserve high-bit/negative and adjacent non-FP32-exact components,
 distinguish samples/coordinates/layers and exercise bounds, masks, partial
 waves, guards and repeats. Fragment array tests add integer outputs,
 divergent samples/layers and helper masks. SDK DXC `int4`/`uint4` shaders
-pass native import/raising and AOT compilation only; runner YAML still
-rejects MS preparation. Mixed scalar types, non-32-bit texels, too-wide
+pass native import/raising and normal/reference/AOT execution with runner
+MS YAML. Mixed scalar types, non-32-bit texels, too-wide
 results, non-heap handles and dynamic/undefined/poison or partial offsets
 remain rejected. Native raising, FP32 MS/single-sample loads, sampling,
 artifact ABI 8 and argument layouts are unchanged; bound/static
 descriptors and owned D3D12 execution remain open.
+
+Runner MS YAML accepts `2d-ms`/`2d-ms-array` and a positive `sample-count`
+(default 1; non-MS dimensions require 1) in `images` and `image-bindings`.
+The checked one-mip layout keeps each texel's samples contiguous with
+sample-aware row/slice pitches and separate physical layers. Invalid
+counts/extents/layers, overflow and host allocation limits are errors.
+Native SDK DXC `float4`/`int4`/`uint4` fixtures execute in all three CPU
+paths with four samples, rows/layers/components, signed/omitted offsets,
+bounds, waves 4/8, seven lanes, guards and repeats. Canonical fixtures
+also cover counts 1/2/8, zero-filled samples and last-row/layer addressing.
+This does not advertise D3D12 MSAA quality or establish owned-device
+execution; mip-chain YAML remains open.
 
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ

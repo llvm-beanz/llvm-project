@@ -3255,7 +3255,7 @@ documented reason rather than an oversight:
   layers/components, all result widths, offsets, bounds, partial waves,
   guards and repeats; fragment tests add divergent mips/layers and helper
   masks. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one mip. Runner MS preparation remains open.
+  reference/AOT paths on one mip. Mip-chain YAML remains open.
   Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   no bound/static descriptors or owned-device execution are added.
@@ -3287,9 +3287,9 @@ documented reason rather than an oversight:
   texel/row/layer; SPIR-V FP32 users share the correction. Compiled
   normal/reference compute and fragment array tests cover samples,
   components, coordinates/layers, bounds, helper masks, partial waves,
-  guards and repeats. SDK DXC FP32 shaders pass import/raising and AOT
-  compilation, not native MS execution through runner YAML, which still
-  rejects MS image preparation. Integer MS execution is covered below.
+  guards and repeats. SDK DXC FP32 shaders pass import/raising and
+  normal/reference/AOT execution with runner MS YAML. Integer MS
+  execution is covered below.
   MS sampling and canonical dynamic/
   undefined/poison or partial offsets remain rejected. Artifact ABI 8,
   argument layouts and SPIR-V lowering are unchanged; bound/static
@@ -3304,12 +3304,21 @@ documented reason rather than an oversight:
   coordinates/layers, offsets and bounds with partial waves, guards and
   repeats; fragment array tests add integer outputs, divergent samples/
   layers and helper masks. SDK DXC `int4`/`uint4` shaders pass native
-  import/raising and AOT compilation only; runner YAML still rejects MS
-  preparation. Mixed scalar types, non-32-bit texels, too-wide results,
+  import/raising and normal/reference/AOT execution with runner MS YAML.
+  Mixed scalar types, non-32-bit texels, too-wide results,
   non-heap handles and dynamic/undefined/poison or partial offsets remain
   rejected. Native raising, FP32 MS/single-sample loads, sampling, artifact
   ABI 8 and argument layouts are unchanged; bound/static descriptors and
   owned-device execution remain open.
+  Runner YAML accepts `2d-ms`/`2d-ms-array` and a positive `sample-count`
+  in `images`/`image-bindings`, with checked one-mip, sample-interleaved
+  row/slice/layer layouts. Non-MS defaults are unchanged. Counts,
+  extents/layers, overflow and host allocation limits are validated.
+  Native SDK DXC FP32/SINT/UINT fixtures now execute in all three CPU
+  paths with distinct samples, rows/layers/components, offsets, bounds,
+  partial waves, guards and repeats. Canonical tests add counts 1/2/8,
+  zero-filled samples and last-row/layer addressing. Mip-chain YAML,
+  D3D12 MSAA-quality/support and owned-device execution remain open.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at
@@ -3743,8 +3752,10 @@ resource class this row also adds (§2.6.1 of feme/docs/Roadmap.md) lives
 in `feme-run` itself (`ImageEntry` in feme-run.cpp): a new `images` list
 builds `FemeImageDescriptor`s into the ABI's separate image heap,
 alongside `resource-heap`/`bindings`, covering a single mip level and (for
-a non-array dimension) a single array layer; multisample dimensions are
-rejected, matching G4's later multisample milestone. The textual image
+a non-array dimension) a single array layer. The runner now also accepts
+2D MS/array dimensions with a positive `sample-count`, checked
+sample-interleaved one-mip layouts and native CPU execution tests.
+The textual image
 fixture (`feme::graphics::ImageFixture`) and scene
 (`feme::graphics::Scene`) formats "Textual scene and image fixtures" in
 Design.md specifies are implemented in the same `FeMeGraphics` library,

@@ -267,7 +267,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   DXC plain/array shaders execute in all three paths with signed/omitted
   offsets, components, invalid mips, five lanes, guards and repeats on
   one mip; runner YAML still prepares one mip. Dynamic-offset admission
-  rejects in all three paths. Runner MS preparation remains open.
+  rejects in all three paths. Mip-chain YAML remains open.
   Existing 1D/3D loads, sampling, SPIR-V
   lowering, artifact ABI 8 and argument layouts are unchanged; SPIR-V
   FP32 users share the runtime bounds correction. No bound/static
@@ -301,9 +301,8 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   compute tests distinguish four samples, components, coordinates/layers,
   offsets, bounds, partial waves, guards and repeats; fragment array tests
   add divergent samples/layers and helper masks. SDK DXC FP32 plain/array
-  shaders pass import/raising and AOT compilation only. **Runner YAML
-  still rejects MS image preparation**, so native MS execution through
-  this runner is not claimed. Integer MS execution is covered below.
+  shaders pass import/raising and normal/reference/AOT-object execution
+  with runner MS YAML. Integer MS execution is covered below.
   MS sampling and dynamic/undefined/poison or partial
   offsets remain unsupported, including dynamic-offset rejection in
   normal/reference/AOT paths. Artifact ABI 8 and argument layouts are
@@ -317,14 +316,21 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   coordinates/layers, offsets and bounds, partial waves, guards and
   repeats; fragment array tests add integer outputs, divergent samples/
   layers and helper masks. SDK DXC `int4`/`uint4` shaders pass native
-  import/raising and AOT compilation only. **Runner YAML still rejects
-  MS image preparation**; native MS execution through this runner is not
-  claimed. Dynamic integer offsets fail normal/reference/AOT admission.
+  import/raising and normal/reference/AOT-object execution with runner
+  MS YAML. Dynamic integer offsets fail normal/reference/AOT admission.
   Mixed scalar types, non-32-bit texels, too-wide results, non-heap handles
   and undefined/poison or partial offsets remain rejected. Native raising,
   FP32 MS/single-sample loads, sampling, artifact ABI 8 and argument
   layouts are unchanged; no bound/static descriptors or owned D3D12
   execution are added.
+  MS heap YAML accepts `dimension: 2d-ms`/`2d-ms-array` and a positive
+  `sample-count`, default 1. Native SDK DXC FP32/SINT/UINT plain/array
+  fixtures distinguish all four samples, rows/layers/components,
+  signed/omitted offsets, negative/upper samples and layers, waves 4/8,
+  seven lanes, guards and repeats through normal/reference/object paths.
+  Canonical tests also cover counts 1/2/8, zero-filled unspecified
+  samples and last-row/layer addressing. Mip-chain YAML remains open;
+  this is not a D3D12 MSAA-quality/support or owned-device claim.
   Heap-backed FP32 3D implicit `Sample` now has fragment-stage CPU lowering
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at
@@ -405,10 +411,11 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
           data: [0, 1, 2, 3]
   images:                        # the shader's *logical* dynamic image heap
     - index: 0
-      dimension: 1d              # 1d/1d-array/2d/2d-array/cube/cube-array/3d
+      dimension: 1d              # also 1d-array/2d/2d-array/2d-ms/2d-ms-array/cube/cube-array/3d
       extent: [4, 1]
       format: r32g32b32a32_float
-      data: [0, 1, 2, 3]         # little-endian uint32 words, one mip, layer-major
+      sample-count: 1            # positive; must be 1 for non-MS dimensions
+      data: [0, 1, 2, 3]         # uint32 words, one mip, layer/row/texel/sample-major
   samplers:                      # the shader's *logical* dynamic sampler heap
     - index: 0
       min-filter: nearest        # nearest/linear
@@ -438,6 +445,18 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   Data is face/layer-major in +X, -X, +Y, -Y, +Z, -Z order for each cube.
   Incomplete face counts, overflowing subresource sizes and sizes exceeding
   the host allocation limit are errors.
+
+  `2d-ms`/`2d-ms-array` accept a positive `sample-count` (default 1).
+  MS extents must have nonzero X/Y and no depth component; MS arrays
+  require positive `array-layers`. Non-MS dimensions require count 1.
+  Each texel's samples are contiguous, in increasing sample-index order;
+  format components are contiguous inside each sample. Rows and physical
+  array layers follow outside that sample-interleaved texel layout.
+  Checked row/slice/layer sizing includes sample count and rejects overflow
+  and host allocation limits before allocation. Unspecified data remains
+  zero-filled. The schema applies equally to `images` and `image-bindings`.
+  Sample counts describe CPU storage only, not D3D12 MSAA-quality/support.
+  Only one mip is prepared; mip-chain YAML remains unsupported.
 
   Every `resource-heap`/`bindings` entry becomes an unstructured,
   host-writable raw buffer (`ResourceKind::Raw`, `FEME_DESCRIPTOR_UAV`

@@ -290,7 +290,7 @@ The original compute-only baseline is no longer current:
   all result widths, offsets, bounds, partial waves, guards and repeats;
   fragment tests add divergent mips/layers and helper masks. Native SDK
   DXC plain/array shaders execute through normal/reference/AOT paths on
-  one mip. Runner MS preparation remains open.
+  one mip. Mip-chain YAML remains open.
   Existing 1D/3D loads, sampling, SPIR-V lowering,
   artifact ABI 8 and argument layouts are unchanged. Bound/static
   descriptors, owned D3D12 execution and W2(a)/W2(b)/W3(b) remain open;
@@ -324,11 +324,11 @@ The original compute-only baseline is no longer current:
   FP32 users share this correction without lowering changes. Compiled
   normal/reference compute and fragment array tests cover samples,
   components, offsets, bounds, helper masks, partial waves, guards and
-  repeats. SDK DXC FP32 plain/array shaders pass import/raising and AOT
-  compilation only: runner YAML still rejects MS image preparation.
+  repeats. SDK DXC FP32 plain/array shaders pass import/raising and
+  normal/reference/AOT execution with runner MS YAML.
   Integer MS execution is covered below.
   MS sampling and dynamic/undefined/poison or partial offsets remain
-  unsupported. Runner MS preparation, bound/static
+  unsupported. Bound/static
   descriptors and owned D3D12 execution remain open. Artifact ABI 8 and
   argument layouts are unchanged; `CreateDevice` remains `E_NOTIMPL`;
   W2(a)/W2(b)/W3(b) are not closed.
@@ -342,13 +342,22 @@ The original compute-only baseline is no longer current:
   coordinates/layers, offsets and bounds, partial waves, guards and
   repeats; fragment array tests add integer outputs, divergent samples/
   layers and helper masks. SDK DXC `int4`/`uint4` shaders pass native
-  import/raising and AOT compilation only: runner YAML still rejects MS
-  image preparation. Mixed scalar types, non-32-bit texels, too-wide
+  import/raising and normal/reference/AOT execution with runner MS YAML.
+  Mixed scalar types, non-32-bit texels, too-wide
   results, non-heap handles and dynamic/undefined/poison or partial offsets
   remain rejected. Native raising, FP32 MS/single-sample loads, sampling,
   artifact ABI 8 and argument layouts are unchanged. Bound/static
-  descriptors, runner MS preparation, owned D3D12 execution and
+  descriptors, owned D3D12 execution and
   W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
+  Runner YAML accepts `2d-ms`/`2d-ms-array` with a positive `sample-count`
+  and checked one-mip sample-interleaved layouts. Native SDK DXC
+  FP32/SINT/UINT plain/array MS shaders execute through normal/reference/
+  AOT-object paths with distinct samples, rows/layers/components,
+  offsets, bounds, partial waves, guards and repeats. Invalid YAML
+  counts/extents/layers, overflow and host allocation limits are errors.
+  This does not advertise D3D12 MSAA quality or materialize owned
+  bound/static descriptors. Mip-chain YAML and owned-device execution
+  remain open; artifact ABI 8 and argument layouts are unchanged.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

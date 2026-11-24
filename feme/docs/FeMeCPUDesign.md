@@ -2955,8 +2955,8 @@ layers/components, all result widths, offsets, bounds, waves 4/8, five
 lanes, guards and repeats; fragment tests add divergent mips/layers,
 both bounds axes, invalid layers/mips and helper masks. Native SDK DXC
 plain/array shaders execute through normal/reference/AOT paths on one
-mip; runner YAML still prepares one mip. Runner MS preparation remains
-open. Existing 1D/3D loads, sampling, artifact ABI 8
+mip; runner YAML still prepares one mip. Existing 1D/3D loads, sampling,
+artifact ABI 8
 and argument layouts are unchanged; no bound/static
 descriptors or owned D3D12 execution are added.
 
@@ -3005,7 +3005,7 @@ pass import/raising and AOT compilation; integer MS execution is covered
 below. Native omitted offsets normalize to zero;
 canonical dynamic/undefined/poison or partial offsets remain rejected.
 Status/aggregate native uses stay raw without duplicate loads.
-Runner YAML MS preparation, bound/static
+Bound/static
 descriptors and owned D3D12 execution remain open. Artifact ABI 8 and
 argument layouts are unchanged.
 
@@ -3026,11 +3026,30 @@ integer outputs, divergent samples/layers and helper masks. Every-stage
 admission now covers FP32/i32 and each undefined/poison XY component.
 Mixed scalar types, non-32-bit texels, too-wide results, non-heap handles
 and dynamic/undefined/poison or partial offsets remain rejected.
-SDK DXC plain/array `int4`/`uint4` shaders pass import/raising and AOT
-compilation only; runner YAML still rejects MS image preparation.
+SDK DXC plain/array `int4`/`uint4` shaders pass import/raising and
+normal/reference/AOT execution with runner MS YAML.
 Native raising, FP32 MS/single-sample loads, sampling, artifact ABI 8 and
 argument layouts are unchanged; bound/static descriptors and owned
 D3D12 execution remain open.
+
+`feme-run` now accepts `dimension: 2d-ms`/`2d-ms-array` and a positive
+`sample-count` (default 1; non-MS dimensions require 1). The `ImageEntry`
+schema is shared by `images` and `image-bindings`. MS extents require
+nonzero X/Y without depth and MS arrays require positive physical
+layers. Existing checked layout construction multiplies the row by
+sample count, keeps each texel's samples contiguous and places layers
+outside the slice. `SampleStride` is the element size for multiple
+samples, otherwise zero. Row/slice/layer overflow and host allocation
+limits are diagnosed before allocation. Single-sample defaults,
+zero-fill, data copying and repeated-dispatch descriptor ownership are
+unchanged; only one mip is prepared.
+SDK DXC plain/array FP32/SINT/UINT fixtures now execute through
+normal/reference/object paths with samples 0/1/2/3, rows/layers/components,
+signed/omitted offsets, negative/upper samples and layers, waves 4/8,
+seven lanes, guards and repeats. Canonical tests add counts 1/2/8,
+last-row/layer addressing, zero-filled samples and ten lanes. This is
+CPU descriptor preparation, not a D3D12 MSAA-quality/support claim or
+owned D3D12 descriptor materialization.
 
 Heap-backed FP32 `Texture3D::Sample` now executes through `createSample3D`
 in fragment stages. Shared admission/lowering requires default samplers,
