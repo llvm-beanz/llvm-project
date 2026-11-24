@@ -1604,8 +1604,8 @@ constant signed i32 offsets through the existing `createSample3D` helper.
 Compiled tests isolate each coordinate's contribution to LOD on both screen
 axes, signed XYZ offsets, biased/clamped mip selection, result components
 and guarded partial waves. Malformed coordinates/offset widths and dynamic
-or partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
-unchanged. This completes bounded fragment biased execution for the seven
+or partially undefined offsets reject. Implicit DXIL 3D sampling and 3D
+loading remain unsupported. This completes bounded fragment biased execution for the seven
 raised texture shapes, not broader sampling conformance.
 
 Heap-backed FP32 `Texture1D::SampleLevel` and `Texture1DArray::SampleLevel`
@@ -1622,6 +1622,21 @@ Native SDK DXC bindless 1D/array shaders also execute through normal/
 reference/AOT paths on one mip; runner YAML still prepares one mip.
 Other ordinary texture shapes, biased/
 comparison/gradient execution and SPIR-V behavior are unchanged.
+No bound/static descriptor materialization or owned D3D12 execution is added.
+
+Heap-backed FP32 `Texture3D::SampleLevel` now also executes in any stage
+with default samplers, three-component U/V/W coordinates, FP32 LOD,
+constant signed XYZ offsets and scalar/vector results up to the declared
+texel width (at most four). Explicit LOD reaches the existing volume helper
+unchanged with six zero derivatives, zero bias and no shader MinLod clamp.
+Compiled fragment and normal/reference compute tests verify multi-mip
+selection, XYZ offsets, components, sampler clamps, helpers, partial waves,
+guards and repeats. Native SDK DXC bindless 3D shaders execute through
+normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
+Malformed shapes, non-heap handles, comparison samplers and dynamic/
+undefined/poison or partially undefined offsets remain unsupported.
+Implicit 3D sampling/loading, other ordinary shapes, existing 1D execution,
+biased/comparison/gradient execution and SPIR-V behavior are unchanged.
 No bound/static descriptor materialization or owned D3D12 execution is added.
 
 Heap-backed FP32 `Texture1D::Sample` and `Texture1DArray::Sample` now execute

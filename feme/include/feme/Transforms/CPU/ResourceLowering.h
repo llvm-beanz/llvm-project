@@ -52,8 +52,8 @@
 // spatial/direction gradients in any stage; array elements are never
 // differentiated, no stage derivatives are synthesized, and supported
 // offsets/clamps survive.
-// FP32 1D/array SampleLevel preserves explicit LOD and constant signed scalar
-// offsets in any stage with zero derivatives/bias and a separate array layer.
+// FP32 1D/array and 3D SampleLevel preserve explicit LOD and constant signed
+// spatial offsets in any stage with zero derivatives/bias and separate layers.
 // Fragment-only FP32 1D/array Sample uses coarse U derivatives and constant
 // signed scalar offsets with zero bias; the array layer is not differentiated.
 //
@@ -83,11 +83,11 @@ bool isSupportedDXILSampleBias(const llvm::CallInst &CI);
 /// (zero/undef/poison) scalar offset. No fragment-stage restriction is needed.
 bool isSupportedDXILSampleGrad(const llvm::CallInst &CI);
 
-/// Tests heap-backed FP32 1D/array explicit-LOD sampling with a default
+/// Tests heap-backed FP32 1D/array or 3D explicit-LOD sampling with a default
 /// sampler, shape-matched coordinates, scalar/vector results and constant
-/// signed scalar offsets. Other ordinary sampling/loading eligibility is
-/// unchanged.
-bool isSupportedDXILSampleLevel1D(const llvm::CallInst &CI);
+/// signed spatial offsets (scalar for 1D, three components for 3D). Other
+/// ordinary sampling/loading eligibility is unchanged.
+bool isSupportedDXILSampleLevel(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32 1D/array implicit sampling in a fragment stage with
 /// a default sampler, shape-matched coordinates, scalar/vector results and

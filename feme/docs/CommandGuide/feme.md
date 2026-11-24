@@ -172,8 +172,8 @@ coverage" in [../Design.md](../Design.md).
   three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
   both screen axes, signed XYZ offsets, biased/clamped mips and components
   with guarded partial waves. Malformed coordinates/offset widths and
-  dynamic or partially undefined offsets reject. Ordinary DXIL 3D sampling/
-  loading is unchanged; seven-shape biased execution is not broader sampling
+  dynamic or partially undefined offsets reject. Implicit DXIL 3D sampling
+  and 3D loading remain unsupported; seven-shape biased execution is not broader sampling
   conformance.
   Heap-backed FP32 1D/array `SampleLevel` now compiles in any stage, including
   native AOT, with default samplers, scalar U or `(U,layer)` coordinates,
@@ -185,6 +185,17 @@ coverage" in [../Design.md](../Design.md).
   through normal/reference/AOT paths; this does not change other ordinary
   shapes, materialize bound/static
   descriptors or establish owned D3D12 rendering.
+  Heap-backed FP32 3D `SampleLevel` now also compiles in any stage, including
+  native AOT, with default samplers, three-component U/V/W coordinates,
+  FP32 LOD, constant signed XYZ offsets and scalar/vector results up to
+  the declared texel width (at most four). Explicit LOD survives with six
+  zero derivatives/bias and unchanged sampler LOD behavior. Native SDK
+  DXC bindless 3D shaders execute through normal/reference/AOT paths.
+  Malformed shapes, non-heap handles, comparison samplers and dynamic/
+  undefined/poison or partially undefined offsets remain unsupported.
+  This does not enable implicit 3D sampling/loading, change other ordinary
+  shapes, materialize bound/static descriptors or establish owned-device
+  execution.
   Heap-backed FP32 1D/array implicit `Sample` now lowers in fragment stages
   with default samplers, scalar U or `(U,layer)`, constant signed scalar
   offsets and scalar/vector results up to the declared texel width (at

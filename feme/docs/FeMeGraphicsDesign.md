@@ -3141,8 +3141,8 @@ documented reason rather than an oversight:
   Compiled tests isolate each coordinate's LOD contribution on both screen
   axes, signed XYZ offsets, biased/clamped mips, scalar/vector results and
   guarded partial waves. Malformed coordinates/offset widths and dynamic or
-  partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
-  unchanged. All seven raised texture shapes have bounded fragment biased
+  partially undefined offsets reject. Implicit DXIL 3D sampling and 3D
+  loading remain unsupported. All seven raised texture shapes have bounded fragment biased
   execution; broader sampling conformance remains open.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage with
   default samplers, scalar U or `(U,layer)` coordinates, constant signed
@@ -3158,6 +3158,20 @@ documented reason rather than an oversight:
   Other ordinary texture shapes and SPIR-V behavior are unchanged.
   This does not materialize bound/static
   descriptors or establish owned D3D12 rendering.
+  Heap-backed FP32 3D `SampleLevel` now also executes in any stage with
+  default samplers, three-component U/V/W coordinates, FP32 LOD, constant
+  signed XYZ offsets and scalar/vector results up to the declared texel
+  width (at most four). Explicit LOD reaches the existing volume helper
+  with six zero derivatives, zero bias and no shader MinLod clamp.
+  Compiled fragment and normal/reference compute tests verify multi-mip
+  selection, offsets, components, sampler clamps, helpers, partial waves,
+  guards and repeats. Native SDK DXC bindless 3D shaders execute through
+  normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
+  Malformed shapes, non-heap handles, comparison samplers and dynamic/
+  undefined/poison or partially undefined offsets remain unsupported.
+  Implicit DXIL 3D sampling/loading, other ordinary shapes and SPIR-V
+  behavior are unchanged. No bound/static descriptor materialization or
+  owned-device execution is enabled.
   Heap-backed FP32 1D/array implicit `Sample` now executes in fragment
   stages with default samplers, scalar U or `(U,layer)`, constant signed
   scalar offsets and scalar/vector results up to the declared texel width

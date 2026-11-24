@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) explicit 3D LOD CPU regression scope (2026-11-23)
+
+The [explicit 3D LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-3d-lod-cpu-execution-vm-2026-11-23)
+adds heap-backed FP32 3D `SampleLevel` CPU execution with default samplers,
+three-component U/V/W coordinates, FP32 LOD, constant signed XYZ offsets
+and scalar/vector results up to the declared texel width (at most four).
+Explicit LOD is preserved in any stage with six zero derivatives and zero
+shader bias; existing sampler-owned LOD behavior is unchanged.
+
+Compiled fragment tests select mips 0/1/2 despite lane-uniform coordinates,
+with signed XYZ offsets, all four result widths, helpers, partial waves,
+guards and repeats. Normal/reference compute tests select divergent mips
+with sampler minimum/maximum LOD clamps. Actual SDK DXC SM6.6 bindless
+3D shaders execute through normal/reference/AOT paths with signed XYZ
+offsets, components, divergent coordinates/LODs, five lanes, guards and
+repeats on one mip; runner YAML still prepares one mip. Malformed shapes,
+comparison samplers, non-heap handles and dynamic/undefined/poison or
+partially undefined offsets remain unsupported.
+
+Focused CPU/DXIL/sampling LIT passes 970; full FeMe LIT passes 4,178 with
+15 skipped, 10 unsupported and zero failures among 4,203 discovered tests.
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, bound/static descriptor
+materialization or owned D3D12 execution is claimed. Native SDK import
+plus canonical CPU execution remains distinct from owned-device execution.
+Implicit DXIL 3D sampling/loading, existing 1D execution, other ordinary
+shapes, biased/comparison/gradient execution, SPIR-V behavior, artifact
+ABI 8 and argument layouts are unchanged. Broader sampling conformance
+and W2(a)/W2(b)/W3(b) remain open; owned `CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) implicit 1D sampling CPU regression scope (2026-11-23)
 
 The [implicit 1D sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-implicit-1d-sampling-cpu-execution-vm-2026-11-23)

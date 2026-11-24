@@ -66,19 +66,25 @@ Error checkSupportedRaisedOps(const Module &M) {
                : nullptr;
         if (Ty &&
             (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
-             Ty->getDimension() == dxil::ResourceKind::Texture1DArray) &&
+             Ty->getDimension() == dxil::ResourceKind::Texture1DArray ||
+             (F.getIntrinsicID() == Intrinsic::dx_resource_samplelevel &&
+              Ty->getDimension() == dxil::ResourceKind::Texture3D)) &&
             !(F.getIntrinsicID() == Intrinsic::dx_resource_sample
                   ? isSupportedDXILSample1D(*CI)
-                  : isSupportedDXILSampleLevel1D(*CI)))
+                  : isSupportedDXILSampleLevel(*CI)))
           return createStringError(
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed FP32 "
-              "1D/array %s sampling with a default sampler, "
-              "shape-matched coordinates and constant signed scalar offsets",
+              "%s %s sampling with a default sampler, "
+              "shape-matched coordinates and constant signed %s offsets",
               F.getName().str().c_str(),
+              Ty->getDimension() == dxil::ResourceKind::Texture3D ? "3D"
+                                                                  : "1D/array",
               F.getIntrinsicID() == Intrinsic::dx_resource_sample
                   ? "fragment implicit"
-                  : "explicit-LOD");
+                  : "explicit-LOD",
+              Ty->getDimension() == dxil::ResourceKind::Texture3D ? "XYZ"
+                                                                  : "scalar");
       }
       continue;
     case Intrinsic::dx_resource_samplebias:

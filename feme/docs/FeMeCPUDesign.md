@@ -2741,7 +2741,8 @@ footprints on both screen axes, signed XYZ offsets, biased/clamped mip
 selection, scalar/vector widths one through four, helper-only lanes,
 partial waves, output guards, masks and repeated invocation. Malformed
 coordinates/offset widths and dynamic, poison, undefined or partially
-undefined offsets reject. Ordinary DXIL 3D sampling/loading is unchanged.
+undefined offsets reject. Implicit DXIL 3D sampling and 3D loading remain
+unsupported.
 All seven raised texture shapes now have bounded fragment biased execution;
 other stages and broader sampling conformance remain open.
 2D array sampling passes the third FP32 coordinate separately as the layer;
@@ -2779,6 +2780,30 @@ prepares one mip. This is CPU execution, not owned D3D12 execution or
 bound/static descriptor materialization. Other ordinary sampling/loading
 shapes, biased/comparison/gradient
 execution, SPIR-V behavior, artifact ABI 8 and argument layouts are unchanged.
+
+Heap-backed FP32 `Texture3D::SampleLevel` now also executes through
+`createSample3D` in any stage. The shared FP32 matcher requires default
+samplers, three-component U/V/W coordinates, FP32 LOD, constant signed XYZ
+offsets and scalar/vector results up to the declared texel width (at most
+four). Explicit LOD is preserved with `UseExplicitLod=true`, six zero
+derivatives, zero shader bias and a negative-infinity shader MinLod clamp;
+sampler-owned LOD behavior remains in the existing runtime.
+
+Lowering/admission share the matcher. Malformed coordinates/offset widths,
+non-heap handles, comparison samplers, out-of-texel-width results and
+dynamic/undefined/poison or partially undefined XYZ offsets remain
+unsupported. Transform tests verify signature growth, reflection, LOD/
+offset forwarding, narrowing, handle cleanup and idempotence. Compiled
+fragment tests select mips 0/1/2 despite lane-uniform coordinates, with
+signed XYZ offsets, all four result widths, helpers, partial waves,
+guards and repeats. Normal/reference compute tests select divergent mips
+with sampler minimum/maximum LOD clamps. Native SDK DXC bindless 3D
+shaders execute through normal/reference/AOT paths on one mip; runner
+YAML still prepares one mip. This is native import plus CPU execution,
+not owned D3D12 execution or bound/static descriptor materialization.
+Implicit DXIL 3D sampling/loading, other ordinary shapes, existing 1D
+execution, biased/comparison/gradient execution, SPIR-V behavior,
+artifact ABI 8 and argument layouts are unchanged.
 
 Heap-backed FP32 `Texture1D::Sample` and `Texture1DArray::Sample` now execute
 through the same 1D helpers in fragment stages. Shared admission/lowering

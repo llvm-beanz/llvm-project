@@ -148,8 +148,8 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   both screen axes, signed XYZ offsets, biased/clamped mips and components
   with guarded partial waves. Malformed coordinates/offset widths and
   dynamic or partially undefined offsets reject. This compute runner still
-  rejects plain/clamped 3D bias in normal/reference/AOT dispatch. Ordinary
-  DXIL 3D sampling/loading is unchanged; no descriptor materialization or
+  rejects plain/clamped 3D bias in normal/reference/AOT dispatch. Implicit
+  DXIL 3D sampling and 3D loading remain unsupported; no descriptor materialization or
   owned-device execution is enabled.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage through
   normal/reference/AOT paths with default samplers, scalar U or `(U,layer)`
@@ -164,6 +164,19 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   remain rejected. Other ordinary shapes are unchanged; no bound/static
   descriptor materialization or owned
   D3D12 execution is enabled.
+  Heap-backed FP32 3D `SampleLevel` now also executes in any stage through
+  normal/reference/AOT paths with default samplers, three-component U/V/W
+  coordinates, FP32 LOD, constant signed XYZ offsets and scalar/vector
+  results up to the declared texel width (at most four). Explicit LOD
+  survives with six zero derivatives and zero bias; sampler LOD behavior
+  is unchanged. Compiled-stage tests verify multi-mip selection and sampler
+  clamps; native SDK DXC bindless 3D runner tests cover signed XYZ offsets,
+  components, divergent coordinates/LODs, partial waves, guards and repeats
+  on one mip. Runner image YAML still prepares one mip. Malformed shapes,
+  non-heap handles, comparison samplers and dynamic/undefined/poison or
+  partially undefined offsets remain rejected. Implicit 3D sampling/loading
+  and other ordinary shapes are unchanged; no bound/static descriptor
+  materialization or owned D3D12 execution is enabled.
   Heap-backed FP32 1D/array implicit `Sample` now has fragment-stage CPU
   lowering with default samplers, scalar U or `(U,layer)`, constant signed
   scalar offsets and scalar/vector results up to the declared texel width

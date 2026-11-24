@@ -174,8 +174,8 @@ The original compute-only baseline is no longer current:
   Compiled tests isolate each coordinate's LOD contribution on both screen
   axes, signed XYZ offsets, biased/clamped mips and result components with
   guarded partial waves. Malformed coordinates/offset widths and dynamic or
-  partially undefined offsets reject. Ordinary DXIL 3D sampling/loading is
-  unchanged. Seven-shape fragment biased execution is bounded compiler/
+  partially undefined offsets reject. Implicit DXIL 3D sampling and 3D
+  loading remain unsupported. Seven-shape fragment biased execution is bounded compiler/
   executor coverage, not descriptor materialization or owned-device execution.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage with
   default samplers, scalar U or `(U,layer)` coordinates, constant signed
@@ -190,6 +190,19 @@ The original compute-only baseline is no longer current:
   remain rejected. This does not change other ordinary shapes or
   materialize bound/static descriptors.
   Owned D3D12 execution and W2/W3 closure remain open.
+  Heap-backed FP32 3D `SampleLevel` now also executes in any stage with
+  default samplers, three-component U/V/W coordinates, FP32 LOD, constant
+  signed XYZ offsets and scalar/vector results up to the declared texel
+  width (at most four). Explicit LOD survives with six zero derivatives
+  and zero bias; existing sampler LOD behavior is unchanged. Compiled
+  fragment and normal/reference compute tests verify multi-mip selection,
+  offsets, components, sampler clamps, helpers, partial waves, guards and
+  repeats. Native SDK DXC bindless 3D shaders execute through normal/
+  reference/AOT paths on one mip; runner YAML still prepares one mip.
+  Malformed shapes, non-heap handles, comparison samplers and dynamic/
+  undefined/poison or partially undefined offsets remain rejected.
+  Implicit 3D sampling/loading and other ordinary shapes are unchanged.
+  No bound/static descriptor materialization or owned D3D12 execution is added.
   Heap-backed FP32 1D/array implicit `Sample` now executes in fragment
   stages with default samplers, scalar U or `(U,layer)`, constant signed
   scalar offsets and scalar/vector results up to the declared texel width

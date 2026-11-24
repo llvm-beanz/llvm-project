@@ -1408,6 +1408,44 @@ conformance and bound/static descriptor materialization remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) explicit 3D LOD CPU execution progress (2026-11-23):
+heap-backed FP32 `Texture3D::SampleLevel` now executes through the existing
+volume sampler. Shared admission/lowering requires default samplers,
+three-component U/V/W coordinates, FP32 LOD, constant signed XYZ offsets
+and scalar/vector results up to the declared texel width (at most four).
+Explicit LOD is preserved in any stage with six zero derivatives, zero
+shader bias and no shader MinLod clamp. Existing sampler-owned LOD behavior
+remains in the runtime. Implicit DXIL 3D sampling/loading is not promoted.
+
+Transform tests verify LOD/XYZ offset forwarding, six zero derivatives,
+result shaping, reflection, image-only signature growth, handle cleanup
+and idempotence. Missing W coordinates, short/dynamic/partially poison
+offsets, comparison samplers, non-heap handles and out-of-texel-width
+results stay untouched. Admission tests reject dynamic, whole undefined/
+poison and every individually undefined/poison XYZ component in fragment,
+vertex, compute and unannotated functions. The old 3D bias fixture now
+retains implicit `Sample` rejection instead of rejecting valid `SampleLevel`.
+Compiled fragment tests select mips 0/1/2 despite lane-uniform coordinates,
+with signed XYZ offsets, all four result widths, helpers, partial waves,
+guards and repeated prepared invocations. Normal/reference compute tests
+select divergent mips with sampler minimum/maximum LOD clamps. Actual SDK
+DXC SM6.6 bindless 3D shaders execute through normal/reference/AOT paths
+with signed XYZ offsets, components, divergent coordinates/LODs, five
+lanes, guards and repeats on one mip; runner image YAML still prepares
+only one mip.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 970 in 34.64 seconds; full FeMe LIT
+passes 4,178 with 15 skipped, 10 unsupported and zero failures among
+4,203 discovered tests in 261.65 seconds. Six new tests add six passes;
+timings are not controlled speedups. Existing 1D execution, other ordinary
+shapes, biased/comparison/gradient execution, SPIR-V behavior, artifact
+ABI 8 and argument layouts remain unchanged. Native SDK import plus
+canonical CPU execution is not owned D3D12 execution. Broader sampling
+conformance and bound/static descriptor materialization remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.
