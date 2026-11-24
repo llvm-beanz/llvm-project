@@ -80,9 +80,8 @@
 // threads through both `JITEngine::dispatch` and `runDispatch` (see roadmap
 // step R29's ABI fold) -- needed by every test exercising a bindless
 // `feme.cpu.image.*` access (see feme/docs/Roadmap.md's §2.6.1,
-// "Infrastructure prerequisites"). Only a single mip level and (for a
-// non-array dimension) a single array layer are supported for now; see
-// `ImageEntry`'s own comment for the full scope note.
+// "Infrastructure prerequisites"). Image storage is mip-major, with
+// physical layers inside each mip; see `ImageEntry`'s own scope note.
 //
 // Roadmap step R14 adds `-O` (see feme/docs/Roadmap.md's §2.2.5
 // "Optimization level"): `feme::cpu::JITEngine::create` has always run
@@ -185,10 +184,9 @@ struct BindingFile {
 /// lowercase, hyphen/underscore-separated spellings as `resource-heap`'s own
 /// `kind`/`format` (see `parseImageDimension`/`parseResourceFormat`).
 ///
-/// Scope note: only a single mip level and (for a non-array dimension) a
-/// single array layer are supported for now. Array dimensions and 2D
-/// multisample dimensions use layer-major storage with each texel's samples
-/// contiguous; real mip chains remain deferred.
+/// Storage is mip-major, then layer/row/texel/sample-major. Physical
+/// array/cube layers stay fixed; 3D depth shrinks per mip.
+/// Multisample dimensions require one mip.
 struct ImageEntry {
   uint32_t Index = 0;
   std::string Dimension;
@@ -196,6 +194,7 @@ struct ImageEntry {
   std::string Format;
   uint32_t ArrayLayers = 1;
   uint32_t SampleCount = 1;
+  uint32_t MipLevels = 1;
   bool Sampled = true;
   bool Storage = false;
   bool Depth = false;
@@ -346,6 +345,7 @@ template <> struct MappingTraits<ImageEntry> {
     Io.mapOptional("format", Entry.Format);
     Io.mapOptional("array-layers", Entry.ArrayLayers, 1u);
     Io.mapOptional("sample-count", Entry.SampleCount, 1u);
+    Io.mapOptional("mip-levels", Entry.MipLevels, 1u);
     Io.mapOptional("sampled", Entry.Sampled, true);
     Io.mapOptional("storage", Entry.Storage, false);
     Io.mapOptional("depth", Entry.Depth, false);
@@ -847,14 +847,13 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
   llvm_unreachable("unhandled ResourceFormat");
 }
 
-/// One `images` entry's backing storage: the byte buffer, its single
-/// `FemeImageSubresourceLayout` (see `ImageEntry`'s scope note: one mip
-/// level only), and the `FemeImageDescriptor` pointing at both. Kept
+/// One `images` entry's backing storage: the byte buffer, its mip
+/// layouts, and the `FemeImageDescriptor` pointing at both. Kept
 /// alive for the dispatch's duration the same way `HeapStorage` keeps its
 /// buffers alive.
 struct ImageStorage {
   std::vector<std::vector<uint8_t>> Buffers;
-  std::vector<FemeImageSubresourceLayout> MipLayouts;
+  std::vector<std::vector<FemeImageSubresourceLayout>> MipLayouts;
   std::vector<FemeImageDescriptor> Descriptors;
 };
 
@@ -921,6 +920,18 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
           "heap entry image %u multisample array requires positive "
           "'array-layers'",
           Entry.Index);
+    if (!Entry.MipLevels || Entry.MipLevels > 32 ||
+        (IsMS && Entry.MipLevels != 1))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "heap entry image %u requires 'mip-levels' in [1, 32] "
+          "(1 for MS dimensions)",
+          Entry.Index);
+    if (Entry.MipLevels > 1 && (!Width || !Height || !Depth))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "heap entry image %u mip chains require nonzero extents",
+          Entry.Index);
     uint32_t ArrayLayers =
         IsArray ? std::max<uint32_t>(1, Entry.ArrayLayers) : 1;
     // The descriptor ABI counts physical faces, not logical cubes.
@@ -940,36 +951,55 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
             Entry.Index);
     }
 
-    FemeImageSubresourceLayout &Layout = Storage.MipLayouts[Entry.Index];
-    Layout.Offset = 0;
-    auto RowPitch = checkedMulUnsigned(uint64_t{Width} * ElemSize,
-                                       uint64_t{Entry.SampleCount});
-    if (!RowPitch)
-      return createStringError(inconvertibleErrorCode(),
-                               "heap entry image %u subresource size overflows",
-                               Entry.Index);
-    Layout.RowPitch = *RowPitch;
-    auto SlicePitch = checkedMulUnsigned(Layout.RowPitch, uint64_t{Height});
-    if (!SlicePitch)
-      return createStringError(inconvertibleErrorCode(),
-                               "heap entry image %u subresource size overflows",
-                               Entry.Index);
-    Layout.SlicePitch = *SlicePitch;
-    Layout.SampleStride = Entry.SampleCount > 1 ? ElemSize : 0;
-    uint64_t LayerCount = Is3D ? Depth : ArrayLayers;
-    auto ByteSize = checkedMulUnsigned(Layout.SlicePitch, LayerCount);
-    if (!ByteSize)
-      return createStringError(inconvertibleErrorCode(),
-                               "heap entry image %u subresource size overflows",
-                               Entry.Index);
+    auto &Layouts = Storage.MipLayouts[Entry.Index];
+    Layouts.resize(Entry.MipLevels);
+    uint64_t ByteSize = 0;
+    for (uint32_t Level = 0; Level != Entry.MipLevels; ++Level) {
+      // Preserve legacy zero-sized single-mip images; chains clamp to one.
+      uint32_t LevelWidth =
+          Entry.MipLevels == 1 ? Width : std::max(1u, Width >> Level);
+      uint32_t LevelHeight =
+          Entry.MipLevels == 1 ? Height : std::max(1u, Height >> Level);
+      uint32_t LevelDepth =
+          Entry.MipLevels == 1 ? Depth : std::max(1u, Depth >> Level);
+      auto &Layout = Layouts[Level];
+      Layout.Offset = ByteSize;
+      auto RowPitch = checkedMulUnsigned(uint64_t{LevelWidth} * ElemSize,
+                                         uint64_t{Entry.SampleCount});
+      if (!RowPitch)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "heap entry image %u subresource size overflows", Entry.Index);
+      Layout.RowPitch = *RowPitch;
+      auto SlicePitch =
+          checkedMulUnsigned(Layout.RowPitch, uint64_t{LevelHeight});
+      if (!SlicePitch)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "heap entry image %u subresource size overflows", Entry.Index);
+      Layout.SlicePitch = *SlicePitch;
+      Layout.SampleStride = Entry.SampleCount > 1 ? ElemSize : 0;
+      uint64_t LayerCount = Is3D ? LevelDepth : ArrayLayers;
+      auto LevelSize = checkedMulUnsigned(Layout.SlicePitch, LayerCount);
+      if (!LevelSize)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "heap entry image %u subresource size overflows", Entry.Index);
+      auto TotalSize = checkedAddUnsigned(ByteSize, *LevelSize);
+      if (!TotalSize)
+        return createStringError(inconvertibleErrorCode(),
+                                 "heap entry image %u mip-chain size overflows",
+                                 Entry.Index);
+      ByteSize = *TotalSize;
+    }
 
     std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
-    if (*ByteSize > Buffer.max_size())
+    if (ByteSize > Buffer.max_size())
       return createStringError(
           inconvertibleErrorCode(),
           "heap entry image %u subresource size exceeds host allocation limits",
           Entry.Index);
-    Buffer.assign(*ByteSize, 0);
+    Buffer.assign(ByteSize, 0);
     size_t CopySize =
         std::min<size_t>(Buffer.size(), Entry.Data.size() * sizeof(uint32_t));
     if (CopySize > 0)
@@ -984,15 +1014,15 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
     Desc.Width = Width;
     Desc.Height = Height;
     Desc.Depth = Depth;
-    Desc.MipLevels = 1;
+    Desc.MipLevels = Entry.MipLevels;
     Desc.ArrayLayers = ArrayLayers;
     Desc.PlaneCount = 1;
     Desc.SampleCount = Entry.SampleCount;
     Desc.Flags = (Entry.Sampled ? FEME_IMAGE_SAMPLED : 0u) |
                  (Entry.Storage ? FEME_IMAGE_STORAGE : 0u) |
                  (Entry.Depth ? FEME_IMAGE_DEPTH : 0u);
-    Desc.MipLayouts = &Layout;
-    Desc.MipLayoutCount = 1;
+    Desc.MipLayouts = Layouts.data();
+    Desc.MipLayoutCount = Layouts.size();
   }
   return Storage;
 }

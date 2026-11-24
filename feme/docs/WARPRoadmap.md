@@ -1935,6 +1935,51 @@ bound/static D3D12 descriptors and owned D3D12 execution remain open.
 Artifact ABI 8 and argument layouts are unchanged;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) runner mip-chain preparation and native load execution progress
+(2026-11-24): `images`/`image-bindings` now accept `mip-levels`, default 1,
+in the CPU descriptor range [1, 32]. MS dimensions still require one mip.
+Chains require nonzero extents; each spatial extent halves per level,
+clamped to one. Array/cube physical layers remain fixed, while 3D depth
+halves. These are CPU storage inputs, not D3D12 mip-count/format support.
+
+The runner retains checked layout construction, following the shared
+image geometry's mip-major order: each mip contains all physical
+layers/depth slices, then rows, texels, samples and format components.
+Every row/slice/layer multiplication and cumulative mip offset is checked
+before allocation; host allocation limits are rejected. Per-image layout
+vectors and backing buffers remain owned across prepared/repeated
+dispatches. Single-mip defaults, including legacy zero-sized non-MS
+images, zero-fill and word-data copying are unchanged. The shared image
+layout helper is not used because its arithmetic is currently unchecked.
+
+Canonical normal/reference/AOT-object tests distinguish three rectangular,
+non-power-of-two mips for 1D/2D plain/array and 3D images, fixed array
+layers, shrinking depth, invalid mip/depth bounds, mip 31 versus 32,
+zero-filled trailing data, waves 4/8, five lanes, guards and repeats.
+Cube/array gradient tests distinguish mip-major faces, the second cube
+and a linear half-mip blend with divergent MinLod clamps. Image-binding
+preparation is checked separately without claiming bound-image execution.
+Invalid YAML tests reject zero/33 mip counts, MS mip chains, zero chain
+extents, subresource/cumulative overflow and host limits in normal,
+reference and object paths.
+
+Actual SDK DXC SM6.6 FP32/SINT/UINT 2D/plain-array load fixtures now also
+execute two real mips through normal/reference/AOT-object paths with
+signed offsets, distinct layers/components, lower/upper mip bounds,
+waves 4/8, five lanes, guards and repeats. Integer results preserve
+high-bit/negative and non-FP32-exact values. Original one-mip fixture
+coverage is retained. Native 1D/3D multi-mip execution is not newly claimed.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2 feme-run` build
+passes with the existing `X8_D24_UNORM` switch warning. Focused all
+runner plus CPU runtime LIT passes 417, marks 4 unsupported and has zero
+failures in 53.06 seconds. Three new fixtures add three passes. This is
+targeted validation, not a new full-suite, adapter-matrix or external
+Vulkan CTS result. No lowering/runtime or artifact ABI 8/argument-layout
+change is made. Non-32-bit DXIL texels, MS sampling, broader conformance,
+bound/static D3D12 descriptors and owned D3D12 execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

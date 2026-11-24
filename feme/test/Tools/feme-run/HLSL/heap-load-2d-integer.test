@@ -15,7 +15,20 @@
 # RUN: feme-run --reference --repeat=2 --heap=%t/uint.yaml %t/uint.dxil | FileCheck %s
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint.dxil -o %t/uint.o
 # RUN: feme-run --object --repeat=2 --heap=%t/uint.yaml %t/uint.o | FileCheck %s
-# Native import plus CPU execution, not owned D3D12; YAML prepares one mip.
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /Fo %t/sint-mips.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /D UNSIGNED /Fo %t/uint-mips.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --reference --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/sint-mips.dxil -o %t/sint-mips.o
+# RUN: feme-run --object --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.o | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme-run --reference --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.dxil | FileCheck %s --check-prefix=MIPS
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint-mips.dxil -o %t/uint-mips.o
+# RUN: feme-run --object --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.o | FileCheck %s --check-prefix=MIPS
+# Native import plus CPU execution, not owned D3D12. MIPS preserves high
+# bits/non-FP32-exact integers while distinguishing mip/layer/component.
 # RAISE: call <4 x i32> @llvm.dx.resource.load.level
 # RAISE-SAME: <2 x i32> splat (i32 1))
 # RAISE: call <4 x i32> @llvm.dx.resource.load.level
@@ -26,6 +39,7 @@
 # RAISE-SAME: <2 x i32> zeroinitializer)
 # RAISE-NOT: call %dx.types.ResRet.i32 @dx.op.textureLoad
 # CHECK: heap[2]: 42 2147483659 0 0 0 2147483663 0 0 0 0 2147483649 2147483750 0 0 2147483653 0 0 0 0 0 0 42
+# MIPS: heap[2]: 42 0 0 0 0 2147483663 2147483649 2147483750 0 4294967295 16777218 16777319 0 0 0 0 0 0 0 0 0 42
 #--- shader.hlsl
 #ifdef UNSIGNED
 #define TEXEL uint4
@@ -40,10 +54,22 @@ void main(uint3 tid : SV_DispatchThreadID) {
   RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
   int x = int(tid.x) - 1;
   int layer = int(tid.x % 4) - 1;
-  TEXEL p = t.Load(int3(x, 0, 0), int2(1, 1));
-  TEXEL n = t.Load(int3(x, 1, 0), int2(-1, -1));
-  TEXEL ap = a.Load(int4(x, 1, layer, 0), int2(-1, -1));
-  TEXEL invalid = a.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : 1));
+  int mip = 0;
+  int y = 0;
+  int nx = x;
+  int upperMip = 1;
+#ifdef MIPS
+  mip = int(tid.x) - 1;
+  x = (mip == 0) ? 0 : -1;
+  y = x;
+  nx = 1;
+  layer = int(tid.x & 1);
+  upperMip = 2;
+#endif
+  TEXEL p = t.Load(int3(x, y, mip), int2(1, 1));
+  TEXEL n = t.Load(int3(nx, 1, mip), int2(-1, -1));
+  TEXEL ap = a.Load(int4(nx, 1, layer, mip), int2(-1, -1));
+  TEXEL invalid = a.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : upperMip));
   outBuffer.Store(4 + tid.x * 16, asuint(p.a));
   outBuffer.Store(8 + tid.x * 16, asuint(n.g));
   outBuffer.Store(12 + tid.x * 16, asuint(ap.b));
@@ -66,6 +92,44 @@ images:
     extent: [2, 2]
     format: r32g32b32a32_sint
     data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483748, 2147483749, 2147483750, 2147483751, 2147483752, 2147483753, 2147483754, 2147483755, 2147483756, 2147483757, 2147483758, 2147483759, 2147483760, 2147483761, 2147483762, 2147483763]
+#--- sint-mips.yaml
+resource-heap:
+  - index: 2
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [2, 2]
+    mip-levels: 2
+    format: r32g32b32a32_sint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 16777217, 16777218, 2147483649, 4294967295]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [2, 2]
+    mip-levels: 2
+    format: r32g32b32a32_sint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483748, 2147483749, 2147483750, 2147483751, 2147483752, 2147483753, 2147483754, 2147483755, 2147483756, 2147483757, 2147483758, 2147483759, 2147483760, 2147483761, 2147483762, 2147483763, 16777317, 16777318, 16777319, 16777320, 2147483750, 2147483751, 2147483752, 2147483753]
+#--- uint-mips.yaml
+resource-heap:
+  - index: 2
+    size: 88
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [2, 2]
+    mip-levels: 2
+    format: r32g32b32a32_uint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 16777217, 16777218, 2147483649, 4294967295]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [2, 2]
+    mip-levels: 2
+    format: r32g32b32a32_uint
+    data: [2147483648, 2147483649, 2147483650, 2147483651, 2147483652, 2147483653, 2147483654, 2147483655, 2147483656, 2147483657, 2147483658, 2147483659, 2147483660, 2147483661, 2147483662, 2147483663, 2147483748, 2147483749, 2147483750, 2147483751, 2147483752, 2147483753, 2147483754, 2147483755, 2147483756, 2147483757, 2147483758, 2147483759, 2147483760, 2147483761, 2147483762, 2147483763, 16777317, 16777318, 16777319, 16777320, 2147483750, 2147483751, 2147483752, 2147483753]
 #--- uint.yaml
 resource-heap:
   - index: 2

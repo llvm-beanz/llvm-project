@@ -159,7 +159,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   Compiled-stage tests verify multi-mip/layer selection and sampler clamps;
   native SDK DXC bindless 1D/array runner tests cover signed offsets,
   components, divergent layers/LODs, partial waves, guards and repeats on
-  one mip. Runner image YAML still prepares one mip. Malformed shapes,
+  one mip in the original fixture. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison offsets
   remain rejected. Other ordinary shapes are unchanged; no bound/static
   descriptor materialization or owned
@@ -172,7 +172,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   is unchanged. Compiled-stage tests verify multi-mip selection and sampler
   clamps; native SDK DXC bindless 3D runner tests cover signed XYZ offsets,
   components, divergent coordinates/LODs, partial waves, guards and repeats
-  on one mip. Runner image YAML still prepares one mip. Malformed shapes,
+  in the original one-mip fixture. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison or
   partially undefined offsets remain rejected. Non-fragment implicit 3D
   sampling, non-32-bit 3D loading and other ordinary shapes are unchanged; no bound/static descriptor
@@ -190,7 +190,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   helpers, masks, guards and repeats. Native SDK DXC bindless shaders
   execute in all three paths with offsets, components, divergent
   coordinates, invalid mips, five lanes, guards and repeats on one mip;
-  runner YAML still prepares one mip. Malformed shapes, non-heap handles,
+  the original YAML fixture uses one mip. Malformed shapes, non-heap handles,
   non-32-bit texels and dynamic/undefined/poison offsets remain rejected.
   Other loading/sampling, SPIR-V lowering, artifact ABI 8 and argument
   layouts are unchanged. No bound/static descriptor materialization or
@@ -205,8 +205,8 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   fragment tests add integer outputs, divergent mips and helper masks.
   Native SDK DXC `int4`/`uint4` shaders execute in all three paths with
   signed offsets, exact components, divergent coordinates, invalid mips,
-  five lanes, guards and repeats on one mip; runner YAML still prepares
-  one mip. Mixed scalar types, non-32-bit texels, too-wide results,
+  five lanes, guards and repeats in the original one-mip fixture.
+  Mixed scalar types, non-32-bit texels, too-wide results,
   non-heap handles and dynamic/undefined/poison offsets remain rejected,
   including dynamic-offset admission in all three paths. Existing FP32
   loads, sampling, other dimensions, SPIR-V lowering, artifact ABI 8 and
@@ -226,7 +226,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   guards and repeats. Fragment tests add divergent mips/layers and helper
   masks. Native SDK DXC shaders execute in all three paths with signed/
   omitted offsets, invalid mips, five lanes, guards and repeats on one
-  mip; runner YAML still prepares one mip. Dynamic-offset admission rejects
+  mip in the original fixture. Dynamic-offset admission rejects
   in all three paths. Non-32-bit 1D/array loads remain unsupported. Existing
   3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument layouts
   are unchanged; SPIR-V FP32 loads share the runtime bounds correction.
@@ -242,8 +242,8 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   tests add integer outputs, divergent mips/layers and helper masks.
   Native SDK DXC plain/array `int4`/`uint4` shaders execute in all three
   paths with signed/omitted offsets, exact components, invalid mips, five
-  lanes, guards and repeats on one mip; runner YAML still prepares one
-  mip. Dynamic-offset admission rejects in all three paths. Mixed scalar
+  lanes, guards and repeats in the original one-mip fixture.
+  Dynamic-offset admission rejects in all three paths. Mixed scalar
   types, non-32-bit texels, too-wide results, non-heap handles and
   dynamic/undefined/poison offsets remain unsupported. Existing FP32 loads,
   3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument layouts
@@ -266,8 +266,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   fragment tests add divergent mips/layers and helper masks. Native SDK
   DXC plain/array shaders execute in all three paths with signed/omitted
   offsets, components, invalid mips, five lanes, guards and repeats on
-  one mip; runner YAML still prepares one mip. Dynamic-offset admission
-  rejects in all three paths. Mip-chain YAML remains open.
+  one and two real mips. Dynamic-offset admission rejects in all three paths.
   Existing 1D/3D loads, sampling, SPIR-V
   lowering, artifact ABI 8 and argument layouts are unchanged; SPIR-V
   FP32 users share the runtime bounds correction. No bound/static
@@ -284,7 +283,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   mips/layers and helper masks. Native SDK DXC plain/array `int4`/`uint4`
   shaders execute in all three paths with signed/omitted offsets, exact
   components, invalid mips, five lanes, guards and repeats on one mip;
-  runner YAML still prepares one mip. Dynamic-offset admission rejects
+  the two-mip follow-up also executes. Dynamic-offset admission rejects
   in all three paths. Mixed scalar types, non-32-bit texels, too-wide
   results, non-heap handles and dynamic/undefined/poison or partial
   offsets reject. Existing FP32 loads, 1D/3D loads, sampling, SPIR-V
@@ -329,7 +328,7 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   signed/omitted offsets, negative/upper samples and layers, waves 4/8,
   seven lanes, guards and repeats through normal/reference/object paths.
   Canonical tests also cover counts 1/2/8, zero-filled unspecified
-  samples and last-row/layer addressing. Mip-chain YAML remains open;
+  samples and last-row/layer addressing. MS images retain one mip;
   this is not a D3D12 MSAA-quality/support or owned-device claim.
   Heap-backed FP32 3D implicit `Sample` now has fragment-stage CPU lowering
   with default samplers, three-component U/V/W coordinates, constant signed
@@ -372,8 +371,9 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   derivative substitution or an LOD-zero approximation. Array elements
   remain coordinate-only, excluded from scalar U, two-component U/V or three-component
   raw-direction gradients. Compiled-stage tests verify multi-mip/face/
-  element selection; runner image YAML currently prepares one mip, so its
-  execution fixtures cover faces/elements, offsets, components, partial
+  element selection; runner image YAML also prepares mip chains. Its
+  cube/array fixture tests divergent MinLod clamps and linear half-mip
+  blending, in addition to faces/elements, offsets, components, partial
   waves and repeats. 1D gradients/offsets are scalar; 3D coordinates,
   gradients and offsets have three U/V/W components. All seven raised
   shapes have bounded CPU execution; dynamic or partially undefined 3D
@@ -415,7 +415,8 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
       extent: [4, 1]
       format: r32g32b32a32_float
       sample-count: 1            # positive; must be 1 for non-MS dimensions
-      data: [0, 1, 2, 3]         # uint32 words, one mip, layer/row/texel/sample-major
+      mip-levels: 1              # [1, 32]; must be 1 for MS dimensions
+      data: [0, 1, 2, 3]         # uint32 words, mip/layer/row/texel/sample-major
   samplers:                      # the shader's *logical* dynamic sampler heap
     - index: 0
       min-filter: nearest        # nearest/linear
@@ -456,7 +457,27 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   and host allocation limits before allocation. Unspecified data remains
   zero-filled. The schema applies equally to `images` and `image-bindings`.
   Sample counts describe CPU storage only, not D3D12 MSAA-quality/support.
-  Only one mip is prepared; mip-chain YAML remains unsupported.
+  MS images require one mip.
+
+  Non-MS images accept `mip-levels` in [1, 32], default 1. Chains require
+  nonzero extents; each spatial extent and 3D depth halves per level,
+  clamped to one. Array/cube physical layers remain fixed. Mips are
+  contiguous in increasing level order, each containing all physical
+  layers/depth slices before the next mip. Rows, texels and format
+  components follow inside each layer/slice. For example, a `5x3`
+  `r32_uint` image with three mips contains 15, 2 and 1 words; a two-layer
+  array contains 30, 4 and 2 words. Cumulative offsets and subresource
+  products are checked before allocation. Missing data is zero-filled;
+  excess word data is truncated as before. The schema applies equally to
+  `images` and `image-bindings`. Counts describe CPU storage, including
+  repeated one-texel levels, not D3D12 legal mip-count/format support.
+  Native SDK DXC FP32/SINT/UINT 2D/plain-array loads execute one/two-mip
+  fixtures in normal/reference/AOT-object modes with signed offsets,
+  layers/components, invalid mips, exact integer bits, waves 4/8, partial
+  waves, guards and repeats. Canonical fixtures add non-power-of-two
+  1D/2D arrays, 3D depth, mip-31 bounds, zero-fill and cube mip blending.
+  Image-binding preparation does not imply bound-image or owned D3D12
+  execution; MS sampling and owned-device gaps remain open.
 
   Every `resource-heap`/`bindings` entry becomes an unstructured,
   host-writable raw buffer (`ResourceKind::Raw`, `FEME_DESCRIPTOR_UAV`

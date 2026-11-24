@@ -260,7 +260,7 @@ coverage" in [../Design.md](../Design.md).
   poison XY offsets raise to zero; canonical offsets remain strict.
   Invalid mips, per-mip spatial bounds and independent layer bounds read
   zero. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one mip. Mip-chain YAML remains open.
+  reference/AOT paths on one and two real mips.
   Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   SPIR-V FP32 users share the runtime bounds correction. No bound/static
@@ -271,7 +271,7 @@ coverage" in [../Design.md](../Design.md).
   and integer helpers preserve exact bits without FP32 conversions.
   Invalid mips, per-mip X/Y bounds and independent layer bounds read
   zero. Native SDK DXC plain/array `int4`/`uint4` shaders execute through
-  normal/reference/AOT paths on one mip. Mixed scalar types, non-32-bit
+  normal/reference/AOT paths on one and two real mips. Mixed scalar types, non-32-bit
   texels, too-wide results, non-heap handles and dynamic/undefined/
   poison or partial offsets reject. Existing FP32 loads, 1D/3D loads,
   sampling, SPIR-V lowering, artifact ABI 8 and argument layouts are
@@ -310,6 +310,14 @@ coverage" in [../Design.md](../Design.md).
   components, signed/omitted offsets, bounds, partial waves, guards
   and repeats. This remains CPU execution, not owned D3D12 execution
   or an MSAA-quality/support advertisement.
+  Non-MS runner YAML also accepts `mip-levels`, default 1, in [1, 32],
+  using checked mip-major layouts with shrinking spatial extents/3D
+  depth and fixed array/cube layers. Native FP32/SINT/UINT 2D/plain-array
+  two-mip fixtures execute through normal/reference/AOT-object paths;
+  canonical fixtures add three non-power-of-two mips, mip-31 bounds,
+  zero-fill and cube half-mip blending. See
+  [the runner schema](feme-run.md). This does not change CPU lowering,
+  artifact ABI 8, argument layouts or owned D3D12 execution.
   Heap-backed FP32 3D implicit `Sample` now lowers in fragment stages with
   default samplers, three-component U/V/W coordinates, constant signed XYZ
   offsets and scalar/vector results up to the declared texel width (at most

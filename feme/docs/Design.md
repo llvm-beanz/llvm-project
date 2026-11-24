@@ -1620,7 +1620,7 @@ undefined/poison offsets remain rejected. Compiled fragment and normal/
 reference compute tests prove multi-mip/layer selection, offsets,
 components, sampler clamps, helpers, partial waves, guards and repeats.
 Native SDK DXC bindless 1D/array shaders also execute through normal/
-reference/AOT paths on one mip; runner YAML still prepares one mip.
+reference/AOT paths in the original one-mip fixture.
 Other ordinary texture shapes, biased/
 comparison/gradient execution and SPIR-V behavior are unchanged.
 No bound/static descriptor materialization or owned D3D12 execution is added.
@@ -1633,7 +1633,7 @@ unchanged with six zero derivatives, zero bias and no shader MinLod clamp.
 Compiled fragment and normal/reference compute tests verify multi-mip
 selection, XYZ offsets, components, sampler clamps, helpers, partial waves,
 guards and repeats. Native SDK DXC bindless 3D shaders execute through
-normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
+normal/reference/AOT paths in the original one-mip fixture.
 Malformed shapes, non-heap handles, comparison samplers and dynamic/
 undefined/poison or partially undefined offsets remain unsupported.
 Non-fragment implicit 3D sampling, non-32-bit 3D loading, other ordinary shapes,
@@ -1655,7 +1655,7 @@ Compiled normal/reference compute tests distinguish mip/XYZ/component
 values with all four result widths, signed offsets, bounds, partial waves,
 guards and repeats. Fragment tests cover divergent mips, each bounds axis
 and helper masks. Native SDK DXC bindless shaders execute through normal/
-reference/AOT paths on one mip; runner YAML still prepares one mip.
+reference/AOT paths in the original one-mip fixture.
 Malformed shapes, non-heap handles, non-32-bit texels, out-of-texel-width
 results and dynamic/undefined/poison or partially undefined offsets remain
 unsupported. Other loading/sampling, SPIR-V lowering, artifact ABI 8 and
@@ -1675,7 +1675,7 @@ Compiled compute tests cover normal/reference paths, all four result widths,
 offsets, invalid mips, bounds, partial waves, guards and repeats; fragment
 tests cover divergent mips, integer outputs and helper masks. Native SDK DXC
 `Texture3D<int4>` and `Texture3D<uint4>` shaders execute through normal/
-reference/AOT paths on one mip; runner YAML still prepares one mip.
+reference/AOT paths in the original one-mip fixture.
 Mixed float/integer results, non-32-bit texels, non-heap handles and
 dynamic/undefined/poison offsets remain unsupported. Existing FP32 loads,
 sampling, other dimensions, SPIR-V lowering, artifact ABI 8 and argument
@@ -1739,8 +1739,8 @@ correction without lowering changes. Compiled normal/reference compute
 tests cover rectangular mips, X/Y/layers/components, all result widths,
 offsets, bounds, partial waves, guards and repeats; fragment tests add
 divergent mips/layers and helper masks. Native SDK DXC plain/array shaders
-execute through normal/reference/AOT paths on one mip.
-Runner image YAML still prepares only one mip. Existing
+execute through normal/reference/AOT paths on one and two real mips.
+Existing
 1D/3D loads, sampling, artifact ABI 8 and argument layouts are unchanged;
 no bound/static descriptors or owned D3D12 execution are added.
 
@@ -1811,7 +1811,24 @@ paths with four samples, rows/layers/components, signed/omitted offsets,
 bounds, waves 4/8, seven lanes, guards and repeats. Canonical fixtures
 also cover counts 1/2/8, zero-filled samples and last-row/layer addressing.
 This does not advertise D3D12 MSAA quality or establish owned-device
-execution; mip-chain YAML remains open.
+execution. MS dimensions retain one mip.
+
+Runner image YAML also accepts `mip-levels`, default 1, in [1, 32] for
+non-MS dimensions. Checked mip-major storage contains all physical
+layers/depth slices inside each mip, then rows, texels and components.
+Nonzero chain extents halve/clamp to one; array/cube layers remain fixed,
+3D depth shrinks. Cumulative offsets and subresource sizes are checked
+before allocation. Per-image layout vectors remain owned across repeated
+dispatches, preserving single-mip defaults and zero-filled word data.
+Canonical normal/reference/AOT-object fixtures distinguish three
+non-power-of-two mips, 1D/2D arrays, 3D depth, mip 31 and trailing
+zero-fill; cube/array gradients test a linear half-mip blend and the
+second cube. Native SDK DXC FP32/SINT/UINT 2D/plain-array loads also
+execute two real mips with exact components, signed offsets, invalid mips,
+partial waves, guards and repeats. Image-binding preparation is tested
+without claiming bound-image execution. Counts describe CPU storage,
+not D3D12 mip/format support; owned-device gaps and artifact ABI 8 remain
+unchanged.
 
 Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
 default samplers, three-component U/V/W coordinates, constant signed XYZ

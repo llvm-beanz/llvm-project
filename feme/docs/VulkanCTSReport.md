@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) runner mip-chain and native load regression scope (2026-11-24)
+
+The [runner mip-chain follow-up](W0WindowsIntegrationProbe.md#w2aw3b-runner-mip-chain-preparation-and-native-loads-vm-2026-11-24)
+adds `mip-levels`, default 1, and checked mip-major CPU image layouts.
+Spatial extents/3D depth shrink; array/cube physical layers remain fixed.
+MS images retain one mip. Invalid counts/extents, subresource/cumulative
+overflow and host allocation limits are explicitly rejected.
+
+Canonical normal/reference/AOT-object tests exercise three rectangular
+non-power-of-two mips, 1D/2D arrays, 3D depth bounds, mip 31, zero-fill and
+cube/array half-mip blending. Native SDK DXC FP32/SINT/UINT 2D/plain-array
+loads distinguish two mips, signed offsets, layers/components and invalid
+mips with exact integer bits, partial waves, guards and repeats.
+Image-binding preparation is checked separately, not bound-image execution.
+
+The ARM64 runner build passes with the existing switch warning. Focused
+runner plus CPU runtime LIT passes 417 with 4 unsupported and zero failures
+in 53.06 seconds. Three new fixtures add three passes. This is not a new
+full-suite, adapter-matrix or external Vulkan CTS result. CPU storage
+counts do not advertise D3D12 mip/format support. Non-32-bit DXIL texels,
+MS sampling, broader conformance, bound/static D3D12 descriptors and
+owned-device execution remain open. Artifact ABI 8 and argument layouts
+are unchanged; W2(a)/W2(b)/W3(b) remain open;
+`CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) runner multisample and native execution regression scope (2026-11-24)
 
 The [runner multisample follow-up](W0WindowsIntegrationProbe.md#w2aw3b-runner-multisample-preparation-and-native-execution-vm-2026-11-24)

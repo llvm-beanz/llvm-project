@@ -3154,7 +3154,7 @@ documented reason rather than an oversight:
   verify multi-mip/layer selection, offsets, components, sampler clamps,
   helpers, partial waves, guards and repeats. Native SDK DXC bindless
   1D/array shaders execute through normal/reference/AOT paths on one mip;
-  runner YAML still prepares one mip. Malformed shapes, non-heap handles,
+  the original YAML fixture uses one mip. Malformed shapes, non-heap handles,
   comparison samplers and dynamic/undefined/poison offsets remain rejected.
   Other ordinary texture shapes and SPIR-V behavior are unchanged.
   This does not materialize bound/static
@@ -3167,7 +3167,7 @@ documented reason rather than an oversight:
   Compiled fragment and normal/reference compute tests verify multi-mip
   selection, offsets, components, sampler clamps, helpers, partial waves,
   guards and repeats. Native SDK DXC bindless 3D shaders execute through
-  normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
+  normal/reference/AOT paths in the original one-mip fixture.
   Malformed shapes, non-heap handles, comparison samplers and dynamic/
   undefined/poison or partially undefined offsets remain unsupported.
   Non-fragment implicit DXIL 3D sampling, non-32-bit 3D loading, other ordinary shapes
@@ -3255,7 +3255,7 @@ documented reason rather than an oversight:
   layers/components, all result widths, offsets, bounds, partial waves,
   guards and repeats; fragment tests add divergent mips/layers and helper
   masks. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one mip. Mip-chain YAML remains open.
+  reference/AOT paths on one and two real mips.
   Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   no bound/static descriptors or owned-device execution are added.
@@ -3317,8 +3317,20 @@ documented reason rather than an oversight:
   Native SDK DXC FP32/SINT/UINT fixtures now execute in all three CPU
   paths with distinct samples, rows/layers/components, offsets, bounds,
   partial waves, guards and repeats. Canonical tests add counts 1/2/8,
-  zero-filled samples and last-row/layer addressing. Mip-chain YAML,
+  zero-filled samples and last-row/layer addressing. MS images keep one mip;
   D3D12 MSAA-quality/support and owned-device execution remain open.
+  Runner YAML also accepts `mip-levels`, default 1, in [1, 32] for non-MS
+  dimensions. Checked mip-major layouts halve/clamp spatial extents and
+  3D depth, retain fixed physical array/cube layers and check cumulative
+  offsets before allocation. Single-mip defaults and zero-fill remain
+  unchanged. Canonical all-path fixtures cover non-power-of-two mips,
+  1D/2D arrays, 3D depth, mip 31, trailing zero-fill and cube/array linear
+  half-mip blending. Native SDK DXC FP32/SINT/UINT 2D/plain-array fixtures
+  execute two real mips with signed offsets, layers/components, invalid
+  mips, exact integer bits, partial waves, guards and repeats.
+  Image-binding preparation is checked without bound-image execution.
+  This is CPU storage/execution, not D3D12 mip/format support or
+  owned-device execution; artifact ABI 8 and argument layouts are unchanged.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at
@@ -3751,10 +3763,14 @@ non-empty `draws` list against it, encoding the scene's `vertex-buffers`/
 resource class this row also adds (§2.6.1 of feme/docs/Roadmap.md) lives
 in `feme-run` itself (`ImageEntry` in feme-run.cpp): a new `images` list
 builds `FemeImageDescriptor`s into the ABI's separate image heap,
-alongside `resource-heap`/`bindings`, covering a single mip level and (for
-a non-array dimension) a single array layer. The runner now also accepts
+alongside `resource-heap`/`bindings`, initially covering a single mip level
+and (for a non-array dimension) a single array layer. The runner now accepts
 2D MS/array dimensions with a positive `sample-count`, checked
 sample-interleaved one-mip layouts and native CPU execution tests.
+Non-MS dimensions also accept `mip-levels` with checked mip-major layouts,
+shrinking spatial extents/3D depth and fixed array/cube layers; canonical
+mip/LOD fixtures and native 2D/plain-array two-mip loads execute through
+normal/reference/AOT-object paths.
 The textual image
 fixture (`feme::graphics::ImageFixture`) and scene
 (`feme::graphics::Scene`) formats "Textual scene and image fixtures" in

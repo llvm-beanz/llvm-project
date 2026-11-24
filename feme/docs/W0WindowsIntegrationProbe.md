@@ -27,6 +27,38 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) runner mip-chain preparation and native loads (VM, 2026-11-24)
+
+`feme-run` now accepts `mip-levels` in [1, 32], default 1, for
+`images`/`image-bindings`; MS images still require one mip. Chains require
+nonzero extents. Checked mip-major layouts halve/clamp spatial extents
+and 3D depth, retaining fixed physical array/cube layers. Checked
+cumulative offsets reject overflow before allocation, alongside existing
+row/slice/layer and host limits. Single-mip defaults, zero-fill and
+repeated-dispatch storage ownership are unchanged.
+
+Canonical normal/reference/AOT-object tests distinguish non-power-of-two
+1D/2D plain/array and 3D mips, shrinking depth, fixed layers, mip-31
+bounds and trailing zero-fill. Cube/array gradients test mip-major faces,
+the second cube and a linear half-mip blend. Native SDK DXC SM6.6
+FP32/SINT/UINT 2D/plain-array shaders execute two mips in all three paths,
+with signed offsets, layers/components, invalid mips, exact integer
+bits, waves 4/8, five lanes, guards and repeats. Invalid YAML and
+image-binding preparation are checked separately; no bound-image
+execution or new native 1D/3D multi-mip execution is claimed.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2 feme-run` build
+passes with the existing `X8_D24_UNORM` switch warning. Focused runner
+plus CPU runtime LIT passes 417 with 4 unsupported and zero failures
+in 53.06 seconds. Three new fixtures add three passes. No new full-suite,
+adapter-matrix or external Vulkan CTS result is claimed.
+
+Counts/layouts describe CPU storage, not D3D12 mip/format support.
+Non-32-bit DXIL texels, MS sampling, broader conformance, bound/static
+D3D12 descriptors and owned-device execution remain open. Artifact ABI 8
+and argument layouts are unchanged; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) runner multisample preparation and native execution (VM, 2026-11-24)
 
 `feme-run` YAML now accepts `2d-ms`/`2d-ms-array` images with a positive

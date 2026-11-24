@@ -186,7 +186,7 @@ The original compute-only baseline is no longer current:
   compute tests verify multi-mip/layer selection, offsets, components,
   sampler clamps, helpers, partial waves, guards and repeats. Native SDK
   DXC bindless 1D/array shaders execute through normal/reference/AOT paths
-  on one mip; runner YAML still prepares one mip. Malformed shapes,
+  in the original one-mip fixture. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison offsets
   remain rejected. This does not change other ordinary shapes or
   materialize bound/static descriptors.
@@ -199,7 +199,7 @@ The original compute-only baseline is no longer current:
   fragment and normal/reference compute tests verify multi-mip selection,
   offsets, components, sampler clamps, helpers, partial waves, guards and
   repeats. Native SDK DXC bindless 3D shaders execute through normal/
-  reference/AOT paths on one mip; runner YAML still prepares one mip.
+  reference/AOT paths in the original one-mip fixture.
   Malformed shapes, non-heap handles, comparison samplers and dynamic/
   undefined/poison or partially undefined offsets remain rejected.
   Non-fragment implicit 3D sampling, non-32-bit 3D loading and other ordinary shapes
@@ -290,7 +290,7 @@ The original compute-only baseline is no longer current:
   all result widths, offsets, bounds, partial waves, guards and repeats;
   fragment tests add divergent mips/layers and helper masks. Native SDK
   DXC plain/array shaders execute through normal/reference/AOT paths on
-  one mip. Mip-chain YAML remains open.
+  one and two real mips.
   Existing 1D/3D loads, sampling, SPIR-V lowering,
   artifact ABI 8 and argument layouts are unchanged. Bound/static
   descriptors, owned D3D12 execution and W2(a)/W2(b)/W3(b) remain open;
@@ -356,8 +356,20 @@ The original compute-only baseline is no longer current:
   offsets, bounds, partial waves, guards and repeats. Invalid YAML
   counts/extents/layers, overflow and host allocation limits are errors.
   This does not advertise D3D12 MSAA quality or materialize owned
-  bound/static descriptors. Mip-chain YAML and owned-device execution
-  remain open; artifact ABI 8 and argument layouts are unchanged.
+  bound/static descriptors. MS images retain one mip; owned-device
+  execution remains open; artifact ABI 8 and argument layouts are unchanged.
+  Runner image YAML also accepts `mip-levels`, default 1, in [1, 32] for
+  non-MS dimensions. Checked mip-major layouts halve/clamp nonzero
+  spatial extents and 3D depth, retain fixed array/cube layers and check
+  cumulative offsets before allocation. Single-mip defaults, zero-fill
+  and repeated-dispatch ownership remain unchanged. Canonical all-path
+  tests cover non-power-of-two mips, 1D/2D arrays, 3D depth, mip 31,
+  trailing zero-fill and cube/array half-mip blending. Native SDK DXC
+  FP32/SINT/UINT 2D/plain-array fixtures execute two mips with offsets,
+  layers/components, invalid mips, exact bits, partial waves, guards
+  and repeats. Image-binding preparation is tested without bound-image
+  execution. CPU storage counts are not D3D12 mip/format support;
+  owned-device gaps, artifact ABI 8 and argument layouts are unchanged.
   Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
   with default samplers, three-component U/V/W coordinates, constant signed
   XYZ offsets and scalar/vector results up to the declared texel width (at

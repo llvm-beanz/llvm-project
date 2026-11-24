@@ -2603,9 +2603,17 @@ the first shader-facing milestone rather than alongside it.
    rejection below. Native DXC FP32/SINT/UINT MS loads execute through
    normal/reference/AOT-object paths with sample/layer bounds, partial
    waves, guards and repeats. Counts describe CPU storage, not D3D12
-   MSAA-quality/support; mip-chain YAML remains open. See
+   MSAA-quality/support; MS images retain one mip. See
    [the runner schema](CommandGuide/feme-run.md) and
    [the WARP progress evidence](WARPRoadmap.md).
+   Runner mip-chain follow-up (2026-11-24): non-MS images also accept
+   `mip-levels`, default 1, in [1, 32], with checked mip-major storage.
+   Spatial extents and 3D depth halve/clamp; physical array/cube layers
+   remain fixed. Canonical all-path tests distinguish non-power-of-two
+   mips, depth/layer/mip bounds, trailing zero-fill and cube half-mip
+   blending. Native SDK DXC FP32/SINT/UINT 2D/plain-array fixtures now
+   execute two real mips through normal/reference/AOT-object paths.
+   This is CPU storage/execution, not owned D3D12 mip/format support.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing
