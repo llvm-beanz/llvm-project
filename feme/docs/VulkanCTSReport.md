@@ -1,5 +1,41 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) 3D texel-load CPU regression scope (2026-11-24)
+
+The [3D texel-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-3d-texel-load-cpu-execution-vm-2026-11-24)
+adds heap-backed FP32 `Texture3D::Load` CPU execution in any stage, with
+three-component i32 XYZ coordinates, an i32 mip, constant signed XYZ
+offsets and scalar/vector results up to the declared texel width (at most
+four). Offsets become wrapping integer coordinate adds; the volume-load
+helper receives explicit mip, sample zero and no sampler/derivatives.
+Native DXIL's all-undefined omitted 3D offset raises to zero, while
+partially undefined offsets remain unsupported.
+
+The shared volume-load runtime now checks every per-mip XYZ extent,
+preventing higher-mip X/Y aliasing. Negative/out-of-range coordinates and
+invalid mips read zero. Existing SPIR-V users share this bounds correction;
+SPIR-V lowering is unchanged. Runtime tests check lower/upper XYZ bounds,
+invalid mips and a false mask. Compiled normal/reference compute tests
+distinguish mips 0/1/2, XYZ/components, all four result widths, offsets,
+bounds, invalid mips, partial waves, guards and repeats. Fragment tests
+add divergent mips, every bounds axis and helper masks. Native SDK DXC
+bindless shaders execute through normal/reference/AOT paths on one mip;
+runner YAML still prepares one mip. Malformed shapes, integer texels,
+non-heap handles and dynamic/undefined/poison offsets remain rejected,
+including dynamic-offset admission in all three paths.
+
+Focused CPU/DXIL/sampling LIT passes 982; full FeMe LIT passes 4,191 with
+15 skipped, 10 unsupported and zero failures among 4,216 discovered tests.
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, bound/static descriptor
+materialization or owned D3D12 execution is claimed. Native SDK import
+plus canonical CPU execution remains distinct from owned-device execution.
+Integer 3D loads, non-fragment implicit 3D sampling and real shader MinLod
+clamps on ordinary `Sample` remain unsupported. Other loading/sampling,
+artifact ABI 8 and argument layouts are unchanged. Broader conformance
+and W2(a)/W2(b)/W3(b) remain open; `CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) implicit 3D sampling CPU regression scope (2026-11-23)
 
 The [implicit 3D sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-implicit-3d-sampling-cpu-execution-vm-2026-11-23)

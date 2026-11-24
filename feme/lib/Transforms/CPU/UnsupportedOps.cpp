@@ -57,6 +57,22 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
 
     switch (F.getIntrinsicID()) {
+    case Intrinsic::dx_resource_load_level:
+      for (const User *U : F.users()) {
+        const auto *CI = dyn_cast<CallInst>(U);
+        const auto *Ty =
+            CI ? dyn_cast<dxil::TextureExtType>(CI->getArgOperand(0)->getType())
+               : nullptr;
+        if (Ty && Ty->getDimension() == dxil::ResourceKind::Texture3D &&
+            !isSupportedDXILLoad3D(*CI))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "unsupported raised operation: '%s' requires heap-backed FP32 "
+              "3D texel loading with three-component i32 coordinates, an i32 "
+              "mip and constant signed XYZ offsets",
+              F.getName().str().c_str());
+      }
+      continue;
     case Intrinsic::dx_resource_sample:
     case Intrinsic::dx_resource_samplelevel:
       for (const User *U : F.users()) {

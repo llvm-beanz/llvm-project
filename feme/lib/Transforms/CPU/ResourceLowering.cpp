@@ -671,6 +671,28 @@ bool isZeroOffset(const Value *Offset) {
   return C && C->isNullValue();
 }
 
+unsigned getFP32Width(Type *Ty) {
+  if (Ty->isFloatTy())
+    return 1;
+  auto *VecTy = dyn_cast<FixedVectorType>(Ty);
+  return VecTy && VecTy->getElementType()->isFloatTy() &&
+                 VecTy->getNumElements() <= 4
+             ? VecTy->getNumElements()
+             : 0;
+}
+
+Value *narrowImageResult(IRBuilder<> &Builder, Value *Loaded, Type *ResultTy) {
+  if (Loaded->getType() == ResultTy)
+    return Loaded;
+  if (auto *VecTy = dyn_cast<FixedVectorType>(ResultTy)) {
+    SmallVector<int, 4> Components;
+    for (unsigned I = 0; I < VecTy->getNumElements(); ++I)
+      Components.push_back(I);
+    return Builder.CreateShuffleVector(Loaded, Components);
+  }
+  return Builder.CreateExtractElement(Loaded, uint64_t{0});
+}
+
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
 /// `samplebias[.clamp]`/`samplegrad[.clamp]`/`samplecmp[.clamp]`/
 /// `samplecmplevelzero`/`load.level`
@@ -694,6 +716,26 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (isSupportedDXILLoad3D(*CI)) {
+      IRBuilder<> Builder(CI);
+      auto *Image = cast<CallInst>(CI->getArgOperand(0));
+      Value *Coord = CI->getArgOperand(1);
+      auto *Offset = cast<Constant>(CI->getArgOperand(3));
+      Value *XYZ[3];
+      for (unsigned Axis = 0; Axis < 3; ++Axis)
+        XYZ[Axis] = Builder.CreateAdd(
+            Builder.CreateExtractElement(Coord, uint64_t{Axis}),
+            Offset->getAggregateElement(Axis));
+      Value *Loaded =
+          createLoad3D(Builder, Env, Image->getArgOperand(0), XYZ[0], XYZ[1],
+                       XYZ[2], CI->getArgOperand(2), Builder.getInt32(0),
+                       Builder.getTrue(), CI->getName());
+      CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
+      CI->eraseFromParent();
+      SampleHandles.insert(Image);
+      Changed = true;
+      continue;
+    }
     bool IsGrad = ID == Intrinsic::dx_resource_samplegrad ||
                   ID == Intrinsic::dx_resource_samplegrad_clamp;
     bool IsLevel = isSupportedDXILSampleLevel(*CI);
@@ -827,17 +869,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
               CI->getName());
         }
       }
-      if (Loaded->getType() != CI->getType()) {
-        if (auto *VecTy = dyn_cast<FixedVectorType>(CI->getType())) {
-          SmallVector<int, 4> Components;
-          for (unsigned I = 0; I < VecTy->getNumElements(); ++I)
-            Components.push_back(I);
-          Loaded = Builder.CreateShuffleVector(Loaded, Components);
-        } else {
-          Loaded = Builder.CreateExtractElement(Loaded, uint64_t{0});
-        }
-      }
-      CI->replaceAllUsesWith(Loaded);
+      CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
       CI->eraseFromParent();
       SampleHandles.insert(Image);
       SampleHandles.insert(Sampler);
@@ -1160,7 +1192,8 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
-    if (isSupportedDXILSampleLevel(*CI) || isSupportedDXILSample(*CI))
+    if (isSupportedDXILLoad3D(*CI) || isSupportedDXILSampleLevel(*CI) ||
+        isSupportedDXILSample(*CI))
       return true;
     if (ID == Intrinsic::dx_resource_samplegrad ||
         ID == Intrinsic::dx_resource_samplegrad_clamp) {
@@ -1361,17 +1394,8 @@ static bool isSupportedDXILFloatingSample(const CallInst &CI,
       SamplerTy->getNumIntParameters() != 1 ||
       SamplerTy->getSamplerType() != dxil::SamplerType::Default)
     return false;
-  auto FP32Width = [](Type *Ty) -> unsigned {
-    if (Ty->isFloatTy())
-      return 1;
-    auto *VecTy = dyn_cast<FixedVectorType>(Ty);
-    return VecTy && VecTy->getElementType()->isFloatTy() &&
-                   VecTy->getNumElements() <= 4
-               ? VecTy->getNumElements()
-               : 0;
-  };
-  unsigned TextureWidth = FP32Width(TextureTy->getTypeParameter(0));
-  unsigned ResultWidth = FP32Width(CI.getType());
+  unsigned TextureWidth = getFP32Width(TextureTy->getTypeParameter(0));
+  unsigned ResultWidth = getFP32Width(CI.getType());
   auto Kind = TextureTy->getDimension();
   unsigned NumCoords;
   switch (Kind) {
@@ -1445,6 +1469,34 @@ bool feme::cpu::isSupportedDXILSampleLevel(const CallInst &CI) {
 
 bool feme::cpu::isSupportedDXILSample(const CallInst &CI) {
   return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_sample);
+}
+
+bool feme::cpu::isSupportedDXILLoad3D(const CallInst &CI) {
+  if (getIntrinsicID(&CI) != Intrinsic::dx_resource_load_level ||
+      CI.arg_size() != 4)
+    return false;
+  auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
+  auto *Ty = dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
+  if (!Image ||
+      getIntrinsicID(Image) != Intrinsic::dx_resource_handlefromheap || !Ty ||
+      Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4 ||
+      Ty->getDimension() != dxil::ResourceKind::Texture3D)
+    return false;
+  unsigned TextureWidth = getFP32Width(Ty->getTypeParameter(0));
+  unsigned ResultWidth = getFP32Width(CI.getType());
+  Type *XYZTy = FixedVectorType::get(Type::getInt32Ty(CI.getContext()), 3);
+  if (!TextureWidth || !ResultWidth || ResultWidth > TextureWidth ||
+      CI.getArgOperand(1)->getType() != XYZTy ||
+      !CI.getArgOperand(2)->getType()->isIntegerTy(32) ||
+      CI.getArgOperand(3)->getType() != XYZTy)
+    return false;
+  auto *Offset = dyn_cast<Constant>(CI.getArgOperand(3));
+  if (!Offset)
+    return false;
+  for (unsigned Axis = 0; Axis < 3; ++Axis)
+    if (!isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(Axis)))
+      return false;
+  return true;
 }
 
 static bool isSupportedDXILComparisonSample(const CallInst &CI) {

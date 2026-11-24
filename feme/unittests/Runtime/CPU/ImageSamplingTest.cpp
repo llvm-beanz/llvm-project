@@ -7817,6 +7817,42 @@ TEST_F(ImageSamplingTest, Load3DOutOfBoundsZReadsZero) {
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
 }
 
+TEST_F(ImageSamplingTest, Load3DChecksEveryMipExtent) {
+  float Storage[292];
+  std::fill_n(Storage, 292, 7.0f);
+  FemeImageSubresourceLayout BaseLayout;
+  auto Img = makeImage3D(Storage, sizeof(Storage), 4, 4, 4,
+                         ResourceFormat::R32G32B32A32_FLOAT, BaseLayout);
+  FemeImageSubresourceLayout Layouts[] = {
+      {0, 64, 256, 0}, {1024, 32, 64, 0}, {1152, 16, 16, 0}};
+  Img.MipLayouts = Layouts;
+  Img.MipLevels = Img.MipLayoutCount = 3;
+  Load3DFn Fn =
+      resolve<Load3DFn>(addWrapper("load3d", "feme.cpu.image.load.3d.v4f32"));
+  float Out[4];
+  for (uint32_t Mip : {0u, 1u, 2u}) {
+    int32_t Size = 4 >> Mip;
+    for (unsigned Axis = 0; Axis < 3; ++Axis)
+      for (int32_t Coord : {-1, 0, Size - 1, Size}) {
+        SCOPED_TRACE(testing::Message() << "mip=" << Mip << " axis=" << Axis
+                                        << " coord=" << Coord);
+        int32_t XYZ[3] = {0, 0, 0};
+        XYZ[Axis] = Coord;
+        Fn(&Img, 1, 0, XYZ[0], XYZ[1], XYZ[2], Mip, 0, true, Out);
+        for (float C : Out)
+          EXPECT_FLOAT_EQ(C, Coord < 0 || Coord >= Size ? 0.0f : 7.0f);
+      }
+  }
+  for (uint32_t Mip : {3u, 32u, 0xffffffffu}) {
+    Fn(&Img, 1, 0, 0, 0, 0, Mip, 0, true, Out);
+    for (float C : Out)
+      EXPECT_FLOAT_EQ(C, 0.0f);
+  }
+  Fn(&Img, 1, 0, 0, 0, 0, 0, 0, false, Out);
+  for (float C : Out)
+    EXPECT_FLOAT_EQ(C, 0.0f);
+}
+
 TEST_F(ImageSamplingTest, Load3DI32FetchesIntegerTexel) {
   int32_t Storage[2][1][1][4] = {}; // [Z][Y][X][Channel].
   Storage[1][0][0][0] = 10;

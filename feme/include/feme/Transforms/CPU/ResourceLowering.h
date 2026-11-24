@@ -57,6 +57,8 @@
 // Fragment-only FP32 1D/array and 3D Sample use coarse spatial derivatives and
 // constant signed spatial offsets with zero bias; layers are not
 // differentiated.
+// FP32 heap-backed Texture3D Load preserves integer XYZ coordinates, explicit
+// mip levels and constant signed XYZ offsets in every stage, without a sampler.
 //
 //===----------------------------------------------------------------------===//
 
@@ -70,6 +72,11 @@ class CallInst;
 }
 
 namespace feme::cpu {
+
+/// Tests heap-backed FP32 3D texel loading in any stage with three-component
+/// i32 coordinates, an i32 mip, constant signed XYZ offsets and scalar/vector
+/// results up to the declared texel width (at most four).
+bool isSupportedDXILLoad3D(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32 1D/2D/3D/cube (including array) biased sampling in a
 /// fragment stage, with scalar/vector results, supported offsets and optional
