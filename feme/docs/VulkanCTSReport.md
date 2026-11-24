@@ -1,5 +1,35 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) implicit 1D sampling CPU regression scope (2026-11-23)
+
+The [implicit 1D sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-implicit-1d-sampling-cpu-execution-vm-2026-11-23)
+adds heap-backed FP32 1D/array fragment `Sample` execution with default
+samplers, scalar U or `(U,layer)`, constant signed scalar offsets and
+scalar/vector results up to the declared texel width (at most four).
+Real coarse U derivatives drive LOD with zero shader bias and no shader
+MinLod clamp; array layers remain undifferentiated.
+
+Compiled fragment tests independently vary positive/negative U derivatives
+on both screen axes to select mips 0/1/2, with signed offsets, layers,
+all four result widths, helpers, partial waves, guards and repeats.
+Native SDK DXC plain/array pixel shaders pass import/raising; real
+shader-clamped variants remain unraised. Native import remains distinct
+from canonical CPU execution. Normal/reference/AOT compute admission
+rejects even valid constant-offset implicit 1D calls. Malformed shapes,
+dynamic/undefined/poison offsets and non-fragment calls remain unsupported.
+
+Focused CPU/DXIL/sampling LIT passes 964; full FeMe LIT passes 4,172 with
+15 skipped, 10 unsupported and zero failures among 4,197 discovered tests.
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+DXIL 1D loading, other ordinary shapes, explicit LOD, biased/comparison/
+gradient execution, SPIR-V behavior, artifact ABI 8 and argument layouts
+are unchanged.
+
+No new Vulkan CTS run, adapter-matrix result, bound/static descriptor
+materialization or owned D3D12 execution is claimed. Broader sampling
+conformance and W2(a)/W2(b)/W3(b) remain open; owned `CreateDevice` remains
+`E_NOTIMPL`.
+
 ## W2(a)/W3(b) explicit 1D LOD CPU regression scope (2026-11-23)
 
 The [explicit 1D LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-1d-lod-cpu-execution-vm-2026-11-23)

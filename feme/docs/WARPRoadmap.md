@@ -1373,6 +1373,41 @@ conformance and bound/static descriptor materialization remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 No new adapter-matrix or external Vulkan CTS result is claimed.
 
+W2(a)/W3(b) implicit 1D sampling CPU execution progress (2026-11-23):
+heap-backed FP32 `Texture1D::Sample` and `Texture1DArray::Sample` now
+execute through existing plain/array 1D helpers in fragment stages. Shared
+admission/lowering requires default samplers, scalar U or `(U,layer)`,
+constant signed scalar offsets and scalar/vector results up to the declared
+texel width (at most four). Real coarse dU/dX and dU/dY drive derivative-based
+LOD with zero shader bias and no shader MinLod clamp, not an LOD-zero
+approximation. Array layers remain separate and undifferentiated.
+
+Transform tests verify exact U derivative/offset forwarding, separate
+layers, narrowing, reflection, image-only signature growth, handle cleanup
+and idempotence. Missing layers, dynamic/poison offsets, out-of-texel-width
+results and compute calls stay untouched. Admission tests reject dynamic/
+undefined/poison offsets and vertex/compute/unannotated calls. Compiled
+fragment tests independently vary positive/negative U derivatives on both
+screen axes to select mips 0/1/2, with signed offsets, independent layers,
+all four result widths, helpers, partial waves, guards and repeated
+prepared invocations. Actual SDK DXC plain/array pixel shaders pass import/
+raising; real shader-clamped variants stay unraised. Native import remains
+separate from canonical CPU and owned-device execution. Normal/reference/
+AOT compute admission rejects even valid constant-offset implicit 1D calls.
+The earlier explicit-LOD fixture now preserves compute-stage implicit
+rejection rather than rejecting the newly supported fragment shape.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 964 in 41.53 seconds; full FeMe LIT
+passes 4,172 with 15 skipped, 10 unsupported and zero failures among
+4,197 discovered tests in 157.87 seconds. Five new tests add five passes;
+timings are not controlled speedups. DXIL 1D loading, other ordinary shapes,
+explicit LOD, biased/comparison/gradient execution, SPIR-V behavior,
+artifact ABI 8 and argument layouts remain unchanged. Broader sampling
+conformance and bound/static descriptor materialization remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

@@ -3095,7 +3095,8 @@ documented reason rather than an oversight:
   dynamic/undefined offsets and half/vector results remain unsupported.
   Plain 1D uses scalar U/offset; array forms add a final FP32 layer
   coordinate and retain spatial-only offsets (one for 1D, two for 2D).
-  Implicit DXIL 1D sampling and 1D loading remain unsupported.
+  Implicit DXIL 1D sampling outside fragment stages and 1D loading remain
+  unsupported.
   Cubes use three-component direction vectors, with a fourth cube-array
   element coordinate, and no spatial offsets. Unused scalar offsets
   accept poison/undef or zero; nonzero/dynamic offsets are rejected.
@@ -3133,7 +3134,8 @@ documented reason rather than an oversight:
   clamps. Compiled tests check mip-0/mip-1 footprints, both derivative axes,
   layer/mip/texel/component values, divergent layers/bias/clamps and guarded
   partial waves. Malformed coordinates and dynamic/poison/undefined 1D
-  offsets reject. Implicit DXIL 1D sampling and 1D loading remain unsupported.
+  offsets reject. Implicit DXIL 1D sampling outside fragment stages and 1D
+  loading remain unsupported.
   Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
   three constant signed i32 offsets through the existing shared 3D helper.
   Compiled tests isolate each coordinate's LOD contribution on both screen
@@ -3153,9 +3155,23 @@ documented reason rather than an oversight:
   1D/array shaders execute through normal/reference/AOT paths on one mip;
   runner YAML still prepares one mip. Malformed shapes, non-heap handles,
   comparison samplers and dynamic/undefined/poison offsets remain rejected.
-  Implicit DXIL 1D sampling/loading, other ordinary texture shapes and
-  SPIR-V behavior are unchanged. This does not materialize bound/static
+  Other ordinary texture shapes and SPIR-V behavior are unchanged.
+  This does not materialize bound/static
   descriptors or establish owned D3D12 rendering.
+  Heap-backed FP32 1D/array implicit `Sample` now executes in fragment
+  stages with default samplers, scalar U or `(U,layer)`, constant signed
+  scalar offsets and scalar/vector results up to the declared texel width
+  (at most four). Real coarse dU/dX and dU/dY select LOD through existing
+  1D helpers with zero shader bias, no shader MinLod clamp and a separate,
+  undifferentiated array layer. Compiled tests vary signed derivatives on
+  both screen axes to select mips 0/1/2, with layers, offsets, components,
+  helpers, partial waves, guards and repeats. Native SDK DXC plain/array
+  pixel shaders pass import/raising; real shader-clamped variants stay raw.
+  Non-fragment calls and malformed/dynamic/undefined/poison offsets remain
+  rejected, including normal/reference/AOT compute admission. DXIL 1D
+  loading, other ordinary shapes, explicit LOD and SPIR-V behavior are
+  unchanged; no bound/static descriptor materialization or owned-device
+  execution is enabled.
   FP32 DXIL `SampleGrad` now raises opcode 63 against LLVM's existing forward
   lowering for 1D/array, 2D/array, 3D and cube/array textures. Scalar/vector
   FP32 texels up to four components use default samplers. Coordinates/

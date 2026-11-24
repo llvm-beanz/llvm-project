@@ -168,7 +168,7 @@ The original compute-only baseline is no longer current:
   footprints, both derivative axes, layer/mip/texel/component values,
   divergent layers/bias/clamps and guarded partial waves. Malformed
   coordinates and dynamic/poison/undefined 1D offsets reject. Implicit DXIL
-  1D sampling and 1D loading remain unsupported.
+  1D sampling outside fragment stages and 1D loading remain unsupported.
   Biased 3D sampling passes FP32 (U, V, W), six coarse spatial derivatives
   and three constant signed i32 offsets to the existing shared 3D helper.
   Compiled tests isolate each coordinate's LOD contribution on both screen
@@ -187,9 +187,21 @@ The original compute-only baseline is no longer current:
   DXC bindless 1D/array shaders execute through normal/reference/AOT paths
   on one mip; runner YAML still prepares one mip. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison offsets
-  remain rejected. This does not enable implicit 1D sampling/loading,
-  change other ordinary shapes or materialize bound/static descriptors.
+  remain rejected. This does not change other ordinary shapes or
+  materialize bound/static descriptors.
   Owned D3D12 execution and W2/W3 closure remain open.
+  Heap-backed FP32 1D/array implicit `Sample` now executes in fragment
+  stages with default samplers, scalar U or `(U,layer)`, constant signed
+  scalar offsets and scalar/vector results up to the declared texel width
+  (at most four). Real coarse U derivatives select LOD with zero shader
+  bias; array layers remain undifferentiated. Compiled tests verify both
+  signed screen-axis derivatives, mips 0/1/2, layers, offsets, components,
+  helpers, partial waves, guards and repeats. Native SDK DXC plain/array
+  pixel shaders pass import/raising; real shader-clamped variants remain
+  unraised. Non-fragment calls and malformed/dynamic/undefined/poison offsets
+  remain rejected, including normal/reference/AOT compute admission.
+  DXIL 1D loading, other ordinary shapes and explicit LOD are unchanged.
+  No bound/static descriptor materialization or owned D3D12 execution is added.
   FP32 `SampleGrad` now has checked opcode-63 import/raising against LLVM's
   existing forward lowering for all seven sampled texture shapes. Scalar/
   vector FP32 texels up to four components use default samplers. Coordinates/

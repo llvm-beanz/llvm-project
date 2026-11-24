@@ -119,4 +119,4 @@ declare <4 x float> @llvm.dx.resource.samplelevel.v4f32.tdx.Texture_f32_0_0_0_1t
 declare float @llvm.dx.resource.samplelevel.f32.tdx.Texture_v4f32_0_0_0_1t.tdx.Sampler_1t.f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 1), target("dx.Sampler", 1), float, float, i32)
 declare float @llvm.dx.resource.sample.f32.tdx.Texture_v4f32_0_0_0_1t.tdx.Sampler_0t.f32.i32(target("dx.Texture", <4 x float>, 0, 0, 0, 1), target("dx.Sampler", 0), float, i32)
 attributes #0 = { "feme.shader.stage"="compute" }
-attributes #1 = { "feme.shader.stage"="fragment" }
+attributes #1 = { "feme.shader.stage"="compute" }

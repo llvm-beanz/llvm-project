@@ -27,6 +27,41 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) implicit 1D sampling CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `Texture1D::Sample` and `Texture1DArray::Sample` now
+execute in fragment stages with default samplers, scalar U or `(U,layer)`,
+constant signed scalar offsets and scalar/vector results up to the declared
+texel width (at most four). Real coarse dU/dX and dU/dY drive existing 1D
+LOD/sampling helpers with zero shader bias and no shader MinLod clamp,
+not an LOD-zero approximation. Array layers remain undifferentiated.
+
+Transform tests check exact derivative/offset forwarding, layers, narrowing,
+reflection, image-only signature growth, handle cleanup and idempotence.
+Missing layers, dynamic/poison offsets, out-of-texel-width results and
+compute calls stay untouched; admission tests reject dynamic/undefined/
+poison offsets and non-fragment calls. Compiled fragment tests independently
+vary positive/negative U derivatives on both screen axes to select mips
+0/1/2, with signed offsets, independent layers, all four result widths,
+helpers, partial waves, guards and repeats. Native SDK DXC plain/array
+pixel shaders pass import/raising; real shader-clamped variants remain raw.
+Native import is distinct from canonical CPU execution and owned D3D12
+execution. Normal/reference/AOT compute admission rejects even valid
+constant-offset implicit 1D calls.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 964 in 41.53 seconds; full FeMe LIT
+passes 4,172, skips 15 and marks 10 unsupported, with zero failures among
+4,197 discovered tests in 157.87 seconds. Five new tests add five passes;
+timings are not controlled speedups. DXIL 1D loading, other ordinary shapes,
+explicit LOD, biased/comparison/gradient execution, SPIR-V behavior,
+artifact ABI 8 and argument layouts remain unchanged.
+
+Broader sampling conformance, bound/static descriptor materialization and
+owned D3D12 execution remain open; owned `CreateDevice` remains `E_NOTIMPL`.
+W2(a)/W2(b)/W3(b) remain open. No new adapter-matrix or external Vulkan CTS
+result is claimed.
+
 ## W2(a)/W3(b) explicit 1D LOD CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 `Texture1D::SampleLevel` and `Texture1DArray::SampleLevel`

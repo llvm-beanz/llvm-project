@@ -697,10 +697,13 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     bool IsGrad = ID == Intrinsic::dx_resource_samplegrad ||
                   ID == Intrinsic::dx_resource_samplegrad_clamp;
     bool IsLevel1D = isSupportedDXILSampleLevel1D(*CI);
+    bool IsImplicit1D = isSupportedDXILSample1D(*CI);
     if (ID == Intrinsic::dx_resource_samplebias ||
-        ID == Intrinsic::dx_resource_samplebias_clamp || IsGrad || IsLevel1D) {
-      if (!IsLevel1D && !(IsGrad ? isSupportedDXILSampleGrad(*CI)
-                                 : isSupportedDXILSampleBias(*CI)))
+        ID == Intrinsic::dx_resource_samplebias_clamp || IsGrad || IsLevel1D ||
+        IsImplicit1D) {
+      if (!IsLevel1D && !IsImplicit1D &&
+          !(IsGrad ? isSupportedDXILSampleGrad(*CI)
+                   : isSupportedDXILSampleBias(*CI)))
         continue;
       IRBuilder<> Builder(CI);
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
@@ -709,7 +712,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *U = Coord->getType()->isFloatTy()
                      ? Coord
                      : Builder.CreateExtractElement(Coord, uint64_t{0});
-      unsigned OffsetIdx = IsGrad ? 5 : 4;
+      unsigned OffsetIdx = IsImplicit1D ? 3 : IsGrad ? 5 : 4;
       Value *Offset = CI->getArgOperand(OffsetIdx);
       bool HasClamp = ID == Intrinsic::dx_resource_samplebias_clamp ||
                       ID == Intrinsic::dx_resource_samplegrad_clamp;
@@ -718,7 +721,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                : ConstantFP::getInfinity(Builder.getFloatTy(),
                                                          /*Negative=*/true);
       Value *Zero = ConstantFP::get(Builder.getFloatTy(), 0.0);
-      Value *Bias = IsGrad || IsLevel1D ? Zero : CI->getArgOperand(3);
+      Value *Bias =
+          IsGrad || IsLevel1D || IsImplicit1D ? Zero : CI->getArgOperand(3);
       auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
       Value *Loaded;
       if (Kind == dxil::ResourceKind::Texture1D ||
@@ -1152,7 +1156,7 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
-    if (isSupportedDXILSampleLevel1D(*CI))
+    if (isSupportedDXILSampleLevel1D(*CI) || isSupportedDXILSample1D(*CI))
       return true;
     if (ID == Intrinsic::dx_resource_samplegrad ||
         ID == Intrinsic::dx_resource_samplegrad_clamp) {
@@ -1326,16 +1330,18 @@ static bool isSupportedDXILFloatingSample(const CallInst &CI,
   Intrinsic::ID ID = getIntrinsicID(&CI);
   bool IsGrad = BaseID == Intrinsic::dx_resource_samplegrad;
   bool IsLevel = BaseID == Intrinsic::dx_resource_samplelevel;
-  bool HasClamp =
-      !IsLevel && ID == (IsGrad ? Intrinsic::dx_resource_samplegrad_clamp
+  bool IsImplicit = BaseID == Intrinsic::dx_resource_sample;
+  bool HasClamp = !IsLevel && !IsImplicit &&
+                  ID == (IsGrad ? Intrinsic::dx_resource_samplegrad_clamp
                                 : Intrinsic::dx_resource_samplebias_clamp);
-  unsigned OffsetIdx = IsGrad ? 5 : 4;
+  unsigned OffsetIdx = IsImplicit ? 3 : IsGrad ? 5 : 4;
   if ((ID != BaseID && !HasClamp) ||
       CI.arg_size() != OffsetIdx + (HasClamp ? 2u : 1u) ||
       (HasClamp && !CI.getArgOperand(OffsetIdx + 1)->getType()->isFloatTy()) ||
-      (!IsGrad && (!CI.getArgOperand(3)->getType()->isFloatTy() ||
-                   (!IsLevel && feme::getShaderStage(*CI.getFunction()) !=
-                                    feme::ShaderStage::Fragment))))
+      (!IsGrad && !IsImplicit &&
+       !CI.getArgOperand(3)->getType()->isFloatTy()) ||
+      (!IsGrad && !IsLevel &&
+       feme::getShaderStage(*CI.getFunction()) != feme::ShaderStage::Fragment))
     return false;
   auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
   auto Sampler = classifySamplerHandle(CI.getArgOperand(1));
@@ -1385,7 +1391,7 @@ static bool isSupportedDXILFloatingSample(const CallInst &CI,
   }
   bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
               Kind == dxil::ResourceKind::Texture1DArray;
-  if (IsLevel && !Is1D)
+  if ((IsLevel || IsImplicit) && !Is1D)
     return false;
   bool IsCube = Kind == dxil::ResourceKind::TextureCube ||
                 Kind == dxil::ResourceKind::TextureCubeArray;
@@ -1431,6 +1437,10 @@ bool feme::cpu::isSupportedDXILSampleGrad(const CallInst &CI) {
 
 bool feme::cpu::isSupportedDXILSampleLevel1D(const CallInst &CI) {
   return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_samplelevel);
+}
+
+bool feme::cpu::isSupportedDXILSample1D(const CallInst &CI) {
+  return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_sample);
 }
 
 static bool isSupportedDXILComparisonSample(const CallInst &CI) {

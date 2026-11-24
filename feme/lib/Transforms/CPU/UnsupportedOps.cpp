@@ -57,6 +57,7 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
 
     switch (F.getIntrinsicID()) {
+    case Intrinsic::dx_resource_sample:
     case Intrinsic::dx_resource_samplelevel:
       for (const User *U : F.users()) {
         const auto *CI = dyn_cast<CallInst>(U);
@@ -66,13 +67,18 @@ Error checkSupportedRaisedOps(const Module &M) {
         if (Ty &&
             (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
              Ty->getDimension() == dxil::ResourceKind::Texture1DArray) &&
-            !isSupportedDXILSampleLevel1D(*CI))
+            !(F.getIntrinsicID() == Intrinsic::dx_resource_sample
+                  ? isSupportedDXILSample1D(*CI)
+                  : isSupportedDXILSampleLevel1D(*CI)))
           return createStringError(
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed FP32 "
-              "1D/array explicit-LOD sampling with a default sampler, "
+              "1D/array %s sampling with a default sampler, "
               "shape-matched coordinates and constant signed scalar offsets",
-              F.getName().str().c_str());
+              F.getName().str().c_str(),
+              F.getIntrinsicID() == Intrinsic::dx_resource_sample
+                  ? "fragment implicit"
+                  : "explicit-LOD");
       }
       continue;
     case Intrinsic::dx_resource_samplebias:

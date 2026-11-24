@@ -166,7 +166,8 @@ coverage" in [../Design.md](../Design.md).
   Compiled tests check mip-0/mip-1 footprints, both derivative axes,
   layer/mip/offset/component selection, divergent layers/bias/clamps and
   guarded partial waves. Malformed coordinates and dynamic/poison/undefined
-  1D offsets reject. Implicit DXIL 1D sampling and 1D loading remain unsupported.
+  1D offsets reject. Implicit DXIL 1D sampling outside fragment stages and
+  1D loading remain unsupported.
   Biased 3D sampling uses FP32 (U, V, W), six coarse spatial derivatives and
   three constant signed i32 offsets. Compiled tests isolate U/V/W LOD on
   both screen axes, signed XYZ offsets, biased/clamped mips and components
@@ -181,9 +182,20 @@ coverage" in [../Design.md](../Design.md).
   derivatives/bias and unchanged sampler LOD behavior. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison offsets
   remain unsupported. Native SDK DXC bindless 1D/array shaders execute
-  through normal/reference/AOT paths; this does not enable implicit 1D
-  sampling/loading, change other ordinary shapes, materialize bound/static
+  through normal/reference/AOT paths; this does not change other ordinary
+  shapes, materialize bound/static
   descriptors or establish owned D3D12 rendering.
+  Heap-backed FP32 1D/array implicit `Sample` now lowers in fragment stages
+  with default samplers, scalar U or `(U,layer)`, constant signed scalar
+  offsets and scalar/vector results up to the declared texel width (at
+  most four). Real coarse U derivatives drive LOD with zero shader bias;
+  array layers remain undifferentiated. Native SDK DXC plain/array pixel
+  shaders pass import/raising; real shader-clamped variants remain unraised.
+  Non-fragment calls and malformed/dynamic/undefined/poison offsets remain
+  unsupported; normal/reference/AOT compute admission rejects even valid
+  constant-offset calls. This does not enable DXIL 1D loading, change
+  other ordinary shapes or materialize bound/static descriptors.
+  Owned D3D12 rendering remains open.
   FP32 `SampleGrad` now has checked opcode-63 import/raising for 1D/array,
   2D/array, 3D and cube/array textures, with scalar/vector FP32 texels up to
   four components and default samplers. Coordinates/layers, spatial gradients,

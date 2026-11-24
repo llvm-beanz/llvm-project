@@ -2649,8 +2649,8 @@ helpers preserve these shapes without synthesizing unused vector elements.
 Canonical and actual SDK DXC coverage checks point/linear comparison,
 signed offsets, divergent coordinates/layers, partial waves and guarded
 repeated normal/reference/AOT dispatches. Dynamic scalar offsets fail
-admission. Implicit DXIL 1D sampling and 1D loading remain unsupported;
-bounded `SampleLevel` execution is described below.
+admission. Implicit DXIL 1D sampling outside fragment stages and 1D loading
+remain unsupported; bounded `Sample`/`SampleLevel` execution is described below.
 Implicit fragment 1D/array comparison also reuses these helpers, with real
 coarse U derivatives, implicit LOD and the optional shader MinLod clamp.
 Only U is differentiated, never the array layer. A combined plain/array
@@ -2732,7 +2732,7 @@ mip-0/mip-1 footprints, both derivative axes, distinct layer/mip/texel/
 component values, divergent layers/bias/clamps, scalar/vector results,
 helpers, partial waves, guards, masks and repeated invocation. Malformed
 coordinates and dynamic/poison/undefined 1D offsets reject. Implicit DXIL
-1D sampling and 1D loading remain unsupported.
+1D sampling outside fragment stages and 1D loading remain unsupported.
 3D sampling uses `createSample3D`, passing FP32 (U, V, W), six coarse
 spatial derivatives, bias, three constant signed i32 offsets and optional
 shader MinLod clamps. Existing 2D derivative synthesis supplies U/V pairs;
@@ -2776,9 +2776,33 @@ mips, independent layers and sampler minimum/maximum LOD clamps with
 repeated prepared invocations. Native SDK DXC bindless 1D/array shaders
 execute through normal/reference/AOT paths on one mip; runner YAML still
 prepares one mip. This is CPU execution, not owned D3D12 execution or
-bound/static descriptor materialization. Implicit DXIL 1D sampling/loading,
-other ordinary sampling/loading shapes, biased/comparison/gradient
+bound/static descriptor materialization. Other ordinary sampling/loading
+shapes, biased/comparison/gradient
 execution, SPIR-V behavior, artifact ABI 8 and argument layouts are unchanged.
+
+Heap-backed FP32 `Texture1D::Sample` and `Texture1DArray::Sample` now execute
+through the same 1D helpers in fragment stages. Shared admission/lowering
+requires default samplers, scalar U or `(U,layer)`, constant signed scalar
+offsets and scalar/vector results up to the declared texel width (at most
+four). `getOrSynthesizeSample1DDerivatives` supplies real coarse dU/dX and
+dU/dY; the layer is excluded. Calls pass zero shader bias,
+`UseExplicitLod=false` and a negative-infinity shader MinLod clamp, not an
+LOD-zero approximation.
+
+Transform tests verify exact U derivative/offset forwarding, separate
+layers, narrowing, reflection, image-only signature growth, handle cleanup
+and idempotence. Missing layers, dynamic/poison offsets and out-of-texel-width
+results stay untouched. Admission tests reject dynamic/undefined/poison
+offsets and non-fragment calls. Compiled fragment tests independently vary
+positive/negative U derivatives on both screen axes to select mips 0/1/2,
+with signed offsets, layers, all four result widths, helpers, partial
+waves, guards and repeats. Native SDK DXC plain/array pixel shaders pass
+import/raising; real shader-clamped variants remain unraised.
+Normal/reference/AOT compute admission remains rejected. DXIL 1D loading,
+other ordinary shapes, explicit LOD, biased/comparison/gradient execution,
+SPIR-V behavior, artifact ABI 8 and argument layouts are unchanged.
+Native import, canonical CPU execution and owned D3D12 execution remain
+distinct; bound/static descriptor materialization is not added.
 
 FP32 DXIL `SampleGrad` now has checked opcode-63 import/raising against
 LLVM's existing forward lowering, with bounded 1D/2D/3D/cube (including array)
