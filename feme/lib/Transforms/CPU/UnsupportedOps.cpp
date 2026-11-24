@@ -67,10 +67,9 @@ Error checkSupportedRaisedOps(const Module &M) {
         if (Ty &&
             (Ty->getDimension() == dxil::ResourceKind::Texture1D ||
              Ty->getDimension() == dxil::ResourceKind::Texture1DArray ||
-             (F.getIntrinsicID() == Intrinsic::dx_resource_samplelevel &&
-              Ty->getDimension() == dxil::ResourceKind::Texture3D)) &&
+             Ty->getDimension() == dxil::ResourceKind::Texture3D) &&
             !(F.getIntrinsicID() == Intrinsic::dx_resource_sample
-                  ? isSupportedDXILSample1D(*CI)
+                  ? isSupportedDXILSample(*CI)
                   : isSupportedDXILSampleLevel(*CI)))
           return createStringError(
               inconvertibleErrorCode(),

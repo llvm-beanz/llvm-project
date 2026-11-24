@@ -54,8 +54,9 @@
 // offsets/clamps survive.
 // FP32 1D/array and 3D SampleLevel preserve explicit LOD and constant signed
 // spatial offsets in any stage with zero derivatives/bias and separate layers.
-// Fragment-only FP32 1D/array Sample uses coarse U derivatives and constant
-// signed scalar offsets with zero bias; the array layer is not differentiated.
+// Fragment-only FP32 1D/array and 3D Sample use coarse spatial derivatives and
+// constant signed spatial offsets with zero bias; layers are not
+// differentiated.
 //
 //===----------------------------------------------------------------------===//
 
@@ -89,10 +90,11 @@ bool isSupportedDXILSampleGrad(const llvm::CallInst &CI);
 /// ordinary sampling/loading eligibility is unchanged.
 bool isSupportedDXILSampleLevel(const llvm::CallInst &CI);
 
-/// Tests heap-backed FP32 1D/array implicit sampling in a fragment stage with
-/// a default sampler, shape-matched coordinates, scalar/vector results and
-/// constant signed scalar offsets. Other ordinary shapes/loading are unchanged.
-bool isSupportedDXILSample1D(const llvm::CallInst &CI);
+/// Tests heap-backed FP32 1D/array or 3D implicit sampling in a fragment stage
+/// with a default sampler, shape-matched coordinates, scalar/vector results and
+/// constant signed spatial offsets (scalar for 1D, three components for 3D).
+/// Other ordinary shapes/loading are unchanged.
+bool isSupportedDXILSample(const llvm::CallInst &CI);
 
 /// Tests the scalar FP32 heap-backed 1D/2D/cube comparison forms supported by
 /// both early CPU admission and resource lowering.

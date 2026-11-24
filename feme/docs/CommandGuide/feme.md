@@ -173,8 +173,8 @@ coverage" in [../Design.md](../Design.md).
   both screen axes, signed XYZ offsets, biased/clamped mips and components
   with guarded partial waves. Malformed coordinates/offset widths and
   dynamic or partially undefined offsets reject. Implicit DXIL 3D sampling
-  and 3D loading remain unsupported; seven-shape biased execution is not broader sampling
-  conformance.
+  outside fragment stages and 3D loading remain unsupported; seven-shape
+  biased execution is not broader sampling conformance.
   Heap-backed FP32 1D/array `SampleLevel` now compiles in any stage, including
   native AOT, with default samplers, scalar U or `(U,layer)` coordinates,
   constant signed scalar offsets and scalar/vector results up to the
@@ -193,9 +193,20 @@ coverage" in [../Design.md](../Design.md).
   DXC bindless 3D shaders execute through normal/reference/AOT paths.
   Malformed shapes, non-heap handles, comparison samplers and dynamic/
   undefined/poison or partially undefined offsets remain unsupported.
-  This does not enable implicit 3D sampling/loading, change other ordinary
-  shapes, materialize bound/static descriptors or establish owned-device
-  execution.
+  This does not enable non-fragment implicit 3D sampling or 3D loading,
+  change other ordinary shapes, materialize bound/static descriptors or
+  establish owned-device execution.
+  Heap-backed FP32 3D implicit `Sample` now lowers in fragment stages with
+  default samplers, three-component U/V/W coordinates, constant signed XYZ
+  offsets and scalar/vector results up to the declared texel width (at most
+  four). Six real coarse spatial derivatives drive LOD with zero shader
+  bias and no shader MinLod clamp. Native SDK DXC pixel shaders pass import/
+  raising; real shader-clamped variants remain unraised. Non-fragment
+  calls and malformed/dynamic/undefined/poison offsets stay unsupported;
+  normal/reference/AOT compute admission rejects even valid constant-offset
+  calls. DXIL 3D loading, other sampling, SPIR-V, artifact ABI 8 and argument
+  layouts are unchanged. No bound/static descriptors or owned D3D12
+  execution are added.
   Heap-backed FP32 1D/array implicit `Sample` now lowers in fragment stages
   with default samplers, scalar U or `(U,layer)`, constant signed scalar
   offsets and scalar/vector results up to the declared texel width (at

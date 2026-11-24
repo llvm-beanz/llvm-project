@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) implicit 3D sampling CPU regression scope (2026-11-23)
+
+The [implicit 3D sampling follow-up](W0WindowsIntegrationProbe.md#w2aw3b-implicit-3d-sampling-cpu-execution-vm-2026-11-23)
+adds heap-backed FP32 3D fragment `Sample` execution with default samplers,
+three-component U/V/W coordinates, constant signed XYZ offsets and
+scalar/vector results up to the declared texel width (at most four).
+Six real coarse spatial derivatives drive LOD with zero shader bias and
+no shader MinLod clamp; existing sampler-owned LOD behavior is unchanged.
+
+Compiled fragment tests isolate positive/negative U/V/W derivatives on
+both screen axes to select mips 0/1/2, with signed XYZ offsets, all four
+result widths, helpers, partial waves, guards, masks and repeats.
+Native SDK DXC pixel shaders pass import/raising; real shader-clamped
+variants remain unraised. Native import remains distinct from canonical
+CPU execution. Normal/reference/AOT compute admission rejects even valid
+constant-offset implicit 3D calls. Malformed shapes, non-heap handles,
+comparison samplers and dynamic/undefined/poison or partially undefined
+offsets remain unsupported.
+
+Focused CPU/DXIL/sampling LIT passes 975; full FeMe LIT passes 4,183 with
+15 skipped, 10 unsupported and zero failures among 4,208 discovered tests.
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+
+No new Vulkan CTS run, adapter-matrix result, bound/static descriptor
+materialization or owned D3D12 execution is claimed. Non-fragment implicit
+3D sampling, real shader MinLod clamps and 3D loading remain unsupported.
+Existing 1D execution, explicit LOD, other ordinary shapes, biased/
+comparison/gradient execution, SPIR-V behavior, artifact ABI 8 and argument
+layouts are unchanged. Broader sampling conformance and W2(a)/W2(b)/W3(b)
+remain open; owned `CreateDevice` remains `E_NOTIMPL`.
+
 ## W2(a)/W3(b) explicit 3D LOD CPU regression scope (2026-11-23)
 
 The [explicit 3D LOD follow-up](W0WindowsIntegrationProbe.md#w2aw3b-explicit-3d-lod-cpu-execution-vm-2026-11-23)

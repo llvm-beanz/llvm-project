@@ -68,7 +68,7 @@ define float @wrong_offset(<2 x i32> %offset) #0 {
   %r = call float @llvm.dx.resource.samplebias.f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4) %t, target("dx.Sampler", 0) %s, <3 x float> zeroinitializer, float 1.0, <2 x i32> %offset)
   ret float %r
 }
-define <4 x float> @ordinary_3d(<3 x float> %coord) #0 {
+define <4 x float> @ordinary_3d(<3 x float> %coord) #1 {
   %t = call target("dx.Texture", <4 x float>, 0, 0, 0, 4) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_0_4t(i32 0)
   %s = call target("dx.Sampler", 0) @llvm.dx.resource.handlefromheap.tdx.Sampler_0t(i32 0)
   %r = call <4 x float> @llvm.dx.resource.sample.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4) %t, target("dx.Sampler", 0) %s, <3 x float> %coord, <3 x i32> zeroinitializer)
@@ -85,3 +85,4 @@ declare float @llvm.dx.resource.samplebias.f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sa
 declare float @llvm.dx.resource.samplebias.f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v2i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), target("dx.Sampler", 0), <3 x float>, float, <2 x i32>)
 declare <4 x float> @llvm.dx.resource.sample.v4f32.tdx.Texture_v4f32_0_0_0_4t.tdx.Sampler_0t.v3f32.v3i32(target("dx.Texture", <4 x float>, 0, 0, 0, 4), target("dx.Sampler", 0), <3 x float>, <3 x i32>)
 attributes #0 = { "feme.shader.stage"="fragment" }
+attributes #1 = { "feme.shader.stage"="compute" }

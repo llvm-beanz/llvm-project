@@ -149,8 +149,8 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   with guarded partial waves. Malformed coordinates/offset widths and
   dynamic or partially undefined offsets reject. This compute runner still
   rejects plain/clamped 3D bias in normal/reference/AOT dispatch. Implicit
-  DXIL 3D sampling and 3D loading remain unsupported; no descriptor materialization or
-  owned-device execution is enabled.
+  DXIL 3D sampling outside fragment stages and 3D loading remain unsupported;
+  no descriptor materialization or owned-device execution is enabled.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage through
   normal/reference/AOT paths with default samplers, scalar U or `(U,layer)`
   coordinates, constant signed scalar offsets and scalar/vector results
@@ -174,9 +174,21 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   components, divergent coordinates/LODs, partial waves, guards and repeats
   on one mip. Runner image YAML still prepares one mip. Malformed shapes,
   non-heap handles, comparison samplers and dynamic/undefined/poison or
-  partially undefined offsets remain rejected. Implicit 3D sampling/loading
-  and other ordinary shapes are unchanged; no bound/static descriptor
+  partially undefined offsets remain rejected. Non-fragment implicit 3D
+  sampling, 3D loading and other ordinary shapes are unchanged; no bound/static descriptor
   materialization or owned D3D12 execution is enabled.
+  Heap-backed FP32 3D implicit `Sample` now has fragment-stage CPU lowering
+  with default samplers, three-component U/V/W coordinates, constant signed
+  XYZ offsets and scalar/vector results up to the declared texel width (at
+  most four). Six real coarse spatial derivatives drive LOD with zero bias
+  and no shader MinLod clamp. Compiled fragment tests isolate signed U/V/W
+  derivatives on both screen axes for mips 0/1/2, offsets, all four result
+  widths, helpers, partial waves, guards and repeats. Native SDK DXC pixel
+  shaders pass import/raising; real shader-clamped variants remain unraised.
+  This compute runner still rejects implicit 3D sampling in normal,
+  reference and AOT admission. DXIL 3D loading, other sampling, SPIR-V,
+  artifact ABI 8 and argument layouts remain unchanged. No bound/static
+  descriptor materialization or owned D3D12 execution is added.
   Heap-backed FP32 1D/array implicit `Sample` now has fragment-stage CPU
   lowering with default samplers, scalar U or `(U,layer)`, constant signed
   scalar offsets and scalar/vector results up to the declared texel width

@@ -1604,9 +1604,10 @@ constant signed i32 offsets through the existing `createSample3D` helper.
 Compiled tests isolate each coordinate's contribution to LOD on both screen
 axes, signed XYZ offsets, biased/clamped mip selection, result components
 and guarded partial waves. Malformed coordinates/offset widths and dynamic
-or partially undefined offsets reject. Implicit DXIL 3D sampling and 3D
-loading remain unsupported. This completes bounded fragment biased execution for the seven
-raised texture shapes, not broader sampling conformance.
+or partially undefined offsets reject. Implicit DXIL 3D sampling outside
+fragment stages and 3D loading remain unsupported. This completes bounded
+fragment biased execution for the seven raised texture shapes, not broader
+sampling conformance.
 
 Heap-backed FP32 `Texture1D::SampleLevel` and `Texture1DArray::SampleLevel`
 now execute in any stage with default samplers, scalar U or `(U,layer)`
@@ -1635,9 +1636,27 @@ guards and repeats. Native SDK DXC bindless 3D shaders execute through
 normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
 Malformed shapes, non-heap handles, comparison samplers and dynamic/
 undefined/poison or partially undefined offsets remain unsupported.
-Implicit 3D sampling/loading, other ordinary shapes, existing 1D execution,
-biased/comparison/gradient execution and SPIR-V behavior are unchanged.
+Non-fragment implicit 3D sampling, 3D loading, other ordinary shapes,
+existing 1D execution, biased/comparison/gradient execution and SPIR-V
+behavior are unchanged.
 No bound/static descriptor materialization or owned D3D12 execution is added.
+
+Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
+default samplers, three-component U/V/W coordinates, constant signed XYZ
+offsets and scalar/vector results up to the declared texel width (at most
+four). All six real coarse spatial derivatives reach the volume helper
+with zero shader bias, derivative-driven LOD and no shader MinLod clamp.
+Compiled fragment tests isolate positive/negative U/V/W derivatives on
+both screen axes to select mips 0/1/2, with signed offsets, all four result
+widths, helper lanes, partial waves, guards and repeated prepared batches.
+Native SDK DXC pixel shaders pass import/raising; real shader-clamped
+variants remain unraised. Malformed shapes, non-heap handles, comparison
+samplers and dynamic/undefined/poison or partially undefined offsets remain
+unsupported. Compute, vertex and unannotated calls stay rejected, including
+normal/reference/AOT compute admission. DXIL 3D loading, existing 1D
+execution, explicit LOD, biased/comparison/gradient execution, SPIR-V
+behavior, artifact ABI 8 and argument layouts are unchanged. This adds no
+bound/static descriptor materialization or owned D3D12 execution.
 
 Heap-backed FP32 `Texture1D::Sample` and `Texture1DArray::Sample` now execute
 in fragment stages with default samplers, scalar U or `(U,layer)` coordinates,

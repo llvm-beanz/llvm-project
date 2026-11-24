@@ -1,0 +1,26 @@
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /Fo %t/plain.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T ps_6_0 /E main /D CLAMP /Fo %t/clamp.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/plain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s
+# RUN: feme-translate --import-dxil %t/clamp.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=CLAMP
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Native import/raising only; bound/static descriptors remain unsupported.
+# CHECK: call target("dx.Texture", <4 x float>, 0, 0, 1, 4)
+# CHECK: call <4 x float> @llvm.dx.resource.sample.v4f32
+# CHECK-SAME: <3 x i32> <i32 1, i32 -2, i32 1>)
+# CHECK-NOT: call %dx.types.ResRet.f32 @dx.op.sample
+# CLAMP: call %dx.types.ResRet.f32 @dx.op.sample.f32(i32 60
+# CLAMP-NOT: call <4 x float> @llvm.dx.resource.sample
+#--- shader.hlsl
+Texture3D<float4> Input : register(t0);
+SamplerState S : register(s0);
+float4 main(float3 uv : TEXCOORD0) : SV_Target {
+#ifdef CLAMP
+  return Input.Sample(S, uv, int3(1, -2, 1), uv.x);
+#else
+  return Input.Sample(S, uv, int3(1, -2, 1));
+#endif
+}

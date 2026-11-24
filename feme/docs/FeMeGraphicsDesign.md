@@ -3141,9 +3141,10 @@ documented reason rather than an oversight:
   Compiled tests isolate each coordinate's LOD contribution on both screen
   axes, signed XYZ offsets, biased/clamped mips, scalar/vector results and
   guarded partial waves. Malformed coordinates/offset widths and dynamic or
-  partially undefined offsets reject. Implicit DXIL 3D sampling and 3D
-  loading remain unsupported. All seven raised texture shapes have bounded fragment biased
-  execution; broader sampling conformance remains open.
+  partially undefined offsets reject. Implicit DXIL 3D sampling outside
+  fragment stages and 3D loading remain unsupported. All seven raised
+  texture shapes have bounded fragment biased execution; broader sampling
+  conformance remains open.
   Heap-backed FP32 1D/array `SampleLevel` now executes in any stage with
   default samplers, scalar U or `(U,layer)` coordinates, constant signed
   scalar offsets and scalar/vector results up to the declared texel width
@@ -3169,9 +3170,22 @@ documented reason rather than an oversight:
   normal/reference/AOT paths on one mip; runner YAML still prepares one mip.
   Malformed shapes, non-heap handles, comparison samplers and dynamic/
   undefined/poison or partially undefined offsets remain unsupported.
-  Implicit DXIL 3D sampling/loading, other ordinary shapes and SPIR-V
-  behavior are unchanged. No bound/static descriptor materialization or
+  Non-fragment implicit DXIL 3D sampling, 3D loading, other ordinary shapes
+  and SPIR-V behavior are unchanged. No bound/static descriptor materialization or
   owned-device execution is enabled.
+  Heap-backed FP32 3D implicit `Sample` now executes in fragment stages
+  with default samplers, three-component U/V/W coordinates, constant signed
+  XYZ offsets and scalar/vector results up to the declared texel width (at
+  most four). Six real coarse spatial derivatives drive LOD through the
+  volume helper with zero shader bias and no shader MinLod clamp. Compiled
+  tests isolate signed U/V/W derivatives on both screen axes for mips
+  0/1/2, signed offsets, all four result widths, helpers, partial waves,
+  guards and repeats. Native SDK DXC pixel shaders pass import/raising;
+  real shader-clamped variants stay raw. Non-fragment calls and malformed/
+  dynamic/undefined/poison offsets remain rejected, including normal/
+  reference/AOT compute admission. DXIL 3D loading, other sampling, SPIR-V,
+  artifact ABI 8 and argument layouts are unchanged; bound/static
+  descriptors and owned D3D12 execution remain open.
   Heap-backed FP32 1D/array implicit `Sample` now executes in fragment
   stages with default samplers, scalar U or `(U,layer)`, constant signed
   scalar offsets and scalar/vector results up to the declared texel width

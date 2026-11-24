@@ -27,6 +27,47 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) implicit 3D sampling CPU execution (VM, 2026-11-23)
+
+Heap-backed FP32 `Texture3D::Sample` now executes in fragment stages with
+default samplers, three-component U/V/W coordinates, constant signed XYZ
+offsets and scalar/vector results up to the declared texel width (at most
+four). All six real coarse spatial derivatives drive existing volume LOD
+selection with zero shader bias and no shader MinLod clamp, not an
+LOD-zero approximation. Sampler-owned LOD behavior remains unchanged.
+
+Transform tests check exact derivative/offset forwarding, narrowing,
+reflection, image-only signature growth, handle cleanup and idempotence.
+Missing W, short/dynamic/partially poison offsets, comparison samplers,
+non-heap handles and out-of-texel-width results stay untouched. Admission
+rejects dynamic, whole undefined/poison and every individually undefined/
+poison XYZ component, plus compute, vertex and unannotated calls.
+Earlier 3D bias/level fixtures retain non-fragment implicit rejection.
+
+Compiled fragment tests independently vary signed U/V/W derivatives on
+both screen axes to select mips 0/1/2, with signed XYZ offsets, all four
+result widths, helper-only lanes, wave sizes 4/8, one/three quads, partial
+final waves, output guards, masks and repeated prepared batches. Native
+SDK DXC pixel shaders pass import/raising; real shader-clamped variants
+remain unraised. This import evidence is distinct from canonical CPU
+execution and does not materialize bound/static descriptors.
+Normal/reference/AOT compute admission rejects even valid constant-offset
+implicit 3D calls.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes.
+Focused CPU/DXIL/sampling LIT passes 975 in 67.96 seconds; full FeMe LIT
+passes 4,183, skips 15 and marks 10 unsupported, with zero failures among
+4,208 discovered tests in 297.78 seconds. Five new tests add five passes;
+timings are not controlled speedups.
+
+Non-fragment implicit 3D sampling, real shader MinLod clamps and 3D loading
+remain unsupported. Existing 1D execution, explicit LOD, other ordinary
+shapes, biased/comparison/gradient execution, SPIR-V behavior, artifact
+ABI 8 and argument layouts remain unchanged. Broader sampling conformance,
+bound/static descriptors and owned D3D12 execution remain open;
+`CreateDevice` remains `E_NOTIMPL`. W2(a)/W2(b)/W3(b) are not closed.
+No new adapter-matrix or external Vulkan CTS result is claimed.
+
 ## W2(a)/W3(b) explicit 3D LOD CPU execution (VM, 2026-11-23)
 
 Heap-backed FP32 `Texture3D::SampleLevel` now executes with default
