@@ -136369,3 +136369,75 @@ no FeMe/LLVM library dependency), and documentation changed. No `feme/lib`,
    not re-litigated here.
 4. Backlog, untouched again this session: `ENV6(c)(3)`/`ENV6(d)` CTS triage,
    `ENV7(g)` audit, full Vulkan CTS re-measure.
+
+# 2026-11-25: Floating-point dimensions and conversion boundaries
+
+## Engineering decisions and scope
+
+- Continued W2(a)/W2(b) with a bounded test-coverage increment. Existing
+  integer dimension lowering already supports the tested float-output
+  overloads; no production compiler/runtime changes were necessary.
+- SDK 26100 DXC emits `sitofp`, not `uitofp`, for the tested native HLSL
+  float-output overloads. The initial unsigned FileCheck expectation failed;
+  the fixture was corrected to preserve the native IR, not change semantics.
+- Small native extents cannot prove conversion signedness. Added separate
+  portable scalar/vector conversion checks and a metadata-only runtime JIT
+  case preserving raw width bits and checking signed/unsigned FP32 bits at
+  seven values spanning rounding near 2^24 and signed-i32 boundaries.
+  Synthetic large widths are not legal native D3D resource-size evidence.
+- New fixtures retain the textual oracle pattern. Normalize new files to LF
+  before staging; the new portable fixture initially tripped the CRLF
+  whitespace check and was normalized before its successful commit.
+
+## Persistent tested increments
+
+1. `dc2087eb27ed` -- native float-output texture dimensions: plain 2D
+   base/explicit-mip, cube-array mip/cube/level, and MS-array extent/layer/
+   sample queries. Waves 4/8, reference and ARM64 AOT each repeat twice,
+   checking every word, divergent unbound zeros, skipped stores and guards.
+   Each case compares 436 image bytes plus 268 output bytes, totaling 704.
+2. `69063c66302d` -- portable repeated-lowering conversion checks and the
+   metadata-only JIT precision/sign-boundary case. Unreadable texel data,
+   unbound data and out-of-range indexing exercise metadata-only behavior.
+3. `dedd0bfde4ab` -- roadmap/support evidence and actionable native conversion
+   testing guidance. Historical measurements remain intact; no broad
+   milestone or conformance closure is claimed.
+4. This engineering-notes update is committed separately, last, as requested.
+
+## Verification and limitations
+
+- Cached ARM64 builds use assertions, sccache, disabled PCH and `-j2`.
+  The existing CMake sccache branch explicitly disables PCH by default.
+- The two new LIT fixtures pass together in 1.39 seconds. The first native
+  fixture also passed independently in 0.98 seconds after its expectation
+  correction. Clang-format reports no remaining C++ changes; staged
+  whitespace checks pass after new-file normalization.
+- The filtered `check-feme` target builds its declared dependencies,
+  including tools, fuzzers, unit binaries and Vulkan libraries, then passes
+  69 FeMe LIT in 38.07 seconds. The filter selects dimensions, related
+  heap loads/sampling, DXIL raising, namespaces and native typed loads.
+  The LLVM dimension forward-lowering fixture passes separately in 0.98
+  seconds. Nineteen runtime dimension units pass in 4.974 seconds.
+- `vulkaninfo --summary` reports missing ICD registry manifests and DZN
+  initialization failure, exiting `-1073741819`. No FeMe Vulkan device is
+  confirmed. No Vulkan execution, registry/ICD/driver modification or new
+  CTS result is attempted or claimed. Building dependencies is not execution
+  evidence, and the filtered gate is not a full-suite result.
+- Owned D3D12 device/resources/queues/PSOs remain absent. `CreateDevice`
+  remains `E_NOTIMPL`; W2(a), W2(b) and W3(b) remain open. ABI 8, argument
+  layouts, advertisements and existing execution policies are unchanged.
+- The unrelated deletion of `agent_prompt.md` is preserved and not staged.
+
+## Suggested next steps
+
+1. Investigate a bounded native sample-position slice: pin DXIL field/operand
+   semantics and the shared standard-position contract before implementing
+   resource admission or runtime helpers. Reuse existing graphics tables
+   rather than duplicating them; preserve unsupported-count diagnostics.
+2. Bound/static image execution needs explicit resource-class namespaces,
+   image heap prefixes/metadata and runner binding handling. Treat it as a
+   separate coherent milestone, not a buffer-normalization shortcut.
+3. Keep general format/resolve behavior, owned-device execution, external
+   CTS and adapter-matrix validation open. Recheck the FeMe Vulkan identity
+   before any future Vulkan execution; do not repair host registration
+   without explicit authorization.
