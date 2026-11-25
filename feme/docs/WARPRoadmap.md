@@ -2959,6 +2959,58 @@ suite, external CTS, adapter-matrix and owned D3D12/conformance closure
 remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native plain-2D explicit-mip dimensions (2026-11-25).**
+
+The native reproduction confirmed explicit-mip/count queries remained
+unraised. The existing `llvm.dx.resource.getdimensions.levels.xy`
+intrinsic now has symmetric LLVM DXIL forward lowering and FeMe raising:
+the i32 mip survives, width/height map to fields 0/1 and DXIL field 3
+(total mip count) maps to vector element 2. Sampled plain 2D queries use
+this form for meaningful mips or a consumed count, even when only width,
+height or count survives. An unused native mip in a count query becomes
+zero. Depth fields and aggregate uses remain wholly unraised.
+
+The shared CPU dimension admission/lowering predicate now admits this
+form for heap-backed sampled FP32/i32 plain 2D textures with defined
+i32 mips, in any stage. Existing explicit-LOD size and total-level
+metadata helpers provide the result without sampler or derivatives.
+Writable/other-shape/undefined-mip forms retain early normal/reference/
+AOT rejection; 1D/array explicit-mip rejection and buffer dimensions are
+unchanged. Portable tests cover forward/reverse mapping, live/zero mips,
+width-/height-/count-only projections, fragment count-only lowering,
+handle cleanup, idempotence and unchanged unsupported functions.
+
+[`native-texture2d-mip-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture2d-mip-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 7x3/3x1/1x1 and SINT 5x2/2x1/
+1x1 extents distinguish three valid dynamic mips while total counts stay
+three. Divergent indices make both images unbound in lane four, returning
+zero extents/counts/loads. Lane one skips a count store, preserving its
+sentinel. Query-derived coordinates load exact negative/high-bit and
+non-FP32-exact integer values from three real mips. Every word, guard
+and repeat passes: 152 input bytes plus a guarded 128-byte output,
+exactly 280 compared bytes. The earlier count-unused explicit-mip variant
+now executes rather than rejecting: four additional CPU cases, each
+repeated twice, check exactly 236 bytes. Base/mip-zero cases remain.
+
+Two runtime units verify metadata-only mip extents and total counts using
+unreadable data pointers, inactive size queries, unbound/zero-mip
+descriptors and invalid heaps/indices. The affected assertions-enabled,
+PCH-disabled, sccache ARM64 `-j2` build, including `opt`, passes 35 steps.
+Thirty-eight focused LLVM forward, FeMe round-trip/raising, dimension,
+1D/2D loading/sampling, namespace, typed-load and CPU/SPIR-V LIT pass
+with zero failures in 26.63 seconds. Thirteen dimension runtime units
+pass in 3.345 seconds. Three new LIT fixtures and two runtime cases are
+added; four existing LIT fixtures are extended.
+
+Only valid-mip native results are measured. Shared helper clamping is
+unchanged and is not claimed as D3D out-of-range-mip behavior. Runtime/
+SPIR-V code, existing load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+Other shapes/fields, bound/static images, full-suite, external CTS,
+adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

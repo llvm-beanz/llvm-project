@@ -1456,10 +1456,11 @@ it now covers the two largest opcode families:
   checking a three-mip base extent, divergent/unbound indices, query/load
   coexistence, every word, guards and repeats. Admission and lowering share
   a predicate; non-heap, 2D-array/MS/3D/cube shapes and non-32-bit declarations
-  remain unsupported. Texture raising now rejects nonzero/dynamic mips
-  rather than dropping an operand absent from the scalar/pair intrinsics.
-  Mip-count/other result fields, bound/static images and owned-device
-  execution remain open. Runtime/SPIR-V code, ABI 8 and layouts are unchanged.
+  remain unsupported. Base scalar/pair intrinsics carry no mip; sampled
+  plain 2D explicit mips/counts use the separate path below. Other texture
+  shapes retain unused/zero-mip guards. Depth/aggregate uses, bound/static
+  images and owned-device execution remain open. Runtime/SPIR-V code,
+  ABI 8 and layouts are unchanged.
 
 - Heap-backed 1D/array texture dimensions now share that admission/lowering
   predicate. Plain 1D accepts scalar width only; array 1D accepts scalar
@@ -1469,9 +1470,23 @@ it now covers the two largest opcode families:
   three-mip base widths, independent layer counts, divergent/unbound
   indices, query/load coexistence, every word, guards and repeats.
   Portable fragment tests cover layer-derived loads and idempotence; plain
-  1D pair queries and explicit mips retain early rejection. Runtime/SPIR-V
+  1D pair queries and 1D/array explicit mips retain early rejection. Runtime/SPIR-V
   code, existing load/store/status/atomic policy, ABI 8 and layouts remain
   unchanged. No bound/static images or owned-device closure is added.
+
+- Sampled plain 2D explicit dimensions now raise to the existing
+  `getdimensions.levels.xy` intrinsic, preserving a live mip and mapping
+  DXIL field 3 (total mip count) to vector element 2. LLVM forward lowering
+  now provides the symmetric mapping. CPU lowering reuses explicit-LOD
+  width/height and total-level metadata helpers in any stage, without
+  sampler/derivatives. Native SDK DXC SM6.6 passes normal waves 4/8,
+  reference and ARM64 AOT for three valid mip extents, fixed counts,
+  divergent/unbound indices, query-derived exact integer loads, all words,
+  guards and repeats. Non-heap, writable, other-shape, non-32-bit and
+  undefined/poison-mip canonical queries retain early rejection. Depth/
+  aggregate uses stay unraised. Shared helper clamping is unchanged; native
+  out-of-range-mip semantics are not claimed. Runtime/SPIR-V code, buffer
+  dimensions, ABI 8 and layouts remain unchanged.
 
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
@@ -1634,19 +1649,19 @@ reconstructed. `raiseSample`/`raiseSampleBias`/`raiseSampleLevel`/`raiseSampleCm
 `dx.op.sampleLevel` (62),
 scalar FP32 `dx.op.sampleCmp` (64)/`dx.op.sampleCmpLevelZero` (65),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
-`dx.op.getDimensions`'s `.x`/`.xy` fields (72, i.e. a `GetDimensions` call
-whose out-parameters only ever read width, or width and height together --
-a mip-count out-parameter, DXIL's `.z`/`.w` fields, is still left unraised,
-since `DXILOpLowering.cpp` has no `levels_xy`-shaped forward lowering to
-verify against yet). Typed/byte-address field-zero queries additionally
+`dx.op.getDimensions`'s width/height fields (72). Base queries use scalar/
+pair intrinsics; sampled plain 2D explicit mips or field-3 mip-count uses
+raise to `getdimensions.levels.xy`. Its vector element 2 maps to DXIL field
+3, symmetrically with the new LLVM forward lowering. Field 2 and aggregate
+uses remain unraised. Typed/byte-address field-zero queries additionally
 raise to `getdimensions.x` with unused/zero mip operands; other buffer
 fields remain unraised. Structured field-zero counts also raise, while DXC's
 constant HLSL stride result is preserved rather than treating it as field 1.
-All scalar/pair dimension raising requires an unused/zero mip operand:
-nonzero/dynamic texture mips stay unraised rather than silently becoming
-mip-zero queries. 1D/array and plain 2D heap-backed FP32/i32 texture
-scalar/pair queries now lower to shared CPU metadata helpers; other shapes,
-mip-count fields and bound/static image queries remain outside that path.
+Scalar/pair dimension raising requires an unused/zero mip operand; sampled
+plain 2D explicit mips/counts instead retain the live mip through the
+three-component intrinsic. 1D/array base and plain 2D base/explicit
+heap-backed FP32/i32 queries lower to shared CPU metadata helpers.
+Other shapes and bound/static image queries remain outside that CPU path.
 Before adding comparison mapping, `Sample`,
 `SampleLevel`, `TextureLoad` and `getDimensions` were the only texture
 ops LLVM's own `DXILOpLowering.cpp` already lowered a canonical

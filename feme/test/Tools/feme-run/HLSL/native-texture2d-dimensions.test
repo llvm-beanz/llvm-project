@@ -11,21 +11,31 @@
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
 # RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIP /Fo %t/mip.dxil %t/shader.hlsl
-# RUN: not feme-run %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
-# RUN: not feme-run --reference %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
-# RUN: not feme --target=%feme_host_triple %t/mip.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=MIP
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/mip.dxil | FileCheck %s --check-prefix=MIP
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/mip.dxil | FileCheck %s --check-prefix=MIP
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/mip.dxil | FileCheck %s --check-prefix=MIP
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/mip.dxil -o %t/mip.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/mip.o | FileCheck %s --check-prefix=MIP
 #
 # Full XY, width-only and height-only queries use three different extents
 # and FP32/UINT/SINT declarations. Lane four selects an unbound image;
 # lane one skips the width store. The full-query handle also loads a texel.
-# The full image has three mips; queries must report the base extent.
+# The full image has three mips; the explicit-mip variant discards count.
 # Every word of 128 input bytes and 108 guarded output bytes is checked.
 # Heap-backed mip-zero CPU evidence, not bound/static or owned D3D12 views.
 # RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <4 x float>,
 # RAISE-DAG: call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.Texture", <2 x i32>,
 # RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", i32,
 # RAISE-NOT: call {{.*}} @dx.op.getDimensions
-# MIP: unsupported raised operation: 'dx.op.getDimensions' was not raised
+# MIP: heap[3]: [[MO:42 5 3 3 4 1067450368 2 1 42 4 1067450368 1 1 3 4 1067450368 5 3 3 4 1067450368 0 0 3 4 0 42]]{{$}}
+# MIP-NEXT: image[0]: [[MF:1067450368( 0){17}]]{{$}}
+# MIP-NEXT: image[1]: [[MU:0( 0){5}]]{{$}}
+# MIP-NEXT: image[2]: [[MI:0( 0){7}]]{{$}}
+# MIP-NEXT: heap[3]: [[MO]]{{$}}
+# MIP-NEXT: image[0]: [[MF]]{{$}}
+# MIP-NEXT: image[1]: [[MU]]{{$}}
+# MIP-NEXT: image[2]: [[MI]]{{$}}
+# MIP-NOT: {{(heap|image)\[}}
 # CHECK: heap[3]: [[OUT:42 5 3 3 4 1067450368 5 3 42 4 1067450368 5 3 3 4 1067450368 5 3 3 4 1067450368 0 0 3 4 0 42]]{{$}}
 # CHECK-NEXT: image[0]: [[F:1067450368( 0){17}]]{{$}}
 # CHECK-NEXT: image[1]: [[U:0( 0){5}]]{{$}}
@@ -47,7 +57,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   uint width, height;
 #ifdef MIP
   uint levels;
-  full.GetDimensions(tid.x, width, height, levels);
+  full.GetDimensions(tid.x % 3, width, height, levels);
 #else
   full.GetDimensions(width, height);
 #endif

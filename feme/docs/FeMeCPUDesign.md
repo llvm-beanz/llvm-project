@@ -2422,9 +2422,9 @@ No sampler, derivatives or texel data are needed. Queries and loads through
 the same handle lower together, unused handles are removed and repeated
 lowering is idempotent. Non-heap, 2D-array/MS/3D/cube shapes and non-32-bit
 declarations remain unsupported with explicit normal/reference/AOT
-admission diagnostics. The raiser now rejects nonzero/dynamic texture
-mips instead of dropping an operand the scalar/pair intrinsics cannot
-represent; mip-count/other result fields remain unraised.
+admission diagnostics. Base scalar/pair intrinsics carry no mip; sampled
+plain 2D explicit mips/counts use the separate path below. Other texture
+shapes retain unused/zero-mip guards; depth/aggregate uses remain unraised.
 Native SDK DXC SM6.6 passes normal waves 4/8, reference and ARM64 AOT:
 5x3 with three mips reports the base extent, a UINT UAV reports width 3
 and a SINT SRV reports height 4. Divergent unbound indices return zeros;
@@ -2452,10 +2452,34 @@ all words, guards and two repeats pass. Two runtime units use unreadable
 data pointers to check sampled/storage metadata, inactive/unbound/zero-
 mip/invalid-index zeros and fixed layers while helper LOD shrinks width.
 The helper LOD tests preserve shared SPIR-V behavior; native lowering
-still passes zero and native dynamic-mip shaders remain rejected.
+still passes zero for 1D/array and their native dynamic-mip shaders remain rejected.
 Raising, runtime/SPIR-V code, existing load/store/status/atomic policy,
 ABI 8, layouts and advertisements remain unchanged. Other shapes/fields,
 bound/static images and owned-device execution remain open.
+
+Sampled plain 2D explicit dimensions now use the existing
+`getdimensions.levels.xy` intrinsic for width, height and total mip count.
+Raising preserves a live i32 mip and maps DXIL field 3 to vector element 2;
+LLVM forward lowering now provides the symmetric mapping. Unused native
+mips in count queries become zero. CPU admission/lowering share the
+existing dimension predicate, restricting this form to heap-backed sampled
+plain 2D FP32/i32 declarations with a defined i32 mip, in any stage.
+Width/height use `getdimensions.lod.2d.v2i32` with the live mip; total
+count uses `querylevels.i32` and does not shrink with mip. No sampler,
+derivatives, runtime helper or ABI change is needed. Native SDK DXC
+SM6.6 passes waves 4/8, reference and ARM64 AOT, distinguishing
+7x3/3x1/1x1 and 5x2/2x1/1x1 extents, fixed counts, divergent/unbound
+indices and query-derived exact SINT loads. The prior extent-only native
+variant now executes rather than rejecting when count is unused.
+Portable forward/reverse, idempotence, fragment count-only and rejection
+controls pass. Canonical writable/other-shape/undefined-mip forms reject;
+depth/aggregate uses stay unraised. Runtime units verify metadata-only
+extents and total counts using unreadable pointers, inactive size queries,
+unbound/zero-mip descriptors and invalid heaps/indices. Shared helper mip
+clamping remains unchanged; only valid-mip native results are measured,
+not D3D out-of-range-mip behavior. Runtime/SPIR-V code, existing load/
+store/status/atomic policy, ABI 8, layouts and advertisements remain
+unchanged. Bound/static images and owned-device closure remain open.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

@@ -27,6 +27,46 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native plain-2D explicit-mip dimensions (VM, 2026-11-25)
+
+The native reproduction left explicit-mip/count queries unraised. The
+existing `getdimensions.levels.xy` intrinsic now has LLVM forward and
+FeMe reverse lowering, preserving live i32 mips and mapping DXIL count
+field 3 to vector element 2. CPU admission/lowering share the existing
+dimension predicate for heap-backed sampled plain 2D FP32/i32 textures,
+using existing size/level metadata helpers in any stage, without sampler/
+derivatives. Width-/height-/count-only projections survive; depth fields
+and aggregate uses remain unraised. Canonical writable/other-shape/
+undefined-mip forms retain early normal/reference/AOT rejection.
+
+[`native-texture2d-mip-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture2d-mip-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 7x3/3x1/1x1 and SINT 5x2/2x1/
+1x1 extents distinguish three valid dynamic mips while total counts
+stay three. Divergent/unbound indices, skipped-store sentinels, query-
+derived exact integer loads from three real mips, every word, guards and
+repeats pass: 152 input bytes plus a guarded 128-byte output, exactly
+280 bytes. The prior count-unused explicit-mip variant now also executes
+four cases, repeated twice, checking exactly 236 bytes each.
+
+The affected 35-step ARM64 build including `opt` passes. Thirty-eight
+focused LLVM forward, FeMe round-trip/raising, dimension, image, namespace,
+typed-load and CPU/SPIR-V LIT pass in 26.63 seconds, zero failures.
+Thirteen dimension runtime units pass in 3.345 seconds. Three LIT
+fixtures and two runtime cases are added; four LIT fixtures are extended.
+The new units use unreadable data pointers to check mip extents/counts,
+inactive size queries, unbound/zero-mip descriptors and invalid heaps/
+indices. Portable tests also verify idempotence, fragment count-only
+queries and unchanged unsupported functions.
+
+Only valid-mip native results are measured; existing shared helper
+clamping is unchanged and is not D3D out-of-range-mip evidence.
+Runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and layouts remain
+unchanged. Other shapes/fields, bound/static images, full-suite, external
+CTS, adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native 1D/array texture dimensions (VM, 2026-11-25)
 
 The native reproduction raised 1D/array dimensions but failed CPU admission.

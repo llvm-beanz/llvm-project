@@ -182,9 +182,9 @@ in any stage, with no sampler or derivatives. Width-only, height-only and
 paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
 including a three-mip base extent, divergent/unbound indices, query/load
 coexistence, all words, guards and repeats. Admission and lowering share
-the same predicate. Nonzero/dynamic texture mips now remain unraised,
-not silently discarded. 2D-array/MS/3D/cube shapes, non-32-bit declarations,
-mip-count/other fields and bound/static images remain unsupported by
+the same predicate. Sampled plain 2D explicit mips/counts use the separate
+path below. 2D-array/MS/3D/cube shapes, non-32-bit declarations,
+depth/aggregate uses and bound/static images remain unsupported by
 this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
 layouts remain unchanged; no owned-device closure is established.
 
@@ -194,10 +194,24 @@ helpers. Plain 1D accepts scalar width only; array 1D accepts scalar width
 or width/layer count. Native SDK DXC SM6.6 passes waves 4/8, reference
 and ARM64 AOT, including three-mip base widths, distinct layer counts,
 divergent/unbound indices, exact integer query/load results, all words,
-guards and repeats. Plain 1D pair queries and explicit mips remain
+guards and repeats. Plain 1D pair queries and 1D/array explicit mips remain
 rejected in normal/reference/AOT paths. No sampler/derivatives are
 needed. Raising, runtime/SPIR-V code, ABI 8, layouts and advertisements
 remain unchanged; no bound/static images or owned-device closure.
+
+Heap-backed sampled `Texture2D.GetDimensions(mip, width, height, levels)`
+now preserves an explicit i32 mip and total mip count through the existing
+`getdimensions.levels.xy` intrinsic. LLVM forward lowering and DXIL
+raising map DXIL count field 3 to vector element 2; CPU lowering reuses
+shared size/level metadata helpers without sampler/derivatives, in any
+stage. Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT
+for three valid mip extents, fixed counts, divergent/unbound indices,
+query-derived exact integer loads, all words, guards and repeats.
+Queries whose count output is unused now also execute. Writable/other-
+shape/undefined-mip canonical forms reject; depth/aggregate uses remain
+unraised. Shared helper clamping is unchanged; native out-of-range-mip
+semantics are not claimed. Runtime/SPIR-V code, ABI 8 and layouts remain
+unchanged; no bound/static images or owned-device closure is added.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

@@ -1,5 +1,34 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native plain-2D explicit-mip dimension scope (2026-11-25)
+
+The [plain-2D explicit-mip follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-2d-explicit-mip-dimensions-vm-2026-11-25)
+adds LLVM forward/FeMe reverse lowering for the existing
+`getdimensions.levels.xy` intrinsic, preserving live i32 mips and mapping
+DXIL total-count field 3 to vector element 2. Heap-backed sampled plain
+2D FP32/i32 CPU queries reuse existing size/level metadata helpers in any
+stage without sampler/derivatives. Width-/height-/count-only projections
+survive. Writable/other-shape/undefined-mip forms reject; depth/aggregate
+uses remain unraised.
+
+SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT, four cases
+each repeated twice. Three distinct valid mip extents, fixed total counts,
+divergent/unbound indices, query-derived exact integer loads, all words,
+guards and sentinels pass: exactly 280 compared bytes including a guarded
+128-byte output. The prior count-unused variant adds four execution
+cases, repeated twice, checking 236 bytes each. The affected 35-step
+ARM64 build passes; 38 focused LLVM/FeMe LIT pass in 26.63 seconds and
+thirteen dimension units in 3.345 seconds, zero failures. Three LIT
+fixtures and two runtime cases are added; four LIT fixtures are extended.
+
+Only valid-mip native results are measured; unchanged shared helper
+clamping is not D3D out-of-range-mip evidence. Runtime/SPIR-V code,
+existing load/store/status/atomic policy, advertisements, descriptor
+materialization, ABI 8 and layouts remain unchanged. Other shapes/
+fields, bound/static images, full-suite, new CTS, adapter-matrix and
+owned D3D12/conformance closure remain open. `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native 1D/array texture dimension scope (2026-11-25)
 
 The [1D/array dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-1darray-texture-dimensions-vm-2026-11-25)

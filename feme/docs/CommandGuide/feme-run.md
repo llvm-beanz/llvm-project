@@ -176,9 +176,9 @@ and 2x4. The full image has three mips and still reports its base extent;
 the same handle also loads a texel. Divergent unbound indices return zeros;
 sentinels, every word, guards and repeats pass: 128 input bytes plus a
 guarded 108-byte output, exactly 236 bytes per case. 2D-array/MS/3D/cube
-shapes, non-32-bit declarations, mip-count/other fields and bound/static
-images remain outside this CPU path. Nonzero/dynamic texture mips are
-rejected during raising, not discarded; unsupported canonical query shapes
+shapes, non-32-bit declarations, depth/aggregate uses and bound/static
+images remain outside this CPU path. Sampled plain 2D explicit mips/counts
+use the separate path below; unsupported canonical query shapes
 fail early normal/reference/AOT admission. Runtime/SPIR-V code, buffer
 dimensions, ABI 8 and argument layouts remain unchanged; no owned-device
 or conformance closure is added.
@@ -193,10 +193,25 @@ report base widths 5/7 and array layers 2; UAVs report width 3 and
 width 2/layers 3. Divergent/unbound indices, alternating-layer exact
 integer loads through a queried handle, sentinels, every word, guards
 and repeats pass: 156 input bytes plus a guarded 148-byte output,
-exactly 304 bytes per case. Plain 1D pair queries and native explicit
-mips remain rejected in normal/reference/AOT paths. Raising, runtime/
+exactly 304 bytes per case. Plain 1D pair queries and native 1D/array
+explicit mips remain rejected in normal/reference/AOT paths. Raising, runtime/
 SPIR-V code, ABI 8 and layouts remain unchanged. Other shapes/fields,
 bound/static images and owned-device/conformance closure remain open.
+
+Native heap-backed sampled `Texture2D.GetDimensions(mip, width, height,
+levels)` now executes SDK DXC SM6.6 FP32/i32 queries in waves 4/8,
+reference and ARM64 AOT. YAML `images` supplies real mip chains;
+no sampler is needed. Existing CPU size/level metadata helpers preserve
+the live mip and fixed total count. Native extents 7x3/3x1/1x1 and
+5x2/2x1/1x1 distinguish three valid mips, with divergent/unbound
+indices, query-derived exact SINT loads, all words, guards and repeats:
+152 input bytes plus a guarded 128-byte output, exactly 280 bytes.
+The prior count-unused explicit-mip variant now also passes four CPU
+modes, 236 bytes per case. Both variants repeat twice. Writable/other-
+shape/undefined-mip canonical forms reject; depth/aggregate uses remain
+unraised. Shared helper clamping is unchanged; native out-of-range-mip
+semantics are not claimed. Runtime/SPIR-V code, ABI 8 and layouts remain
+unchanged; no bound/static images or owned-device closure is added.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

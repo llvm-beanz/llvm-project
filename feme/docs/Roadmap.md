@@ -3022,6 +3022,26 @@ the first shader-facing milestone rather than alongside it.
    descriptor materialization, ABI 8 and layouts remain unchanged.
    Other shapes/mips/fields, bound/static images, full-suite, external
    CTS, adapter-matrix and owned-device/W2/W3 closure remain open.
+   Native plain-2D explicit-mip dimensions follow-up (2026-11-25):
+   existing `getdimensions.levels.xy` now has LLVM forward/FeMe reverse
+   lowering, retaining live i32 mips and mapping DXIL count field 3 to
+   vector element 2. Heap-backed sampled plain 2D FP32/i32 queries share
+   CPU admission/lowering through existing size/level metadata helpers in
+   any stage without sampler/derivatives. Writable/other-shape/undefined-
+   mip forms reject; depth/aggregate uses remain unraised. SDK DXC SM6.6
+   passes waves 4/8, reference and ARM64 AOT, four cases repeated twice,
+   with distinct valid mip extents, fixed counts, divergent/unbound indices,
+   query-derived exact integer loads, all words, guards and sentinels:
+   exactly 280 bytes. A prior count-unused variant adds four execution
+   cases, each repeated twice, checking 236 bytes. The affected 35-step
+   ARM64 build passes; 38 focused LLVM/FeMe LIT pass in 26.63 seconds
+   and thirteen dimension units in 3.345 seconds, zero failures. Three LIT
+   fixtures and two runtime cases are added; four LIT fixtures are extended.
+   Shared helper clamping is unchanged, with no native out-of-range-mip
+   claim. Runtime/SPIR-V code, load/store/status/atomic policy,
+   advertisements, descriptor materialization, ABI 8 and layouts remain
+   unchanged. Other shapes/fields, bound/static images, full-suite,
+   external CTS, adapter-matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

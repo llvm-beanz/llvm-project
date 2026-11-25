@@ -140,11 +140,11 @@ define <2 x i32> @dimensions_2d_xy(i32 %idx) {
   ret <2 x i32> %v1
 }
 
-; No mip operand can be discarded: even a width-only query at mip 1
-; must remain unraised, as must a query at a dynamic mip.
+; Nonzero/dynamic mips survive even when only one extent component is used.
 ; CHECK-LABEL: define i32 @dimensions_nonzero_mip(
-; CHECK: call %dx.types.Dimensions @dx.op.getDimensions(i32 72, {{.*}}, i32 1)
-; CHECK-NOT: @llvm.dx.resource.getdimensions
+; CHECK: [[D:%.*]] = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy{{.*}}({{.*}}, i32 1)
+; CHECK: extractelement <3 x i32> [[D]], i32 0
+; CHECK-NOT: @dx.op.getDimensions
 define i32 @dimensions_nonzero_mip(i32 %idx) {
   %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
   %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 2, i32 1033 })
@@ -153,8 +153,9 @@ define i32 @dimensions_nonzero_mip(i32 %idx) {
   ret i32 %w
 }
 ; CHECK-LABEL: define i32 @dimensions_dynamic_mip(
-; CHECK: call %dx.types.Dimensions @dx.op.getDimensions(i32 72, {{.*}}, i32 %mip)
-; CHECK-NOT: @llvm.dx.resource.getdimensions
+; CHECK: [[D:%.*]] = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy{{.*}}({{.*}}, i32 %mip)
+; CHECK: extractelement <3 x i32> [[D]], i32 1
+; CHECK-NOT: @dx.op.getDimensions
 define i32 @dimensions_dynamic_mip(i32 %idx, i32 %mip) {
   %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
   %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 2, i32 1033 })
@@ -162,7 +163,7 @@ define i32 @dimensions_dynamic_mip(i32 %idx, i32 %mip) {
   %w = extractvalue %dx.types.Dimensions %d, 1
   ret i32 %w
 }
-; A consumed mip-count field must leave the entire query unraised.
+; A consumed depth field must leave the entire plain-2D query unraised.
 ; CHECK-LABEL: define i32 @dimensions_mixed_fields(
 ; CHECK: call %dx.types.Dimensions @dx.op.getDimensions
 ; CHECK-NOT: @llvm.dx.resource.getdimensions
@@ -171,9 +172,20 @@ define i32 @dimensions_mixed_fields(i32 %idx) {
   %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 2, i32 1033 })
   %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 0)
   %w = extractvalue %dx.types.Dimensions %d, 0
-  %levels = extractvalue %dx.types.Dimensions %d, 3
-  %r = add i32 %w, %levels
+  %depth = extractvalue %dx.types.Dimensions %d, 2
+  %r = add i32 %w, %depth
   ret i32 %r
+}
+
+; Aggregate uses cannot be partially raised.
+; CHECK-LABEL: define %dx.types.Dimensions @dimensions_aggregate(
+; CHECK: call %dx.types.Dimensions @dx.op.getDimensions
+; CHECK-NOT: @llvm.dx.resource.getdimensions
+define %dx.types.Dimensions @dimensions_aggregate(i32 %idx) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 2, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 1)
+  ret %dx.types.Dimensions %d
 }
 
 ; A writeable `RWTexture2D<float4>` (kind 2, `IsUAV`) texel write:

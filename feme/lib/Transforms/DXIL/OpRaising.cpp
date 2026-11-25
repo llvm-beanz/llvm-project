@@ -1303,10 +1303,10 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // FP32 `SampleGrad` (63),
 // scalar FP32 `SampleCmp`
 // (64)/`SampleCmpLevelZero` (65), `TextureLoad` (66) and
-// `GetDimensions`' `.x` and `.xy` fields (72, via
-// `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
-// `levels_xy` lowering to verify against yet, so a mip-count query stays
-// unraised). Gather remains outside this raiser's scope. Gradient sampling
+// `GetDimensions`' width/height fields (72, via
+// `int_dx_resource_getdimensions_x`/`_xy`), plus sampled plain 2D explicit
+// mips/counts via `_levels_xy`. Gather remains outside this raiser's scope.
+// Gradient sampling
 // preserves spatial/direction derivatives/clamp; heap-backed FP32 1D/2D/3D/cube
 // (including arrays) executes on CPU. Biased sampling preserves bias/clamp;
 // CPU lowering is
@@ -1831,23 +1831,12 @@ bool raiseTextureStore(CallInst &CI) {
   return true;
 }
 
-/// Raises a `dx.op.getDimensions` (opcode 72) call's field-0 (`.x`, i.e.
-/// width) and/or field-1 (`.y`, i.e. height) extracts into
-/// `llvm.dx.resource.getdimensions_x`/`_xy`, the only two overloads LLVM's
-/// own `DXILOpLowering.cpp` lowers a canonical intrinsic to yet (see this
-/// section's header comment): a use of field 2 or 3 (`.z`/mip count -- a
-/// depth/array-slice count or `GetDimensions`' optional mip-count out
-/// parameter), or a use that isn't a field extract at all, is left
-/// unraised, since there is no `levels_xy`-shaped counterpart to verify
-/// against.
-///
-/// Field 0 alone raises to the scalar `_x` overload (exactly as before this
-/// also covered field 1); fields 0 and/or 1 together raise to the
-/// `<2 x i32>`-returning `_xy` overload instead, with each surviving
-/// `extractvalue` rewritten to the matching `extractelement`.
-/// Buffers support only field 0 (element/byte count). All queries require an
-/// unused or zero mip operand because the raised intrinsics carry no mip.
-/// DXC supplies a structured buffer's HLSL stride as a constant.
+/// Raises field-0/1 dimension extracts to scalar/pair queries. Sampled plain
+/// 2D queries with a meaningful mip or field-3 mip count instead use
+/// `getdimensions.levels.xy`, mapping DXIL field 3 to vector element 2.
+/// Field 2 and aggregate uses remain unsupported. Other shapes require an
+/// unused/zero mip; buffers accept only field 0 (DXC supplies a structured
+/// buffer's HLSL stride as a constant).
 bool raiseGetDimensions(CallInst &CI) {
   if (CI.arg_size() != 3) // opcode, Handle, MipLevel
     return false;
@@ -1861,7 +1850,13 @@ bool raiseGetDimensions(CallInst &CI) {
     return false;
   Value *Mip = CI.getArgOperand(2);
   auto *ConstantMip = dyn_cast<ConstantInt>(Mip);
-  if (!isa<UndefValue>(Mip) && (!ConstantMip || !ConstantMip->isZero()))
+  bool NeedsLevels =
+      !isa<UndefValue>(Mip) && (!ConstantMip || !ConstantMip->isZero());
+  auto *TextureTy = dyn_cast<dxil::TextureExtType>(Handle->getType());
+  bool CanQueryLevels =
+      TextureTy && !TextureTy->isWriteable() &&
+      TextureTy->getDimension() == dxil::ResourceKind::Texture2D;
+  if (NeedsLevels && !CanQueryLevels)
     return false;
 
   SmallVector<ExtractValueInst *, 2> Extracts;
@@ -1871,9 +1866,11 @@ bool raiseGetDimensions(CallInst &CI) {
     if (!EV || EV->getNumIndices() != 1)
       return false;
     uint64_t Field = EV->getIndices()[0];
-    if (Field > 1 || (IsBuffer && Field != 0))
+    if ((Field > 1 && (Field != 3 || !CanQueryLevels)) ||
+        (IsBuffer && Field != 0))
       return false;
     NeedsHeight |= (Field == 1);
+    NeedsLevels |= (Field == 3);
     Extracts.push_back(EV);
   }
   if (Extracts.empty())
@@ -1888,7 +1885,13 @@ bool raiseGetDimensions(CallInst &CI) {
 
   IRBuilder<> Builder(&CI);
   Value *Dimensions;
-  if (NeedsHeight) {
+  if (NeedsLevels) {
+    Function *GetDimensionsLevelsFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(), Intrinsic::dx_resource_getdimensions_levels_xy,
+        {Handle->getType()});
+    Value *Level = isa<UndefValue>(Mip) ? Builder.getInt32(0) : Mip;
+    Dimensions = Builder.CreateCall(GetDimensionsLevelsFn, {Handle, Level});
+  } else if (NeedsHeight) {
     Function *GetDimensionsXYFn = Intrinsic::getOrInsertDeclaration(
         CI.getModule(), Intrinsic::dx_resource_getdimensions_xy,
         {Handle->getType()});
@@ -1902,9 +1905,12 @@ bool raiseGetDimensions(CallInst &CI) {
 
   for (ExtractValueInst *EV : Extracts) {
     Value *Replacement =
-        NeedsHeight ? Builder.CreateExtractElement(
-                          Dimensions, Builder.getInt32(EV->getIndices()[0]))
-                    : Dimensions;
+        NeedsHeight || NeedsLevels
+            ? Builder.CreateExtractElement(
+                  Dimensions, Builder.getInt32(EV->getIndices()[0] == 3
+                                                   ? 2
+                                                   : EV->getIndices()[0]))
+            : Dimensions;
     EV->replaceAllUsesWith(Replacement);
     EV->eraseFromParent();
   }

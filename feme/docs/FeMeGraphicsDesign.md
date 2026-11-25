@@ -3151,8 +3151,8 @@ by the same predicate used for early CPU admission. Native SDK DXC SM6.6
 passes normal waves 4/8, reference and ARM64 AOT, including width-only,
 height-only and paired results, a three-mip base extent, divergent/unbound
 indices, query/load coexistence, all words, guards and repeats.
-Nonzero/dynamic texture mips now stay unraised rather than being dropped.
-2D-array/MS/3D/cube shapes, non-32-bit declarations, mip-count/other fields
+Sampled plain 2D explicit mips/counts use the separate path below.
+2D-array/MS/3D/cube shapes, non-32-bit declarations, depth/aggregate uses
 and bound/static image queries remain outside this CPU path. Runtime/
 SPIR-V code, ABI 8 and argument layouts remain unchanged; this is shared
 CPU metadata evidence, not draw or owned-device/conformance closure.
@@ -3165,9 +3165,22 @@ derivatives. Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64
 AOT with three-mip base widths, distinct fixed layer counts, divergent/
 unbound indices, query/load coexistence, all words, guards and repeats.
 Portable fragment tests verify layer-derived loads and idempotence;
-plain 1D pair queries and explicit mips remain rejected. Raising, runtime/
+plain 1D pair queries and 1D/array explicit mips remain rejected. Raising, runtime/
 SPIR-V code, ABI 8 and layouts remain unchanged. This is shared CPU
 metadata evidence, not draw or bound/static/owned-device closure.
+
+Heap-backed sampled plain 2D explicit dimensions now lower the existing
+`getdimensions.levels.xy` form through shared size/level metadata helpers,
+without samplers or derivatives, in any stage. LLVM forward lowering and
+DXIL raising preserve live mips and map DXIL field 3 to vector element 2.
+Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT for
+three valid mip extents, fixed counts, divergent/unbound indices,
+query-derived exact integer loads, all words, guards and repeats.
+Count-unused native queries now also execute. Writable/other-shape/
+undefined-mip canonical forms reject; depth/aggregate uses stay unraised.
+Shared helper clamping is unchanged and no native out-of-range-mip
+semantics are claimed. Runtime/SPIR-V code, ABI 8 and layouts remain
+unchanged; no draw, bound/static images or owned-device closure is added.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

@@ -757,7 +757,17 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
       auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
       Value *Dimensions;
-      if (Kind == dxil::ResourceKind::Texture1D)
+      if (ID == Intrinsic::dx_resource_getdimensions_levels_xy) {
+        Value *Size =
+            createQuerySizeLod2D(Builder, Env, Image->getArgOperand(0),
+                                 CI->getArgOperand(1), Builder.getTrue());
+        Value *Levels =
+            createQueryLevels(Builder, Env, Image->getArgOperand(0));
+        Dimensions = Builder.CreateShuffleVector(
+            Size, PoisonValue::get(Size->getType()), {0, 1, 2});
+        Dimensions =
+            Builder.CreateInsertElement(Dimensions, Levels, uint64_t{2});
+      } else if (Kind == dxil::ResourceKind::Texture1D)
         Dimensions =
             createQuerySizeLod1D(Builder, Env, Image->getArgOperand(0),
                                  Builder.getInt32(0), Builder.getTrue());
@@ -1505,9 +1515,10 @@ bool feme::cpu::isSupportedDXILSample(const CallInst &CI) {
 
 bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
+  bool WithLevels = ID == Intrinsic::dx_resource_getdimensions_levels_xy;
   if ((ID != Intrinsic::dx_resource_getdimensions_x &&
-       ID != Intrinsic::dx_resource_getdimensions_xy) ||
-      CI.arg_size() != 1)
+       ID != Intrinsic::dx_resource_getdimensions_xy && !WithLevels) ||
+      CI.arg_size() != (WithLevels ? 2u : 1u))
     return false;
   auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
   auto *Ty = dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
@@ -1516,6 +1527,11 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
       Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4)
     return false;
   auto Kind = Ty->getDimension();
+  if (WithLevels &&
+      (Kind != dxil::ResourceKind::Texture2D || Ty->isWriteable() ||
+       !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
+       isa<UndefValue>(CI.getArgOperand(1))))
+    return false;
   if ((Kind != dxil::ResourceKind::Texture1D &&
        Kind != dxil::ResourceKind::Texture1DArray &&
        Kind != dxil::ResourceKind::Texture2D) ||

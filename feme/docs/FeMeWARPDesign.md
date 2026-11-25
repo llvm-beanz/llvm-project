@@ -202,9 +202,9 @@ The original compute-only baseline is no longer current:
   DXC SM6.6 in waves 4/8, reference and ARM64 AOT, including width-only,
   height-only and paired results, a three-mip base extent, divergent/
   unbound indices, query/load coexistence, all words, guards and repeats.
-  Nonzero/dynamic texture mips now remain unraised rather than being
-  dropped. 2D-array/MS/3D/cube shapes, non-32-bit declarations, mip-count/
-  other fields and bound/static images remain outside this CPU path.
+  Sampled plain 2D explicit mips/counts use the separate path below.
+  2D-array/MS/3D/cube shapes, non-32-bit declarations, depth/aggregate
+  uses and bound/static images remain outside this CPU path.
   Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; this adds no
   descriptor materialization, advertisements or owned-device closure.
   Heap-backed 1D/array dimensions now share admission/lowering eligibility
@@ -215,9 +215,20 @@ The original compute-only baseline is no longer current:
   widths, distinct layer counts, divergent/unbound indices, query/load
   coexistence, all words, guards and repeats. Portable fragment tests
   verify layer-derived loads and idempotence; plain 1D pair queries and
-  explicit mips remain rejected. Raising, runtime/SPIR-V code, ABI 8 and
+  1D/array explicit mips remain rejected. Raising, runtime/SPIR-V code, ABI 8 and
   layouts remain unchanged; no bound/static images, advertisements or
   owned-device closure are added.
+  Sampled plain 2D explicit dimensions now preserve live i32 mips and total
+  mip counts through `getdimensions.levels.xy`, symmetric LLVM forward/
+  DXIL reverse lowering and shared CPU metadata helpers in any stage.
+  Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT for
+  three valid mip extents, fixed counts, divergent/unbound indices,
+  query-derived exact integer loads, all words, guards and repeats.
+  Count-unused queries also execute. Writable/other-shape/undefined-mip
+  canonical forms reject; depth/aggregate uses remain unraised. Helper
+  clamping is unchanged, with no native out-of-range-mip claim.
+  Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; no bound/
+  static images, advertisements or owned-device closure are added.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.
