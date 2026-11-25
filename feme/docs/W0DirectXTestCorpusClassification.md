@@ -424,6 +424,21 @@ a new FXC-profile/external corpus, external CTS, adapter-matrix or owned-
 device proof; see the
 [RGB32 integer evidence](W0WindowsIntegrationProbe.md#w2aw2b-rgb32-integer-read-decoding-vm-2026-11-24).
 
+Native RGB32 four-component defaults follow-up (2026-11-24): the existing
+native typed-load fixture adds SDK DXC SM6.6/SM6.0 `int4`/`uint4`/
+`float4` SRV/UAV loads on RGB32 SINT/UINT/FP32 in normal waves 4/8,
+reference and ARM64 AOT. Eight execution cases each repeat twice.
+Physical 12-byte stride, exact RGB bits and alpha one versus all-zero
+partial/invalid loads, namespaces, divergence, all input/output words,
+guards and sentinels pass: exactly 920 compared bytes per case.
+Nineteen focused LIT pass with zero failures in 6.36 seconds. The existing
+fixture is extended without a new LIT test, implementation changes or
+rebuild. No stores, advertisements, raising/lowering policy, runtime/
+SPIR-V code, ABI 8 or argument layouts change. This is CPU evidence, not
+general format, new FXC-profile/external corpus, external CTS, adapter-
+matrix or owned-device closure; see the
+[native RGB32 defaults evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-rgb32-four-component-load-defaults-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

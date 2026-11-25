@@ -2637,6 +2637,41 @@ external CTS, adapter-matrix or owned D3D12/conformance result is claimed.
 Bound/static descriptors and broader format support remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native RGB32 four-component load defaults (2026-11-24).**
+
+The existing
+[`native-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-loads.test)
+now executes SDK DXC SM6.6 heap and SM6.0 bound `int4`/`uint4`/
+`float4` SRV/UAV loads on RGB32 SINT/UINT/FP32, alongside its R32/
+RGBA32 controls. Eight added execution cases cover normal waves 4/8,
+reference and ARM64 AOT, each repeated twice. Modern/legacy raising
+retains four-component handles and signedness/access class.
+
+RGB32 uses a real 12-byte stride, not the shader result's 16-byte width.
+Valid loads preserve exact RGB bits and supply numeric alpha one
+(integer 1, FP32 bits 1065353216). Missing-Z texels and upper/negative
+index 0xffffffff return all four components zero, including alpha.
+Signed/high/non-FP32-exact integers, negative zero, subnormal, positive/
+negative infinity and signed quiet-NaN payloads survive without arithmetic.
+Distinct SRV/UAV data at identical logical registers proves namespace
+separation; legacy AOT uses space/register/namespace-ordered physical
+heaps. Valid-end accesses, divergence, every input/output word, guards,
+inactive-store sentinels and both repeats pass: six 56-byte input views
+plus the guarded 584-byte output, exactly 920 compared bytes per case.
+
+Nineteen focused native typed-resource, namespace, raising/round-trip and
+typed/scalar/vector-two lowering LIT pass with zero failures in 6.36
+seconds. One existing fixture gains RGB layouts and execution checks,
+not a new LIT test. No implementation changes or rebuild were needed.
+This validates native RGB32 four-component defaults/bounds after the
+preceding shared integer decoder change, not new stores/advertisements,
+general format or non-32-bit closure, a broader/full-suite, external CTS,
+adapter-matrix or owned D3D12/conformance result. Raising/lowering policy,
+runtime/SPIR-V code, status, atomics, raw/structured behavior, descriptor
+materialization, ABI 8 and argument layouts remain unchanged.
+Bound/static descriptors remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

@@ -2899,6 +2899,22 @@ the first shader-facing milestone rather than alongside it.
    atomics, descriptor materialization, ABI 8 or argument layouts change.
    General format, broader/full-suite, external CTS, adapter-matrix and
    owned-device/W2/W3 closure remain open.
+   Native RGB32 four-component defaults follow-up (2026-11-24): the
+   existing native typed-load fixture now executes SDK DXC SM6.6/SM6.0
+   `int4`/`uint4`/`float4` SRV/UAV loads on RGB32 SINT/UINT/FP32 in
+   normal waves 4/8, reference and ARM64 AOT. Eight added execution cases
+   each repeat twice. Physical 12-byte stride, exact RGB bits and numeric
+   alpha one differ from all-zero missing-Z/upper/negative loads.
+   Namespaces, valid-end accesses, divergence, all input/output words,
+   guards and sentinels pass: six 56-byte inputs plus a guarded 584-byte
+   output, exactly 920 compared bytes per case. Nineteen focused native
+   typed-resource/namespace/raising/lowering LIT pass with zero failures
+   in 6.36 seconds. The fixture is extended without a new LIT test,
+   implementation changes or rebuild. No new stores, advertisements,
+   raising/lowering policy, runtime/SPIR-V code, status, atomics,
+   descriptor materialization, ABI 8 or argument layouts change. General/
+   non-32-bit formats, broader/full-suite, external CTS, adapter-matrix
+   and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

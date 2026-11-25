@@ -27,6 +27,38 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native RGB32 four-component load defaults (VM, 2026-11-24)
+
+[`native-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-loads.test)
+now runs SDK DXC SM6.6 heap and SM6.0 bound `int4`/`uint4`/`float4`
+SRV/UAV loads on RGB32 SINT/UINT/FP32, alongside the existing R32/
+RGBA32 controls. Eight added execution cases cover normal waves 4/8,
+reference and ARM64 AOT, each repeated twice. Existing modern/legacy
+raising retains four-component handles and signedness/access class.
+
+Physical RGB32 texels remain 12 bytes despite four-component shader
+results. Valid loads preserve RGB and supply integer alpha 1 or FP32
+alpha bits 1065353216. Missing-Z, upper-index and negative-bit-pattern
+index 0xffffffff loads return all zero, including alpha. Exact signed/
+high/non-FP32-exact integers, negative zero, subnormal, infinities and
+signed quiet-NaN payloads survive without arithmetic. Distinct SRV/UAV
+inputs at identical registers prove namespace separation; legacy AOT
+uses space/register/namespace-ordered physical heaps. Valid-end loads,
+divergence, every input/output word, guards, inactive-store sentinels and
+both repeats pass: six 56-byte inputs plus a guarded 584-byte output,
+exactly 920 compared bytes per case.
+
+Nineteen focused native typed-resource, namespace, raising/round-trip and
+lowering LIT pass with zero failures in 6.36 seconds. The existing fixture
+is extended without a new LIT test, implementation changes or rebuild.
+This is native CPU default-channel/bounds evidence, not new RGB32 stores,
+Vulkan advertisements, general/non-32-bit format closure, a broader/
+full-suite, external CTS, adapter-matrix or owned D3D12/conformance result.
+Raising/lowering policy, runtime/SPIR-V code, status, atomics, raw/structured
+behavior, descriptor materialization, ABI 8 and argument layouts remain
+unchanged. Bound/static descriptors remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) RGB32 integer read decoding (VM, 2026-11-24)
 
 The shared CPU runtime now gives `R32G32B32_UINT` and

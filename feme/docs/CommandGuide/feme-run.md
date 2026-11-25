@@ -102,9 +102,10 @@ store or owned-device closure; runtime/SPIR-V code, loads/status, atomics
 and ABI remain unchanged.
 
 Native four-component typed loads additionally cover SDK DXC SM6.6/SM6.0
-SINT/UINT/FP32 SRV/UAV shaders on six R32/RGBA32 formats across the same
-CPU modes. Exact bits, valid R32 zero-G/B/one-alpha defaults versus all-zero
-incomplete/invalid loads, valid-end accesses, divergent use, complete input/
+SINT/UINT/FP32 SRV/UAV shaders on nine R32/RGB32/RGBA32 formats across
+the same CPU modes. Exact bits, valid R32 zero-G/B/one-alpha defaults,
+RGB32's real 12-byte stride and alpha one versus all-zero incomplete/
+invalid loads, valid-end accesses, divergent use, complete input/
 output words, guards and two repeats pass. Distinct inputs prove namespace
 separation; legacy AOT requires explicit physical heaps in space/register/
 namespace order, interleaving SRVs and UAVs at equal registers. Object

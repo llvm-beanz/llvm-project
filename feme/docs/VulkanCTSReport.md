@@ -1,5 +1,26 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native RGB32 four-component defaults (2026-11-24)
+
+The [native RGB32 default-channel follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-rgb32-four-component-load-defaults-vm-2026-11-24)
+executes SDK DXC SM6.6/SM6.0 `int4`/`uint4`/`float4` SRV/UAV loads
+on RGB32 SINT/UINT/FP32 in normal waves 4/8, reference and ARM64 AOT.
+Eight added execution cases each repeat twice. Real 12-byte texels
+preserve exact RGB bits and supply numeric alpha one; missing-Z/upper/
+negative accesses return every channel zero. Namespace separation,
+valid-end loads, divergence, all input/output words, guards and sentinels
+pass: exactly 920 compared bytes, including the guarded 584-byte output.
+
+Nineteen focused typed-resource/namespace/raising/lowering LIT pass with
+zero failures in 6.36 seconds. One existing fixture gains execution cases,
+not a new test; no implementation changes or rebuild were needed.
+This is native CPU evidence, not Vulkan advertisement, RGB32 store,
+general format, broader/full-suite, external CTS, adapter-matrix or owned
+D3D12/conformance closure. Raising/lowering policy, runtime/SPIR-V code,
+status, atomics, descriptor materialization, ABI 8 and argument layouts
+remain unchanged. Bound/static descriptors remain open; `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) RGB32 integer read scope (2026-11-24)
 
 The [RGB32 integer follow-up](W0WindowsIntegrationProbe.md#w2aw2b-rgb32-integer-read-decoding-vm-2026-11-24)

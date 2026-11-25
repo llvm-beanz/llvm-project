@@ -14,6 +14,10 @@
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
 # RUN: feme-run --object --repeat=2 --heap=%t/wide.yaml %t/heap.o | FileCheck %s --check-prefix=WIDE
 # RUN: feme-run --object --repeat=2 --heap=%t/narrow.yaml %t/heap.o | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefix=RGB
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefix=RGB
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefix=RGB
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/heap.o | FileCheck %s --check-prefix=RGB
 # RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
 # RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings-wide.yaml %t/legacy.dxil | FileCheck %s --check-prefix=WIDE
@@ -25,6 +29,10 @@
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
 # RUN: feme-run --object --repeat=2 --heap=%t/wide.yaml %t/legacy.o | FileCheck %s --check-prefix=WIDE
 # RUN: feme-run --object --repeat=2 --heap=%t/narrow.yaml %t/legacy.o | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings-rgb.yaml %t/legacy.dxil | FileCheck %s --check-prefix=RGB
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings-rgb.yaml %t/legacy.dxil | FileCheck %s --check-prefix=RGB
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings-rgb.yaml %t/legacy.dxil | FileCheck %s --check-prefix=RGB
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/legacy.o | FileCheck %s --check-prefix=RGB
 #
 # Native CPU evidence, not owned D3D12. Distinct SRV/UAV payloads at the
 # same logical registers prove namespace separation. RGBA32 inputs contain
@@ -36,6 +44,9 @@
 # No arithmetic obscures FP32 bits. Every input/output word, both guards,
 # inactive-store sentinels and both repeats are checked. AOT uses heaps
 # ordered by space/register/namespace, interleaving SRVs and UAVs here.
+# RGB32 inputs use 12-byte texels and a final texel missing Z. Valid
+# int4/uint4/float4 loads preserve RGB and supply numeric alpha one;
+# partial and invalid texels return zero in every channel, including A.
 # RAISE-DAG: call { <4 x i32>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <4 x i32>, 0, 0, 1) {{%.*}}, i32 {{.*}})
 # RAISE-DAG: call { <4 x i32>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <4 x i32>, 0, 0, 0) {{%.*}}, i32 {{.*}})
 # RAISE-DAG: call { <4 x float>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <4 x float>, 0, 0, 1) {{%.*}}, i32 {{.*}})
@@ -73,6 +84,21 @@
 # NARROW-DAG: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF]]{{$}}
 # NARROW-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT]]{{$}}
 # NARROW-NOT: {{(heap|binding)\[}}
+# RGB: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42 42 42 2147483649 2147483650 2147483651 4294967295 0 1 2147483653 2147483654 2147483655 91 92]]{{$}}
+# RGB-DAG: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U:42 42 42 16777217 16777218 16777219 4294967295 2147483648 0 16777221 16777222 16777223 101 102]]{{$}}
+# RGB-DAG: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F:42 42 42 2147483648 1 2139095040 2143363909 4290917462 1065353217 3196059648 1056964608 1061158912 111 112]]{{$}}
+# RGB-DAG: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS:42 42 42 2147483665 2147483666 2147483667 2147483647 1 0 2147483669 2147483670 2147483671 121 122]]{{$}}
+# RGB-DAG: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU:42 42 42 16777233 16777234 16777235 2147483648 4294967295 1 16777237 16777238 16777239 131 132]]{{$}}
+# RGB-DAG: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF:42 42 42 1 2147483648 4286578688 4290917462 2143363909 3212836865 3226468352 1080033280 1081081856 141 142]]{{$}}
+# RGB-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT:42 2147483649 2147483650 2147483651 1 16777217 16777218 16777219 1 2147483648 1 2139095040 1065353216 2147483665 2147483666 2147483667 1 16777233 16777234 16777235 1 1 2147483648 4286578688 1065353216 4294967295 0 1 1 4294967295 2147483648 0 1 2143363909 4290917462 1065353217 1065353216 2147483647 1 0 1 2147483648 4294967295 1 1 4290917462 2143363909 3212836865 1065353216 2147483653 2147483654 2147483655 1 16777221 16777222 16777223 1 3196059648 1056964608 1061158912 1065353216 2147483669 2147483670 2147483671 1 16777237 16777238 16777239 1 42 42 42 42( 0){72} 42]]{{$}}
+# RGB-DAG: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# RGB-DAG: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U]]{{$}}
+# RGB-DAG: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F]]{{$}}
+# RGB-DAG: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS]]{{$}}
+# RGB-DAG: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU]]{{$}}
+# RGB-DAG: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF]]{{$}}
+# RGB-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT]]{{$}}
+# RGB-NOT: {{(heap|binding)\[}}
 #--- shader.hlsl
 #ifndef HEAP
 Buffer<int4> signedInput : register(t0);
@@ -215,6 +241,138 @@ resource-heap:
            42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
            42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
            42, 42]
+#--- rgb.yaml
+resource-heap:
+  - index: 0
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_sint
+    data: [42, 42, 42, 2147483649, 2147483650, 2147483651,
+           4294967295, 0, 1, 2147483653, 2147483654, 2147483655, 91, 92]
+  - index: 2
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_uint
+    data: [42, 42, 42, 16777217, 16777218, 16777219,
+           4294967295, 2147483648, 0, 16777221, 16777222, 16777223, 101, 102]
+  - index: 4
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42, 42, 2147483648, 1, 2139095040,
+           2143363909, 4290917462, 1065353217, 3196059648, 1056964608,
+           1061158912, 111, 112]
+  - index: 1
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_sint
+    data: [42, 42, 42, 2147483665, 2147483666, 2147483667,
+           2147483647, 1, 0, 2147483669, 2147483670, 2147483671, 121, 122]
+  - index: 3
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_uint
+    data: [42, 42, 42, 16777233, 16777234, 16777235,
+           2147483648, 4294967295, 1, 16777237, 16777238, 16777239, 131, 132]
+  - index: 5
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42, 42, 1, 2147483648, 4286578688,
+           4290917462, 2143363909, 3212836865, 3226468352, 1080033280,
+           1081081856, 141, 142]
+  - index: 6
+    size: 584
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42]
+#--- bindings-rgb.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_sint
+        data: [42, 42, 42, 2147483649, 2147483650, 2147483651,
+               4294967295, 0, 1, 2147483653, 2147483654, 2147483655, 91, 92]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_uint
+        data: [42, 42, 42, 16777217, 16777218, 16777219,
+               4294967295, 2147483648, 0, 16777221, 16777222, 16777223, 101, 102]
+  - space: 0
+    register: 2
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42, 42, 2147483648, 1, 2139095040,
+               2143363909, 4290917462, 1065353217, 3196059648, 1056964608,
+               1061158912, 111, 112]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_sint
+        data: [42, 42, 42, 2147483665, 2147483666, 2147483667,
+               2147483647, 1, 0, 2147483669, 2147483670, 2147483671, 121, 122]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_uint
+        data: [42, 42, 42, 16777233, 16777234, 16777235,
+               2147483648, 4294967295, 1, 16777237, 16777238, 16777239, 131, 132]
+  - space: 0
+    register: 2
+    register-class: uav
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42, 42, 1, 2147483648, 4286578688,
+               4290917462, 2143363909, 3212836865, 3226468352, 1080033280,
+               1081081856, 141, 142]
+  - space: 0
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 584
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42]
 #--- bindings-wide.yaml
 bindings:
   - space: 0

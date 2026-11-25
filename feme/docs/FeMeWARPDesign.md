@@ -145,9 +145,10 @@ The original compute-only baseline is no longer current:
   general typed or owned-device closure; runtime/SPIR-V code, loads/
   status, atomics and ABI are unchanged.
   Native four-component typed loads now check SDK DXC SM6.6/SM6.0
-  SINT/UINT/FP32 SRV/UAV shaders on six R32/RGBA32 formats across the
-  same CPU modes. Valid R32 zero-G/B/one-alpha defaults differ from
-  all-zero incomplete/invalid loads. Exact bits, valid-end accesses,
+  SINT/UINT/FP32 SRV/UAV shaders on nine R32/RGB32/RGBA32 formats across
+  the same CPU modes. Valid R32 zero-G/B/one-alpha defaults and RGB32's
+  real 12-byte stride/alpha one differ from all-zero incomplete/invalid
+  loads, including alpha. Exact bits, valid-end accesses,
   divergent use, all input/output words, guards and two repeats pass.
   Distinct SRV/UAV data proves namespace separation; legacy AOT supplies
   physical heaps ordered by space/register/namespace. This is bounded
