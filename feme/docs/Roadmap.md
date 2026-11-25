@@ -3064,6 +3064,25 @@ the first shader-facing milestone rather than alongside it.
    materialization, ABI 8 and layouts are unchanged. Other shapes/fields,
    bound/static images, full-suite, external CTS, adapter-matrix and
    owned-device/W2/W3 closure remain open.
+   Native plain-1D explicit-mip dimensions follow-up (2026-11-25):
+   new `getdimensions.levels.x` returns width/total mip count, with
+   symmetric LLVM forward lowering and FeMe raising mapping DXIL fields
+   0/3 to vector elements 0/1. Heap-backed sampled FP32/i32 plain 1D
+   CPU queries with defined i32 mips reuse existing size/level metadata
+   helpers in any stage without samplers or derivatives. Writable/undefined-
+   mip and mismatched-shape canonical queries reject; base 1D pairs remain
+   unsupported. Native SM6.6 passes waves 4/8, reference and ARM64 AOT,
+   four cases repeated twice, distinguishing widths 7/3/1 with three mips
+   from widths 5/2 with two mips. Exact query-derived SINT loads, divergent/
+   unbound indices, skipped stores, every word, guards and repeats pass:
+   exactly 180 compared bytes. The count-unused plain-1D variant adds
+   four cases repeated twice, checking 304 bytes each. See the
+   [probe](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-1d-explicit-mip-dimensions-vm-2026-11-25)
+   for validation. Only valid native mips are measured; helper clamping,
+   runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+   descriptor materialization, ABI 8 and layouts are unchanged. Other
+   shapes/fields, bound/static images, full-suite, external CTS, adapter-
+   matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

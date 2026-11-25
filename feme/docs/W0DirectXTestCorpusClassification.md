@@ -589,6 +589,26 @@ images, new FXC-profile/external corpus, external CTS, adapter-matrix
 and owned-device closure remain open; see the
 [1D-array explicit-mip evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-1d-array-explicit-mip-dimensions-vm-2026-11-25).
 
+Native plain-1D explicit-mip dimensions follow-up (2026-11-25): new
+`getdimensions.levels.x` returns width/total mip count, with symmetric
+LLVM forward lowering and FeMe raising mapping DXIL fields 0/3 to
+vector elements 0/1. Heap-backed sampled FP32/i32 CPU queries with
+defined i32 mips reuse existing size/level metadata helpers in any stage
+without sampler/derivatives. Writable/undefined-mip and mismatched-shape
+canonical forms reject; base 1D pairs remain unsupported. Native SDK DXC
+SM6.6 passes waves 4/8, reference and ARM64 AOT, four cases repeated
+twice, with widths 7/3/1 and three mips versus widths 5/2 and two mips.
+Query-derived exact SINT loads, divergent/unbound indices, skipped stores,
+every word, guards and repeats pass: exactly 180 compared bytes.
+The count-unused plain-1D variant adds four cases repeated twice,
+checking 304 bytes each. See the
+[plain-1D explicit-mip evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-1d-explicit-mip-dimensions-vm-2026-11-25)
+for validation. Only valid native mips are measured; shared helper clamping,
+runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+ABI 8 and layouts remain unchanged. Other shapes/fields, bound/static
+images, new FXC-profile/external corpus, external CTS, adapter-matrix
+and owned-device closure remain open.
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

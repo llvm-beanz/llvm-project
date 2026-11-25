@@ -3165,7 +3165,7 @@ derivatives. Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64
 AOT with three-mip base widths, distinct fixed layer counts, divergent/
 unbound indices, query/load coexistence, all words, guards and repeats.
 Portable fragment tests verify layer-derived loads and idempotence;
-plain 1D pair and plain 1D explicit-mip queries remain rejected. Runtime/
+plain 1D base-pair queries remain rejected; explicit queries use the path below. Runtime/
 SPIR-V code, ABI 8 and layouts remain unchanged. This is shared CPU
 metadata evidence, not draw or bound/static/owned-device closure.
 
@@ -3189,10 +3189,23 @@ Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT for
 widths 7/3/1 with two layers/three mips and widths 5/2 with three
 layers/two mips. Query-derived exact SINT loads, divergent/unbound indices,
 skipped-store sentinels, all words, guards and repeats pass; count-unused
-queries also execute. Writable arrays and plain 1D explicit queries remain
+queries also execute. Writable explicit queries remain
 unsupported. Only valid mips are measured; helper clamping, runtime/SPIR-V
 code, ABI 8 and layouts are unchanged. This is shared CPU evidence, not
 draw, bound/static image or owned-device/conformance closure.
+
+Sampled plain 1D explicit dimensions now use `getdimensions.levels.x`
+for width/total mip count. LLVM forward lowering and FeMe raising map
+DXIL fields 0/3 to vector elements 0/1; heap-backed FP32/i32 CPU queries
+with defined i32 mips reuse 1D size/level metadata helpers in any stage
+without samplers or derivatives. Native SM6.6 covers widths 7/3/1
+with three mips and widths 5/2 with two mips, exact query-derived SINT
+loads, divergence/unbound zeros, skipped stores, all words, guards and
+repeats in waves 4/8, reference and ARM64 AOT. Count-unused queries
+execute. Writable/undefined-mip and mismatched-shape canonical forms
+reject; base 1D pairs remain unsupported. Only valid native mips are
+measured; helper clamping, runtime/SPIR-V code, ABI 8 and layouts remain
+unchanged. This is shared CPU evidence, not draw or owned-device closure.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

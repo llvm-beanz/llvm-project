@@ -193,8 +193,8 @@ report base widths 5/7 and array layers 2; UAVs report width 3 and
 width 2/layers 3. Divergent/unbound indices, alternating-layer exact
 integer loads through a queried handle, sentinels, every word, guards
 and repeats pass: 156 input bytes plus a guarded 148-byte output,
-exactly 304 bytes per case. Plain 1D pair queries and native plain 1D
-explicit mips remain rejected in normal/reference/AOT paths. Runtime/
+exactly 304 bytes per case. Plain 1D base-pair queries remain rejected;
+explicit queries use the paths below. Runtime/
 SPIR-V code, ABI 8 and layouts remain unchanged. Other shapes/fields,
 bound/static images and owned-device/conformance closure remain open.
 
@@ -225,10 +225,25 @@ Query-derived last-X/last-layer exact SINT loads, divergent/unbound
 indices, skipped-store sentinels, every word, guards and repeats pass:
 172 input bytes plus a guarded 148-byte output, exactly 320 compared
 bytes per case. The prior count-unused 1D-array variant also executes
-four modes, repeated twice, checking 304 bytes each. Writable arrays and
-plain 1D explicit queries remain unsupported. Only valid mips are measured;
+four modes, repeated twice, checking 304 bytes each. Writable explicit
+queries remain unsupported. Only valid mips are measured;
 helper clamping, runtime/SPIR-V code, ABI 8 and layouts are unchanged.
 No bound/static images or owned-device/conformance closure is added.
+
+Native heap-backed sampled `Texture1D.GetDimensions(mip, width, levels)`
+now executes FP32/i32 SDK DXC SM6.6 queries in waves 4/8, reference
+and ARM64 AOT, each repeated twice. YAML uses `dimension: 1d`, a
+one-component `extent` and `mip-levels`, with mip-major data. Widths
+7/3/1 with three mips and widths 5/2 with two mips distinguish live
+mips and fixed total counts. Query-derived last-X exact SINT loads,
+divergent/unbound indices, skipped-store sentinels, every word, guards
+and repeats pass: 72 input bytes plus a guarded 108-byte output,
+exactly 180 compared bytes per case. The prior count-unused plain-1D
+variant also executes four modes, repeated twice, checking 304 bytes
+each. No sampler or derivatives are needed. Writable/undefined-mip and
+mismatched-shape canonical queries reject; base 1D pairs remain unsupported.
+Only valid native mips are measured. Helper clamping, runtime/SPIR-V
+code, ABI 8, layouts and owned-device boundaries remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

@@ -194,8 +194,8 @@ helpers. Plain 1D accepts scalar width only; array 1D accepts scalar width
 or width/layer count. Native SDK DXC SM6.6 passes waves 4/8, reference
 and ARM64 AOT, including three-mip base widths, distinct layer counts,
 divergent/unbound indices, exact integer query/load results, all words,
-guards and repeats. Plain 1D pair and plain 1D explicit-mip queries remain
-rejected in normal/reference/AOT paths. No sampler/derivatives are
+guards and repeats. Plain 1D base-pair queries remain rejected; explicit
+queries use the path below. No sampler/derivatives are
 needed. Runtime/SPIR-V code, ABI 8, layouts and advertisements
 remain unchanged; no bound/static images or owned-device closure.
 
@@ -220,9 +220,22 @@ Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT for
 widths 7/3/1, two layers/three mips and widths 5/2, three layers/two
 mips. Query-derived exact SINT loads, divergent/unbound indices, skipped
 stores, every word, guards and repeats pass. Count-unused queries also
-execute. Writable arrays and plain 1D explicit queries remain unsupported.
+execute. Writable explicit queries remain unsupported.
 Only valid mips are measured; shared helper clamping, runtime/SPIR-V code,
 ABI 8 and layouts are unchanged. No owned-device closure is established.
+
+Heap-backed sampled `Texture1D.GetDimensions(mip, width, levels)` now
+uses `getdimensions.levels.x`, preserving width/count in vector elements
+0/1 from DXIL fields 0/3 through symmetric forward/reverse lowering.
+FP32/i32 CPU declarations with defined i32 mips reuse existing 1D size/
+level metadata helpers in any stage without samplers or derivatives.
+Native SM6.6 covers widths 7/3/1 with three mips and widths 5/2 with
+two mips, query-derived exact SINT loads, divergent/unbound indices,
+skipped stores, every word, guards and repeats in waves 4/8, reference
+and ARM64 AOT. Count-unused queries execute. Writable/undefined-mip
+and mismatched-shape canonical forms reject; base plain 1D pairs remain
+unsupported. Only valid native mips are measured. Helper clamping,
+runtime/SPIR-V code, ABI 8 and owned-device boundaries are unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

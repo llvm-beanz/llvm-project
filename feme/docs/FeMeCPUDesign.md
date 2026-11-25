@@ -2492,9 +2492,26 @@ two layers/three mips and widths 5/2, three layers/two mips. Exact
 query-derived SINT loads, divergent/unbound indices, skipped stores,
 every word, guards and two repeats pass. Count-unused queries also execute.
 The existing array metadata unit now checks mip one as well as zero/two.
-Writable arrays and plain 1D explicit queries remain unsupported.
+Writable explicit queries remain unsupported.
 Only valid-mip native results are measured; shared helper clamping,
 runtime/SPIR-V code, ABI 8, layouts and owned-device boundaries are unchanged.
+
+Sampled plain 1D explicit queries now use `getdimensions.levels.x`,
+returning width/total mip count as two i32 elements. LLVM forward
+lowering and FeMe raising map DXIL fields 0/3 to elements 0/1, retaining
+the live mip; an unused native mip in a count query becomes zero.
+The shared admission/lowering predicate requires a heap-backed sampled
+FP32/i32 1D declaration and defined i32 mip. CPU lowering uses
+`getdimensions.lod.1d.i32` plus `querylevels.i32` without samplers or
+derivatives in any stage. Native SM6.6 covers widths 7/3/1 with three
+mips and widths 5/2 with two mips, exact query-derived SINT loads,
+divergent/unbound indices, skipped stores, every word, guards and repeats
+in waves 4/8, reference and ARM64 AOT. Count-unused queries execute;
+portable fragment count-only queries and idempotence are tested.
+Writable, undefined-mip and mismatched-shape canonical queries reject;
+base plain 1D pairs remain unsupported. Only valid native mips are
+measured. Helper clamping, runtime/SPIR-V code, ABI 8, layouts,
+advertisements and owned-device boundaries remain unchanged.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

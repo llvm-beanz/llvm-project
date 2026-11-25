@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native plain-1D explicit-mip dimension scope (2026-11-25)
+
+The [plain-1D explicit-mip follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-1d-explicit-mip-dimensions-vm-2026-11-25)
+adds `getdimensions.levels.x` and symmetric forward/reverse mapping of
+DXIL width/count fields 0/3 to vector elements 0/1. Heap-backed sampled
+FP32/i32 plain 1D CPU queries with defined i32 mips reuse existing
+size/level metadata helpers in any stage without sampler/derivatives.
+Writable/undefined-mip and mismatched-shape canonical queries reject;
+base plain-1D pairs remain unsupported.
+
+SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT, four cases
+each repeated twice. Widths 7/3/1 with three mips and widths 5/2 with
+two mips distinguish live widths from total counts. Query-derived exact
+SINT loads, divergent/unbound indices, skipped stores, every word, guards
+and repeats pass: exactly 180 compared bytes including a guarded
+108-byte output. The prior count-unused variant adds four cases repeated
+twice, checking 304 bytes each. See the linked probe for validation.
+
+Only valid-mip native results are measured; unchanged helper clamping
+is not D3D out-of-range-mip evidence. Runtime/SPIR-V code, existing
+load/store/status/atomic policy, advertisements, descriptor materialization,
+ABI 8 and layouts remain unchanged. Other shapes/fields, bound/static
+images, full-suite, new CTS, adapter-matrix and owned D3D12/conformance
+closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native 1D-array explicit-mip dimension scope (2026-11-25)
 
 The [1D-array explicit-mip follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-1d-array-explicit-mip-dimensions-vm-2026-11-25)

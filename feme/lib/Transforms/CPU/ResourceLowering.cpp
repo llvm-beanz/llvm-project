@@ -757,7 +757,17 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
       auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
       Value *Dimensions;
-      if (ID == Intrinsic::dx_resource_getdimensions_levels_xy) {
+      if (ID == Intrinsic::dx_resource_getdimensions_levels_x) {
+        Value *Width =
+            createQuerySizeLod1D(Builder, Env, Image->getArgOperand(0),
+                                 CI->getArgOperand(1), Builder.getTrue());
+        Value *Levels =
+            createQueryLevels(Builder, Env, Image->getArgOperand(0));
+        Dimensions = Builder.CreateInsertElement(
+            PoisonValue::get(CI->getType()), Width, uint64_t{0});
+        Dimensions =
+            Builder.CreateInsertElement(Dimensions, Levels, uint64_t{1});
+      } else if (ID == Intrinsic::dx_resource_getdimensions_levels_xy) {
         Value *Size =
             Kind == dxil::ResourceKind::Texture1DArray
                 ? createQuerySizeLod1DArray(
@@ -1519,7 +1529,9 @@ bool feme::cpu::isSupportedDXILSample(const CallInst &CI) {
 
 bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
-  bool WithLevels = ID == Intrinsic::dx_resource_getdimensions_levels_xy;
+  bool WithLevelsX = ID == Intrinsic::dx_resource_getdimensions_levels_x;
+  bool WithLevels =
+      WithLevelsX || ID == Intrinsic::dx_resource_getdimensions_levels_xy;
   if ((ID != Intrinsic::dx_resource_getdimensions_x &&
        ID != Intrinsic::dx_resource_getdimensions_xy && !WithLevels) ||
       CI.arg_size() != (WithLevels ? 2u : 1u))
@@ -1532,8 +1544,9 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
     return false;
   auto Kind = Ty->getDimension();
   if (WithLevels &&
-      ((Kind != dxil::ResourceKind::Texture2D &&
-        Kind != dxil::ResourceKind::Texture1DArray) ||
+      ((WithLevelsX ? Kind != dxil::ResourceKind::Texture1D
+                    : Kind != dxil::ResourceKind::Texture2D &&
+                          Kind != dxil::ResourceKind::Texture1DArray) ||
        Ty->isWriteable() || !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
        isa<UndefValue>(CI.getArgOperand(1))))
     return false;
@@ -1541,7 +1554,7 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
        Kind != dxil::ResourceKind::Texture1DArray &&
        Kind != dxil::ResourceKind::Texture2D) ||
       (Kind == dxil::ResourceKind::Texture1D &&
-       ID != Intrinsic::dx_resource_getdimensions_x))
+       ID != Intrinsic::dx_resource_getdimensions_x && !WithLevelsX))
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
   return (ScalarTy->isFloatTy() || ScalarTy->isIntegerTy(32)) &&

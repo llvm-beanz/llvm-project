@@ -720,6 +720,7 @@ TEST_F(ImageSamplingTest, GetDimensions1DIsMetadataOnlyAndChecksBounds) {
   Img.MipLevels = 3;
   Img.Flags = FEME_IMAGE_SAMPLED;
   EXPECT_EQ(Fn(&Img, 1, 0, 0, true), 5);
+  EXPECT_EQ(Fn(&Img, 1, 0, 1, true), 2);
   EXPECT_EQ(Fn(&Img, 1, 0, 2, true), 1);
   Img.Width = 3;
   Img.Flags = FEME_IMAGE_STORAGE;

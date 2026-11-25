@@ -1470,7 +1470,8 @@ it now covers the two largest opcode families:
   three-mip base widths, independent layer counts, divergent/unbound
   indices, query/load coexistence, every word, guards and repeats.
   Portable fragment tests cover layer-derived loads and idempotence; plain
-  1D pair and plain 1D explicit-mip queries retain early rejection. Runtime/SPIR-V
+  1D base-pair queries retain early rejection; explicit queries use the
+  separate path below. Runtime/SPIR-V
   code, existing load/store/status/atomic policy, ABI 8 and layouts remain
   unchanged. No bound/static images or owned-device closure is added.
 
@@ -1496,9 +1497,23 @@ it now covers the two largest opcode families:
   checking widths 7/3/1 with two layers/three mips and widths 5/2 with
   three layers/two mips. Query-derived exact SINT loads, divergent/unbound
   indices, skipped-store sentinels, all words, guards and repeats pass.
-  Count-unused queries also execute. Writable arrays and plain 1D explicit
-  queries remain unsupported. Only valid mips are measured; helper
+  Count-unused queries also execute. Writable explicit queries remain
+  unsupported. Only valid mips are measured; helper
   clamping, runtime/SPIR-V code, ABI 8 and owned-device boundaries are unchanged.
+
+- Sampled plain 1D explicit dimensions use `getdimensions.levels.x`,
+  returning width/count as two i32 elements. Symmetric LLVM forward
+  lowering and FeMe raising map DXIL fields 0/3 to vector elements 0/1
+  without reading a height field. CPU lowering reuses the 1D size-at-LOD
+  and total-level metadata helpers for heap-backed FP32/i32 declarations
+  with defined i32 mips, in any stage without sampler or derivatives.
+  Native SM6.6 covers widths 7/3/1 with three mips and widths 5/2 with
+  two mips, query-derived exact SINT loads, divergent/unbound indices,
+  skipped stores, every word, guards and repeats in waves 4/8, reference
+  and ARM64 AOT. Count-unused queries also execute. Writable/undefined-mip
+  and mismatched-shape canonical forms reject; base 1D pairs stay
+  unsupported. Only valid native mips are measured. Helper clamping,
+  runtime/SPIR-V code, ABI 8 and owned-device boundaries are unchanged.
 
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
@@ -1662,16 +1677,16 @@ reconstructed. `raiseSample`/`raiseSampleBias`/`raiseSampleLevel`/`raiseSampleCm
 scalar FP32 `dx.op.sampleCmp` (64)/`dx.op.sampleCmpLevelZero` (65),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
 `dx.op.getDimensions`'s width/height fields (72). Base queries use scalar/
-pair intrinsics; sampled 1D-array/plain 2D explicit mips or field-3 mip-count uses
-raise to `getdimensions.levels.xy`. Its vector element 2 maps to DXIL field
-3, symmetrically with the new LLVM forward lowering. Field 2 and aggregate
+pair intrinsics; sampled 1D/array or plain 2D explicit mips or field-3 counts
+raise to `getdimensions.levels.x/xy`. Their final element (1/2) maps to DXIL
+field 3, symmetrically with LLVM forward lowering. Field 2 and aggregate
 uses remain unraised. Typed/byte-address field-zero queries additionally
 raise to `getdimensions.x` with unused/zero mip operands; other buffer
 fields remain unraised. Structured field-zero counts also raise, while DXC's
 constant HLSL stride result is preserved rather than treating it as field 1.
 Scalar/pair dimension raising requires an unused/zero mip operand; sampled
-1D-array/plain 2D explicit mips/counts instead retain the live mip through the
-three-component intrinsic. Plain 1D base and 1D-array/plain 2D base/explicit
+1D/array or plain 2D explicit mips/counts retain the live mip through the
+two-/three-component intrinsic. 1D/array and plain 2D base/explicit
 heap-backed FP32/i32 queries lower to shared CPU metadata helpers.
 Other shapes and bound/static image queries remain outside that CPU path.
 Before adding comparison mapping, `Sample`,

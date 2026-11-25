@@ -1304,14 +1304,15 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // scalar FP32 `SampleCmp`
 // (64)/`SampleCmpLevelZero` (65), `TextureLoad` (66) and
 // `GetDimensions`' width/height fields (72, via
-// `int_dx_resource_getdimensions_x`/`_xy`), plus sampled 1D-array/plain 2D
-// explicit mips/counts via `_levels_xy`. Gather remains outside this raiser's
-// scope. Gradient sampling preserves spatial/direction derivatives/clamp;
-// heap-backed FP32 1D/2D/3D/cube (including arrays) executes on CPU. Biased
-// sampling preserves bias/clamp; CPU lowering is stage/shape-limited. Implicit
-// comparison preserves the wire clamp but requires derivative-aware CPU
-// lowering. Heap-backed scalar FP32 1D/2D/cube (and array) comparison executes
-// in fragment stages; level zero also supports compute.
+// `int_dx_resource_getdimensions_x`/`_xy`), plus sampled 1D/array or plain 2D
+// explicit mips/counts via `_levels_x`/`_levels_xy`. Gather is outside this
+// raiser's scope. Gradient sampling preserves spatial/direction
+// derivatives/clamp; heap-backed FP32 1D/2D/3D/cube (including arrays) executes
+// on CPU. Biased sampling preserves bias/clamp; CPU lowering is
+// stage/shape-limited. Implicit comparison preserves the wire clamp but
+// requires derivative-aware CPU lowering. Heap-backed scalar FP32 1D/2D/cube
+// (and array) comparison executes in fragment stages; level zero also supports
+// compute.
 //===----------------------------------------------------------------------===//
 
 /// The number of texture coordinate components DXIL's sample/load ops
@@ -1829,9 +1830,9 @@ bool raiseTextureStore(CallInst &CI) {
   return true;
 }
 
-/// Raises field-0/1 dimension extracts to scalar/pair queries. Sampled 1D-array
-/// and plain 2D queries with a meaningful mip or field-3 mip count instead use
-/// `getdimensions.levels.xy`, mapping DXIL field 3 to vector element 2.
+/// Raises field-0/1 dimension extracts to scalar/pair queries. Sampled 1D,
+/// 1D-array and plain 2D queries with a meaningful mip or field-3 count use
+/// `getdimensions.levels.x/xy`, mapping field 3 after the spatial dimensions.
 /// Field 2 and aggregate uses remain unsupported. Other shapes require an
 /// unused/zero mip; buffers accept only field 0 (DXC supplies a structured
 /// buffer's HLSL stride as a constant).
@@ -1851,10 +1852,12 @@ bool raiseGetDimensions(CallInst &CI) {
   bool NeedsLevels =
       !isa<UndefValue>(Mip) && (!ConstantMip || !ConstantMip->isZero());
   auto *TextureTy = dyn_cast<dxil::TextureExtType>(Handle->getType());
+  bool Is1D =
+      TextureTy && TextureTy->getDimension() == dxil::ResourceKind::Texture1D;
   bool CanQueryLevels =
       TextureTy && !TextureTy->isWriteable() &&
       (TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
-       TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray);
+       TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray || Is1D);
   if (NeedsLevels && !CanQueryLevels)
     return false;
 
@@ -1866,7 +1869,7 @@ bool raiseGetDimensions(CallInst &CI) {
       return false;
     uint64_t Field = EV->getIndices()[0];
     if ((Field > 1 && (Field != 3 || !CanQueryLevels)) ||
-        (IsBuffer && Field != 0))
+        (IsBuffer && Field != 0) || (Is1D && Field == 1))
       return false;
     NeedsHeight |= (Field == 1);
     NeedsLevels |= (Field == 3);
@@ -1886,7 +1889,9 @@ bool raiseGetDimensions(CallInst &CI) {
   Value *Dimensions;
   if (NeedsLevels) {
     Function *GetDimensionsLevelsFn = Intrinsic::getOrInsertDeclaration(
-        CI.getModule(), Intrinsic::dx_resource_getdimensions_levels_xy,
+        CI.getModule(),
+        Is1D ? Intrinsic::dx_resource_getdimensions_levels_x
+             : Intrinsic::dx_resource_getdimensions_levels_xy,
         {Handle->getType()});
     Value *Level = isa<UndefValue>(Mip) ? Builder.getInt32(0) : Mip;
     Dimensions = Builder.CreateCall(GetDimensionsLevelsFn, {Handle, Level});
@@ -1907,7 +1912,7 @@ bool raiseGetDimensions(CallInst &CI) {
         NeedsHeight || NeedsLevels
             ? Builder.CreateExtractElement(
                   Dimensions, Builder.getInt32(EV->getIndices()[0] == 3
-                                                   ? 2
+                                                   ? (Is1D ? 1 : 2)
                                                    : EV->getIndices()[0]))
             : Dimensions;
     EV->replaceAllUsesWith(Replacement);

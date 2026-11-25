@@ -163,6 +163,44 @@ define i32 @dimensions_dynamic_mip(i32 %idx, i32 %mip) {
   %w = extractvalue %dx.types.Dimensions %d, 1
   ret i32 %w
 }
+; CHECK-LABEL: define i32 @dimensions_1d_width(
+; CHECK: [[D:%.*]] = call <2 x i32> @llvm.dx.resource.getdimensions.levels.x{{.*}}({{.*}}, i32 %mip)
+; CHECK: extractelement <2 x i32> [[D]], i32 0
+; CHECK-NOT: @dx.op.getDimensions
+define i32 @dimensions_1d_width(i32 %idx, i32 %mip) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 1, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 %mip)
+  %w = extractvalue %dx.types.Dimensions %d, 0
+  ret i32 %w
+}
+
+; CHECK-LABEL: define i32 @dimensions_1d_count(
+; CHECK: [[D:%.*]] = call <2 x i32> @llvm.dx.resource.getdimensions.levels.x{{.*}}({{.*}}, i32 0)
+; CHECK: extractelement <2 x i32> [[D]], i32 1
+; CHECK-NOT: @dx.op.getDimensions
+define i32 @dimensions_1d_count(i32 %idx) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 1, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 undef)
+  %n = extractvalue %dx.types.Dimensions %d, 3
+  ret i32 %n
+}
+
+; A consumed field 1 is not a plain-1D mip count.
+; CHECK-LABEL: define i32 @dimensions_1d_invalid_height(
+; CHECK: call %dx.types.Dimensions @dx.op.getDimensions
+; CHECK-NOT: @llvm.dx.resource.getdimensions
+define i32 @dimensions_1d_invalid_height(i32 %idx, i32 %mip) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 1, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 %mip)
+  %hgt = extractvalue %dx.types.Dimensions %d, 1
+  %n = extractvalue %dx.types.Dimensions %d, 3
+  %r = add i32 %hgt, %n
+  ret i32 %r
+}
+
 ; A consumed depth field must leave the entire plain-2D query unraised.
 ; CHECK-LABEL: define i32 @dimensions_mixed_fields(
 ; CHECK: call %dx.types.Dimensions @dx.op.getDimensions

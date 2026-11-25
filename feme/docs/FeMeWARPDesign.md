@@ -214,8 +214,8 @@ The original compute-only baseline is no longer current:
   pass waves 4/8, reference and ARM64 AOT, including three-mip base
   widths, distinct layer counts, divergent/unbound indices, query/load
   coexistence, all words, guards and repeats. Portable fragment tests
-  verify layer-derived loads and idempotence; plain 1D pair queries and
-  plain 1D explicit mips remain rejected. Runtime/SPIR-V code, ABI 8 and
+  verify layer-derived loads and idempotence; plain 1D base-pair queries
+  remain rejected. Explicit queries use the path below. Runtime/SPIR-V code, ABI 8 and
   layouts remain unchanged; no bound/static images, advertisements or
   owned-device closure are added.
   Sampled plain 2D explicit dimensions now preserve live i32 mips and total
@@ -236,10 +236,22 @@ The original compute-only baseline is no longer current:
   widths 7/3/1, two layers/three mips and widths 5/2, three layers/two
   mips, including exact query-derived SINT loads, divergent/unbound indices,
   skipped stores, every word, guards and repeats. Count-unused queries also
-  execute. Writable arrays and plain 1D explicit queries remain unsupported.
+  execute. Writable explicit queries remain unsupported.
   Only valid mips are measured; helper clamping, runtime/SPIR-V code,
   ABI 8, layouts and advertisements are unchanged. No bound/static
   images or owned-device/conformance closure is added.
+  Sampled plain 1D explicit dimensions now use `getdimensions.levels.x`,
+  mapping width/count DXIL fields 0/3 to vector elements 0/1 through
+  symmetric LLVM forward lowering and FeMe raising. Heap-backed FP32/i32
+  CPU queries with defined i32 mips reuse existing 1D size/level metadata
+  helpers without samplers or derivatives in any stage. Native SM6.6
+  covers widths 7/3/1 with three mips and widths 5/2 with two mips,
+  query-derived exact SINT loads, divergent/unbound indices, skipped stores,
+  every word, guards and repeats in waves 4/8, reference and ARM64 AOT.
+  Count-unused queries execute. Writable/undefined-mip and mismatched-shape
+  canonical queries reject; base 1D pairs remain unsupported. Only valid
+  native mips are measured; helper clamping, runtime/SPIR-V code, ABI 8,
+  layouts and advertisements remain unchanged. No owned-device closure.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.
