@@ -2788,6 +2788,27 @@ the first shader-facing milestone rather than alongside it.
    contention/order/barrier, other-format/image/int64 atomic, external
    CTS, adapter-matrix, owned-device or W2/W3 closure is claimed;
    descriptor materialization, runtime/SPIR-V code and ABI 8 are unchanged.
+   Full-mask typed-buffer store follow-up (2026-11-24): opcode 69
+   mask-15 i32/FP32 payloads through narrower one/two/three-component
+   handles now remain four-channel canonical stores. This closes the
+   preceding SM6.6 scalar-store gap while preserving declared handle
+   width/signedness. Scalar helpers would fill other channels 0/0/1,
+   losing native payload on wider descriptors, so existing vector
+   helpers receive all four values. Invalid/nonmatching partial masks,
+   mixed types and non-32-bit promotion stay unraised; validation precedes
+   mutation. Portable raising/CPU and real forward/raise tests check
+   shorter handles, nonbroadcast order, helper width, indices, rejected
+   calls and idempotence. Native SDK DXC SM6.6 heap and SM6.0 bound
+   scalar SINT/UINT/FP32 stores pass R32/RGBA32 cases across normal
+   waves 4/8, reference and ARM64 AOT modes, checking all channels,
+   exact bits, divergent stores, invalid indices, texel guards and two
+   repeats. Legacy AOT uses physical heaps. The affected ARM64 build
+   passes 25 steps; formatting is clean. Relevant DXIL/CPU transforms,
+   CPU units, runner and runtime LIT pass 1,720 with 4 unsupported and
+   zero failures in 87.34 seconds, adding three fixtures/tests. No full-
+   suite, external CTS, adapter-matrix, general partial-mask/other-format/
+   non-32-bit typed or owned-device/W2/W3 closure is claimed. Loads/status,
+   atomics, raw/structured behavior, runtime/SPIR-V code and ABI 8 remain.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

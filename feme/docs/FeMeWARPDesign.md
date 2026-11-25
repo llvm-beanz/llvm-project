@@ -130,11 +130,20 @@ The original compute-only baseline is no longer current:
   element-index bounds across the same CPU modes. Modern scalar/legacy
   atomic-only four-component fallback handles retain signedness; atomic
   exchange initializes lane-owned state. Guarded 28-byte state/464-byte
-  output words pass twice. SM6.6 mask-15 broadcast scalar typed stores
-  remain unraised due to the mask/handle width mismatch; ordinary typed
-  admission and legacy width inference are not advanced. This is not
+  output words pass twice. Legacy width inference is unchanged. This is not
   contention/order/barrier, other-format/image/int64 atomic or owned-
   device closure; runtime/SPIR-V code and ABI remain unchanged.
+  Full-mask typed-store raising now closes the scalar-store gap found
+  by that probe. Mask-15 i32/FP32 payloads through narrower handles
+  retain all four channels in canonical vector stores, avoiding scalar
+  helpers' 0/0/1 fills on wide descriptors. Handle width/signedness remain.
+  Native SM6.6/SM6.0 scalar SINT/UINT/FP32 assignments pass R32/RGBA32
+  cases across the same CPU modes, checking all broadcast channels,
+  exact bits, divergent stores, invalid indices, texel guards and two
+  repeats. Invalid/nonmatching partial masks, mixed types and non-32-bit
+  promotion stay unraised. This adds native CPU store evidence, not
+  general typed or owned-device closure; runtime/SPIR-V code, loads/
+  status, atomics and ABI are unchanged.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

@@ -85,10 +85,21 @@ bounds across the same CPU modes. Modern scalar and legacy atomic-only
 four-component fallback handles retain signedness. Atomic exchange
 initializes five lane-owned element pairs; all words of two guarded
 28-byte state buffers and a guarded 464-byte output pass twice.
-Ordinary SM6.6 mask-15 broadcast scalar typed stores remain unraised due
-to the mask/handle width mismatch. This does not establish new ordinary
-typed-load/store admission, legacy width inference, contention/order/
-barrier, other-format/image/int64 atomic or implementation/ABI changes.
+This does not establish new legacy width inference, contention/order/
+barrier, other-format/image/int64 atomic or ABI changes.
+
+Full-mask typed-store admission now closes that probe's scalar-store gap:
+opcode 69 mask-15 i32/FP32 payloads through narrower handles retain all
+four channels in canonical vector stores, with declared width/signedness
+unchanged. Existing vector helpers honor the bound format instead of
+filling other channels 0/0/1 through scalar helpers. Native SM6.6/SM6.0
+scalar SINT/UINT/FP32 assignments pass exact-output R32/RGBA32 cases
+across the same CPU modes, checking all broadcast channels, special bits,
+divergent stores, invalid indices, complete texel guards and two repeats.
+Invalid/nonmatching partial masks, mixed types and non-32-bit promotion
+stay unraised. This is bounded store evidence, not general typed-load/
+store or owned-device closure; runtime/SPIR-V code, loads/status, atomics
+and ABI remain unchanged.
 
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.

@@ -328,6 +328,24 @@ corpus, contention/order/barrier, other-format/image/int64 atomic or
 owned-device proof; see the
 [typed atomic evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-r32_sintr32_uint-typed-buffer-atomics-vm-2026-11-24).
 
+Full-mask typed-store follow-up (2026-11-24): the preceding scalar-store
+gap is closed by preserving mask-15 i32/FP32 payloads through narrower
+typed handles as four-channel canonical stores. Declared width/signedness
+remain; existing vector helpers avoid scalar helpers' 0/0/1 fills on
+wide formats. Invalid/nonmatching partial masks, mixed active types and
+non-32-bit promotion stay unraised. Portable raising/CPU and real forward/
+raise tests verify width/order, indices, rejected calls and idempotence.
+Native SDK DXC SM6.6 heap and SM6.0 bound scalar SINT/UINT/FP32 stores
+pass R32/RGBA32 cases across normal waves 4/8, reference and ARM64 AOT
+with every broadcast channel, exact bits, divergent stores, invalid
+indices, texel guards and two repeats. Legacy AOT takes physical heaps.
+The affected ARM64 build passes; relevant LIT passes 1,720 with
+4 unsupported and zero failures in 87.34 seconds, adding three fixtures/
+tests. This is native CPU store evidence, not new FXC-profile/external
+corpus, general typed/partial-mask/non-32-bit closure or owned-device
+proof; see the
+[full-mask store evidence](W0WindowsIntegrationProbe.md#w2aw2b-full-mask-typed-buffer-stores-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

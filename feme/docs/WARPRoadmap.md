@@ -2401,6 +2401,48 @@ runtime/SPIR-V code, ABI 8 and argument layouts remain unchanged.
 Bound/static D3D12 descriptors and broader conformance remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W2(b) full-mask typed-buffer store admission (2026-11-24):
+opcode 69 mask-15 i32/FP32 stores through one/two/three-component typed
+handles now retain all four payload channels in a canonical vector store.
+This closes the SM6.6 scalar-store gap found by the typed-atomic probe.
+The declared handle width and signedness stay intact. Narrowing to a
+scalar store would be incorrect: existing scalar helpers fill other
+channels with 0/0/1, while the bound descriptor can expose RGBA32 and
+native DXC broadcasts the scalar into all four channels. Existing vector
+helpers preserve the wire payload and let the bound format choose its
+physical texel size. Matching-width stores keep their existing behavior.
+
+All active operand types are checked before constructing IR. Empty,
+sparse, dynamic and oversized masks, nonmatching partial masks, mixed
+active types and non-32-bit full-mask promotion remain unraised without
+partial construction or duplicate writes. Portable raising/CPU tests
+check scalar and shorter-vector handles, nonbroadcast component order,
+four-channel helper selection, element-index zero-extension, rejected
+calls, cleanup and idempotence. The real DirectX forward/raise round-trip
+also preserves a scalar handle carrying a four-channel FP32 payload.
+
+The new [`native-scalar-typed-stores.test`](../test/Tools/feme-run/HLSL/native-scalar-typed-stores.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound scalar SINT/UINT/FP32
+assignments against both R32 and RGBA32 descriptors: six format cases
+pass normal waves 4/8, reference and ARM64 AOT-object paths. All four
+broadcast channels are checked, not only R32 results. Exact signed/high-
+bit and adjacent non-FP32-exact integers, negative zero, subnormal,
+quiet-NaN payload and negative fractional/infinity bits, divergent stores,
+upper/negative-bit-pattern indices, complete texel guards and two repeats
+pass. Legacy AOT uses explicit physical heaps, not object binding YAML.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes 25 steps; changed-line clang-format is clean.
+Relevant DXIL/CPU transforms, CPU units, runner and runtime LIT pass
+1,720 with 4 unsupported and zero failures in 87.34 seconds; three new
+fixtures add three tests. This is bounded native CPU store evidence,
+not general partial-mask/other-format/non-32-bit typed closure, a full-
+suite, external CTS, adapter-matrix or owned D3D12 result. Loads/status,
+atomics, raw/structured behavior, runtime/SPIR-V code, ABI 8 and argument
+layouts remain unchanged. Bound/static D3D12 descriptors and broader
+conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

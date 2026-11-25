@@ -2321,11 +2321,24 @@ and element-index zero/no-op bounds across the same CPU modes. Modern
 scalar and legacy atomic-only four-component fallback handles retain
 signedness; existing typed helpers use R32 descriptor formats. Atomic
 exchange initializes each lane's elements on each repeat; all guarded
-28-byte state/464-byte output words pass twice. Ordinary SM6.6 mask-15
-broadcast scalar typed stores still fail the raiser's width-equality
-check. This fixture does not change that admission, legacy width inference,
-runtime code, contention/order/barrier policy, other-format/image/int64
-atomic breadth or ABI.
+28-byte state/464-byte output words pass twice. This atomic fixture does
+not change legacy width inference, runtime code, contention/order/barrier
+policy, other-format/image/int64 atomic breadth or ABI.
+
+Full-mask typed-store raising now closes that probe's scalar-store gap.
+Opcode 69 mask-15 i32/FP32 payloads through one/two/three-component
+handles remain four-channel vector stores; handle width/signedness are
+preserved. Scalar helpers would fill other channels 0/0/1, losing native
+payload on wide descriptors, so existing v4 helpers receive all four
+values and use the bound format's texel size. Active types are checked
+before mutation; invalid/nonmatching partial masks, mixed types and
+non-32-bit promotion stay unraised. Portable raising/CPU and forward/
+raise tests preserve width/order, element indices and idempotence.
+Native SM6.6/SM6.0 scalar SINT/UINT/FP32 stores pass R32/RGBA32 cases
+across the same CPU modes, checking every broadcast channel, exact bits,
+divergent stores, invalid indices, texel guards and two repeats.
+Runtime/SPIR-V code, loads/status, atomics and ABI remain unchanged;
+general masked/other-format/non-32-bit typed closure is not added.
 
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded

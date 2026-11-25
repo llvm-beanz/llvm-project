@@ -107,10 +107,19 @@ values, wraparound, divergent increments and element-index bounds across
 the same CPU modes. Modern scalar and legacy atomic-only four-component
 fallback handles retain signedness. Atomic exchange initializes lane-owned
 elements; guarded 28-byte state/464-byte output words pass twice.
-Ordinary SM6.6 mask-15 broadcast scalar typed stores remain unraised due
-to the mask/handle width mismatch. No ordinary typed-load/store admission,
-legacy width inference, contention/order/barrier, other-format/image/int64
-atomic or implementation/ABI change is implied.
+No legacy width inference, contention/order/barrier, other-format/image/
+int64 atomic or ABI change is implied.
+
+Full-mask typed stores now preserve opcode 69 mask-15 i32/FP32 payloads
+through narrower handles as four-channel canonical stores. Handle width/
+signedness stay intact; existing vector helpers honor the bound format
+without scalar helpers' 0/0/1 fills in other channels. Native SM6.6/SM6.0
+scalar SINT/UINT/FP32 stores pass exact-output R32/RGBA32 cases across
+the same CPU modes, checking all broadcast channels, special bits,
+divergent stores, invalid indices, texel guards and two repeats. Invalid/
+nonmatching partial masks, mixed types and non-32-bit promotion remain
+unraised. This closes the scalar-store gap, not general typed-load/store,
+owned-device, runtime/SPIR-V, loads/status, atomic or ABI behavior.
 
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which

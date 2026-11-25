@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) full-mask typed-buffer store scope (2026-11-24)
+
+The [full-mask store follow-up](W0WindowsIntegrationProbe.md#w2aw2b-full-mask-typed-buffer-stores-vm-2026-11-24)
+closes the preceding SM6.6 scalar-store gap: opcode 69 mask-15 i32/FP32
+stores through narrower typed handles now preserve all four payload
+channels through existing vector helpers. Declared handle widths and
+signedness remain intact. Scalar-helper narrowing would replace other
+channels with 0/0/1 on wide descriptors and is deliberately avoided.
+Invalid/nonmatching partial masks, mixed active types and non-32-bit
+promotion stay unraised; validation precedes mutation.
+
+Portable raising/CPU regressions and a real DirectX forward/raise
+round-trip check payload width/order, scalar/shorter handles, helper
+selection, element indexing, malformed calls and idempotence. Native SDK
+DXC SM6.6 heap and SM6.0 bound scalar SINT/UINT/FP32 stores execute on
+R32 and RGBA32 descriptors across normal waves 4/8, reference and ARM64
+AOT modes. All broadcast channels, exact integer/special FP32 bits,
+divergent stores, invalid indices, texel guards and two repeats pass.
+Legacy AOT uses physical heaps.
+
+The affected ARM64 build passes 25 steps; changed-line formatting is
+clean. Relevant DXIL/CPU transforms, CPU units, runner and runtime LIT
+pass 1,720 with 4 unsupported and zero failures in 87.34 seconds, adding
+three fixtures/tests. Vulkan advertisements, loads/status, atomics,
+raw/structured behavior, runtime/SPIR-V code, ABI 8 and argument layouts
+are unchanged. No full-suite, external CTS, adapter-matrix, general
+partial-mask/other-format/non-32-bit typed closure or owned-device
+result is claimed. Bound/static D3D12 descriptors and broader conformance
+remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native R32 typed-buffer atomic scope (2026-11-24)
 
 The [typed-atomic follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-r32_sintr32_uint-typed-buffer-atomics-vm-2026-11-24)

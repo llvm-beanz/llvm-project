@@ -1369,9 +1369,24 @@ it now covers the two largest opcode families:
   four-component fallback handles preserve signedness; typed helpers use
   R32 descriptor formats. Atomic exchange initializes lane-owned state,
   checking every word of guarded 28-byte state buffers/464-byte output
-  twice. SM6.6 mask-15 broadcast scalar typed stores remain unraised:
-  their mask width does not match the scalar handle width. Ordinary
-  typed-load/store admission and legacy width inference are not advanced.
+  twice. That probe initially exposed a scalar typed-store mask/handle
+  width mismatch; the full-mask follow-up below closes that store gap
+  without changing atomic execution or legacy width inference.
+
+- Full-mask typed stores: opcode 69 mask-15 i32/FP32 payloads through
+  narrower one/two/three-component handles are preserved as four-channel
+  canonical stores. Handle width/signedness are unchanged. Bound formats
+  may expose more channels than the shader type, so scalar-helper
+  narrowing (which fills other channels 0/0/1) would lose native payload.
+  Active types are validated before mutation; invalid/nonmatching partial
+  masks, mixed types and non-32-bit promotion remain unraised. Native
+  SM6.6/SM6.0 scalar SINT/UINT/FP32 assignments pass exact-output R32 and
+  RGBA32 cases across normal waves 4/8, reference and ARM64 AOT modes,
+  checking all broadcast channels, special bits, divergent stores, invalid
+  indices, texel guards and two repeats. Portable raising/CPU and real
+  forward/raise regressions preserve payload order/width and idempotence.
+  Runtime/SPIR-V code, loads/status, atomics and ABI 8 are unchanged;
+  general partial-mask/other-format/non-32-bit typed closure is not claimed.
 
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard

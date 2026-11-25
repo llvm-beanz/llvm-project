@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) full-mask typed-buffer stores (VM, 2026-11-24)
+
+Opcode 69 mask-15 i32/FP32 stores through narrower one/two/three-component
+typed handles now preserve all four payload channels in a canonical vector
+store. Handle width/signedness stay intact; existing vector helpers honor
+the bound format. Narrowing to a scalar helper would incorrectly replace
+other channels with 0/0/1 on RGBA32 descriptors. This closes the scalar
+store gap found by the preceding typed-atomic probe, not all masked stores.
+
+Active types are validated before IR construction. Empty/sparse/dynamic/
+oversized masks, nonmatching partial masks, mixed types and non-32-bit
+promotion remain unraised without partial mutation. Portable raising/CPU
+tests check shorter handles, nonbroadcast component order, four-channel
+helper selection, element indices, cleanup and idempotence. The real
+DirectX forward/raise round-trip preserves a scalar handle with four
+FP32 payload channels.
+
+[`native-scalar-typed-stores.test`](../test/Tools/feme-run/HLSL/native-scalar-typed-stores.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound scalar SINT/UINT/FP32 stores
+against R32 and RGBA32 descriptors in normal waves 4/8, reference and
+ARM64 AOT modes. Six format cases check every broadcast channel,
+exact signed/high/non-FP32-exact integer and special FP32 bits, divergent
+stores, upper/negative-bit-pattern indices, full texel guards and two
+repeats. Legacy AOT supplies physical heaps, not object binding YAML.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes 25 steps; changed-line clang-format is clean.
+Relevant DXIL/CPU transforms, CPU units, runner and runtime LIT pass
+1,720 with 4 unsupported and zero failures in 87.34 seconds; three
+fixtures add three tests. No full-suite, external CTS, adapter-matrix,
+general partial-mask/other-format/non-32-bit typed closure or owned-device
+result is claimed. Loads/status, atomics, raw/structured behavior,
+runtime/SPIR-V code, ABI 8 and argument layouts are unchanged. Bound/
+static D3D12 descriptors and broader conformance remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native R32_SINT/R32_UINT typed-buffer atomics (VM, 2026-11-24)
 
 The new [`native-typed-buffer-atomics.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-atomics.test)

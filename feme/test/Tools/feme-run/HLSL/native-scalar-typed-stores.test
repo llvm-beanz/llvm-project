@@ -1,0 +1,177 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,HEAP
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/narrow.yaml %t/heap.dxil | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/narrow.yaml %t/heap.dxil | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --reference --repeat=2 --heap=%t/narrow.yaml %t/heap.dxil | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/wide.yaml %t/heap.dxil | FileCheck %s --check-prefix=WIDE
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/wide.yaml %t/heap.dxil | FileCheck %s --check-prefix=WIDE
+# RUN: feme-run --reference --repeat=2 --heap=%t/wide.yaml %t/heap.dxil | FileCheck %s --check-prefix=WIDE
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/narrow.yaml %t/heap.o | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --object --repeat=2 --heap=%t/wide.yaml %t/heap.o | FileCheck %s --check-prefix=WIDE
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,LEGACY
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings-narrow.yaml %t/legacy.dxil | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings-narrow.yaml %t/legacy.dxil | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings-narrow.yaml %t/legacy.dxil | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings-wide.yaml %t/legacy.dxil | FileCheck %s --check-prefix=WIDE
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings-wide.yaml %t/legacy.dxil | FileCheck %s --check-prefix=WIDE
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings-wide.yaml %t/legacy.dxil | FileCheck %s --check-prefix=WIDE
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/narrow.yaml %t/legacy.o | FileCheck %s --check-prefix=NARROW
+# RUN: feme-run --object --repeat=2 --heap=%t/wide.yaml %t/legacy.o | FileCheck %s --check-prefix=WIDE
+#
+# Native CPU stores, not owned D3D12. DXC scalar assignments broadcast the
+# value to all four channels and emit mask 15. Preserve that complete payload
+# rather than using scalar runtime stores, which fill other channels 0/0/1.
+# The same shader executes with R32 and RGBA32 descriptors. Element-index
+# bounds, signed/high bits, special FP32 bits, divergent stores, per-texel
+# guards and both repeats are checked. Legacy AOT uses physical heaps.
+# HEAP-DAG: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 1, 0, 1) {{%.*}}, i32 {{.*}}, <4 x i32> {{%.*}})
+# HEAP-DAG: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 1, 0, 0) {{%.*}}, i32 {{.*}}, <4 x i32> {{%.*}})
+# HEAP-DAG: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", float, 1, 0, 1) {{%.*}}, i32 {{.*}}, <4 x float> {{%.*}})
+# LEGACY-DAG: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", <4 x i32>, 1, 0, 1) {{%.*}}, i32 {{.*}}, <4 x i32> {{%.*}})
+# LEGACY-DAG: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", <4 x i32>, 1, 0, 0) {{%.*}}, i32 {{.*}}, <4 x i32> {{%.*}})
+# LEGACY-DAG: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", <4 x float>, 1, 0, 1) {{%.*}}, i32 {{.*}}, <4 x float> {{%.*}})
+# RAISE-NOT: call void @dx.op.bufferStore
+# NARROW: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[S:42 2147483653 2147483654 2147483655 2147483656 2147483657 42]]{{$}}
+# NARROW-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[U:42 16777217 42 16777219 42 16777221 42]]{{$}}
+# NARROW-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[F:42 2147483648 1 2143363909 3196059648 4286578688 42]]{{$}}
+# NARROW-NEXT: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[S]]{{$}}
+# NARROW-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[U]]{{$}}
+# NARROW-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[F]]{{$}}
+# NARROW-NOT: {{(heap|binding)\[}}
+# WIDE: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[S:42 42 42 42 2147483653 2147483653 2147483653 2147483653 2147483654 2147483654 2147483654 2147483654 2147483655 2147483655 2147483655 2147483655 2147483656 2147483656 2147483656 2147483656 2147483657 2147483657 2147483657 2147483657 42 42 42 42]]{{$}}
+# WIDE-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[U:42 42 42 42 16777217 16777217 16777217 16777217 42 42 42 42 16777219 16777219 16777219 16777219 42 42 42 42 16777221 16777221 16777221 16777221 42 42 42 42]]{{$}}
+# WIDE-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[F:42 42 42 42 2147483648 2147483648 2147483648 2147483648 1 1 1 1 2143363909 2143363909 2143363909 2143363909 3196059648 3196059648 3196059648 3196059648 4286578688 4286578688 4286578688 4286578688 42 42 42 42]]{{$}}
+# WIDE-NEXT: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[S]]{{$}}
+# WIDE-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[U]]{{$}}
+# WIDE-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[F]]{{$}}
+# WIDE-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+#ifndef HEAP
+RWBuffer<int> signedOutput : register(u0);
+RWBuffer<uint> unsignedOutput : register(u1);
+RWBuffer<float> floatOutput : register(u2);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  RWBuffer<int> signedOutput = ResourceDescriptorHeap[0];
+  RWBuffer<uint> unsignedOutput = ResourceDescriptorHeap[1];
+  RWBuffer<float> floatOutput = ResourceDescriptorHeap[2];
+#endif
+  uint i = tid.x;
+  uint index = i + 1;
+  signedOutput[index] = asint(0x80000005u + i);
+  if ((i & 1) == 0)
+    unsignedOutput[index] = 0x01000001u + i;
+  uint bits = i == 0 ? 0x80000000u : i == 1 ? 1u :
+              i == 2 ? 0x7fc12345u : i == 3 ? 0xbe800000u : 0xff800000u;
+  floatOutput[index] = asfloat(bits);
+  signedOutput[7] = -11;
+  unsignedOutput[7] = 12;
+  floatOutput[7] = asfloat(13u);
+  signedOutput[0xffffffffu] = -21;
+  unsignedOutput[0xffffffffu] = 22;
+  floatOutput[0xffffffffu] = asfloat(23u);
+}
+#--- narrow.yaml
+resource-heap:
+  - index: 0
+    size: 28
+    kind: typed-buffer
+    format: r32_sint
+    data: [42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 28
+    kind: typed-buffer
+    format: r32_uint
+    data: [42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 28
+    kind: typed-buffer
+    format: r32_float
+    data: [42, 42, 42, 42, 42, 42, 42]
+#--- wide.yaml
+resource-heap:
+  - index: 0
+    size: 112
+    kind: typed-buffer
+    format: r32g32b32a32_sint
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 112
+    kind: typed-buffer
+    format: r32g32b32a32_uint
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 112
+    kind: typed-buffer
+    format: r32g32b32a32_float
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- bindings-narrow.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 28
+        kind: typed-buffer
+        format: r32_sint
+        data: [42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    entries:
+      - index: 0
+        size: 28
+        kind: typed-buffer
+        format: r32_uint
+        data: [42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 2
+    entries:
+      - index: 0
+        size: 28
+        kind: typed-buffer
+        format: r32_float
+        data: [42, 42, 42, 42, 42, 42, 42]
+#--- bindings-wide.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 112
+        kind: typed-buffer
+        format: r32g32b32a32_sint
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    entries:
+      - index: 0
+        size: 112
+        kind: typed-buffer
+        format: r32g32b32a32_uint
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 2
+    entries:
+      - index: 0
+        size: 112
+        kind: typed-buffer
+        format: r32g32b32a32_float
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

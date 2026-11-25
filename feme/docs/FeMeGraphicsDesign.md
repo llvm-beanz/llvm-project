@@ -3072,11 +3072,20 @@ across the two formats, successful/failed compare-exchange, exact old
 values, wraparound, divergent increments and element-index bounds in the
 same CPU modes. Modern scalar/legacy atomic-only four-component fallback
 handles preserve signedness; atomic exchange initializes independent lane
-state. Guarded 28-byte state buffers/464-byte output pass twice. SM6.6
-mask-15 scalar typed stores remain unraised because of the mask/handle
-width mismatch; ordinary typed-load/store admission is not added. This is
+state. Guarded 28-byte state buffers/464-byte output pass twice. This is
 CPU atomic evidence, not draw, contention/order/barrier, other-format/
 image/int64 atomic, owned-device, runtime/SPIR-V or ABI proof.
+
+The full-mask typed-store follow-up closes the scalar-store gap found by
+that atomic probe. Mask-15 i32/FP32 payloads through narrower typed handles
+remain four-channel canonical writes, preserving channels that scalar
+helpers would fill 0/0/1 on wide descriptors. Native SM6.6/SM6.0 scalar
+SINT/UINT/FP32 stores pass R32/RGBA32 exact-output cases across the same
+CPU modes with all broadcast channels, special bits, divergent stores,
+invalid indices, texel guards and two repeats. Invalid/nonmatching partial
+masks, mixed types and non-32-bit promotion remain unraised. This is
+shared CPU store evidence, not draw, general typed closure or owned-device
+proof; runtime/SPIR-V code, loads/status, atomics and ABI are unchanged.
 
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D

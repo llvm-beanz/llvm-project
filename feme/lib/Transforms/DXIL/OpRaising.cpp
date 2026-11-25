@@ -1201,7 +1201,9 @@ bool raiseLegacyCreateHandle(CallInst &CI, const ResourceMetadata &MD) {
 /// Raises a `dx.op.bufferStore` (opcode 69) call on an already-raised typed
 /// buffer handle into `llvm.dx.resource.store.typedbuffer`, reassembling the
 /// four scalar component operands DXIL splits the stored value into back into
-/// the handle's element type.
+/// the handle's element type. Full-mask i32/FP32 writes through narrower
+/// handles retain all four payload channels: the bound descriptor can expose
+/// more channels than the shader's declared element type.
 bool raiseTypedBufferStore(CallInst &CI) {
   if (CI.arg_size() != 9)
     return false;
@@ -1212,28 +1214,33 @@ bool raiseTypedBufferStore(CallInst &CI) {
     return false;
 
   std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(8));
-  if (!Mask)
+  if (!Mask || *Mask > 15)
     return false;
   unsigned Width = getContiguousMaskWidth(*Mask);
   Type *ElemTy = HandleTy->getTypeParameter(0);
   auto *VecTy = dyn_cast<FixedVectorType>(ElemTy);
-  if (Width != (VecTy ? VecTy->getNumElements() : 1))
+  unsigned ElemWidth = VecTy ? VecTy->getNumElements() : 1;
+  Type *ScalarTy = ElemTy->getScalarType();
+  bool FullMaskWiden = Width == 4 && ElemWidth < 4 &&
+                       (ScalarTy->isIntegerTy(32) || ScalarTy->isFloatTy());
+  if (Width != ElemWidth && !FullMaskWiden)
     return false;
+  for (unsigned I = 0; I != Width; ++I)
+    if (CI.getArgOperand(4 + I)->getType() != ScalarTy)
+      return false;
+  Type *StoredTy = FullMaskWiden ? FixedVectorType::get(ScalarTy, 4) : ElemTy;
 
   IRBuilder<> Builder(&CI);
   Value *Stored = CI.getArgOperand(4);
-  if (VecTy) {
-    Stored = PoisonValue::get(VecTy);
+  if (auto *StoredVecTy = dyn_cast<FixedVectorType>(StoredTy)) {
+    Stored = PoisonValue::get(StoredVecTy);
     for (unsigned I = 0; I != Width; ++I)
       Stored = Builder.CreateInsertElement(Stored, CI.getArgOperand(4 + I),
                                            Builder.getInt32(I));
   }
-  if (Stored->getType() != ElemTy)
-    return false;
-
   Function *StoreFn = Intrinsic::getOrInsertDeclaration(
       CI.getModule(), Intrinsic::dx_resource_store_typedbuffer,
-      {HandleTy, ElemTy});
+      {HandleTy, StoredTy});
   Builder.CreateCall(StoreFn, {Handle, CI.getArgOperand(2), Stored});
   CI.eraseFromParent();
   return true;

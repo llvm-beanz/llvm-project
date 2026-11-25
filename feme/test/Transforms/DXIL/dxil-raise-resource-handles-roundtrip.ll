@@ -120,6 +120,20 @@ define void @typed_buffer_uav_vec4(i32 %idx, <4 x float> %v) {
 declare target("dx.TypedBuffer", float, 0, 0, 1) @llvm.dx.resource.handlefrombinding.tdx.TypedBuffer_f32_0_0_1t(i32, i32, i32, i32, ptr)
 declare {float, i1} @llvm.dx.resource.load.typedbuffer.f32.tdx.TypedBuffer_f32_0_0_1t(target("dx.TypedBuffer", float, 0, 0, 1), i32)
 declare target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_i8_1_0t(i32, i32, i32, i32, ptr)
+; Full-mask payload width is independent of the shader's declared width.
+; CHECK-LABEL: define void @scalar_handle_full_payload(
+define void @scalar_handle_full_payload(i32 %idx, <4 x float> %value) {
+  ; CHECK: [[H:%.*]] = call target("dx.TypedBuffer", float, 1, 0, 1) @llvm.dx.resource.handlefrombinding
+  ; CHECK: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", float, 1, 0, 1) [[H]], i32 %idx, <4 x float> {{%.*}})
+  ; CHECK-NOT: casthandle
+  ; CHECK: ret void
+  %h = call target("dx.TypedBuffer", float, 1, 0, 1) @llvm.dx.resource.handlefrombinding.f32(i32 0, i32 3, i32 1, i32 0, ptr @ResName5)
+  call void @llvm.dx.resource.store.typedbuffer.f32.v4f32(target("dx.TypedBuffer", float, 1, 0, 1) %h, i32 %idx, <4 x float> %value)
+  ret void
+}
+
+declare target("dx.TypedBuffer", float, 1, 0, 1) @llvm.dx.resource.handlefrombinding.f32(i32, i32, i32, i32, ptr)
+declare void @llvm.dx.resource.store.typedbuffer.f32.v4f32(target("dx.TypedBuffer", float, 1, 0, 1), i32, <4 x float>)
 declare {i32, i1} @llvm.dx.resource.load.rawbuffer.i32.tdx.RawBuffer_i8_1_0t(target("dx.RawBuffer", i8, 1, 0), i32, i32)
 declare target("dx.RawBuffer", %struct.S, 0, 0) @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_s_struct.Ss_0_0t(i32, i32, i32, i32, ptr)
 declare {%struct.S, i1} @llvm.dx.resource.load.rawbuffer.s_struct.Ss.tdx.RawBuffer_s_struct.Ss_0_0t(target("dx.RawBuffer", %struct.S, 0, 0), i32, i32)
