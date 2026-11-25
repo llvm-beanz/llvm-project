@@ -1,0 +1,89 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+#
+# Float-output overloads numerically convert integer dimensions/counts;
+# output words are FP32 bits, not the integer dimensions reinterpreted.
+# SDK DXC emits signed conversions here; preserve them rather than replacing
+# them with unsigned conversions (the tested native extents fit both).
+# Cubes, mips, array layers and samples remain distinct. Lane four is
+# unbound; lane one skips the cube-array mip-count store.
+# All 436 image bytes and 268 guarded output bytes are checked twice.
+# RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy
+# RAISE-DAG: call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy
+# RAISE-DAG: call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz
+# RAISE-DAG: call <4 x i32> @llvm.dx.resource.getdimensions.samples.xyz
+# RAISE: sitofp i32
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# CHECK: heap[3]: [[OUT:42 1077936128 1073741824 1077936128 1073741824 1073741824 1073741824 1073741824 1077936128 1073741824 1073741824 1065353216 1077936128 1073741824 1077936128 1073741824 1065353216 1065353216 1073741824 1065353216 1065353216 1077936128 42 1073741824 1065353216 1077936128 1073741824 1077936128 1073741824 1077936128 1073741824 1073741824 1073741824 1073741824 1077936128 1073741824 1073741824 1065353216 1077936128 1073741824 1077936128 1073741824 1065353216 1065353216 1073741824 1065353216 1065353216 1077936128 1073741824 1073741824 1065353216 1077936128 1073741824 0( 0){12} 42]]{{$}}
+# CHECK-NEXT: image[0]: [[P:0( 0){6}]]{{$}}
+# CHECK-NEXT: image[1]: [[C:0( 0){89}]]{{$}}
+# CHECK-NEXT: image[2]: [[M:0( 0){11}]]{{$}}
+# CHECK-NEXT: heap[3]: [[OUT]]{{$}}
+# CHECK-NEXT: image[0]: [[P]]{{$}}
+# CHECK-NEXT: image[1]: [[C]]{{$}}
+# CHECK-NEXT: image[2]: [[M]]{{$}}
+# CHECK-NOT: {{(heap|image)\[}}
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture2D<float4> plain = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 9 : 0)];
+  TextureCubeArray<int> cubes = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 8 : 1)];
+  Texture2DMSArray<uint, 2> ms = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 7 : 2)];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[3];
+  uint base = 4 + tid.x * 52;
+  float width, height, elements, count;
+  plain.GetDimensions(width, height);
+  output.Store2(base, asuint(float2(width, height)));
+  plain.GetDimensions(tid.x & 1, width, height, count);
+  output.Store3(base + 8, asuint(float3(width, height, count)));
+  cubes.GetDimensions(tid.x & 1, width, height, elements, count);
+  output.Store3(base + 20, asuint(float3(width, height, elements)));
+  if (tid.x != 1)
+    output.Store(base + 32, asuint(count));
+  ms.GetDimensions(width, height, elements, count);
+  output.Store4(base + 36, asuint(float4(width, height, elements, count)));
+}
+#--- heap.yaml
+resource-heap:
+  - index: 3
+    size: 268
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [3, 2]
+    mip-levels: 2
+    format: r32_float
+    data: []
+  - index: 1
+    dimension: cube-array
+    extent: [2, 2]
+    array-layers: 18
+    mip-levels: 2
+    format: r32_sint
+    data: []
+  - index: 2
+    dimension: 2d-ms-array
+    extent: [2, 1]
+    array-layers: 3
+    sample-count: 2
+    format: r32_uint
+    data: []
