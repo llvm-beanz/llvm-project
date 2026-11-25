@@ -327,6 +327,17 @@ non-32-bit, wrong result forms, samples-on-non-MS and levels-on-MS queries
 reject. Runtime/SPIR-V code, existing load/store/status/atomic policy,
 ABI 8 and owned-device boundaries remain unchanged; resolve is not added.
 
+Native float-output `GetDimensions` overloads also have
+[`native-float-texture-dimensions.test`](../../test/Tools/feme-run/HLSL/native-float-texture-dimensions.test)
+coverage for plain 2D base/explicit-mip, cube-array mip/cube/level and
+MS-array extent/layer/sample queries. The same four CPU modes each
+repeat twice, checking every word and guard across 436 image bytes and
+a 268-byte output, exactly 704 compared bytes per case. The tested SDK
+DXC emits `sitofp`, which raising preserves. Separate portable/JIT tests
+distinguish signed and unsigned FP32 conversions at synthetic large
+metadata widths; they do not imply native D3D resource-size support.
+This adds no CLI, resource binding, runtime/ABI or owned-device capability.
+
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and
 complete-texel bounds: RGB32 uses 12 bytes; an RGBA32 texel missing W

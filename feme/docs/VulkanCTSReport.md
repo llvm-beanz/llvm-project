@@ -1,5 +1,26 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) float dimension coverage, not CTS (2026-11-25)
+
+The [floating-point follow-up](W0WindowsIntegrationProbe.md#w2aw2b-floating-point-dimension-coverage-vm-2026-11-25)
+adds tests only. Native SDK DXC SM6.6 float-output 2D, cube-array and
+MS-array dimensions pass waves 4/8, reference and ARM64 AOT, each
+repeated twice, comparing all 704 bytes per case. DXC's signed conversions
+are preserved. Portable lowering and metadata-only JIT checks distinguish
+signed/unsigned FP32 conversion at precision/sign boundaries; synthetic
+large metadata widths are not native resource-size evidence.
+
+The cached, assertions-enabled, PCH-disabled ARM64 filtered `check-feme`
+dependency gate passes 69 LIT in 38.07 seconds. The LLVM forward fixture
+passes separately in 0.98 seconds and 19 runtime dimension units in
+4.974 seconds. Building Vulkan dependencies does not execute Vulkan.
+The host device check fails with missing ICD manifests/DZN initialization
+and exit `-1073741819`, without confirming a FeMe ICD. No Vulkan execution
+or new CTS results are claimed; no registry/driver/system changes occur.
+Production code, ABI and advertisements remain unchanged. Full-suite,
+bound/static images, general formats/resolve, adapter-matrix and owned
+D3D12/conformance closure remain open; `CreateDevice` stays `E_NOTIMPL`.
+
 ## W2(a)/W2(b) native 2DMS/array dimension scope (2026-11-25)
 
 The [2DMS/array follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-2dmsarray-dimensions-vm-2026-11-25)

@@ -3179,6 +3179,17 @@ the first shader-facing milestone rather than alongside it.
    remain unchanged. Bound/static images, non-32-bit/general format and
    resolve behavior, full-suite, external CTS, adapter-matrix and owned-
    device/W2/W3 closure remain open.
+   Float-output dimensions coverage (2026-11-25): native SDK DXC SM6.6
+   plain 2D, cube-array and MS-array queries pass the four CPU modes,
+   each repeated twice, comparing all 704 bytes per case. Preserve DXC's
+   signed conversions; separate portable/JIT tests distinguish signed/
+   unsigned FP32 conversion at synthetic precision/sign boundaries.
+   These are not native large-resource claims. The cached ARM64 filtered
+   `check-feme` dependency gate passes 69 LIT in 38.07 seconds; the LLVM
+   forward fixture passes separately in 0.98 seconds and 19 dimension
+   units in 4.974 seconds. No production/ABI/advertisement changes,
+   full-suite/Vulkan/CTS result or owned-device/W2/W3 closure is claimed.
+   See [WARPRoadmap.md](WARPRoadmap.md) for measured scope and remaining work.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

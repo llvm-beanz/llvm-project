@@ -27,6 +27,37 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) floating-point dimension coverage (VM, 2026-11-25)
+
+[`native-float-texture-dimensions.test`](../test/Tools/feme-run/HLSL/native-float-texture-dimensions.test)
+executes SDK 26100 DXC SM6.6 float-output plain 2D base/explicit-mip,
+cube-array mip/cube/level and MS-array extent/layer/sample queries.
+Waves 4/8, reference and ARM64 AOT each repeat twice. Every input/output
+word, divergent unbound zeros, skipped stores and guards pass: 436 image
+bytes plus a guarded 268-byte output, exactly 704 compared bytes per case.
+DXC emits signed `sitofp` after integer dimension extracts; native raising
+preserves it. Small native extents alone cannot distinguish signed from
+unsigned conversion.
+
+Portable scalar/vector conversion and repeated-lowering checks accompany
+a metadata-only JIT case checking raw width and signed/unsigned FP32 bits
+at seven values spanning precision/sign boundaries. Synthetic widths
+around 2^24 and through `0xffffffff` are conversion evidence, not native
+D3D texture-size limits. No texels are read; unbound and out-of-range
+metadata queries also return zero.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 build passes.
+Filtered `check-feme` builds its declared dependencies and passes 69 LIT
+in 38.07 seconds; the separate LLVM forward-lowering fixture passes in
+0.98 seconds. Nineteen dimension runtime units pass in 4.974 seconds.
+This test-only increment changes no production code, ABI or advertisements.
+The host `vulkaninfo --summary` reports missing ICD registry manifests,
+DZN initialization failure and exits `-1073741819`; no FeMe device is
+confirmed and no Vulkan execution or system changes are attempted.
+Full-suite, external CTS, bound/static images, general formats/resolve
+and owned D3D12 execution remain open. `CreateDevice` stays `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native 2DMS/array dimensions (VM, 2026-11-25)
 
 The native reproduction confirmed DXIL field 3 is sample count for both

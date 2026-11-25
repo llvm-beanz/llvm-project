@@ -3350,6 +3350,40 @@ resolve behavior, full-suite, external CTS, adapter-matrix and owned D3D12/
 conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) floating-point dimension coverage (2026-11-25).**
+
+This is a tested coverage increment, not a new resource capability.
+[`native-float-texture-dimensions.test`](../test/Tools/feme-run/HLSL/native-float-texture-dimensions.test)
+executes SDK 26100 DXC SM6.6 float-output overloads for plain 2D base/
+explicit-mip queries, cube-array mip/cube/level queries, and MS-array
+extent/layer/sample queries. Waves 4/8, reference and ARM64 AOT each
+repeat twice. All 436 image bytes and the guarded 268-byte output pass,
+exactly 704 compared bytes per case, including divergent unbound zeros,
+skipped stores and both guards. These SDK overloads emit `sitofp` after
+integer queries; raising preserves that native conversion rather than
+assuming unsigned conversion from the HLSL dimension domain.
+
+[`dxil-resource-lowering-getdimensions-float.ll`](../test/Transforms/CPU/dxil-resource-lowering-getdimensions-float.ll)
+checks scalar signed/unsigned and vector unsigned conversions through
+resource lowering and repeated lowering. A metadata-only runtime JIT
+case preserves raw width bits and checks distinct `sitofp`/`uitofp`
+FP32 bit patterns at seven values, including rounding near 2^24,
+`0x7fffffff`, `0x80000000` and `0xffffffff`. An unreadable texel pointer,
+unbound data and an out-of-range index confirm no texel access. These
+synthetic large widths are conversion tests, not legal native D3D
+texture-size or out-of-range-resource evidence.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build and
+filtered `check-feme` dependency gate pass: 69 FeMe LIT in 38.07 seconds.
+The LLVM dimension forward-lowering fixture passes separately in 0.98
+seconds; 19 dimension runtime units pass in 4.974 seconds. No production
+compiler/runtime, ABI, argument layout or advertisement changes are
+needed. This is not a full-suite or Vulkan/CTS result: the host device
+check did not confirm a FeMe ICD, so no Vulkan execution was attempted.
+Bound/static images, general format/resolve behavior and owned D3D12
+execution remain open; `CreateDevice` stays `E_NOTIMPL` and
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.
