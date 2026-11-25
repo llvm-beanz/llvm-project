@@ -3152,7 +3152,7 @@ passes normal waves 4/8, reference and ARM64 AOT, including width-only,
 height-only and paired results, a three-mip base extent, divergent/unbound
 indices, query/load coexistence, all words, guards and repeats.
 Sampled plain 2D explicit mips/counts use the separate path below.
-2D-array/MS/3D/cube-array shapes, non-32-bit declarations, depth/aggregate uses
+MS/3D/cube-array shapes, non-32-bit declarations, depth/aggregate uses
 and bound/static image queries remain outside this CPU path. Runtime/
 SPIR-V code, ABI 8 and argument layouts remain unchanged; this is shared
 CPU metadata evidence, not draw or owned-device/conformance closure.
@@ -3220,6 +3220,20 @@ cube arrays and undefined-mip canonical forms reject. Only valid native
 mips are measured; helper clamping, runtime/SPIR-V code, ABI 8 and
 layouts remain unchanged. This is shared CPU evidence, not draw or
 owned-device/conformance closure.
+
+Heap-backed FP32/i32 2D-array dimensions now accept base scalar/pair/
+triple SRV/UAV queries and sampled explicit width/height/layers/mip-count
+queries. New xyz/levels.xyz intrinsic forms preserve DXIL fields 0/1/2/3
+through symmetric forward/reverse lowering; CPU lowering reuses existing
+2D-array size/level metadata helpers in any stage without sampler or
+derivatives. Layers stay fixed as mip extents shrink. Native SM6.6 passes
+waves 4/8, reference and ARM64 AOT for base/explicit sampled and base
+writable queries, query-derived exact SINT loads, divergence/unbound zeros,
+skipped stores, all words, guards and repeats. Writable explicit, undefined-
+mip and mismatched-shape canonical forms reject; 3D/MS/cube-array
+dimensions remain unsupported. Only valid native mips are measured.
+Helper clamping, runtime/SPIR-V code, ABI 8 and layouts remain unchanged.
+This is shared CPU evidence, not draw or owned-device/conformance closure.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

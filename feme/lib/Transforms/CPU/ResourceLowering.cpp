@@ -767,6 +767,16 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
             PoisonValue::get(CI->getType()), Width, uint64_t{0});
         Dimensions =
             Builder.CreateInsertElement(Dimensions, Levels, uint64_t{1});
+      } else if (ID == Intrinsic::dx_resource_getdimensions_levels_xyz) {
+        Value *Size =
+            createQuerySizeLod2DArray(Builder, Env, Image->getArgOperand(0),
+                                      CI->getArgOperand(1), Builder.getTrue());
+        Value *Levels =
+            createQueryLevels(Builder, Env, Image->getArgOperand(0));
+        Dimensions = Builder.CreateShuffleVector(
+            Size, PoisonValue::get(Size->getType()), {0, 1, 2, 3});
+        Dimensions =
+            Builder.CreateInsertElement(Dimensions, Levels, uint64_t{3});
       } else if (ID == Intrinsic::dx_resource_getdimensions_levels_xy) {
         Value *Size =
             Kind == dxil::ResourceKind::Texture1DArray
@@ -793,12 +803,19 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         Dimensions =
             createQuerySizeLod2D(Builder, Env, Image->getArgOperand(0),
                                  Builder.getInt32(0), Builder.getTrue());
+      else if (Kind == dxil::ResourceKind::Texture2DArray)
+        Dimensions =
+            createQuerySizeLod2DArray(Builder, Env, Image->getArgOperand(0),
+                                      Builder.getInt32(0), Builder.getTrue());
       else
         Dimensions = createGetDimensions2D(
             Builder, Env, Image->getArgOperand(0), Builder.getTrue());
       if (ID == Intrinsic::dx_resource_getdimensions_x &&
           Kind != dxil::ResourceKind::Texture1D)
         Dimensions = Builder.CreateExtractElement(Dimensions, uint64_t{0});
+      else if (ID == Intrinsic::dx_resource_getdimensions_xy &&
+               Kind == dxil::ResourceKind::Texture2DArray)
+        Dimensions = Builder.CreateShuffleVector(Dimensions, {0, 1});
       CI->replaceAllUsesWith(Dimensions);
       CI->eraseFromParent();
       SampleHandles.insert(Image);
@@ -1534,10 +1551,12 @@ bool feme::cpu::isSupportedDXILSample(const CallInst &CI) {
 bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
   Intrinsic::ID ID = getIntrinsicID(&CI);
   bool WithLevelsX = ID == Intrinsic::dx_resource_getdimensions_levels_x;
-  bool WithLevels =
-      WithLevelsX || ID == Intrinsic::dx_resource_getdimensions_levels_xy;
+  bool WithLevelsXYZ = ID == Intrinsic::dx_resource_getdimensions_levels_xyz;
+  bool WithLevels = WithLevelsX || WithLevelsXYZ ||
+                    ID == Intrinsic::dx_resource_getdimensions_levels_xy;
   if ((ID != Intrinsic::dx_resource_getdimensions_x &&
-       ID != Intrinsic::dx_resource_getdimensions_xy && !WithLevels) ||
+       ID != Intrinsic::dx_resource_getdimensions_xy &&
+       ID != Intrinsic::dx_resource_getdimensions_xyz && !WithLevels) ||
       CI.arg_size() != (WithLevels ? 2u : 1u))
     return false;
   auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
@@ -1550,16 +1569,23 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
   if (Kind == dxil::ResourceKind::TextureCube && Ty->isWriteable())
     return false;
   if (WithLevels &&
-      ((WithLevelsX ? Kind != dxil::ResourceKind::Texture1D
-                    : Kind != dxil::ResourceKind::Texture2D &&
-                          Kind != dxil::ResourceKind::Texture1DArray &&
-                          Kind != dxil::ResourceKind::TextureCube) ||
-       Ty->isWriteable() || !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
+      (Ty->isWriteable() || !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
        isa<UndefValue>(CI.getArgOperand(1))))
+    return false;
+  if (WithLevelsX && Kind != dxil::ResourceKind::Texture1D)
+    return false;
+  if (ID == Intrinsic::dx_resource_getdimensions_levels_xy &&
+      Kind != dxil::ResourceKind::Texture2D &&
+      Kind != dxil::ResourceKind::Texture1DArray &&
+      Kind != dxil::ResourceKind::TextureCube)
+    return false;
+  if ((WithLevelsXYZ || ID == Intrinsic::dx_resource_getdimensions_xyz) &&
+      Kind != dxil::ResourceKind::Texture2DArray)
     return false;
   if ((Kind != dxil::ResourceKind::Texture1D &&
        Kind != dxil::ResourceKind::Texture1DArray &&
        Kind != dxil::ResourceKind::Texture2D &&
+       Kind != dxil::ResourceKind::Texture2DArray &&
        Kind != dxil::ResourceKind::TextureCube) ||
       (Kind == dxil::ResourceKind::Texture1D &&
        ID != Intrinsic::dx_resource_getdimensions_x && !WithLevelsX))

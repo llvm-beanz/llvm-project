@@ -4,10 +4,7 @@
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-; Unsupported shapes retain their original ABI, even in a mixed module.
-; CHECK-LABEL: define <2 x i32> @array()
-; CHECK: call <2 x i32> @llvm.dx.resource.getdimensions.xy
-; CHECK-NOT: @feme.cpu.image.getdimensions
+; Unsupported queries retain their original ABI, even in a mixed module.
 ; CHECK-LABEL: define i32 @nonheap(target("dx.Texture", float, 0, 0, 0, 2) %t)
 ; CHECK: call i32 @llvm.dx.resource.getdimensions.x
 ; CHECK-NOT: @feme.cpu.image.getdimensions
@@ -35,6 +32,11 @@
 ; CHECK: [[Y:%.*]] = extractelement <2 x i32> [[C]], i64 1
 ; CHECK: [[OY:%.*]] = add i32 [[Y]], 0
 ; CHECK: call <4 x float> @feme.cpu.image.load.2d.v4f32(ptr %image_heap, i32 %image_heap_count, i32 2, i32 [[OX]], i32 [[OY]], i32 0, i32 0, i1 true)
+; CHECK-NOT: call target("dx.
+; CHECK-LABEL: define <2 x i32> @array(
+; CHECK-SAME: ptr %image_heap, i32 %image_heap_count)
+; CHECK: [[A:%.*]] = call <3 x i32> @feme.cpu.image.getdimensions.lod.2darray.v3i32(ptr %image_heap, i32 %image_heap_count, i32 0, i32 0, i1 true)
+; CHECK: shufflevector <3 x i32> [[A]], <3 x i32> poison, <2 x i32> <i32 0, i32 1>
 ; CHECK-NOT: call target("dx.
 
 define <2 x i32> @pair(i32 %index) {

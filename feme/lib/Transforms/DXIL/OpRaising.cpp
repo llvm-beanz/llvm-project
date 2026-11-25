@@ -1830,12 +1830,12 @@ bool raiseTextureStore(CallInst &CI) {
   return true;
 }
 
-/// Raises field-0/1 dimension extracts to scalar/pair queries. Sampled 1D,
-/// 1D-array, plain 2D and cube queries with a meaningful mip or field-3 count
-/// use `getdimensions.levels.x/xy`, mapping field 3 after the spatial
-/// dimensions. Field 2 and aggregate uses remain unsupported. Other shapes
-/// require an unused/zero mip; buffers accept only field 0 (DXC supplies a
-/// structured buffer's HLSL stride as a constant).
+/// Raises dimension extracts to scalar/pair/triple queries; field 2 is
+/// supported for 2D-array layers. Sampled 1D/array, 2D/array and cube queries
+/// with a meaningful mip or field-3 count use `getdimensions.levels.x/xy/xyz`,
+/// mapping field 3 after the dimensions. Aggregate uses remain unsupported.
+/// Other shapes require an unused/zero mip; buffers accept only field 0 (DXC
+/// supplies a structured buffer's HLSL stride as a constant).
 bool raiseGetDimensions(CallInst &CI) {
   if (CI.arg_size() != 3) // opcode, Handle, MipLevel
     return false;
@@ -1854,25 +1854,31 @@ bool raiseGetDimensions(CallInst &CI) {
   auto *TextureTy = dyn_cast<dxil::TextureExtType>(Handle->getType());
   bool Is1D =
       TextureTy && TextureTy->getDimension() == dxil::ResourceKind::Texture1D;
+  bool Is2DArray = TextureTy && TextureTy->getDimension() ==
+                                    dxil::ResourceKind::Texture2DArray;
   bool CanQueryLevels =
       TextureTy && !TextureTy->isWriteable() &&
       (TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
        TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray ||
-       TextureTy->getDimension() == dxil::ResourceKind::TextureCube || Is1D);
+       TextureTy->getDimension() == dxil::ResourceKind::TextureCube || Is1D ||
+       Is2DArray);
   if (NeedsLevels && !CanQueryLevels)
     return false;
 
   SmallVector<ExtractValueInst *, 2> Extracts;
   bool NeedsHeight = false;
+  bool NeedsLayers = false;
   for (User *U : CI.users()) {
     auto *EV = dyn_cast<ExtractValueInst>(U);
     if (!EV || EV->getNumIndices() != 1)
       return false;
     uint64_t Field = EV->getIndices()[0];
-    if ((Field > 1 && (Field != 3 || !CanQueryLevels)) ||
-        (IsBuffer && Field != 0) || (Is1D && Field == 1))
+    if (Field > 3 || (Field == 2 && !Is2DArray) ||
+        (Field == 3 && !CanQueryLevels) || (IsBuffer && Field != 0) ||
+        (Is1D && Field == 1))
       return false;
     NeedsHeight |= (Field == 1);
+    NeedsLayers |= (Field == 2);
     NeedsLevels |= (Field == 3);
     Extracts.push_back(EV);
   }
@@ -1891,11 +1897,17 @@ bool raiseGetDimensions(CallInst &CI) {
   if (NeedsLevels) {
     Function *GetDimensionsLevelsFn = Intrinsic::getOrInsertDeclaration(
         CI.getModule(),
-        Is1D ? Intrinsic::dx_resource_getdimensions_levels_x
-             : Intrinsic::dx_resource_getdimensions_levels_xy,
+        Is1D        ? Intrinsic::dx_resource_getdimensions_levels_x
+        : Is2DArray ? Intrinsic::dx_resource_getdimensions_levels_xyz
+                    : Intrinsic::dx_resource_getdimensions_levels_xy,
         {Handle->getType()});
     Value *Level = isa<UndefValue>(Mip) ? Builder.getInt32(0) : Mip;
     Dimensions = Builder.CreateCall(GetDimensionsLevelsFn, {Handle, Level});
+  } else if (NeedsLayers) {
+    Function *GetDimensionsXYZFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(), Intrinsic::dx_resource_getdimensions_xyz,
+        {Handle->getType()});
+    Dimensions = Builder.CreateCall(GetDimensionsXYZFn, {Handle});
   } else if (NeedsHeight) {
     Function *GetDimensionsXYFn = Intrinsic::getOrInsertDeclaration(
         CI.getModule(), Intrinsic::dx_resource_getdimensions_xy,
@@ -1910,10 +1922,12 @@ bool raiseGetDimensions(CallInst &CI) {
 
   for (ExtractValueInst *EV : Extracts) {
     Value *Replacement =
-        NeedsHeight || NeedsLevels
+        NeedsHeight || NeedsLayers || NeedsLevels
             ? Builder.CreateExtractElement(
                   Dimensions, Builder.getInt32(EV->getIndices()[0] == 3
-                                                   ? (Is1D ? 1 : 2)
+                                                   ? (Is1D        ? 1
+                                                      : Is2DArray ? 3
+                                                                  : 2)
                                                    : EV->getIndices()[0]))
             : Dimensions;
     EV->replaceAllUsesWith(Replacement);

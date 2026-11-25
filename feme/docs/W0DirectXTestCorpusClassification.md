@@ -631,6 +631,28 @@ shapes/fields, bound/static images, new FXC-profile/external corpus,
 external CTS, adapter-matrix and owned-device closure remain open; see
 the [plain-cube evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-cube-dimensions-vm-2026-11-25).
 
+Native 2D-array dimensions follow-up (2026-11-25): new xyz/levels.xyz
+intrinsic forms map width/height/layers and optional total mip count
+through symmetric LLVM forward lowering and FeMe raising. Heap-backed
+FP32/i32 base SRV/UAV and sampled explicit CPU queries reuse existing
+array size/level metadata helpers in any stage without sampler/
+derivatives. Layers stay fixed as mip extents shrink. Native SM6.6
+passes waves 4/8, reference and ARM64 AOT, four cases repeated twice,
+distinguishing base/mip extents, layers two/three/four and total mip counts
+three/two. Query-derived exact SINT loads, divergent/unbound indices,
+skipped stores, every word, guards and repeats pass: exactly 684 compared
+bytes. The intrinsic-triggered ARM64 rebuild passes; 51 focused LLVM/
+FeMe LIT pass in 40.68 seconds and fifteen dimension units in 3.135
+seconds, zero failures. Three LIT fixtures and one runtime case are added;
+four LIT fixtures are extended or updated. Writable explicit, undefined-
+mip and mismatched-shape canonical forms reject; 3D/MS/cube-array
+dimensions remain unsupported. Only valid native mips are measured;
+helper clamping, runtime/SPIR-V code, load/store/status/atomic policy,
+advertisements, ABI 8 and layouts remain unchanged. Bound/static images,
+new FXC-profile/external corpus, external CTS, adapter-matrix and owned-
+device closure remain open; see the
+[2D-array evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-2d-array-dimensions-vm-2026-11-25).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

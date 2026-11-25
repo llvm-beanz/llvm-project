@@ -1,5 +1,34 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native 2D-array dimension scope (2026-11-25)
+
+The [2D-array follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-2d-array-dimensions-vm-2026-11-25)
+adds xyz/levels.xyz intrinsic forms with symmetric LLVM forward lowering
+and FeMe raising for width/height/layers and optional total mip count.
+Heap-backed FP32/i32 base SRV/UAV and sampled explicit CPU queries reuse
+existing array size/level metadata helpers in any stage without sampler/
+derivatives. Layers stay fixed while mip extents shrink. Writable explicit,
+undefined-mip and mismatched-shape canonical forms reject; 3D/MS/cube-
+array dimensions remain unsupported.
+
+SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT, four cases
+each repeated twice. Base 7x3/layers 2, valid 7x3/3x1/1x1 with three
+mips, SINT 5x2/2x1 with three layers/two mips and UINT UAV 2x1/layers
+4 distinguish extents, layers and counts. Query-derived exact SINT loads,
+divergent/unbound indices, skipped stores, every word, guards and repeats
+pass: exactly 684 compared bytes including a guarded 308-byte output.
+The intrinsic-triggered ARM64 rebuild passes; 51 focused LLVM/FeMe LIT
+pass in 40.68 seconds and fifteen dimension units in 3.135 seconds,
+zero failures. Three LIT fixtures and one runtime case are added; four
+LIT fixtures are extended or updated.
+
+Only valid native mips are measured; helper clamping, runtime/SPIR-V
+code, load/store/status/atomic policy, advertisements, descriptor
+materialization, ABI 8 and layouts remain unchanged. Other shapes/fields,
+bound/static images, full-suite, new CTS, adapter-matrix and owned D3D12/
+conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native plain-cube dimension scope (2026-11-25)
 
 The [plain-cube follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-cube-dimensions-vm-2026-11-25)

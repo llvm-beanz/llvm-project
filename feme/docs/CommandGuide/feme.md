@@ -183,7 +183,7 @@ paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
 including a three-mip base extent, divergent/unbound indices, query/load
 coexistence, all words, guards and repeats. Admission and lowering share
 the same predicate. Sampled plain 2D explicit mips/counts use the separate
-path below. 2D-array/MS/3D/cube-array shapes, non-32-bit declarations,
+path below. MS/3D/cube-array shapes, non-32-bit declarations,
 depth/aggregate uses and bound/static images remain unsupported by
 this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
 layouts remain unchanged; no owned-device closure is established.
@@ -249,6 +249,20 @@ divergent/unbound indices, skipped stores, all words, guards and repeats.
 Writable cubes, cube arrays and undefined-mip canonical forms reject.
 Only valid native mips are measured; helper clamping, runtime/SPIR-V
 code, ABI 8 and owned-device boundaries remain unchanged.
+
+Heap-backed `Texture2DArray`/`RWTexture2DArray.GetDimensions` now accepts
+FP32/i32 base width/height/layers queries; sampled arrays additionally
+accept `(mip, width, height, layers, levels)` with a defined i32 mip.
+New `getdimensions.xyz`/`getdimensions.levels.xyz` forms preserve DXIL
+fields 0/1/2/3 through symmetric forward/reverse lowering. Existing CPU
+array size/level metadata helpers keep layers fixed as mip extents shrink,
+without sampler/derivatives in any stage. Native SM6.6 passes waves 4/8,
+reference and ARM64 AOT for base/explicit sampled and base writable
+queries, exact query-derived SINT loads, divergence/unbound zeros, skipped
+stores, all words, guards and repeats. Writable explicit, undefined-mip
+and mismatched-shape canonical queries reject; 3D/MS/cube-array dimensions
+remain unsupported. Only valid native mips are measured. Helper clamping,
+runtime/SPIR-V code, ABI 8 and owned-device boundaries remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

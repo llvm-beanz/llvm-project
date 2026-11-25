@@ -59,8 +59,10 @@ Error checkSupportedRaisedOps(const Module &M) {
     switch (F.getIntrinsicID()) {
     case Intrinsic::dx_resource_getdimensions_x:
     case Intrinsic::dx_resource_getdimensions_xy:
+    case Intrinsic::dx_resource_getdimensions_xyz:
     case Intrinsic::dx_resource_getdimensions_levels_x:
     case Intrinsic::dx_resource_getdimensions_levels_xy:
+    case Intrinsic::dx_resource_getdimensions_levels_xyz:
       for (const User *U : F.users()) {
         const auto *CI = dyn_cast<CallInst>(U);
         if ((F.getIntrinsicID() == Intrinsic::dx_resource_getdimensions_x ||
@@ -75,7 +77,8 @@ Error checkSupportedRaisedOps(const Module &M) {
               "unsupported raised operation: '%s' requires heap-backed "
               "FP32/i32 1D/array or plain 2D mip-zero texture dimension "
               "queries, sampled cube dimensions, or sampled 1D/array or "
-              "plain 2D explicit-mip/count queries",
+              "plain 2D explicit-mip/count queries, or 2D-array base/sampled "
+              "explicit-mip/count queries",
               F.getName().str().c_str());
       }
       continue;

@@ -203,7 +203,7 @@ The original compute-only baseline is no longer current:
   height-only and paired results, a three-mip base extent, divergent/
   unbound indices, query/load coexistence, all words, guards and repeats.
   Sampled plain 2D explicit mips/counts use the separate path below.
-  2D-array/MS/3D/cube-array shapes, non-32-bit declarations, depth/aggregate
+  MS/3D/cube-array shapes, non-32-bit declarations, depth/aggregate
   uses and bound/static images remain outside this CPU path.
   Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; this adds no
   descriptor materialization, advertisements or owned-device closure.
@@ -264,6 +264,19 @@ The original compute-only baseline is no longer current:
   cubes, cube arrays and undefined-mip canonical forms reject. Only valid
   native mips are measured; helper clamping, runtime/SPIR-V code, ABI 8,
   layouts and advertisements remain unchanged. No owned-device closure.
+  Heap-backed FP32/i32 2D-array dimensions now accept base scalar/pair/
+  triple SRV/UAV queries and sampled explicit width/height/layers/mip-count
+  queries. New xyz/levels.xyz intrinsic forms preserve DXIL fields 0/1/2/3
+  through symmetric LLVM forward lowering and FeMe raising. CPU lowering
+  reuses existing array size/level metadata helpers in any stage without
+  sampler/derivatives. Layers stay fixed as mip extents shrink. Native
+  SM6.6 passes waves 4/8, reference and ARM64 AOT for base/explicit
+  sampled and base writable queries, exact query-derived SINT loads,
+  divergence/unbound zeros, skipped stores, all words, guards and repeats.
+  Writable explicit, undefined-mip and mismatched-shape canonical queries
+  reject; 3D/MS/cube-array dimensions remain unsupported. Only valid native
+  mips are measured; helper clamping, runtime/SPIR-V code, ABI 8, layouts
+  and advertisements are unchanged. No owned-device closure is established.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

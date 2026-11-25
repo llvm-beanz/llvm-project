@@ -3151,6 +3151,57 @@ Other shapes/fields, bound/static images, full-suite, external CTS,
 adapter-matrix and owned D3D12/conformance closure remain open.
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native 2D-array dimensions (2026-11-25).**
+
+The native reproduction confirmed full 2D-array queries remained unraised.
+New `getdimensions.xyz` and `getdimensions.levels.xyz` intrinsic forms
+now have symmetric LLVM forward lowering and FeMe raising. DXIL fields
+0/1/2 map to width/height/layers; field 3 is total mip count, a separate
+fourth element for explicit queries. Raising supports field-2 layer uses
+only for 2D arrays; other depth/layer shapes and aggregate uses remain
+outside this slice. An unused native mip in a count query becomes zero.
+
+The shared CPU dimension admission/lowering predicate now accepts
+heap-backed FP32/i32 2D-array scalar/pair/triple base SRV/UAV queries and
+sampled explicit queries with defined i32 mips. Existing 2D-array size-at-
+LOD metadata helpers return fixed layers while shrinking width/height;
+the shared level helper appends total mip count. Base queries use mip
+zero and narrow scalar/pair results as needed. No sampler or derivatives
+are required in any stage. Writable explicit, undefined-mip, mismatched-
+shape and buffer triple forms reject early in normal/reference/AOT paths.
+
+[`native-texture2d-array-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture2d-array-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. Base 7x3/layers 2 differs from valid
+7x3/3x1/1x1 with three mips. A SINT array supplies 5x2/2x1 with three
+layers/two mips; a UINT UAV reports 2x1/layers 4. Query-derived last-X/
+Y/layer coordinates load exact high-bit/non-FP32-exact integer values
+from both integer mips. Divergent indices make both sampled arrays unbound
+in lane four; lane one skips a count store. Every word, guard and repeat
+passes: 376 image bytes plus a guarded 308-byte output, exactly 684
+compared bytes per case. The bound UAV remains independent of unbound SRVs.
+
+The intrinsic-triggered assertions-enabled, PCH-disabled, sccache ARM64
+`-j2` rebuild passes, including `opt`, `llvm-as`, FeMe tools and runtime
+tests. Fifty-one focused LLVM forward, FeMe round-trip/raising, dimension,
+cube/1D/2D sampling/loading, namespace, typed-load and CPU/SPIR-V LIT pass
+in 40.68 seconds. Fifteen dimension runtime units pass in 3.135 seconds,
+zero failures. Three LIT fixtures and one runtime case are added; four
+existing LIT fixtures are extended or updated for the support change.
+Portable tests cover scalar/pair narrowing, sampled/storage queries,
+fragment layer-/count-only projections, helper wiring, idempotence,
+count normalization and unsupported-function preservation. The metadata
+unit uses unreadable texel data to check fixed layers, sampled/storage
+queries and inactive/unbound/out-of-range-index zeros.
+
+Only valid native mips are measured; unchanged helper clamping is not
+D3D out-of-range-mip evidence. Runtime/SPIR-V code, existing load/store/
+status/atomic policy, advertisements, descriptor materialization, ABI 8
+and argument layouts remain unchanged. 3D/MS/cube-array dimensions,
+bound/static images, full-suite, external CTS, adapter-matrix and owned
+D3D12/conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

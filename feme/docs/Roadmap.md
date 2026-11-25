@@ -3104,6 +3104,26 @@ the first shader-facing milestone rather than alongside it.
    descriptor materialization, ABI 8 and layouts are unchanged. Other
    shapes/fields, bound/static images, full-suite, external CTS, adapter-
    matrix and owned-device/W2/W3 closure remain open.
+   Native 2D-array dimensions follow-up (2026-11-25): new xyz/levels.xyz
+   intrinsic forms map width/height/layers and optional total mip count
+   through symmetric LLVM forward lowering and FeMe raising. Heap-backed
+   FP32/i32 base SRV/UAV and sampled explicit CPU queries reuse existing
+   array size/level metadata helpers in any stage without sampler/
+   derivatives. Layers stay fixed as mip extents shrink. Native SM6.6
+   passes waves 4/8, reference and ARM64 AOT, four cases repeated twice,
+   distinguishing base/mip extents, layer counts two/three/four and total
+   mip counts three/two. Query-derived exact SINT loads, divergent/unbound
+   indices, skipped stores, every word, guards and repeats pass: exactly
+   684 compared bytes. The intrinsic-triggered ARM64 rebuild passes;
+   51 focused LLVM/FeMe LIT pass in 40.68 seconds and fifteen dimension
+   units in 3.135 seconds, zero failures. Three LIT fixtures and one runtime
+   case are added; four LIT fixtures are extended or updated. Writable
+   explicit, undefined-mip and mismatched-shape canonical forms reject;
+   3D/MS/cube-array dimensions remain unsupported. Only valid native
+   mips are measured; helper clamping, runtime/SPIR-V code, load/store/
+   status/atomic policy, advertisements, descriptor materialization, ABI 8
+   and layouts are unchanged. Bound/static images, full-suite, external
+   CTS, adapter-matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

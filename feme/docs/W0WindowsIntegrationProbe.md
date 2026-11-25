@@ -27,6 +27,47 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native 2D-array dimensions (VM, 2026-11-25)
+
+The native reproduction left full 2D-array queries unraised. New
+`getdimensions.xyz`/`getdimensions.levels.xyz` intrinsic forms now have
+symmetric LLVM forward lowering and FeMe raising: DXIL fields 0/1/2
+are width/height/layers, field 3 is total mip count. Field-2 raising is
+limited to 2D arrays; other shapes and aggregate uses remain outside this
+slice. The shared CPU predicate admits heap-backed FP32/i32 base scalar/
+pair/triple SRV/UAV queries and sampled explicit queries with defined
+i32 mips. Existing array size-at-LOD and total-level metadata helpers
+keep layers fixed as width/height shrink, without sampler/derivatives in
+any stage. Writable explicit, undefined-mip, mismatched-shape and buffer
+triple forms reject in normal/reference/AOT paths.
+
+[`native-texture2d-array-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture2d-array-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. Base 7x3/layers 2, valid 7x3/3x1/1x1
+with three mips, SINT 5x2/2x1 with three layers/two mips and UINT UAV
+2x1/layers 4 distinguish extents, fixed layers and total counts. Query-
+derived last-X/Y/layer exact SINT loads, divergent/unbound indices,
+skipped-store sentinels, every word, guards and repeats pass: 376 image
+bytes plus a guarded 308-byte output, exactly 684 compared bytes.
+
+The intrinsic-triggered ARM64 rebuild passes, including `opt`, `llvm-as`,
+FeMe tools and runtime tests. Fifty-one focused LLVM/FeMe LIT pass in
+40.68 seconds; fifteen dimension runtime units pass in 3.135 seconds,
+zero failures. Three LIT fixtures and one runtime case are added; four
+existing LIT fixtures are extended or updated. Portable checks cover
+scalar/pair narrowing, fragment layer-/count-only queries, count
+normalization, helper wiring, idempotence and unsupported preservation.
+The metadata-only unit verifies fixed layers, sampled/storage queries
+and inactive/unbound/bounds zeros with unreadable texel data.
+
+Only valid native mips are measured; helper clamping remains unchanged,
+not D3D out-of-range-mip evidence. Runtime/SPIR-V code, existing load/
+store/status/atomic policy, advertisements, descriptor materialization,
+ABI 8 and layouts remain unchanged. 3D/MS/cube-array dimensions,
+bound/static images, full-suite, external CTS, adapter-matrix and owned
+D3D12/conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native plain-cube dimensions (VM, 2026-11-25)
 
 The reproduction raised cube base queries but left explicit-mip/count

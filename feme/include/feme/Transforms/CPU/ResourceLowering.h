@@ -75,6 +75,8 @@
 // through the corresponding 1D size and shared level metadata helpers.
 // Sampled plain cube x/xy/levels.xy queries return face width/height and
 // optional total mip count through the shared 2D size/level helpers.
+// 2D-array x/xy/xyz queries use the array size helper at mip zero;
+// sampled levels.xyz queries append total mip count at an explicit mip.
 //
 //===----------------------------------------------------------------------===//
 
@@ -91,12 +93,14 @@ namespace feme::cpu {
 
 /// Tests heap-backed FP32/i32 1D/array or plain 2D mip-zero scalar/pair
 /// dimension queries in any stage. Sampled and writable textures share the same
-/// metadata helpers; plain 1D accepts only scalar width. Other array
+/// metadata helpers; plain 1D accepts only scalar width. Cube-array
 /// shapes and MS are not included. Sampled 1D/array and plain 2D additionally
 /// accept explicit, defined i32 mip queries returning width, optional
 /// layers-or-height, and total mip count.
 /// Sampled plain cubes accept scalar/pair base or explicit-mip/count queries
 /// through those same 2D metadata helpers; writable cubes are not included.
+/// 2D arrays accept x/xy/xyz base queries for sampled/writable declarations
+/// and sampled levels.xyz with a defined i32 mip, preserving fixed layers.
 bool isSupportedDXILGetDimensions(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32/i32 1D/2D (including array) or 3D loading in any
