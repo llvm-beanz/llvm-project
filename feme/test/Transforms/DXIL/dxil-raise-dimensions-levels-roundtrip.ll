@@ -61,3 +61,15 @@ define i32 @plain_1d_count_only() {
   %count = extractelement <2 x i32> %dims, i32 1
   ret i32 %count
 }
+
+; CHECK-LABEL: define <3 x i32> @cube_dynamic(
+; CHECK: [[D:%.*]] = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 5) {{.*}}, i32 %mip)
+; CHECK: extractelement <3 x i32> [[D]], i32 0
+; CHECK: extractelement <3 x i32> [[D]], i32 1
+; CHECK: extractelement <3 x i32> [[D]], i32 2
+; CHECK-NOT: @dx.op.getDimensions
+define <3 x i32> @cube_dynamic(i32 %mip) {
+  %handle = call target("dx.Texture", <4 x float>, 0, 0, 1, 5) @llvm.dx.resource.handlefrombinding(i32 0, i32 5, i32 1, i32 0, ptr null)
+  %dims = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", <4 x float>, 0, 0, 1, 5) %handle, i32 %mip)
+  ret <3 x i32> %dims
+}

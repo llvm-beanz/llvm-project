@@ -2420,7 +2420,7 @@ component selection. Scalar/vector FP32/i32 declarations up to four
 components, sampled or writable, share an admission/lowering predicate.
 No sampler, derivatives or texel data are needed. Queries and loads through
 the same handle lower together, unused handles are removed and repeated
-lowering is idempotent. Non-heap, 2D-array/MS/3D/cube shapes and non-32-bit
+lowering is idempotent. Non-heap, 2D-array/MS/3D/cube-array shapes and non-32-bit
 declarations remain unsupported with explicit normal/reference/AOT
 admission diagnostics. Base scalar/pair intrinsics carry no mip; sampled
 1D-array/plain 2D explicit mips/counts use the separate paths below. Other texture
@@ -2512,6 +2512,24 @@ Writable, undefined-mip and mismatched-shape canonical queries reject;
 base plain 1D pairs remain unsupported. Only valid native mips are
 measured. Helper clamping, runtime/SPIR-V code, ABI 8, layouts,
 advertisements and owned-device boundaries remain unchanged.
+
+Heap-backed sampled plain-cube FP32/i32 dimensions now share the same
+eligibility predicate. Scalar/pair base queries use
+`getdimensions.lod.2d.v2i32` with literal mip zero; explicit
+`getdimensions.levels.xy` queries use that helper with the live mip and
+`querylevels.i32` for total count. A face's width/height shrink, not a
+six-face count. Raising preserves DXIL fields 0/1/3 as vector elements
+0/1/2; existing LLVM forward lowering is reused. No sampler or derivatives
+are needed in any stage. Native SM6.6 passes waves 4/8, reference and
+ARM64 AOT without a sampler heap and with query-derived explicit-LOD
+sampling, checking base 4x4, valid 4x4/2x2/1x1 mips, counts three versus
+two, divergent/unbound indices, skipped stores, every word, guards and
+repeats. Portable width-/height-/count-only queries, fragment queries,
+idempotence and rejection controls pass. A metadata-only unit uses an
+unreadable data pointer to distinguish face extents/counts from six layers.
+Writable cubes, cube arrays and undefined-mip canonical forms reject.
+Only valid native mips are measured; helper clamping, runtime/SPIR-V
+code, ABI 8, layouts and owned-device boundaries remain unchanged.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

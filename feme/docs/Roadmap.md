@@ -3083,6 +3083,27 @@ the first shader-facing milestone rather than alongside it.
    descriptor materialization, ABI 8 and layouts are unchanged. Other
    shapes/fields, bound/static images, full-suite, external CTS, adapter-
    matrix and owned-device/W2/W3 closure remain open.
+   Native plain-cube dimensions follow-up (2026-11-25): raising and the
+   shared CPU dimension predicate now admit heap-backed sampled FP32/i32
+   cubes. Base scalar/pair and explicit width/height/count queries reuse
+   existing 2D size-at-LOD and total-level metadata helpers in any stage
+   without sampler/derivatives. Live mips and DXIL count field 3 survive
+   through `getdimensions.levels.xy`; existing LLVM forward lowering is
+   reused. Native SM6.6 passes waves 4/8, reference and ARM64 AOT in
+   sampler-free and query-derived sampling variants, four cases each
+   repeated twice. Base/three valid face extents, distinct counts,
+   divergence/unbound zeros, skipped stores, every word, guards and
+   repeats pass: 792 bytes for query-only, 872 with sampler bytes.
+   The affected 34-step ARM64 build and two-step unit rebuild pass;
+   48 focused LLVM/FeMe LIT pass in 43.25 seconds and fourteen dimension
+   units in 3.675 seconds, zero failures. Three LIT fixtures and one runtime
+   case are added; the round-trip fixture is extended. Writable cubes,
+   cube arrays and undefined-mip canonical forms reject. Only valid
+   native mips are measured; helper clamping, LLVM intrinsic definitions,
+   runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+   descriptor materialization, ABI 8 and layouts are unchanged. Other
+   shapes/fields, bound/static images, full-suite, external CTS, adapter-
+   matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

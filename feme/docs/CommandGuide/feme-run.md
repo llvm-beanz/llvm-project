@@ -175,7 +175,7 @@ Width-only, height-only and paired outputs distinguish extents 5x3, 3x2
 and 2x4. The full image has three mips and still reports its base extent;
 the same handle also loads a texel. Divergent unbound indices return zeros;
 sentinels, every word, guards and repeats pass: 128 input bytes plus a
-guarded 108-byte output, exactly 236 bytes per case. 2D-array/MS/3D/cube
+guarded 108-byte output, exactly 236 bytes per case. 2D-array/MS/3D/cube-array
 shapes, non-32-bit declarations, depth/aggregate uses and bound/static
 images remain outside this CPU path. Sampled plain 2D explicit mips/counts
 use the separate path below; unsupported canonical query shapes
@@ -244,6 +244,23 @@ each. No sampler or derivatives are needed. Writable/undefined-mip and
 mismatched-shape canonical queries reject; base 1D pairs remain unsupported.
 Only valid native mips are measured. Helper clamping, runtime/SPIR-V
 code, ABI 8, layouts and owned-device boundaries remain unchanged.
+
+Native heap-backed sampled `TextureCube.GetDimensions` now executes
+FP32/i32 base width/height and explicit `(mip, width, height, levels)`
+queries in waves 4/8, reference and ARM64 AOT, each repeated twice.
+YAML uses `dimension: cube`, a square two-component `extent` and
+`mip-levels`; the runner supplies six faces, mip-major. Queries reuse
+existing metadata helpers without sampler/derivatives. The query-only
+variant has no sampler heap; the sampling variant uses queried width/count
+to select +X and reverse the three real mips. Base 4x4 versus valid
+4x4/2x2/1x1, integer cube 2x2/1x1 with two mips, divergent/unbound
+indices, skipped-store sentinels, every word, guards and repeats pass.
+The query-only variant checks 624 image bytes plus a guarded 168-byte
+output, exactly 792 compared bytes; sampling additionally checks all
+80 sampler bytes, exactly 872 bytes per case. Writable cubes, cube
+arrays and undefined-mip canonical forms reject. Only valid native mips
+are measured. Helper clamping, runtime/SPIR-V code, ABI 8, layouts and
+owned-device/conformance boundaries remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

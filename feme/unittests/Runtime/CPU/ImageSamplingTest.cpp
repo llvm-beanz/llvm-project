@@ -827,6 +827,37 @@ TEST_F(ImageSamplingTest, GetDimensions2DExplicitMipIsMetadataOnly) {
   }
 }
 
+TEST_F(ImageSamplingTest, GetDimensionsCubeReportsFaceExtentAndMipCount) {
+  using GetDimensionsFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                   uint32_t, int32_t, bool, void *);
+  using QueryLevelsFn =
+      int32_t (*)(const FemeImageDescriptor *, uint32_t, uint32_t);
+  Function *SizeWrapper =
+      addWrapper("dimensions", "feme.cpu.image.getdimensions.lod.2d.v2i32");
+  Function *LevelsFunction =
+      getRuntimeFunction(*M, "feme.cpu.image.querylevels.i32");
+  ASSERT_TRUE(LevelsFunction);
+  keepForJIT(LevelsFunction);
+  GetDimensionsFn Size = resolve<GetDimensionsFn>(SizeWrapper);
+  QueryLevelsFn Levels = resolve<QueryLevelsFn>(LevelsFunction);
+  ASSERT_TRUE(Size);
+  ASSERT_TRUE(Levels);
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::TextureCube);
+  Img.Width = Img.Height = 4;
+  Img.ArrayLayers = 6;
+  Img.MipLevels = 3;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  alignas(8) uint32_t Out[2] = {};
+  for (int32_t Mip = 0; Mip < 3; ++Mip) {
+    Size(&Img, 1, 0, Mip, true, Out);
+    EXPECT_EQ(Out[0], 4u >> Mip);
+    EXPECT_EQ(Out[1], 4u >> Mip);
+    EXPECT_EQ(Levels(&Img, 1, 0), 3);
+  }
+}
+
 TEST_F(ImageSamplingTest, GetDimensions2DTotalLevelsIsMetadataOnly) {
   using QueryLevelsFn =
       int32_t (*)(const FemeImageDescriptor *, uint32_t, uint32_t);

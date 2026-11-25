@@ -73,6 +73,8 @@
 // i32 mip and total mip count through existing size/level metadata helpers.
 // Sampled plain 1D getdimensions.levels.x returns width/total mip count
 // through the corresponding 1D size and shared level metadata helpers.
+// Sampled plain cube x/xy/levels.xy queries return face width/height and
+// optional total mip count through the shared 2D size/level helpers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -93,6 +95,8 @@ namespace feme::cpu {
 /// shapes and MS are not included. Sampled 1D/array and plain 2D additionally
 /// accept explicit, defined i32 mip queries returning width, optional
 /// layers-or-height, and total mip count.
+/// Sampled plain cubes accept scalar/pair base or explicit-mip/count queries
+/// through those same 2D metadata helpers; writable cubes are not included.
 bool isSupportedDXILGetDimensions(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32/i32 1D/2D (including array) or 3D loading in any

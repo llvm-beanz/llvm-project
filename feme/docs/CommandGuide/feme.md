@@ -183,7 +183,7 @@ paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
 including a three-mip base extent, divergent/unbound indices, query/load
 coexistence, all words, guards and repeats. Admission and lowering share
 the same predicate. Sampled plain 2D explicit mips/counts use the separate
-path below. 2D-array/MS/3D/cube shapes, non-32-bit declarations,
+path below. 2D-array/MS/3D/cube-array shapes, non-32-bit declarations,
 depth/aggregate uses and bound/static images remain unsupported by
 this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
 layouts remain unchanged; no owned-device closure is established.
@@ -236,6 +236,19 @@ and ARM64 AOT. Count-unused queries execute. Writable/undefined-mip
 and mismatched-shape canonical forms reject; base plain 1D pairs remain
 unsupported. Only valid native mips are measured. Helper clamping,
 runtime/SPIR-V code, ABI 8 and owned-device boundaries are unchanged.
+
+Heap-backed sampled `TextureCube.GetDimensions` now accepts base width/
+height and explicit `(mip, width, height, levels)` queries for FP32/i32
+declarations. CPU lowering shares the existing 2D size-at-LOD and total-
+level metadata helpers in any stage without sampler/derivatives. Explicit
+queries preserve live mips and DXIL count field 3 through
+`getdimensions.levels.xy`. Native SM6.6 passes waves 4/8, reference and
+ARM64 AOT without a sampler heap and with query-derived explicit-LOD
+sampling, checking base 4x4, three valid mip extents, distinct counts,
+divergent/unbound indices, skipped stores, all words, guards and repeats.
+Writable cubes, cube arrays and undefined-mip canonical forms reject.
+Only valid native mips are measured; helper clamping, runtime/SPIR-V
+code, ABI 8 and owned-device boundaries remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

@@ -27,6 +27,48 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native plain-cube dimensions (VM, 2026-11-25)
+
+The reproduction raised cube base queries but left explicit-mip/count
+queries unraised. Raising and the shared CPU dimension predicate now
+admit heap-backed sampled FP32/i32 plain cubes. Base scalar/pair queries
+use the existing 2D size-at-LOD metadata helper with mip zero; explicit
+`getdimensions.levels.xy` queries preserve the live mip and DXIL count
+field 3, using that size helper plus the shared total-level helper.
+Width/height describe a face, not six layers. Existing LLVM forward
+lowering is reused; queries need no sampler or derivatives in any stage.
+Writable cubes, cube arrays and undefined-mip canonical forms reject
+early in normal/reference/AOT paths.
+
+[`native-texturecube-dimensions.test`](../test/Tools/feme-run/HLSL/native-texturecube-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT.
+The query-only variant has no sampler heap; the sampling variant uses
+queried width/count to select +X and reverse three real mips. Each has
+four cases, repeated twice. Base 4x4, valid 4x4/2x2/1x1, a SINT cube
+with 2x2/1x1 and two mips, divergence/unbound zeros, skipped-store
+sentinels, every word, guards and repeats pass. Query-only checks 624
+image bytes plus a guarded 168-byte output, exactly 792 compared bytes.
+Sampling additionally checks all 80 sampler bytes, exactly 872 bytes
+per case, including both repeated sampler dumps.
+
+The affected 34-step ARM64 build passes, including `opt` and `llvm-as`;
+the runtime test fix adds a two-step rebuild. Forty-eight focused LLVM/
+FeMe LIT pass in 43.25 seconds; fourteen dimension runtime units pass
+in 3.675 seconds, zero failures. Three LIT fixtures and one runtime case
+are added; the existing forward/reverse round-trip fixture is extended.
+Portable tests cover projections, helper wiring, fragment queries,
+idempotence and writable-cube preservation. The metadata-only cube unit
+registers both JIT entries before resolution and uses unreadable texel
+data to verify face extents/mip count rather than six layers.
+
+Only valid-mip native results are measured; unchanged helper clamping
+is not D3D out-of-range-mip evidence. LLVM intrinsic definitions, runtime/
+SPIR-V code, existing load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and layouts remain unchanged. Other
+shapes/fields, bound/static images, full-suite, external CTS, adapter-matrix
+and owned D3D12/conformance closure remain open. `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native plain-1D explicit-mip dimensions (VM, 2026-11-25)
 
 The native reproduction left sampled plain-1D explicit-mip/count queries

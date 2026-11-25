@@ -1,0 +1,66 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# RUN: split-file %s %t
+# RUN: not feme-run %t/writable.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/writable.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/writable.ll -o %t/writable.bc
+# RUN: not feme --target=%feme_host_triple %t/writable.bc -o %t/writable.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/writable-levels.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/writable-levels.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/writable-levels.ll -o %t/writable-levels.bc
+# RUN: not feme --target=%feme_host_triple %t/writable-levels.bc -o %t/writable-levels.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/poison.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/poison.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/poison.ll -o %t/poison.bc
+# RUN: not feme --target=%feme_host_triple %t/poison.bc -o %t/poison.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/array.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/array.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/array.ll -o %t/array.bc
+# RUN: not feme --target=%feme_host_triple %t/array.bc -o %t/array.o 2>&1 | FileCheck %s
+# CHECK: requires heap-backed FP32/i32 1D/array or plain 2D mip-zero texture dimension queries
+# CHECK-SAME: sampled cube dimensions
+#--- writable.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", float, 1, 0, 0, 5) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <2 x i32> @llvm.dx.resource.getdimensions.xy(target("dx.Texture", float, 1, 0, 0, 5) %t)
+  call void @consume(<2 x i32> %d)
+  ret void
+}
+declare target("dx.Texture", float, 1, 0, 0, 5) @llvm.dx.resource.handlefromheap(i32)
+declare <2 x i32> @llvm.dx.resource.getdimensions.xy(target("dx.Texture", float, 1, 0, 0, 5))
+declare void @consume(<2 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- writable-levels.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", float, 1, 0, 0, 5) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", float, 1, 0, 0, 5) %t, i32 0)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.Texture", float, 1, 0, 0, 5) @llvm.dx.resource.handlefromheap(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", float, 1, 0, 0, 5), i32)
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- poison.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", float, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", float, 0, 0, 0, 5) %t, i32 poison)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.Texture", float, 0, 0, 0, 5) @llvm.dx.resource.handlefromheap(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", float, 0, 0, 0, 5), i32)
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- array.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", float, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", float, 0, 0, 0, 9) %t, i32 0)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.Texture", float, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", float, 0, 0, 0, 9), i32)
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }

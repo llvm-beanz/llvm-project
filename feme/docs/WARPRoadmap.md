@@ -3105,6 +3105,52 @@ shapes/fields, bound/static images, full-suite, external CTS, adapter-matrix
 and owned D3D12/conformance closure remain open. `CreateDevice` remains
 `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native plain-cube dimensions (2026-11-25).**
+
+The native reproduction confirmed cube base queries raised but explicit-
+mip/count queries remained unraised. Raising and the shared CPU dimension
+admission/lowering predicate now admit heap-backed sampled FP32/i32 plain
+cubes. Scalar/pair base queries use the existing 2D size-at-LOD metadata
+helper with literal mip zero; `getdimensions.levels.xy` queries use that
+helper with the live mip plus the shared total-level helper. DXIL fields
+0/1/3 map to width/height/count elements 0/1/2, not a six-face layer count.
+Existing LLVM forward lowering is reused. Queries need no sampler or
+derivatives in any stage. Writable cubes, cube arrays and undefined-mip
+canonical forms retain early normal/reference/AOT rejection.
+
+[`native-texturecube-dimensions.test`](../test/Tools/feme-run/HLSL/native-texturecube-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT.
+The query-only variant runs without a sampler heap; a second variant
+uses queried width/count to select +X and reverse three real sampling
+mips. Each variant has four cases, each repeated twice. Base 4x4 differs
+from valid 4x4/2x2/1x1 mip extents, while a SINT cube supplies 2x2/1x1
+with two mips versus three. Divergent indices make both images unbound
+in lane four; lane one skips a count store. Every word, guard and repeat
+passes: 624 image bytes plus a guarded 168-byte output, exactly 792
+compared bytes for query-only. Sampling also checks all 80 sampler bytes,
+exactly 872 bytes per case. Sampler output is checked on both repetitions.
+
+The affected assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build
+passes 34 steps, including `opt` and `llvm-as`; the runtime unit fix adds
+a two-step rebuild. Forty-eight focused LLVM forward, FeMe round-trip/
+raising, dimension, cube/1D/2D sampling/loading, namespace, typed-load and
+CPU/SPIR-V LIT pass in 43.25 seconds. Fourteen dimension runtime units
+pass in 3.675 seconds, zero failures. Three LIT fixtures and one runtime
+case are added; the existing forward/reverse round-trip fixture is extended.
+Portable tests cover width-/height-/count-only projections, live mip/
+helper wiring, fragment queries, idempotence and unchanged writable-cube
+lowering. The new metadata unit keeps both JIT entry points before
+resolution and uses unreadable texel data to distinguish face extents/
+total mip count from six physical layers.
+
+Only valid-mip native results are measured; unchanged helper clamping is
+not D3D out-of-range-mip evidence. LLVM intrinsic definitions, runtime/
+SPIR-V code, existing load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+Other shapes/fields, bound/static images, full-suite, external CTS,
+adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

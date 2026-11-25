@@ -203,7 +203,7 @@ The original compute-only baseline is no longer current:
   height-only and paired results, a three-mip base extent, divergent/
   unbound indices, query/load coexistence, all words, guards and repeats.
   Sampled plain 2D explicit mips/counts use the separate path below.
-  2D-array/MS/3D/cube shapes, non-32-bit declarations, depth/aggregate
+  2D-array/MS/3D/cube-array shapes, non-32-bit declarations, depth/aggregate
   uses and bound/static images remain outside this CPU path.
   Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; this adds no
   descriptor materialization, advertisements or owned-device closure.
@@ -250,6 +250,18 @@ The original compute-only baseline is no longer current:
   every word, guards and repeats in waves 4/8, reference and ARM64 AOT.
   Count-unused queries execute. Writable/undefined-mip and mismatched-shape
   canonical queries reject; base 1D pairs remain unsupported. Only valid
+  native mips are measured; helper clamping, runtime/SPIR-V code, ABI 8,
+  layouts and advertisements remain unchanged. No owned-device closure.
+  Heap-backed sampled plain-cube FP32/i32 dimensions now accept base
+  scalar/pair and explicit width/height/mip-count queries through existing
+  2D size-at-LOD and total-level helpers. Raising preserves live mips and
+  DXIL field-3 counts through `getdimensions.levels.xy`; existing LLVM
+  forward lowering is reused. Queries need no sampler or derivatives in
+  any stage. Native SM6.6 passes waves 4/8, reference and ARM64 AOT
+  without a sampler heap and with query-derived explicit-LOD sampling,
+  covering base 4x4, three valid face extents, distinct counts, divergence/
+  unbound zeros, skipped stores, all words, guards and repeats. Writable
+  cubes, cube arrays and undefined-mip canonical forms reject. Only valid
   native mips are measured; helper clamping, runtime/SPIR-V code, ABI 8,
   layouts and advertisements remain unchanged. No owned-device closure.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers

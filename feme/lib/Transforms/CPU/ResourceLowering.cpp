@@ -789,6 +789,10 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         Dimensions =
             createQuerySizeLod1DArray(Builder, Env, Image->getArgOperand(0),
                                       Builder.getInt32(0), Builder.getTrue());
+      else if (Kind == dxil::ResourceKind::TextureCube)
+        Dimensions =
+            createQuerySizeLod2D(Builder, Env, Image->getArgOperand(0),
+                                 Builder.getInt32(0), Builder.getTrue());
       else
         Dimensions = createGetDimensions2D(
             Builder, Env, Image->getArgOperand(0), Builder.getTrue());
@@ -1543,16 +1547,20 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
       Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4)
     return false;
   auto Kind = Ty->getDimension();
+  if (Kind == dxil::ResourceKind::TextureCube && Ty->isWriteable())
+    return false;
   if (WithLevels &&
       ((WithLevelsX ? Kind != dxil::ResourceKind::Texture1D
                     : Kind != dxil::ResourceKind::Texture2D &&
-                          Kind != dxil::ResourceKind::Texture1DArray) ||
+                          Kind != dxil::ResourceKind::Texture1DArray &&
+                          Kind != dxil::ResourceKind::TextureCube) ||
        Ty->isWriteable() || !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
        isa<UndefValue>(CI.getArgOperand(1))))
     return false;
   if ((Kind != dxil::ResourceKind::Texture1D &&
        Kind != dxil::ResourceKind::Texture1DArray &&
-       Kind != dxil::ResourceKind::Texture2D) ||
+       Kind != dxil::ResourceKind::Texture2D &&
+       Kind != dxil::ResourceKind::TextureCube) ||
       (Kind == dxil::ResourceKind::Texture1D &&
        ID != Intrinsic::dx_resource_getdimensions_x && !WithLevelsX))
     return false;
