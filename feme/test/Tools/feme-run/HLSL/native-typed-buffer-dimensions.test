@@ -1,0 +1,292 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/heap.o | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/mixed.yaml %t/heap.dxil | FileCheck %s --check-prefixes=CHECK,MIXED
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/mixed.yaml %t/heap.dxil | FileCheck %s --check-prefixes=CHECK,MIXED
+# RUN: feme-run --reference --repeat=2 --heap=%t/mixed.yaml %t/heap.dxil | FileCheck %s --check-prefixes=CHECK,MIXED
+# RUN: feme-run --object --repeat=2 --heap=%t/mixed.yaml %t/heap.o | FileCheck %s --check-prefixes=CHECK,MIXED
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb-bindings.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb-bindings.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb-bindings.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/legacy.o | FileCheck %s --check-prefixes=CHECK,RGB
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/mixed-bindings.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=CHECK,MIXED
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/mixed-bindings.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=CHECK,MIXED
+# RUN: feme-run --reference --repeat=2 --heap=%t/mixed-bindings.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=CHECK,MIXED
+# RUN: feme-run --object --repeat=2 --heap=%t/mixed.yaml %t/legacy.o | FileCheck %s --check-prefixes=CHECK,MIXED
+#
+# Native CPU metadata queries, not owned D3D12. Byte sizes differ at
+# overlapping SRV/UAV registers, proving namespace separation. RGB32
+# counts only complete 12-byte texels, including a bound view too short
+# for one texel. Mixed controls use 4/8/16-byte formats with the same
+# bytes and four-component shader handles. Divergent queries preserve
+# sentinels; no input texel is read. All 352 bytes and repeats are checked.
+# RAISE-COUNT-6: call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.TypedBuffer",
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# CHECK: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42( 42){7}]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS:42( 42){9}]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U:42( 42){13}]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU:42( 42){4}]]{{$}}
+# CHECK-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F:42 42]]{{$}}
+# CHECK-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF:42( 42){16}]]{{$}}
+# RGB-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT:42 2 3 4 1 0 5 2 42 4 1 0 5 2 3 4 1 0 5 2 3 4 1 0 5 2 3 4 1 0 5 42]]{{$}}
+# MIXED-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT:42 8 5 3 5 1 4 8 42 3 5 1 4 8 5 3 5 1 4 8 5 3 5 1 4 8 5 3 5 1 4 42]]{{$}}
+# CHECK-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU]]{{$}}
+# CHECK-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F]]{{$}}
+# CHECK-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF]]{{$}}
+# CHECK-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT]]{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+#ifndef HEAP
+Buffer<int4> signedInput : register(t0);
+RWBuffer<int4> signedUAV : register(u0);
+Buffer<uint4> unsignedInput : register(t1);
+RWBuffer<uint4> unsignedUAV : register(u1);
+Buffer<float4> floatInput : register(t2);
+RWBuffer<float4> floatUAV : register(u2);
+RWByteAddressBuffer output : register(u3);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  Buffer<int4> signedInput = ResourceDescriptorHeap[0];
+  RWBuffer<int4> signedUAV = ResourceDescriptorHeap[1];
+  Buffer<uint4> unsignedInput = ResourceDescriptorHeap[2];
+  RWBuffer<uint4> unsignedUAV = ResourceDescriptorHeap[3];
+  Buffer<float4> floatInput = ResourceDescriptorHeap[4];
+  RWBuffer<float4> floatUAV = ResourceDescriptorHeap[5];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[6];
+#endif
+  uint base = 4 + tid.x * 24;
+  uint count;
+  signedInput.GetDimensions(count);
+  output.Store(base, count);
+  if (tid.x != 1) {
+    signedUAV.GetDimensions(count);
+    output.Store(base + 4, count);
+  }
+  unsignedInput.GetDimensions(count);
+  output.Store(base + 8, count);
+  unsignedUAV.GetDimensions(count);
+  output.Store(base + 12, count);
+  floatInput.GetDimensions(count);
+  output.Store(base + 16, count);
+  floatUAV.GetDimensions(count);
+  output.Store(base + 20, count);
+}
+#--- rgb.yaml
+resource-heap:
+  - index: 0
+    size: 32
+    kind: typed-buffer
+    format: r32g32b32_sint
+    data: [42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 40
+    kind: typed-buffer
+    format: r32g32b32_sint
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_uint
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 3
+    size: 20
+    kind: typed-buffer
+    format: r32g32b32_uint
+    data: [42, 42, 42, 42, 42]
+  - index: 4
+    size: 8
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42]
+  - index: 5
+    size: 68
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 6
+    size: 128
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- mixed.yaml
+resource-heap:
+  - index: 0
+    size: 32
+    kind: typed-buffer
+    format: r32_sint
+    data: [42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 40
+    kind: typed-buffer
+    format: r32g32_sint
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32a32_uint
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 3
+    size: 20
+    kind: typed-buffer
+    format: r32_uint
+    data: [42, 42, 42, 42, 42]
+  - index: 4
+    size: 8
+    kind: typed-buffer
+    format: r32g32_float
+    data: [42, 42]
+  - index: 5
+    size: 68
+    kind: typed-buffer
+    format: r32g32b32a32_float
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 6
+    size: 128
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- rgb-bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 32
+        kind: typed-buffer
+        format: r32g32b32_sint
+        data: [42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 40
+        kind: typed-buffer
+        format: r32g32b32_sint
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_uint
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 20
+        kind: typed-buffer
+        format: r32g32b32_uint
+        data: [42, 42, 42, 42, 42]
+  - space: 0
+    register: 2
+    register-class: srv
+    entries:
+      - index: 0
+        size: 8
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42]
+  - space: 0
+    register: 2
+    register-class: uav
+    entries:
+      - index: 0
+        size: 68
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 128
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- mixed-bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 32
+        kind: typed-buffer
+        format: r32_sint
+        data: [42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 40
+        kind: typed-buffer
+        format: r32g32_sint
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32a32_uint
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 20
+        kind: typed-buffer
+        format: r32_uint
+        data: [42, 42, 42, 42, 42]
+  - space: 0
+    register: 2
+    register-class: srv
+    entries:
+      - index: 0
+        size: 8
+        kind: typed-buffer
+        format: r32g32_float
+        data: [42, 42]
+  - space: 0
+    register: 2
+    register-class: uav
+    entries:
+      - index: 0
+        size: 68
+        kind: typed-buffer
+        format: r32g32b32a32_float
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 128
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

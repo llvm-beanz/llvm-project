@@ -167,6 +167,17 @@ The original compute-only baseline is no longer current:
   ordered physical heaps. This adds narrow CPU evidence, not D3D12 view
   construction or general typed/owned-device closure; admission, status,
   runtime/SPIR-V code and ABI remain unchanged.
+  Typed-buffer opcode-72 field-zero dimensions now raise to
+  `llvm.dx.resource.getdimensions.x` and lower to the existing CPU typed
+  element-count helper. Complete physical texels are counted from descriptor
+  byte size/format, not shader width. Unused/zero mip operands are accepted;
+  other fields, aggregate uses, meaningful mips and raw/structured DXIL
+  queries remain unraised. Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32
+  SRV/UAV queries pass RGB32 and mixed R32/RG32/RGBA32 layouts across
+  the same CPU modes, including partial/too-short views, namespaces,
+  divergence, guards and repeats. Runtime/SPIR-V code, ABI 8 and argument
+  layouts remain unchanged; no stores, advertisements, descriptor
+  materialization or owned-device closure are added.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

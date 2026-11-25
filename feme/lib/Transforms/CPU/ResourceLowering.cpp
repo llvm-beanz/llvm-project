@@ -174,6 +174,11 @@ bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
     if (!CI)
       return false;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (Kind == Family::Typed && ID == Intrinsic::dx_resource_getdimensions_x) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      continue;
+    }
     if (ID == StoreID) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
@@ -536,6 +541,13 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
     auto *Access = cast<CallInst>(U);
     IRBuilder<> Builder(Access);
     Intrinsic::ID ID = getIntrinsicID(Access);
+    if (ID == Intrinsic::dx_resource_getdimensions_x) {
+      Value *Dimensions = createGetDimensionsTyped(
+          Builder, Env, DescriptorIndex, Mask, Access->getName());
+      Access->replaceAllUsesWith(Dimensions);
+      Access->eraseFromParent();
+      continue;
+    }
     bool IsStore = ID == Intrinsic::dx_resource_store_typedbuffer ||
                    ID == Intrinsic::dx_resource_store_rawbuffer;
 

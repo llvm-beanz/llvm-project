@@ -27,6 +27,43 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native typed-buffer dimensions (VM, 2026-11-24)
+
+Typed-buffer opcode-72 field-zero queries now raise to
+`llvm.dx.resource.getdimensions.x` with unused/zero mip operands, then
+lower to the existing CPU typed element-count helper. Portable tests
+reproduced both missing links and now check scalar/three/four-component
+handles, descriptor indices, query/load coexistence and idempotence.
+Unsupported fields, mixed extracts, aggregate uses, meaningful mips and
+raw/structured DXIL queries remain unraised; raw/xy CPU controls retain
+their original ABI. Texture and SPIR-V dimension behavior is unchanged.
+
+[`native-typed-buffer-dimensions.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-dimensions.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound SINT/UINT/FP32 SRV/UAV
+queries in normal waves 4/8, reference and ARM64 AOT. Sixteen execution
+cases each repeat twice. RGB32 views sized 32/40/56/20/8/68 bytes
+return 2/3/4/1/0/5 complete 12-byte texels, including zero for a bound
+view too short for one texel. Mixed R32/RG32/RGBA32 controls return
+8/5/3/5/1/4 from the same bytes and four-component shader handles.
+Distinct counts at overlapping registers prove SRV/UAV namespace
+separation; legacy AOT uses space/register/namespace-ordered physical
+heaps. Divergence, every input/output word, guards, sentinels and repeats
+pass: 224 input bytes plus a guarded 128-byte output, exactly 352 bytes.
+
+The affected ARM64 build passes 31 steps. Twenty-five focused native
+typed-resource, namespace, raising/round-trip, CPU/SPIR-V lowering and
+texture-dimension LIT pass with zero failures in 7.43 seconds. Five existing
+typed-dimension runtime units pass in 1.264 seconds, including complete-
+element, inactive/unbound and unreadable-pointer metadata/bounds cases.
+Three new fixtures add three tests.
+
+This adds dimension raising/CPU lowering only: runtime/SPIR-V code,
+load/store/status/atomic policy, format advertisements, descriptor
+materialization, ABI 8 and argument layouts remain unchanged. Raw/
+structured DXIL dimensions and broader format, full-suite, external CTS,
+adapter-matrix or owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native narrow RGB32 typed loads (VM, 2026-11-24)
 
 [`native-narrow-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-narrow-typed-buffer-loads.test)

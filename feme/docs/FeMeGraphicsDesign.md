@@ -3111,6 +3111,18 @@ This is narrow shared CPU load/bounds evidence, not draw, general typed
 or owned-device closure; admission, status, runtime/SPIR-V code and ABI
 are unchanged.
 
+Typed-buffer opcode-72 field-zero dimensions now raise to
+`llvm.dx.resource.getdimensions.x` and lower to the existing shared CPU
+typed element-count helper. Descriptor format/byte size, not shader width,
+determine complete-element counts without reading texel data. Unsupported
+fields, aggregate uses, meaningful mips and raw/structured DXIL queries
+remain unraised. Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV
+queries pass RGB32 and mixed R32/RG32/RGBA32 layouts across the same
+CPU modes, including partial/too-short views, namespace separation,
+divergence, guards and repeats. Runtime/SPIR-V code, ABI 8 and argument
+layouts remain unchanged. This is shared CPU evidence, not draw, new
+stores/advertisements or general typed/owned-device closure.
+
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling
 nonexistent `v3` helpers. Physical descriptor formats retain stride and

@@ -1414,6 +1414,18 @@ it now covers the two largest opcode families:
   narrow native CPU evidence, not new admission, status, runtime/SPIR-V,
   ABI, three-component/other-format/non-32-bit or owned-device closure.
 
+- Typed-buffer dimensions now raise opcode-72 field-zero queries to
+  `llvm.dx.resource.getdimensions.x`, then lower to the existing CPU
+  typed element-count helper. Only unused/zero mip operands and field-zero
+  extracts are accepted; mixed fields, aggregate uses, meaningful mips
+  and raw/structured DXIL queries remain unraised. Descriptor format and
+  byte size determine complete-element counts, not shader width. Native
+  SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32 and
+  mixed R32/RG32/RGBA32 layouts across the same CPU modes, including
+  partial/too-short views, namespace separation, divergence, guards and
+  repeats. Runtime/SPIR-V code, ABI 8 and argument layouts are unchanged;
+  this adds no stores, advertisements or owned-device closure.
+
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
   calls. Descriptor formats retain physical stride/bounds; the existing
@@ -1579,7 +1591,10 @@ scalar FP32 `dx.op.sampleCmp` (64)/`dx.op.sampleCmpLevelZero` (65),
 whose out-parameters only ever read width, or width and height together --
 a mip-count out-parameter, DXIL's `.z`/`.w` fields, is still left unraised,
 since `DXILOpLowering.cpp` has no `levels_xy`-shaped forward lowering to
-verify against yet). Before adding comparison mapping, `Sample`,
+verify against yet). Typed-buffer field-zero queries additionally raise
+to `getdimensions.x` with unused/zero mip operands; other buffer fields
+and raw/structured DXIL queries remain unraised.
+Before adding comparison mapping, `Sample`,
 `SampleLevel`, `TextureLoad` and `getDimensions` were the only texture
 ops LLVM's own `DXILOpLowering.cpp` already lowered a canonical
 intrinsic to/from (`getdimensions.xy`'s own forward lowering was added

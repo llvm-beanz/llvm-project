@@ -2711,6 +2711,58 @@ structured behavior, descriptor materialization, ABI 8 and argument layouts
 remain unchanged. Bound/static descriptors remain open; `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native typed-buffer dimensions (2026-11-24).**
+
+Portable regressions reproduced two missing links: opcode-72
+`GetDimensions` only raised texture handles, and CPU buffer lowering
+did not recognize canonical typed-buffer dimension queries. The raiser
+now maps a typed-buffer query's field-zero element count to
+`llvm.dx.resource.getdimensions.x`, with unused/zero mip operands only.
+Other fields, mixed supported/unsupported extracts, aggregate uses,
+meaningful mips and raw/structured DXIL queries remain unraised. CPU
+buffer lowering accepts the scalar typed query and reuses the existing
+`feme.cpu.resource.getdimensions.typed.i32` helper, without an element
+index, new runtime entry point or argument ABI.
+
+New portable
+[`dxil-raise-typed-getdimensions.ll`](../test/Transforms/DXIL/dxil-raise-typed-getdimensions.ll)
+and
+[`resource-lowering-typed-getdimensions.ll`](../test/Transforms/CPU/resource-lowering-typed-getdimensions.ll)
+check scalar FP32, signed three-component UAV and unsigned four-component
+handles, descriptor indices, shared-handle query/load lowering, rejection
+controls and idempotence. Unsupported raw/xy CPU queries retain the
+original function ABI. Existing texture and SPIR-V dimension controls pass.
+
+The new
+[`native-typed-buffer-dimensions.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-dimensions.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound SINT/UINT/FP32 SRV/UAV
+queries in normal waves 4/8, reference and ARM64 AOT. Sixteen execution
+cases each repeat twice. RGB32 views sized 32/40/56/20/8/68 bytes
+return 2/3/4/1/0/5 complete 12-byte texels; mixed R32/RG32/RGBA32
+controls return 8/5/3/5/1/4 from the same bytes and four-component shader
+handles. A too-short bound view returns zero, not a fractional element.
+Different counts at overlapping SRV/UAV registers prove namespace
+separation; legacy AOT uses space/register/namespace-ordered physical
+heaps. Divergent queries preserve sentinels. Every input/output word,
+guard and both repeats pass: 224 input bytes plus a guarded 128-byte
+output, exactly 352 compared bytes per case.
+
+The affected assertions-enabled, PCH-disabled, sccache ARM64 `-j2`
+build passes 31 steps. Twenty-five focused native typed-resource,
+namespace, raising/round-trip, CPU/SPIR-V lowering and texture-dimension
+LIT pass with zero failures in 7.43 seconds. Five existing typed-dimension
+runtime units pass in 1.264 seconds, including complete-element counts,
+inactive/unbound resources and unreadable-pointer bounds/metadata checks.
+Three fixtures add three tests. Changed-line formatting is applied.
+
+This adds typed-buffer dimension raising/CPU lowering and native metadata
+evidence only. Runtime/SPIR-V code, loads/stores/status/atomics policy,
+format advertisements, descriptor materialization, ABI 8 and argument
+layouts remain unchanged. Raw/structured DXIL dimensions, broader format
+support, a full suite, external CTS, adapter-matrix and owned D3D12/
+conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

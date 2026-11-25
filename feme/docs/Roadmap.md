@@ -2931,6 +2931,25 @@ the first shader-facing milestone rather than alongside it.
    atomics, descriptor materialization, ABI 8 or argument layouts change.
    General/non-32-bit formats, broader/full-suite, external CTS, adapter-
    matrix and owned-device/W2/W3 closure remain open.
+   Native typed-buffer dimensions follow-up (2026-11-24): opcode-72
+   field-zero queries now raise to `llvm.dx.resource.getdimensions.x`
+   and lower to the existing CPU typed element-count helper. Only unused/
+   zero mip operands are accepted; other fields, aggregate uses, meaningful
+   mips and raw/structured DXIL queries remain unraised. Portable controls
+   check scalar/three/four-component handles, indices, query/load coexistence,
+   unsupported ABI preservation and idempotence. Native SDK DXC SM6.6/
+   SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32 and mixed R32/
+   RG32/RGBA32 layouts in waves 4/8, reference and ARM64 AOT.
+   Sixteen execution cases each repeat twice. Physical complete-element
+   counts, partial/too-short views, namespaces, divergence, all input/output
+   words, guards and sentinels pass: exactly 352 bytes per case, including
+   a guarded 128-byte output. The affected 31-step ARM64 build passes;
+   25 focused LIT pass in 7.43 seconds and five existing typed-dimension
+   units pass in 1.264 seconds, with zero failures. Three fixtures add three
+   tests. Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+   descriptor materialization, ABI 8 and argument layouts remain unchanged.
+   Raw/structured DXIL dimensions, broader format, full-suite, external CTS,
+   adapter-matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

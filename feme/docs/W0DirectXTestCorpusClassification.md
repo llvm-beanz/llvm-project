@@ -455,6 +455,24 @@ new FXC-profile/external corpus, external CTS, adapter-matrix or owned-
 device closure; see the
 [native narrow RGB32 evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-narrow-rgb32-typed-loads-vm-2026-11-24).
 
+Native typed-buffer dimensions follow-up (2026-11-24): opcode-72 field-zero
+queries now raise/lower to the existing CPU typed element-count helper,
+with unused/zero mip operands only. Portable tests check handles, indices,
+query/load coexistence, rejection and idempotence; unsupported fields,
+aggregate uses, meaningful mips and raw/structured DXIL queries remain
+unraised. Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries
+pass RGB32 and mixed R32/RG32/RGBA32 in waves 4/8, reference and ARM64
+AOT, with sixteen execution cases each repeated twice. Physical complete-
+element counts, partial/too-short views, namespaces, divergence, all input/
+output words, guards and sentinels pass: exactly 352 bytes per case.
+The affected 31-step ARM64 build passes; 25 focused LIT pass in 7.43
+seconds and five existing runtime units pass in 1.264 seconds, with zero
+failures. Three fixtures add three tests. Runtime/SPIR-V code, load/store/
+status/atomic policy, advertisements, ABI 8 and argument layouts remain.
+This is native CPU metadata evidence, not new FXC-profile/external corpus,
+external CTS, adapter-matrix or owned-device closure; see the
+[typed-buffer dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-typed-buffer-dimensions-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

@@ -1,5 +1,32 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native typed-buffer dimension scope (2026-11-24)
+
+The [native typed-buffer dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-typed-buffer-dimensions-vm-2026-11-24)
+adds opcode-72 field-zero raising and CPU lowering to the existing typed
+element-count helper. Unused/zero mip operands are supported; other fields,
+aggregate uses, meaningful mips and raw/structured DXIL queries remain
+unraised. Portable controls check handles, query/load coexistence,
+descriptor indices, rejection and idempotence.
+
+SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries execute RGB32
+and mixed R32/RG32/RGBA32 layouts in waves 4/8, reference and ARM64
+AOT. Sixteen execution cases each repeat twice. Complete physical texels,
+not shader width, determine counts; partial/too-short views, namespace
+separation, divergence, all input/output words, guards and sentinels pass:
+224 input bytes plus a guarded 128-byte output, exactly 352 bytes per case.
+
+The affected 31-step ARM64 build passes. Twenty-five focused native
+typed-resource/namespace/raising/CPU-SPIR-V-lowering/texture-dimension
+LIT pass with zero failures in 7.43 seconds; five existing typed-dimension
+runtime units pass in 1.264 seconds. Three fixtures add three tests.
+Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+This is native CPU metadata evidence, not raw/structured DXIL dimensions,
+broader format, full-suite, external CTS, adapter-matrix or owned D3D12/
+conformance closure. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native narrow RGB32 load scope (2026-11-24)
 
 The [native narrow RGB32 follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-narrow-rgb32-typed-loads-vm-2026-11-24)

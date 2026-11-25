@@ -143,6 +143,18 @@ explicit space/register/namespace-ordered heaps. This is narrow CPU
 evidence, not new admission, status, runtime/SPIR-V, ABI or general typed/
 owned-device closure.
 
+Typed-buffer `GetDimensions` now raises opcode-72 field-zero queries to
+`llvm.dx.resource.getdimensions.x` and lowers to the existing CPU typed
+element-count helper. Complete physical texels are counted from descriptor
+byte size/format, not shader width. Only unused/zero mip operands and
+field-zero extracts are supported; mixed fields, aggregate uses, meaningful
+mips and raw/structured DXIL queries remain unraised. Native SDK DXC
+SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32 and mixed
+R32/RG32/RGBA32 layouts across the same CPU modes, including partial/
+too-short views, namespaces, divergence, guards and repeats. Runtime/
+SPIR-V code, ABI 8 and argument layouts remain unchanged; no stores,
+advertisements or owned-device closure are added.
+
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are
 unchanged. Portable i32/FP32 regressions and native SM6.6/SM6.0 FP32

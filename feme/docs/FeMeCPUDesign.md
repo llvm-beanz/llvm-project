@@ -2368,6 +2368,21 @@ every input/output word, guards and two repeats pass. This adds narrow
 native CPU bounds evidence, not D3D12 view construction or general typed
 closure; admission, status, runtime/SPIR-V code and ABI remain unchanged.
 
+Typed-buffer opcode-72 field-zero queries now raise to
+`llvm.dx.resource.getdimensions.x` and lower to the existing
+`feme.cpu.resource.getdimensions.typed.i32` helper. This call has no
+element-index operand: it counts complete physical texels from descriptor
+byte size/format, without reading texel data. Inactive/unbound/invalid
+descriptors still return zero. Only unused/zero mip operands and field-zero
+extracts are raised; mixed fields, aggregate uses, meaningful mips and
+raw/structured DXIL queries remain outside this path. Queries and loads
+through the same typed handle lower together without changing the ABI.
+Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32
+and mixed R32/RG32/RGBA32 layouts in normal waves 4/8, reference and
+ARM64 AOT. Partial/too-short views, namespaces, divergence, guards and
+repeats pass. Runtime/SPIR-V code, ABI 8 and argument layouts remain;
+no stores, format advertisements or owned-device closure are added.
+
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This
 avoids nonexistent typed `v3` entry points; physical descriptor formats
