@@ -27,6 +27,38 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native four-component typed-buffer loads (VM, 2026-11-24)
+
+[`native-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-loads.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound SINT/UINT/FP32 `Buffer`/
+`RWBuffer` loads on six R32/RGBA32 formats, each as SRV and UAV views,
+in normal waves 4/8, reference and ARM64 AOT modes. Existing opcode-68
+raising preserves four-component handles, signedness and access class;
+existing vector helpers use physical descriptor formats and element indices.
+
+Distinct inputs at identical logical SRV/UAV registers prove namespace
+separation. Legacy AOT uses physical heaps ordered by space/register/
+namespace, not SRVs followed by UAVs. Wide inputs contain a prefix texel,
+three complete texels and a fourth missing W; incomplete/upper/negative-
+bit-pattern accesses read all zero. Valid R32 vector loads return zero
+G/B and numeric alpha one, not the invalid-load alpha zero. Exact integer
+high/non-FP32-exact bits and negative-zero/subnormal/infinity/quiet-NaN
+FP32 bits survive without arithmetic. Five lanes cover valid-end accesses
+and divergence. Every input word and the guarded 584-byte output pass
+twice per mode: 1,040 bytes in each wide layout, 680 in each narrow layout.
+
+Focused native typed loads/stores/atomics, Clang typed-buffer execution,
+namespace/kind, DXIL resource raising/round-trip and CPU typed lowering/
+normalization LIT pass thirteen tests with zero failures in 4.81 seconds.
+One fixture adds one test without implementation changes or a rebuild.
+This is bounded CPU load/bounds evidence, not owned D3D12 view construction,
+scalar/shorter-vector/other-format/non-32-bit closure, a broader/full-suite,
+external CTS or adapter-matrix result. Store admission, status, atomics,
+raw/structured behavior, descriptor materialization, runtime/SPIR-V code,
+ABI 8 and argument layouts remain unchanged. Bound/static D3D12
+descriptors and broader conformance remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) full-mask typed-buffer stores (VM, 2026-11-24)
 
 Opcode 69 mask-15 i32/FP32 stores through narrower one/two/three-component

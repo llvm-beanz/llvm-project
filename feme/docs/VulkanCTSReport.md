@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native four-component typed-buffer load scope (2026-11-24)
+
+The [native typed-load follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-four-component-typed-buffer-loads-vm-2026-11-24)
+executes SDK DXC SM6.6 heap and SM6.0 bound four-component SINT/UINT/
+FP32 SRV/UAV loads on six R32/RGBA32 formats across normal waves 4/8,
+reference and ARM64 AOT. Existing raising/helpers preserve access class,
+signedness, exact integer/special FP32 bits and element-index bounds.
+Distinct inputs at identical logical SRV/UAV registers prove namespace
+separation; legacy AOT uses explicit space/register/namespace-ordered heaps.
+Valid R32 loads pad G/B zero and alpha one; incomplete RGBA32 texels and
+upper/negative-bit-pattern indices return all zero. Complete inputs,
+valid-end accesses, divergent use, guarded 584-byte output and both repeats
+pass, comparing 1,040 wide-layout bytes or 680 narrow-layout bytes.
+
+Thirteen focused typed-resource/namespace/raising/lowering tests pass with
+zero failures in 4.81 seconds; one fixture adds one test without code
+changes or a rebuild. Vulkan advertisements, store admission, status,
+atomics, raw/structured behavior, descriptor materialization, runtime/
+SPIR-V code, ABI 8 and argument layouts remain unchanged. This is CPU
+bounds policy evidence, not owned D3D12 view construction, scalar/shorter-
+vector/other-format/non-32-bit closure, a broader/full-suite, external CTS
+or adapter-matrix result. Bound/static D3D12 descriptors and broader
+conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) full-mask typed-buffer store scope (2026-11-24)
 
 The [full-mask store follow-up](W0WindowsIntegrationProbe.md#w2aw2b-full-mask-typed-buffer-stores-vm-2026-11-24)

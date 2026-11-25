@@ -1388,6 +1388,17 @@ it now covers the two largest opcode families:
   Runtime/SPIR-V code, loads/status, atomics and ABI 8 are unchanged;
   general partial-mask/other-format/non-32-bit typed closure is not claimed.
 
+- Native four-component typed loads: SDK DXC SM6.6 heap and SM6.0 bound
+  SINT/UINT/FP32 SRV/UAV shaders pass six R32/RGBA32 format cases across
+  normal waves 4/8, reference and ARM64 AOT. Existing opcode-68 raising
+  preserves access class and signedness. Distinct SRV/UAV data at identical
+  logical registers proves namespace separation; AOT supplies physical
+  space/register/namespace-ordered heaps. Valid R32 loads supply G/B zero
+  and alpha one, while incomplete RGBA32 texels and upper/negative indices
+  read all zero. Exact bits, valid-end accesses, divergent use, all input/
+  output words and guards pass twice. This adds native CPU evidence only,
+  not new admission, status, runtime/SPIR-V, ABI or owned-device behavior.
+
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard
 32-bit-per-component row shape is covered as of roadmap step R12

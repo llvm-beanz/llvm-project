@@ -121,6 +121,15 @@ nonmatching partial masks, mixed types and non-32-bit promotion remain
 unraised. This closes the scalar-store gap, not general typed-load/store,
 owned-device, runtime/SPIR-V, loads/status, atomic or ABI behavior.
 
+Native four-component typed loads additionally cover SDK DXC SM6.6/SM6.0
+SINT/UINT/FP32 SRV/UAV shaders on six R32/RGBA32 formats across the same
+CPU modes. Exact bits, valid R32 zero-G/B/one-alpha defaults versus all-zero
+incomplete/invalid loads, valid-end accesses, divergent use, complete input/
+output words, guards and two repeats pass. Distinct inputs prove namespace
+separation; legacy AOT uses explicit space/register/namespace-ordered heaps.
+This is bounded CPU evidence, not new admission, status, runtime/SPIR-V,
+ABI or owned-device behavior.
+
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
 `feme` reuses rather than reimplementing -- has no patterns for SPIR-V image

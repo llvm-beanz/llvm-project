@@ -2443,6 +2443,43 @@ layouts remain unchanged. Bound/static D3D12 descriptors and broader
 conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W2(b) native four-component typed-buffer loads (2026-11-24):
+the new [`native-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-loads.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound `Buffer`/`RWBuffer`
+SINT/UINT/FP32 loads through existing opcode-68 raising and vector CPU
+helpers. Six R32/RGBA32 formats are exercised as both SRV and UAV views
+in normal waves 4/8, reference and ARM64 AOT-object modes. Native raising
+checks four-component handle types, signedness and read-only/read-write
+classification, with no remaining buffer-load/raw-store calls.
+
+Distinct SRV/UAV inputs at the same logical registers establish namespace
+separation. AOT explicitly supplies physical heaps in bound normalization's
+space/register/namespace order, interleaving SRVs and UAVs here. RGBA32
+inputs have a prefix texel, three complete texels and an incomplete final
+texel missing W. All four components of that incomplete CPU view read
+zero; upper and negative-bit-pattern indices likewise return all zero.
+R32 vector loads instead supply G/B zero and numeric alpha one for valid
+elements, distinguishing format defaults from invalid-load results.
+Complete texels preserve signed/high-bit and adjacent non-FP32-exact
+integers, negative zero, subnormals, infinities and quiet-NaN payloads
+without FP32 arithmetic. Five lanes exercise the last complete element,
+partial/upper bounds and divergent load/store use. All six input views,
+the guarded 584-byte output, inactive-store sentinels and both repeats
+are compared exactly: 1,040 bytes per wide case and 680 per narrow case.
+
+Focused native typed loads/stores/atomics, Clang typed-buffer execution,
+buffer namespace/kind, DXIL resource raising/round-trip and CPU typed
+lowering/normalization LIT pass thirteen tests with zero failures in
+4.81 seconds. One fixture adds one test; no implementation changes or
+rebuild were needed. No broader/full-suite, external CTS, adapter-matrix,
+scalar/shorter-vector or other-format/non-32-bit load closure is claimed.
+Partial-texel results establish the shared CPU bounds policy, not owned
+D3D12 view construction or conformance. Store admission, status, atomics,
+raw/structured behavior, descriptor materialization, runtime/SPIR-V code,
+ABI 8 and argument layouts remain unchanged. Bound/static D3D12
+descriptors and broader conformance remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

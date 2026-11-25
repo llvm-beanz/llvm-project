@@ -2809,6 +2809,23 @@ the first shader-facing milestone rather than alongside it.
    suite, external CTS, adapter-matrix, general partial-mask/other-format/
    non-32-bit typed or owned-device/W2/W3 closure is claimed. Loads/status,
    atomics, raw/structured behavior, runtime/SPIR-V code and ABI 8 remain.
+   Native four-component typed-load follow-up (2026-11-24): SDK DXC
+   SM6.6 heap and SM6.0 bound SINT/UINT/FP32 SRV/UAV shaders execute
+   six R32/RGBA32 formats across normal waves 4/8, reference and ARM64
+   AOT. Existing opcode-68/vector helpers preserve access class, signedness,
+   exact bits and element indexing. Valid R32 G/B-zero/alpha-one defaults
+   differ from all-zero incomplete/upper/negative-index loads. Distinct
+   inputs at identical logical registers prove namespace separation; AOT
+   supplies space/register/namespace-ordered physical heaps. Valid-end
+   accesses, divergence, every input/output word, guards and two repeats
+   pass: 1,040 wide-layout bytes or 680 narrow-layout bytes. Thirteen
+   focused typed-resource/namespace/raising/lowering tests pass with zero
+   failures in 4.81 seconds; one fixture adds one test without code changes
+   or a rebuild. This is bounded CPU load/bounds evidence, not D3D12 view
+   construction, scalar/shorter-vector/other-format/non-32-bit closure,
+   broader/full-suite, external CTS, adapter-matrix or W2/W3 closure.
+   Admission, status, atomics, descriptor materialization, runtime/SPIR-V
+   code and ABI 8 remain unchanged.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

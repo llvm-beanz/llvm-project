@@ -2340,6 +2340,19 @@ divergent stores, invalid indices, texel guards and two repeats.
 Runtime/SPIR-V code, loads/status, atomics and ABI remain unchanged;
 general masked/other-format/non-32-bit typed closure is not added.
 
+Native four-component typed-load coverage additionally executes SDK DXC
+SM6.6 heap and SM6.0 bound SINT/UINT/FP32 SRV/UAV shaders on six R32/
+RGBA32 formats across the same CPU modes. Existing opcode-68/vector
+helpers preserve exact bits and physical element stride. Valid R32 loads
+return zero G/B and numeric alpha one; incomplete RGBA32 texels and upper/
+negative-bit-pattern indices return all zero. Distinct SRV/UAV inputs at
+identical logical registers prove namespace separation. Legacy AOT takes
+physical heaps in space/register/namespace order, interleaving the views.
+Valid-end accesses, divergent use, every input/output word, guards and two
+repeats pass. This is CPU bounds-policy evidence, not D3D12 view construction
+or general typed closure; admission, status, runtime/SPIR-V code and ABI
+remain unchanged.
+
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded
   `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the

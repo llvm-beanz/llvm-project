@@ -3087,6 +3087,16 @@ masks, mixed types and non-32-bit promotion remain unraised. This is
 shared CPU store evidence, not draw, general typed closure or owned-device
 proof; runtime/SPIR-V code, loads/status, atomics and ABI are unchanged.
 
+Native four-component typed loads also execute SDK DXC SM6.6/SM6.0
+SINT/UINT/FP32 SRV/UAV shaders on six R32/RGBA32 formats across the
+same CPU modes. Exact bits, valid R32 zero-G/B/one-alpha defaults versus
+all-zero incomplete/invalid loads, valid-end accesses, divergent use, all
+input/output words, guards and two repeats pass. Distinct inputs prove
+SRV/UAV namespace separation; legacy AOT supplies physical heaps ordered
+by space/register/namespace. This is shared CPU load/bounds evidence, not
+draw, general typed or owned-device proof; admission, status, runtime/
+SPIR-V code and ABI are unchanged.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into

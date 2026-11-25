@@ -144,6 +144,16 @@ The original compute-only baseline is no longer current:
   promotion stay unraised. This adds native CPU store evidence, not
   general typed or owned-device closure; runtime/SPIR-V code, loads/
   status, atomics and ABI are unchanged.
+  Native four-component typed loads now check SDK DXC SM6.6/SM6.0
+  SINT/UINT/FP32 SRV/UAV shaders on six R32/RGBA32 formats across the
+  same CPU modes. Valid R32 zero-G/B/one-alpha defaults differ from
+  all-zero incomplete/invalid loads. Exact bits, valid-end accesses,
+  divergent use, all input/output words, guards and two repeats pass.
+  Distinct SRV/UAV data proves namespace separation; legacy AOT supplies
+  physical heaps ordered by space/register/namespace. This is bounded
+  shared CPU load/bounds evidence, not D3D12 view construction or general
+  typed/owned-device closure; admission, status, runtime/SPIR-V code
+  and ABI remain unchanged.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

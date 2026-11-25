@@ -346,6 +346,21 @@ corpus, general typed/partial-mask/non-32-bit closure or owned-device
 proof; see the
 [full-mask store evidence](W0WindowsIntegrationProbe.md#w2aw2b-full-mask-typed-buffer-stores-vm-2026-11-24).
 
+Native four-component typed-load follow-up (2026-11-24): SDK DXC SM6.6
+heap and SM6.0 bound SINT/UINT/FP32 SRV/UAV shaders execute six R32/
+RGBA32 formats across normal waves 4/8, reference and ARM64 AOT.
+Existing raising/helpers retain access class, signedness and exact bits.
+Valid R32 default channels differ from all-zero incomplete/invalid loads.
+Distinct inputs at identical logical registers prove namespace separation;
+legacy AOT takes space/register/namespace-ordered physical heaps. Valid-
+end accesses, divergence, all input/output words, guards and two repeats
+pass. Thirteen focused typed-resource/namespace/raising/lowering tests
+pass with zero failures in 4.81 seconds; one fixture adds one test without
+code changes or a rebuild. This is CPU bounds-policy evidence, not new
+FXC-profile/external corpus, D3D12 view construction, general typed closure
+or owned-device proof; see the
+[native typed-load evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-four-component-typed-buffer-loads-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)
