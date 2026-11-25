@@ -2480,6 +2480,41 @@ ABI 8 and argument layouts remain unchanged. Bound/static D3D12
 descriptors and broader conformance remain open; `CreateDevice` remains
 `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W2(b) native scalar/two-component typed-buffer loads (2026-11-24):
+the new [`native-narrow-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-narrow-typed-buffer-loads.test)
+extends the preceding four-component evidence to actual SDK DXC SM6.6
+heap and SM6.0 bound scalar R32 and two-component RG32 SINT/UINT/FP32
+SRV/UAV loads. Shader widths match the physical formats. Modern resource
+properties and legacy result uses both reconstruct scalar or vector-two
+handles with preserved signedness and access class, rather than relying
+on a vector-four fallback. Existing scalar/vector-two CPU helpers execute
+normal waves 4/8, reference and ARM64 AOT-object paths.
+
+Distinct SRV/UAV inputs at identical logical registers prove namespace
+separation. Explicit physical heaps follow space/register/namespace order
+for legacy AOT. Five lanes read three complete elements after a prefix
+guard, then partial/upper indices. RG32 inputs end with an element missing
+Y: both loaded components read zero, not a successful X plus zero Y.
+Upper and negative-bit-pattern indices return zero at both widths.
+Signed/high-bit and adjacent non-FP32-exact integers, negative zero,
+subnormal, positive/negative infinity and quiet-NaN payloads survive
+without FP32 arithmetic. Divergent signed UAV copies retain sentinel
+values. Every input/output word, prefix/suffix guard and both repeats
+pass: 248 bytes per scalar case, 512 bytes per two-component case.
+
+Focused native typed loads/stores/atomics, Clang typed-buffer execution,
+buffer namespace/kind, DXIL resource raising/round-trip, CPU typed
+lowering/normalization and scalar/vector-two SPIR-V texel-buffer lowering
+LIT pass sixteen tests with zero failures in 5.02 seconds. One fixture
+adds one test; no implementation changes or rebuild were needed. This
+establishes narrow native CPU load/bounds evidence, not three-component,
+other-format/non-32-bit typed closure, a broader/full-suite, external CTS,
+adapter-matrix or owned D3D12 view construction/conformance result.
+Store admission, status, atomics, raw/structured behavior, descriptor
+materialization, runtime/SPIR-V code, ABI 8 and argument layouts are
+unchanged. Bound/static D3D12 descriptors and broader conformance remain
+open; `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

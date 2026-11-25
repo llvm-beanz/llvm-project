@@ -2353,6 +2353,18 @@ repeats pass. This is CPU bounds-policy evidence, not D3D12 view construction
 or general typed closure; admission, status, runtime/SPIR-V code and ABI
 remain unchanged.
 
+Native scalar/vector-two typed-load coverage now exercises SDK DXC
+SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32
+formats across the same CPU modes. Modern properties and legacy uses
+recover narrow handles; existing scalar/vector-two helpers retain exact
+bits and physical element stride. Both components of an incomplete RG32
+element return zero; upper/negative indices return zero at both widths.
+Distinct inputs prove namespace separation; AOT uses space/register/
+namespace-ordered physical heaps. Valid-end accesses, divergent copies,
+every input/output word, guards and two repeats pass. This adds narrow
+native CPU bounds evidence, not D3D12 view construction or general typed
+closure; admission, status, runtime/SPIR-V code and ABI remain unchanged.
+
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded
   `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the

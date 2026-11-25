@@ -112,6 +112,16 @@ execution does not materialize logical binding YAML. This is bounded CPU
 evidence, not new admission, status, runtime/SPIR-V, ABI or owned-device
 behavior.
 
+Native scalar/vector-two typed loads now cover SDK DXC SM6.6/SM6.0
+SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32 formats across the
+same CPU modes. Narrow handles/helpers preserve exact bits; incomplete
+RG32 elements return both components zero, with upper/negative indices
+zero at both widths. Namespace separation, valid-end accesses, divergence,
+all input/output words, guards and two repeats pass. Legacy AOT uses
+explicit space/register/namespace-ordered physical heaps. This adds narrow
+CPU evidence, not new admission, status, runtime/SPIR-V, ABI or general
+typed/owned-device closure.
+
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.
 

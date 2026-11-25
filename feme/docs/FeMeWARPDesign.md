@@ -154,6 +154,16 @@ The original compute-only baseline is no longer current:
   shared CPU load/bounds evidence, not D3D12 view construction or general
   typed/owned-device closure; admission, status, runtime/SPIR-V code
   and ABI remain unchanged.
+  Native scalar/vector-two typed loads additionally execute SDK DXC
+  SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32
+  formats across the same CPU modes. Modern properties/legacy uses recover
+  narrow handles; existing helpers retain exact bits and return both
+  components zero for incomplete RG32 elements. Upper/negative bounds,
+  namespace separation, valid-end accesses, divergence, all input/output
+  words, guards and two repeats pass. AOT uses space/register/namespace-
+  ordered physical heaps. This adds narrow CPU evidence, not D3D12 view
+  construction or general typed/owned-device closure; admission, status,
+  runtime/SPIR-V code and ABI remain unchanged.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

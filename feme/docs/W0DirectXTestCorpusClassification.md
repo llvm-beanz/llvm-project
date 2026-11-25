@@ -361,6 +361,21 @@ FXC-profile/external corpus, D3D12 view construction, general typed closure
 or owned-device proof; see the
 [native typed-load evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-four-component-typed-buffer-loads-vm-2026-11-24).
 
+Native scalar/vector-two typed-load follow-up (2026-11-24): SDK DXC
+SM6.6 heap and SM6.0 bound SINT/UINT/FP32 SRV/UAV shaders execute
+matched R32/RG32 formats across normal waves 4/8, reference and ARM64
+AOT. Modern properties/legacy uses reconstruct narrow handles; existing
+helpers preserve signedness/access class and exact bits. Incomplete RG32
+elements return both components zero. Namespace separation, valid-end
+accesses, upper/negative bounds, divergence, all input/output words, guards
+and two repeats pass; legacy AOT uses space/register/namespace-ordered
+physical heaps. Sixteen focused typed-resource/namespace/raising/lowering
+tests pass with zero failures in 5.02 seconds; one fixture adds one test
+without code changes or a rebuild. This is narrow CPU bounds evidence,
+not a new FXC-profile/external corpus, D3D12 view construction or general
+typed/owned-device closure; see the
+[narrow typed-load evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-scalartwo-component-typed-buffer-loads-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

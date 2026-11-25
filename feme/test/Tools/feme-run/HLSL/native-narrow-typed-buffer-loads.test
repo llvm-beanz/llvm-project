@@ -1,0 +1,363 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/scalar.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/scalar.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,SCALAR-RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/scalar.yaml %t/scalar.dxil | FileCheck %s --check-prefix=SCALAR
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/scalar.yaml %t/scalar.dxil | FileCheck %s --check-prefix=SCALAR
+# RUN: feme-run --reference --repeat=2 --heap=%t/scalar.yaml %t/scalar.dxil | FileCheck %s --check-prefix=SCALAR
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/scalar.dxil -o %t/scalar.o
+# RUN: feme-run --object --repeat=2 --heap=%t/scalar.yaml %t/scalar.o | FileCheck %s --check-prefix=SCALAR
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/scalar-legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/scalar-legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,SCALAR-RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/scalar-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefix=SCALAR
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/scalar-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefix=SCALAR
+# RUN: feme-run --reference --repeat=2 --heap=%t/scalar-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefix=SCALAR
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/scalar-legacy.dxil -o %t/scalar-legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/scalar.yaml %t/scalar-legacy.o | FileCheck %s --check-prefix=SCALAR
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /D TWO /Fo %t/two.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/two.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,TWO-RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/two.yaml %t/two.dxil | FileCheck %s --check-prefix=TWO
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/two.yaml %t/two.dxil | FileCheck %s --check-prefix=TWO
+# RUN: feme-run --reference --repeat=2 --heap=%t/two.yaml %t/two.dxil | FileCheck %s --check-prefix=TWO
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/two.dxil -o %t/two.o
+# RUN: feme-run --object --repeat=2 --heap=%t/two.yaml %t/two.o | FileCheck %s --check-prefix=TWO
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /D TWO /Fo %t/two-legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/two-legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,TWO-RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/two-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefix=TWO
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/two-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefix=TWO
+# RUN: feme-run --reference --repeat=2 --heap=%t/two-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefix=TWO
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/two-legacy.dxil -o %t/two-legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/two.yaml %t/two-legacy.o | FileCheck %s --check-prefix=TWO
+#
+# Native CPU evidence, not owned D3D12. Scalar and two-component shader
+# types match R32/RG32 descriptors. Modern properties and legacy result
+# uses both recover the narrow handle widths. SRV/UAV registers overlap,
+# but distinct data proves namespace separation. Physical heaps follow
+# space/register/namespace order, interleaving SRVs and UAVs for AOT.
+# Five lanes read three complete elements after a prefix guard, then
+# partial/upper indices. RG32's last element lacks Y and reads all zero.
+# Lane zero also reads 0xffffffff from every input. A divergent signed
+# UAV copy retains the 42 sentinels. No arithmetic alters special FP32
+# bits. All inputs, complete guarded outputs and both repeats are checked.
+# SCALAR-RAISE-DAG: call { i32, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 0, 0, 1) {{%.*}}, i32 {{.*}})
+# SCALAR-RAISE-DAG: call { i32, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 1, 0, 1) {{%.*}}, i32 {{.*}})
+# SCALAR-RAISE-DAG: call { i32, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 0, 0, 0) {{%.*}}, i32 {{.*}})
+# SCALAR-RAISE-DAG: call { i32, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 1, 0, 0) {{%.*}}, i32 {{.*}})
+# SCALAR-RAISE-DAG: call { float, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", float, 0, 0, 1) {{%.*}}, i32 {{.*}})
+# SCALAR-RAISE-DAG: call { float, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", float, 1, 0, 1) {{%.*}}, i32 {{.*}})
+# TWO-RAISE-DAG: call { <2 x i32>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <2 x i32>, 0, 0, 1) {{%.*}}, i32 {{.*}})
+# TWO-RAISE-DAG: call { <2 x i32>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <2 x i32>, 1, 0, 1) {{%.*}}, i32 {{.*}})
+# TWO-RAISE-DAG: call { <2 x i32>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <2 x i32>, 0, 0, 0) {{%.*}}, i32 {{.*}})
+# TWO-RAISE-DAG: call { <2 x i32>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <2 x i32>, 1, 0, 0) {{%.*}}, i32 {{.*}})
+# TWO-RAISE-DAG: call { <2 x float>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <2 x float>, 0, 0, 1) {{%.*}}, i32 {{.*}})
+# TWO-RAISE-DAG: call { <2 x float>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <2 x float>, 1, 0, 1) {{%.*}}, i32 {{.*}})
+# RAISE-NOT: call {{.*}} @dx.op.{{(bufferLoad|rawBufferStore)}}
+# SCALAR: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42 2147483649 4294967295 2147483653]]{{$}}
+# SCALAR-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS:42 2147483665 2147483647 2147483669]]{{$}}
+# SCALAR-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U:42 16777217 4294967295 16777221]]{{$}}
+# SCALAR-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU:42 16777233 2147483648 16777237]]{{$}}
+# SCALAR-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F:42 2147483648 1 2143363909]]{{$}}
+# SCALAR-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF:42 4286578688 2139095040 4290917462]]{{$}}
+# SCALAR-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT:42 2147483649 2147483665 16777217 16777233 2147483648 4286578688 4294967295 42 4294967295 2147483648 1 2139095040 2147483653 2147483669 16777221 16777237 2143363909 4290917462 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 42]]{{$}}
+# SCALAR-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# SCALAR-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS]]{{$}}
+# SCALAR-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U]]{{$}}
+# SCALAR-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU]]{{$}}
+# SCALAR-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F]]{{$}}
+# SCALAR-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF]]{{$}}
+# SCALAR-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT]]{{$}}
+# SCALAR-NOT: {{(heap|binding)\[}}
+# TWO: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42 42 2147483649 2147483650 4294967295 2147483647 2147483653 2147483654 91]]{{$}}
+# TWO-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS:42 42 2147483665 2147483666 2147483647 4294967295 2147483669 2147483670 121]]{{$}}
+# TWO-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U:42 42 16777217 16777218 4294967295 2147483648 16777221 16777222 101]]{{$}}
+# TWO-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU:42 42 16777233 16777234 2147483648 4294967295 16777237 16777238 131]]{{$}}
+# TWO-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F:42 42 2147483648 1 2143363909 4290917462 3196059648 1056964608 111]]{{$}}
+# TWO-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF:42 42 4286578688 2139095040 1065353217 3212836865 3226468352 1080033280 141]]{{$}}
+# TWO-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT:42 2147483649 2147483650 2147483665 2147483666 16777217 16777218 16777233 16777234 2147483648 1 4286578688 2139095040 4294967295 2147483647 42 42 4294967295 2147483648 2147483648 4294967295 2143363909 4290917462 1065353217 3212836865 2147483653 2147483654 2147483669 2147483670 16777221 16777222 16777237 16777238 3196059648 1056964608 3226468352 1080033280 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 42]]{{$}}
+# TWO-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# TWO-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS]]{{$}}
+# TWO-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U]]{{$}}
+# TWO-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU]]{{$}}
+# TWO-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F]]{{$}}
+# TWO-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF]]{{$}}
+# TWO-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT]]{{$}}
+# TWO-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+#ifdef TWO
+typedef int2 IntElement;
+typedef uint2 UIntElement;
+typedef float2 FloatElement;
+#define WRITE Store2
+#define STEP 8
+#else
+typedef int IntElement;
+typedef uint UIntElement;
+typedef float FloatElement;
+#define WRITE Store
+#define STEP 4
+#endif
+#ifndef HEAP
+Buffer<IntElement> signedInput : register(t0);
+RWBuffer<IntElement> signedUAV : register(u0);
+Buffer<UIntElement> unsignedInput : register(t1);
+RWBuffer<UIntElement> unsignedUAV : register(u1);
+Buffer<FloatElement> floatInput : register(t2);
+RWBuffer<FloatElement> floatUAV : register(u2);
+RWByteAddressBuffer output : register(u3);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  Buffer<IntElement> signedInput = ResourceDescriptorHeap[0];
+  RWBuffer<IntElement> signedUAV = ResourceDescriptorHeap[1];
+  Buffer<UIntElement> unsignedInput = ResourceDescriptorHeap[2];
+  RWBuffer<UIntElement> unsignedUAV = ResourceDescriptorHeap[3];
+  Buffer<FloatElement> floatInput = ResourceDescriptorHeap[4];
+  RWBuffer<FloatElement> floatUAV = ResourceDescriptorHeap[5];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[6];
+#endif
+  uint i = tid.x;
+  uint index = i + 1;
+  uint base = 4 + i * 6 * STEP;
+  output.WRITE(base, asuint(signedInput[index]));
+  if (i != 1)
+    output.WRITE(base + STEP, asuint(signedUAV[index]));
+  output.WRITE(base + 2 * STEP, unsignedInput[index]);
+  output.WRITE(base + 3 * STEP, unsignedUAV[index]);
+  output.WRITE(base + 4 * STEP, asuint(floatInput[index]));
+  output.WRITE(base + 5 * STEP, asuint(floatUAV[index]));
+  if (i == 0) {
+    uint invalidBase = 4 + 5 * 6 * STEP;
+    output.WRITE(invalidBase, asuint(signedInput[0xffffffffu]));
+    output.WRITE(invalidBase + STEP, asuint(signedUAV[0xffffffffu]));
+    output.WRITE(invalidBase + 2 * STEP, unsignedInput[0xffffffffu]);
+    output.WRITE(invalidBase + 3 * STEP, unsignedUAV[0xffffffffu]);
+    output.WRITE(invalidBase + 4 * STEP, asuint(floatInput[0xffffffffu]));
+    output.WRITE(invalidBase + 5 * STEP, asuint(floatUAV[0xffffffffu]));
+  }
+}
+#--- scalar.yaml
+resource-heap:
+  - index: 0
+    size: 16
+    kind: typed-buffer
+    format: r32_sint
+    data: [42, 2147483649, 4294967295, 2147483653]
+  - index: 1
+    size: 16
+    kind: typed-buffer
+    format: r32_sint
+    data: [42, 2147483665, 2147483647, 2147483669]
+  - index: 2
+    size: 16
+    kind: typed-buffer
+    format: r32_uint
+    data: [42, 16777217, 4294967295, 16777221]
+  - index: 3
+    size: 16
+    kind: typed-buffer
+    format: r32_uint
+    data: [42, 16777233, 2147483648, 16777237]
+  - index: 4
+    size: 16
+    kind: typed-buffer
+    format: r32_float
+    data: [42, 2147483648, 1, 2143363909]
+  - index: 5
+    size: 16
+    kind: typed-buffer
+    format: r32_float
+    data: [42, 4286578688, 2139095040, 4290917462]
+  - index: 6
+    size: 152
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42]
+#--- two.yaml
+resource-heap:
+  - index: 0
+    size: 36
+    kind: typed-buffer
+    format: r32g32_sint
+    data: [42, 42, 2147483649, 2147483650, 4294967295, 2147483647,
+           2147483653, 2147483654, 91]
+  - index: 1
+    size: 36
+    kind: typed-buffer
+    format: r32g32_sint
+    data: [42, 42, 2147483665, 2147483666, 2147483647, 4294967295,
+           2147483669, 2147483670, 121]
+  - index: 2
+    size: 36
+    kind: typed-buffer
+    format: r32g32_uint
+    data: [42, 42, 16777217, 16777218, 4294967295, 2147483648,
+           16777221, 16777222, 101]
+  - index: 3
+    size: 36
+    kind: typed-buffer
+    format: r32g32_uint
+    data: [42, 42, 16777233, 16777234, 2147483648, 4294967295,
+           16777237, 16777238, 131]
+  - index: 4
+    size: 36
+    kind: typed-buffer
+    format: r32g32_float
+    data: [42, 42, 2147483648, 1, 2143363909, 4290917462,
+           3196059648, 1056964608, 111]
+  - index: 5
+    size: 36
+    kind: typed-buffer
+    format: r32g32_float
+    data: [42, 42, 4286578688, 2139095040, 1065353217, 3212836865,
+           3226468352, 1080033280, 141]
+  - index: 6
+    size: 296
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- scalar-bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 16
+        kind: typed-buffer
+        format: r32_sint
+        data: [42, 2147483649, 4294967295, 2147483653]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 16
+        kind: typed-buffer
+        format: r32_sint
+        data: [42, 2147483665, 2147483647, 2147483669]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 16
+        kind: typed-buffer
+        format: r32_uint
+        data: [42, 16777217, 4294967295, 16777221]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 16
+        kind: typed-buffer
+        format: r32_uint
+        data: [42, 16777233, 2147483648, 16777237]
+  - space: 0
+    register: 2
+    register-class: srv
+    entries:
+      - index: 0
+        size: 16
+        kind: typed-buffer
+        format: r32_float
+        data: [42, 2147483648, 1, 2143363909]
+  - space: 0
+    register: 2
+    register-class: uav
+    entries:
+      - index: 0
+        size: 16
+        kind: typed-buffer
+        format: r32_float
+        data: [42, 4286578688, 2139095040, 4290917462]
+  - space: 0
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 152
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42]
+#--- two-bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 36
+        kind: typed-buffer
+        format: r32g32_sint
+        data: [42, 42, 2147483649, 2147483650, 4294967295, 2147483647,
+               2147483653, 2147483654, 91]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 36
+        kind: typed-buffer
+        format: r32g32_sint
+        data: [42, 42, 2147483665, 2147483666, 2147483647, 4294967295,
+               2147483669, 2147483670, 121]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 36
+        kind: typed-buffer
+        format: r32g32_uint
+        data: [42, 42, 16777217, 16777218, 4294967295, 2147483648,
+               16777221, 16777222, 101]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 36
+        kind: typed-buffer
+        format: r32g32_uint
+        data: [42, 42, 16777233, 16777234, 2147483648, 4294967295,
+               16777237, 16777238, 131]
+  - space: 0
+    register: 2
+    register-class: srv
+    entries:
+      - index: 0
+        size: 36
+        kind: typed-buffer
+        format: r32g32_float
+        data: [42, 42, 2147483648, 1, 2143363909, 4290917462,
+               3196059648, 1056964608, 111]
+  - space: 0
+    register: 2
+    register-class: uav
+    entries:
+      - index: 0
+        size: 36
+        kind: typed-buffer
+        format: r32g32_float
+        data: [42, 42, 4286578688, 2139095040, 1065353217, 3212836865,
+               3226468352, 1080033280, 141]
+  - space: 0
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 296
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

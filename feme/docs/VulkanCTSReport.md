@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native scalar/two-component typed-buffer load scope (2026-11-24)
+
+The [narrow typed-load follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-scalartwo-component-typed-buffer-loads-vm-2026-11-24)
+executes SDK DXC SM6.6 heap and SM6.0 bound scalar R32/two-component
+RG32 SINT/UINT/FP32 SRV/UAV loads across normal waves 4/8, reference
+and ARM64 AOT. Modern properties and legacy uses recover matched narrow
+handles with preserved signedness/access class. Existing scalar/vector-two
+CPU helpers retain exact integer/special FP32 bits. Distinct inputs prove
+namespace separation; AOT uses explicit space/register/namespace-ordered
+physical heaps. Incomplete RG32 elements return both components zero;
+upper/negative indices likewise return zero. Valid-end accesses, divergence,
+all input/output words, guards and two repeats pass, comparing 248 bytes
+per scalar layout or 512 per two-component layout.
+
+Sixteen focused native typed-resource, namespace, raising/round-trip and
+typed/scalar/vector-two lowering tests pass with zero failures in 5.02
+seconds. One fixture adds one test without implementation changes or a
+rebuild. Vulkan advertisements, store admission, status, atomics,
+raw/structured behavior, descriptor materialization, runtime/SPIR-V code,
+ABI 8 and argument layouts are unchanged. This is narrow CPU bounds
+evidence, not three-component/other-format/non-32-bit closure, a broader/
+full-suite, external CTS, adapter-matrix or owned D3D12 view construction/
+conformance result. Bound/static D3D12 descriptors and broader conformance
+remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native four-component typed-buffer load scope (2026-11-24)
 
 The [native typed-load follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-four-component-typed-buffer-loads-vm-2026-11-24)

@@ -27,6 +27,40 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native scalar/two-component typed-buffer loads (VM, 2026-11-24)
+
+[`native-narrow-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-narrow-typed-buffer-loads.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound scalar R32 and
+two-component RG32 SINT/UINT/FP32 SRV/UAV loads in normal waves 4/8,
+reference and ARM64 AOT modes. Shader widths match physical formats.
+Modern properties and legacy result uses recover the narrow handle
+widths, preserving signedness and access class; existing scalar/vector-two
+CPU helpers execute without vector-four fallback.
+
+Distinct inputs at identical SRV/UAV registers prove namespace separation;
+legacy AOT supplies space/register/namespace-ordered physical heaps.
+Five lanes cover three complete elements after a prefix guard, then
+partial/upper indices. RG32's final element lacks Y and returns both
+components zero; upper/negative-bit-pattern indices return zero at both
+widths. Exact signed/high/non-FP32-exact integers and negative-zero/
+subnormal/infinity/quiet-NaN FP32 bits survive without arithmetic.
+Divergent signed UAV copies retain sentinels. Every input/output word,
+prefix/suffix guard and both repeats pass: 248 scalar-layout bytes or
+512 two-component-layout bytes per mode.
+
+Focused native typed resources, Clang typed-buffer execution, namespace/
+kind, DXIL raising/round-trip, CPU typed lowering/normalization and
+scalar/vector-two SPIR-V texel-buffer lowering LIT pass sixteen tests
+with zero failures in 5.02 seconds; one fixture adds one test without
+implementation changes or a rebuild. This is narrow CPU load/bounds
+evidence, not three-component/other-format/non-32-bit closure, a broader/
+full-suite, external CTS, adapter-matrix or owned D3D12 view construction/
+conformance result. Store admission, status, atomics, raw/structured
+behavior, descriptor materialization, runtime/SPIR-V code, ABI 8 and
+argument layouts are unchanged. Bound/static D3D12 descriptors and broader
+conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native four-component typed-buffer loads (VM, 2026-11-24)
 
 [`native-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-loads.test)

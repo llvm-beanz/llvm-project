@@ -3097,6 +3097,17 @@ by space/register/namespace. This is shared CPU load/bounds evidence, not
 draw, general typed or owned-device proof; admission, status, runtime/
 SPIR-V code and ABI are unchanged.
 
+Native scalar/vector-two typed loads additionally execute SDK DXC
+SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32
+formats across the same CPU modes. Narrow handles/helpers preserve exact
+bits; incomplete RG32 elements return both components zero, and upper/
+negative indices return zero at both widths. Namespace separation,
+valid-end accesses, divergence, all input/output words, guards and two
+repeats pass; AOT uses explicit space/register/namespace-ordered heaps.
+This is narrow shared CPU load/bounds evidence, not draw, general typed
+or owned-device closure; admission, status, runtime/SPIR-V code and ABI
+are unchanged.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into
