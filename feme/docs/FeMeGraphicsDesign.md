@@ -3019,6 +3019,18 @@ by the new `ImageSampleExplicitLodPattern`/existing
 SPIRVToLLVMPatterns.cpp`) and LLVM's DirectX/SPIR-V backends already
 lower them to real wire-format ops, exactly mirroring how a typed buffer
 access was never given its own `feme.buffer.*` spelling either.
+Native opcode 140 and legacy opcode 69 raw/structured stores also raise
+contiguous masks 3/7/15 into packed two/three/four-component i32/FP32
+`llvm.dx.resource.store.rawbuffer` calls. Existing CPU vector helpers
+retain full-width bounds and 12-byte three-component writes rather than
+independent scalar writes. Native SM6.6 heap and SM6.0 bound compute
+tests cover exact bits, field strides/sub-offsets, divergent masks,
+five lanes, guards and two repeats in normal waves 4/8, reference and
+ARM64 AOT-object paths; legacy AOT uses a physical heap. Sparse/dynamic/
+oversized masks, packed non-32-bit types and mixed active fields remain
+unraised. This is shared CPU buffer evidence, not a new draw or owned
+D3D12 result; runtime/SPIR-V implementation and ABI 8 are unchanged.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into

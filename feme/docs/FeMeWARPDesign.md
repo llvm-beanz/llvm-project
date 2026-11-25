@@ -81,6 +81,18 @@ The original compute-only baseline is no longer current:
   typed buffers and textures require tables. Live original native heap
   handles require the matching resource/sampler direct-index root flag;
   heap accesses generated for traditional bound emulation do not.
+  Native opcode 140 and legacy opcode 69 raw/structured stores now raise
+  contiguous masks 3/7/15 into packed two/three/four-component i32/FP32
+  operations through existing CPU vector helpers. Scalar behavior is
+  preserved; sparse/dynamic/oversized masks, packed non-32-bit types and
+  mixed active fields remain unraised. Native SM6.6 heap and SM6.0 bound
+  compute tests pass normal waves 4/8, reference and ARM64 AOT-object
+  paths with exact bits, preserved field strides/sub-offsets, divergent
+  masks, five lanes, guards and two repeats. Three-component writes use
+  12 bytes; partly out-of-bounds vectors commit no words. Legacy AOT uses
+  an explicit physical heap, not new object-mode binding materialization.
+  This changes DXIL raising, not runtime/SPIR-V implementation, loads/
+  status handling, artifact ABI 8, argument layouts or owned-device support.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

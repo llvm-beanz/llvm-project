@@ -2259,6 +2259,21 @@ ABI error rather than a second interpretation of `FemeDispatchArgs`.
 
 ### Lowering (`feme::cpu::ResourceLoweringPass`, `feme-cpu-lower-resources`)
 
+DXIL raw/structured stores now raise contiguous masks 3/7/15 into packed
+two/three/four-component i32/FP32 values for the existing vector helpers.
+Scalar mask-1 behavior is unchanged; sparse/dynamic/oversized masks,
+packed non-32-bit types and mixed active fields remain unraised. Raw
+addresses zero-extend to i64; structured indices multiply by the preserved
+stride before adding the intra-element byte offset. The packed operation
+retains full-width bounds: partly out-of-bounds writes commit no words,
+and three-component helpers write 12 bytes, not padded 16-byte vectors.
+Native SDK DXC SM6.6 heap and SM6.0 bound compute tests pass normal waves
+4/8, reference and ARM64 AOT-object execution with exact bits, divergent
+masks, five lanes, per-width/per-record guards and two checked repeats.
+Legacy AOT uses an explicit physical heap; object binding-prefix
+reflection/materialization is not added. Runtime/SPIR-V implementation,
+loads/status handling, artifact ABI 8 and argument layouts are unchanged.
+
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded
   `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the

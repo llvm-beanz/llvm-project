@@ -1311,16 +1311,27 @@ it now covers the two largest opcode families:
   with no accesses at all falls back to 4, DXIL's widest typed buffer
   element.
 
-- Scalar raw/structured buffer accesses: `RawBufferLoad`/`RawBufferStore`
+- Raw/structured buffer accesses: `RawBufferLoad`/`RawBufferStore`
   (139/140) and the legacy `BufferLoad`/`BufferStore` (68/69) encodings
   raise to `llvm.dx.resource.load.rawbuffer`/`store.rawbuffer`. A raw
   buffer's unused coordinate becomes `poison`; structured element indices
-  and byte offsets remain unchanged. Multi-component accesses and loads
-  consuming the status field remain unraised. The legacy encoding is
+  and byte offsets remain unchanged. Stores accept scalar mask 1 and
+  contiguous masks 3/7/15 for two/three/four i32/FP32 components, retaining
+  one vector write through the existing CPU helpers. Sparse/dynamic/
+  oversized masks, packed non-32-bit types and mismatched active fields
+  remain unraised. Loads still require a scalar component-0 result;
+  multi-component/status loads are unchanged. The legacy encoding is
   required for DXBC-derived DXIL 1.0 IR; treating it as typed-only left
   raw stores and their `i8` masks in the backend's pre-lowering IR.
   LIT covers both encodings and DXBC-to-DXIL payload round-trips, including
-  real FXC SM 5.0/5.1 output.
+  real FXC SM 5.0/5.1 output. Native SDK DXC SM6.6 heap and SM6.0 bound
+  compute stores execute through normal waves 4/8, reference and ARM64
+  AOT-object paths, checking exact bits, field strides/sub-offsets,
+  divergent masks, five lanes, guards and two repeats. Three-component
+  stores write exactly 12 bytes; partly out-of-bounds vectors do not
+  commit any words. Legacy AOT uses an explicit physical heap. This
+  changes DXIL raising only, not runtime/SPIR-V implementation, artifact
+  ABI 8, argument layouts or owned D3D12 execution.
 
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard

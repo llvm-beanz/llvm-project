@@ -57,6 +57,18 @@ neither `feme::dxil::OpRaisingPass` nor LLVM's DirectX target itself raises
 `dx.op.loadInput`/`storeOutput` (no idiomatic intrinsic models "read a
 whole signature element" the way resource ops do).
 
+For CPU targets, native and legacy DXIL raw/structured stores also support
+contiguous masks 3/7/15 for packed two/three/four-component i32/FP32
+values. Scalar behavior remains; sparse/dynamic/oversized masks, packed
+non-32-bit types and mixed active fields remain unraised. Native SDK DXC
+SM6.6 heap and SM6.0 bound compute tests execute through normal waves
+4/8, reference and ARM64 AOT-object paths with exact bits, field strides/
+sub-offsets, divergent masks, five lanes, guards and two repeats.
+Existing vector helpers reject an entire partly out-of-bounds write and
+write exactly 12 bytes for three components. Legacy AOT takes an explicit
+physical heap. No new runtime/SPIR-V implementation, raw-load/status
+support, GPU-target lowering, ABI or owned D3D12 behavior is implied.
+
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
 `feme` reuses rather than reimplementing -- has no patterns for SPIR-V image

@@ -2691,6 +2691,24 @@ the first shader-facing milestone rather than alongside it.
    artifact ABI 8, argument layouts and raw-store admission are unchanged.
    This is bounded native CPU execution, not D3D12 mip/format support,
    owned-device, adapter-matrix, external CTS or W2/W3/conformance closure.
+   Packed raw/structured DXIL store follow-up (2026-11-24): opcode 140
+   and legacy opcode 69 now raise contiguous i32/FP32 masks 3/7/15 into
+   two/three/four-component stores through existing CPU vector helpers.
+   Scalar behavior is preserved; sparse/dynamic/oversized masks, packed
+   non-32-bit types and mixed active fields remain unraised. Portable
+   raising/CPU tests verify component order, coordinates/strides/sub-
+   offsets, malformed-call preservation and idempotence. Native SDK DXC
+   SM6.6 heap and SM6.0 bound compute `Store2`/`Store3`/`Store4` and
+   structured uint4/float3 fields pass normal waves 4/8, reference and
+   ARM64 AOT-object paths with exact bits, five lanes, divergent masks,
+   guards and two checked repeats. Three components write 12 bytes;
+   partly out-of-bounds vectors commit no words. Legacy AOT uses an
+   explicit physical heap. The affected ARM64 build passes; relevant
+   DXIL/CPU transforms, CPU units, runner and runtime LIT pass 1,711
+   with 4 unsupported and zero failures in 70.85 seconds, adding three
+   fixtures/tests. Runtime/SPIR-V implementation, loads/status handling,
+   images/sampling, ABI 8 and argument layouts are unchanged. No full-
+   suite, external CTS, adapter-matrix or owned D3D12 closure is claimed.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

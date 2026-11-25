@@ -27,6 +27,39 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) packed raw/structured DXIL stores (VM, 2026-11-24)
+
+Native opcode 140 and legacy opcode 69 raw/structured stores now raise
+contiguous i32/FP32 masks 3/7/15 into two/three/four-component canonical
+stores. Scalar behavior is preserved. Empty/sparse/dynamic/oversized
+masks, packed non-32-bit types and mismatched active fields remain
+unraised without partial vector construction or duplicate writes.
+Raw unused coordinates become poison; structured indices/sub-offsets
+remain separate. Existing CPU vector helpers receive a packed write,
+not scalar stores that could partially commit an out-of-bounds vector.
+
+Portable raising/CPU tests verify component order, both encodings,
+coordinate/stride arithmetic, cleanup and idempotence. Actual SDK DXC
+SM6.6 heap-backed and SM6.0 bound compute shaders execute `Store2`,
+`Store3`, `Store4` and structured uint4/float3 fields through normal
+waves 4/8, reference and ARM64 AOT-object paths. Five lanes, divergent
+masks, exact integer/negative-fractional FP32 bits, per-width/per-record
+guards and two explicitly checked repeats pass. Three-component stores
+write exactly 12 bytes; partly out-of-bounds packed writes and large
+byte addresses leave all words unchanged. Legacy AOT uses an explicit
+physical heap; object-mode binding YAML remains unsupported.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes; changed-line clang-format is clean. Relevant
+DXIL/CPU transforms, CPU units, runner and runtime LIT pass 1,711 with
+4 unsupported and zero failures in 70.85 seconds; three new fixtures
+add three tests. No full-suite, external CTS, adapter-matrix or owned
+D3D12 result is claimed. Loads/status handling, images/sampling,
+runtime/SPIR-V implementation, artifact ABI 8 and argument layouts
+are unchanged. Bound/static D3D12 descriptors, broader conformance and
+owned-device execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native FP32/SINT/UINT 2D/array three-mip texel loads (VM, 2026-11-24)
 
 The existing SDK DXC SM6.6 heap-backed 2D/plain-array `Load` fixtures now

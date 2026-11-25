@@ -246,10 +246,21 @@ An unused raw-buffer coordinate is normalized from DXIL's `undef` to the
 `poison` required by LLVM's intrinsic; structured-buffer element indices
 and byte offsets remain unchanged. The portable raising regression covers
 legacy raw and structured loads/stores, float/integer values, a 20-byte
-structured stride and nonzero register space, and leaves unsupported
-multi-component stores, second-component loads and status reads unraised.
+structured stride and nonzero register space. At that stage, multi-
+component stores, second-component loads and status reads remained unraised.
 The existing lower/raise round-trip now restores its original `poison`
 coordinate rather than the previously incorrect `undef`.
+
+Packed-store follow-up (2026-11-24): contiguous two/three/four-component
+i32/FP32 stores now raise for both opcode 140 and legacy opcode 69.
+Scalar behavior remains; sparse/dynamic/oversized masks, packed non-32-bit
+types, mixed active fields and multi-component/status loads remain
+unraised. Native SDK DXC SM6.6 heap and SM6.0 bound compute tests verify
+guarded packed CPU execution, full-width bounds and exact 12-byte
+three-component writes through normal/reference/ARM64 AOT paths.
+Legacy AOT supplies a physical heap. This is not a new FXC-profile,
+external corpus or owned D3D12 result; see the
+[packed-store evidence](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-stores-vm-2026-11-24).
 
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new

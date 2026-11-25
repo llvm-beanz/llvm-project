@@ -1,0 +1,127 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,HEAP
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/heap.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,LEGACY
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/legacy.o | FileCheck %s
+#
+# Native CPU execution, not owned D3D12. Guards separate every packed raw
+# write and structured record. Three-component stores must write 12 bytes,
+# and partially out-of-bounds packed writes must leave all words unchanged.
+# Legacy AOT uses an explicit physical heap; object-mode binding YAML
+# materialization is not added.
+# RAISE-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", i8, 1, 0) {{%.*}}, i32 {{.*}}, i32 poison, <2 x i32> {{%.*}})
+# RAISE-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", i8, 1, 0) {{%.*}}, i32 {{.*}}, i32 poison, <3 x i32> {{%.*}})
+# RAISE-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", i8, 1, 0) {{%.*}}, i32 {{.*}}, i32 poison, <4 x i32> {{%.*}})
+# HEAP-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [16 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <4 x i32> {{%.*}})
+# HEAP-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [12 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <3 x float> {{%.*}})
+# LEGACY-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", [20 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <4 x i32> {{%.*}})
+# LEGACY-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", [16 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <3 x float> {{%.*}})
+# RAISE-NOT: call void @dx.op.{{(rawBufferStore|bufferStore)}}
+# CHECK: {{(heap\[0\]|binding\[0:0\]\[0\])}}: 42 2147483648 16777217 42 4294967295 2147483647 1000 42 100 200 300 400 42 2147483649 16777218 42 42 42 42 42 101 201 301 401 42 2147483650 16777219 42 4294967293 2147483645 1002 42 102 202 302 402 42 2147483651 16777220 42 42 42 42 42 103 203 303 403 42 2147483652 16777221 42 4294967291 2147483643 1004 42 104 204 304 404 42{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: 42 2147483648 16777217 4294967295 2147483647 42 2147483649 16777218 4294967294 2147483646 42 2147483650 16777219 4294967293 2147483645 42 2147483651 16777220 4294967292 2147483644 42 2147483652 16777221 4294967291 2147483643 42{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: 42 3196059648 1056964608 1061158912 42 3214934016 1069547520 1071644672 42 42 42 42 42 3226468352 1080033280 1081081856 42 3230138368 1083179008 1083703296 42{{$}}
+# CHECK-NEXT: {{(heap\[0\]|binding\[0:0\]\[0\])}}: 42 2147483648 16777217 42 4294967295 2147483647 1000 42 100 200 300 400 42 2147483649 16777218 42 42 42 42 42 101 201 301 401 42 2147483650 16777219 42 4294967293 2147483645 1002 42 102 202 302 402 42 2147483651 16777220 42 42 42 42 42 103 203 303 403 42 2147483652 16777221 42 4294967291 2147483643 1004 42 104 204 304 404 42{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: 42 2147483648 16777217 4294967295 2147483647 42 2147483649 16777218 4294967294 2147483646 42 2147483650 16777219 4294967293 2147483645 42 2147483651 16777220 4294967292 2147483644 42 2147483652 16777221 4294967291 2147483643 42{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: 42 3196059648 1056964608 1061158912 42 3214934016 1069547520 1071644672 42 42 42 42 42 3226468352 1080033280 1081081856 42 3230138368 1083179008 1083703296 42{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+struct IntRecord {
+  uint Guard;
+  uint4 Values;
+};
+struct FloatRecord {
+  uint Guard;
+  float3 Values;
+};
+#ifndef HEAP
+RWByteAddressBuffer raw : register(u0);
+RWStructuredBuffer<IntRecord> ints : register(u1);
+RWStructuredBuffer<FloatRecord> floats : register(u2);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  RWByteAddressBuffer raw = ResourceDescriptorHeap[0];
+  RWStructuredBuffer<IntRecord> ints = ResourceDescriptorHeap[1];
+  RWStructuredBuffer<FloatRecord> floats = ResourceDescriptorHeap[2];
+#endif
+  uint i = tid.x;
+  uint offset = 4 + i * 48;
+  raw.Store2(offset, uint2(0x80000000u + i, 0x01000001u + i));
+  if ((i & 1) == 0)
+    raw.Store3(offset + 12, uint3(0xffffffffu - i, 0x7fffffffu - i, 1000 + i));
+  raw.Store4(offset + 28, uint4(100 + i, 200 + i, 300 + i, 400 + i));
+  ints[i].Values = uint4(0x80000000u + i, 0x01000001u + i,
+                         0xffffffffu - i, 0x7fffffffu - i);
+  if (i != 2)
+    floats[i].Values = float3(-(float(i) + 0.25), float(i) + 0.5, float(i) + 0.75);
+  raw.Store2(240, uint2(11, 12));
+  raw.Store3(236, uint3(13, 14, 15));
+  raw.Store4(232, uint4(16, 17, 18, 19));
+  raw.Store4(0xfffffffcu, uint4(20, 21, 22, 23));
+}
+#--- heap.yaml
+resource-heap:
+  - index: 0
+    size: 244
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 104
+    kind: structured-buffer
+    stride: 20
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 84
+    kind: structured-buffer
+    stride: 16
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 244
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    entries:
+      - index: 0
+        size: 104
+        kind: structured-buffer
+        stride: 20
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 2
+    entries:
+      - index: 0
+        size: 84
+        kind: structured-buffer
+        stride: 16
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

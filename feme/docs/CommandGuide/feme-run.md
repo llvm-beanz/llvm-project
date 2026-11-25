@@ -27,6 +27,20 @@ raw/structured buffer, never a typed-buffer format conversion), matching
 what `libFeMeRuntimeCPU` and the CPU pipeline's resource-call
 scalarization exercise today.
 
+Native opcode 140 and legacy opcode 69 raw/structured stores accept
+contiguous masks 3/7/15 for packed two/three/four-component i32/FP32
+values. These use existing vector helpers, preserving full-width bounds:
+partly out-of-bounds stores commit no words; three components write
+12 bytes, not a padded 16-byte value. Scalar behavior remains; sparse/
+dynamic/oversized masks, packed non-32-bit types and mixed active fields
+stay unraised. Native SDK DXC SM6.6 heap and SM6.0 bound compute tests
+cover normal waves 4/8, reference and ARM64 AOT-object execution, exact
+bits, field strides/sub-offsets, divergent masks, five lanes, per-width/
+per-record guards and two checked repeats. Legacy AOT supplies an explicit
+physical `resource-heap`, not `bindings` YAML. Runtime/SPIR-V implementation,
+raw-load/status handling, artifact ABI 8 and argument layouts are unchanged;
+this is CPU execution, not owned D3D12.
+
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.
 

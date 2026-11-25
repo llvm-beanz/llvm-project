@@ -1362,7 +1362,7 @@ unsigned getTextureOffsetComponents(dxil::ResourceKind Dim) {
 /// dimension (`Texture1D`'s coordinate, matching how `TypedBufferExtType`'s
 /// scalar-vs-vector element type distinction already works). Returns
 /// nullptr for an empty \p Components (a dimension with no offset operand
-/// at all, e.g. `TextureCube`).
+/// at all, e.g. `TextureCube`). Also packs raw-buffer store components.
 Value *packTextureVector(IRBuilder<> &Builder, ArrayRef<Value *> Components) {
   if (Components.empty())
     return nullptr;
@@ -1968,10 +1968,10 @@ Value *normalizeRawBufferCoordinate(TargetExtType *HandleTy, Value *Coord) {
 /// element" (a `StructuredBuffer`) the handle's resource kind means -- both
 /// forward straight through to the raised intrinsic's own `Coord0`/`Coord1`
 /// operands, except that an unused raw-buffer coordinate becomes poison.
-/// Only a single-component (mask 0b0001) store is raised, matching what
-/// `libFeMeRuntimeCPU`'s raw/structured buffer view implements today (see
-/// the "Descriptor formats" section of feme/docs/FeMeCPUDesign.md); a
-/// multi-component store is left unraised for now.
+/// Contiguous low-order masks select one through four components. Packed
+/// i32/FP32 stores use the existing vector raw/structured CPU helpers;
+/// scalar stores retain their existing type support. Sparse/dynamic masks
+/// and packed stores of other component types remain unraised.
 bool raiseRawBufferStore(CallInst &CI, bool Legacy) {
   if (CI.arg_size() != (Legacy ? 9 : 10))
     return false;
@@ -1982,14 +1982,28 @@ bool raiseRawBufferStore(CallInst &CI, bool Legacy) {
     return false;
 
   std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(8));
-  if (!Mask || *Mask != 1)
+  if (!Mask || *Mask > 15)
     return false;
+  unsigned Width = getContiguousMaskWidth(*Mask);
+  if (Width == 0)
+    return false;
+
+  Type *ElemTy = CI.getArgOperand(4)->getType();
+  if (Width > 1 && !ElemTy->isIntegerTy(32) && !ElemTy->isFloatTy())
+    return false;
+  SmallVector<Value *, 4> Components;
+  for (unsigned I = 0; I != Width; ++I) {
+    Value *Component = CI.getArgOperand(4 + I);
+    if (Component->getType() != ElemTy)
+      return false;
+    Components.push_back(Component);
+  }
 
   Value *Coord0 = CI.getArgOperand(2);
   Value *Coord1 = normalizeRawBufferCoordinate(HandleTy, CI.getArgOperand(3));
-  Value *Stored = CI.getArgOperand(4);
 
   IRBuilder<> Builder(&CI);
+  Value *Stored = packTextureVector(Builder, Components);
   Function *StoreFn = Intrinsic::getOrInsertDeclaration(
       CI.getModule(), Intrinsic::dx_resource_store_rawbuffer,
       {HandleTy, Stored->getType()});

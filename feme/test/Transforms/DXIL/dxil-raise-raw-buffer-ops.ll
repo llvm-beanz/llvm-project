@@ -7,9 +7,8 @@
 ; `llvm.dx.resource.store.rawbuffer`/`.load.rawbuffer`, the form a
 ; `RWStructuredBuffer`/`RWByteAddressBuffer` access in real HLSL (e.g.
 ; `Out[tid.x] = tid.x;`) lowers to -- see feme/test/Tools/feme-run/HLSL for
-; this raised end-to-end through `feme-run`. A multi-component access (mask
-; with more than one bit set) is left unraised, matching the scope note in
-; each function's own comment.
+; this raised end-to-end through `feme-run`. Contiguous two/three/four-
+; component i32/FP32 stores also raise; loads retain their scalar scope.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-ms-dx"
@@ -46,13 +45,13 @@ define i32 @load_raw(i32 %byteoffset) {
   ret i32 %r
 }
 
-; A multi-component store (mask 3, two components) isn't raised: only the
-; single-component view `libFeMeRuntimeCPU` implements today is covered (see
-; raiseRawBufferStore's own comment) -- left as an unmodified `dx.op.*` call
-; rather than mis-raised.
+; Packed stores preserve component order and structured coordinates.
 ; CHECK-LABEL: define void @store_multi_component(
 define void @store_multi_component(i32 %idx, i32 %x, i32 %y) {
-  ; CHECK: call void @dx.op.rawBufferStore.i32(i32 140,
+  ; CHECK: [[V:%.*]] = insertelement <2 x i32> poison, i32 %x, i32 0
+  ; CHECK: [[V2:%.*]] = insertelement <2 x i32> [[V]], i32 %y, i32 1
+  ; CHECK: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", [4 x i8], 1, 0) {{%.*}}, i32 %idx, i32 0, <2 x i32> [[V2]])
+  ; CHECK-NOT: call void @dx.op.rawBufferStore
   %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 0, i1 false)
   call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %h, i32 %idx, i32 0, i32 %x, i32 %y, i32 poison, i32 poison, i8 3, i32 4)
   ret void
@@ -111,7 +110,10 @@ define i32 @load_legacy_structured(i32 %idx, i32 %offset) {
 
 ; CHECK-LABEL: define void @store_legacy_multi_component(
 define void @store_legacy_multi_component(i32 %idx, i32 %x, i32 %y) {
-  ; CHECK: call void @dx.op.bufferStore.i32(i32 69,
+  ; CHECK: [[V:%.*]] = insertelement <2 x i32> poison, i32 %x, i32 0
+  ; CHECK: [[V2:%.*]] = insertelement <2 x i32> [[V]], i32 %y, i32 1
+  ; CHECK: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", i8, 1, 0) {{%.*}}, i32 %idx, i32 poison, <2 x i32> [[V2]])
+  ; CHECK-NOT: call void @dx.op.bufferStore
   %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 1, i32 1, i1 false)
   call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %h, i32 %idx, i32 undef, i32 %x, i32 %y, i32 undef, i32 undef, i8 3)
   ret void

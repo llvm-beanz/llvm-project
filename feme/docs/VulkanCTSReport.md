@@ -1,5 +1,35 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) packed raw/structured DXIL store scope (2026-11-24)
+
+The [packed-store follow-up](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-stores-vm-2026-11-24)
+extends native opcode 140 and legacy opcode 69 raising to contiguous
+two/three/four-component i32/FP32 stores. The existing CPU vector helpers
+receive one packed operation, preserving full-width bounds rather than
+partially committing independent scalar writes. Scalar behavior remains;
+empty/sparse/dynamic/oversized masks, packed non-32-bit types and mixed
+active fields stay unraised.
+
+Portable raising/CPU regressions check both encodings, component order,
+coordinates/stride/sub-offsets, malformed-call preservation and
+idempotence. Actual SDK DXC SM6.6 heap and SM6.0 bound compute shaders
+execute `Store2`/`Store3`/`Store4` and structured uint4/float3 fields
+through normal waves 4/8, reference and ARM64 AOT-object paths. Exact
+integer/FP32 bits, five lanes, divergent masks, per-width/per-record
+guards, 12-byte three-component stores, all-or-nothing vector bounds and
+two explicitly checked repeats pass. Legacy AOT uses a physical heap,
+not object-mode binding YAML materialization.
+
+The affected ARM64 build and changed-line clang-format pass. Relevant
+DXIL/CPU transforms, CPU units, runner and runtime LIT pass 1,711 with
+4 unsupported and zero failures in 70.85 seconds; three fixtures add
+three tests. Vulkan advertisements are unchanged; no full-suite,
+external CTS, adapter-matrix or owned-device result is claimed.
+Loads/status handling, images/sampling, runtime/SPIR-V implementation,
+artifact ABI 8 and argument layouts are unchanged. Bound/static D3D12
+descriptors, broader conformance and owned-device execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native FP32/SINT/UINT 2D/array three-mip texel-load scope (2026-11-24)
 
 The [native 2D load-chain follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-fp32sintuint-2darray-three-mip-texel-loads-vm-2026-11-24)
