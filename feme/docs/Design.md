@@ -1340,6 +1340,16 @@ it now covers the two largest opcode families:
   Legacy AOT uses an explicit physical heap. This
   changes DXIL raising only, not runtime/SPIR-V implementation, artifact
   ABI 8, argument layouts or owned D3D12 execution.
+  Native FP32 structured-buffer breadth additionally checks float2/float3/
+  float4 loads and stores at field offset 4 in 12/16/20-byte records,
+  across the same SM6.6/SM6.0 CPU modes. Exact copies preserve negative
+  zero, signed subnormals/infinities/quiet-NaN payloads and adjacent values
+  near one without arithmetic. Truncated final vectors and upper/negative
+  indices read all zero; partial/invalid writes leave inputs unchanged.
+  Five lanes, divergent copies, every word of 732 output bytes, record/
+  trailing guards and two repeats pass. This adds native copy/bounds
+  evidence, not new implementation, general FP32 arithmetic conformance
+  or broader legacy partial/coalesced-width semantics.
 
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard

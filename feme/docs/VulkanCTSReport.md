@@ -1,5 +1,34 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) native packed FP32 structured-buffer scope (2026-11-24)
+
+The [native FP32 buffer follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-packed-fp32-structured-buffer-breadth-vm-2026-11-24)
+adds actual SDK DXC SM6.6 heap and SM6.0 bound float2/float3/float4
+field load/store execution through normal waves 4/8, reference and ARM64
+AOT-object paths. Native raising checks both directions, all three FP32
+widths, modern layouts, legacy placeholders, 12/16/20-byte strides and
+offset 4. Last-complete records read correctly; truncated final vectors,
+upper and negative-bit-pattern indices read all zero. Partial/invalid
+writes preserve every input word; valid writes retain record/trailing
+guards, including 12-byte float3 stores.
+
+Five lanes, divergent copies, fifteen output records per width and two
+checked repeats compare all 732 output bytes and input words exactly.
+Negative zero, subnormals of both signs, infinities, signed quiet-NaN
+payloads, adjacent values near one and negative/fractional values survive
+FP32 vector copies without arithmetic. Legacy loads use complete leading
+runs; AOT uses an explicit physical heap.
+
+Focused packed-buffer native/raising/CPU LIT passes eight tests with zero
+failures in 3.56 seconds; one fixture adds one test. No implementation
+change, rebuild or broader/full-suite run is claimed. Vulkan
+advertisements, raw-load admission, legacy partial/coalesced-width limits,
+status handling, images/sampling, runtime/SPIR-V code, ABI 8 and argument
+layouts are unchanged. This is not general FP32 arithmetic conformance,
+external CTS, an adapter-matrix or owned-device evidence. Bound/static
+D3D12 descriptors and broader conformance remain open; `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) packed raw/structured DXIL load scope (2026-11-24)
 
 The [packed-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-loads-vm-2026-11-24)

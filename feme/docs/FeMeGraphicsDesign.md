@@ -3045,6 +3045,17 @@ avoids legacy source-width coalescing; general legacy partial/coalesced-
 width semantics remain unproven. This adds CPU buffer evidence, not draw,
 owned-device, runtime/SPIR-V or ABI changes.
 
+Native FP32 structured-buffer follow-up also checks float2/float3/float4
+loads and stores at offset 4 with 12/16/20-byte strides in SM6.6 heap and
+SM6.0 bound compute shaders across the same CPU modes. Copies preserve
+negative zero, signed subnormals/infinities/quiet-NaN payloads and adjacent
+values near one without arithmetic. Truncated final vectors and invalid
+indices read all zero; partial/invalid writes leave inputs unchanged.
+Five lanes, divergent copies, 732 guarded output bytes and two repeats
+pass, including 12-byte float3 stores. This is shared native CPU copy/
+bounds evidence, not draw, general FP32 arithmetic or owned-device proof;
+legacy admission, runtime/SPIR-V code and ABI remain unchanged.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into

@@ -27,6 +27,37 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) native packed FP32 structured-buffer breadth (VM, 2026-11-24)
+
+The new [`packed-structured-float.test`](../test/Tools/feme-run/HLSL/packed-structured-float.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound float2/float3/float4
+field loads and stores through normal waves 4/8, reference and ARM64
+AOT-object paths. Import/raising checks all three FP32 widths, modern
+field layouts, legacy stride placeholders, 12/16/20-byte strides and
+field offset 4. Legacy loads use complete leading-component runs; AOT
+uses an explicit physical heap, not object binding YAML.
+
+Four complete input records precede a fifth missing its last component.
+Last-complete reads succeed; partially present vectors, upper index 5
+and negative-bit-pattern index 0xffffffff read all zero. Writes to those
+partial/invalid records leave every input word unchanged. Valid copies
+retain each record/trailing guard, including the 12-byte float3 write.
+Five lanes, divergent copies and fifteen output records per width are
+checked twice in every mode, comparing all 732 output bytes and input
+words exactly. No FP32 arithmetic intervenes: negative zero, positive/
+negative subnormals, infinities, signed quiet-NaN payloads, adjacent values
+near one and negative/fractional values preserve their bits.
+
+Focused native/raising/CPU packed-buffer LIT passes eight tests with zero
+failures in 3.56 seconds; one fixture adds one test. No implementation
+change required a rebuild or broader/full-suite run. Raw-load admission,
+legacy partial/coalesced-width limits, status handling, images/sampling,
+runtime/SPIR-V code, artifact ABI 8 and argument layouts are unchanged.
+This is bounded native CPU copy/bounds evidence, not general FP32
+arithmetic conformance, external CTS, an adapter-matrix or owned D3D12.
+Bound/static D3D12 descriptors and broader conformance remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) packed raw/structured DXIL loads (VM, 2026-11-24)
 
 Opcode 139 now raises contiguous masks 1/3/7/15; legacy opcode 68 infers

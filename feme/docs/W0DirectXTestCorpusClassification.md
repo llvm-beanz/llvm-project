@@ -280,6 +280,21 @@ with 4 unsupported and zero failures in 74.71 seconds. This is not a new
 FXC-profile, external corpus or owned D3D12 result; see the
 [packed-load evidence](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-loads-vm-2026-11-24).
 
+Native FP32 structured-buffer follow-up (2026-11-24): actual SDK DXC
+SM6.6 heap and SM6.0 bound float2/float3/float4 field loads and stores
+execute across normal waves 4/8, reference and ARM64 AOT. Strides 12/16/20,
+offset 4, exact copies of negative zero/signed subnormals/infinities/
+quiet-NaN payloads and adjacent values near one, divergent uses, truncated
+final records, invalid indices and guard preservation pass twice.
+Partial/invalid reads return all zero; partial/invalid writes preserve
+inputs. All 732 output bytes and input words are checked. Legacy loads
+use complete leading runs; AOT takes a physical heap. Focused packed-
+buffer native/raising/CPU LIT passes eight tests with zero failures in
+3.56 seconds; one fixture adds one test without implementation changes
+or a rebuild. This is copy/bounds evidence, not a new FXC-profile,
+external corpus, general FP32 arithmetic or owned-device result; see the
+[native FP32 evidence](W0WindowsIntegrationProbe.md#w2aw3b-native-packed-fp32-structured-buffer-breadth-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

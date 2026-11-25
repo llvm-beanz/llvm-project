@@ -104,6 +104,16 @@ The original compute-only baseline is no longer current:
   coalesced-width semantics remain unproven. This changes DXIL raising,
   not runtime/SPIR-V implementation, status handling, artifact ABI 8,
   argument layouts or owned-device support.
+  Native FP32 breadth additionally checks float2/float3/float4 structured
+  loads and stores at offset 4 with strides 12/16/20 in SM6.6 heap and
+  SM6.0 bound compute shaders across the same CPU modes. Negative zero,
+  signed subnormals/infinities/quiet-NaN payloads and adjacent values near
+  one retain their bits in copies without arithmetic. Partial final
+  vectors and invalid indices read all zero; partial/invalid writes leave
+  inputs unchanged. Five lanes, divergent copies, 732 guarded output
+  bytes and two repeats pass, including 12-byte float3 stores. This adds
+  native CPU copy/bounds evidence, not general FP32 arithmetic conformance,
+  broader legacy admission or owned-device execution.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

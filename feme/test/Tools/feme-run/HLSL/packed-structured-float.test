@@ -1,0 +1,233 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,HEAP
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/heap.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,LEGACY
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/legacy.o | FileCheck %s
+#
+# Native CPU execution, not owned D3D12. Float2/3/4 fields follow a guard
+# at byte offset 4 in 12/16/20-byte records. Four complete input records
+# precede a fifth missing its last component; that entire vector reads zero.
+# Negative/upper indices likewise read zero. Partial/invalid writes leave
+# inputs unchanged; valid writes retain every record and trailing guard,
+# including the 12-byte float3 write.
+# No FP32 arithmetic obscures signed zero, subnormal, infinity or NaN bits.
+# Legacy loads consume complete leading runs; AOT takes a physical heap.
+# HEAP-DAG: call { <2 x float>, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [8 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4)
+# HEAP-DAG: call { <3 x float>, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [12 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4)
+# HEAP-DAG: call { <4 x float>, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [16 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4)
+# HEAP-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [8 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <2 x float> {{%.*}})
+# HEAP-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [12 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <3 x float> {{%.*}})
+# HEAP-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", { i32, [16 x i8] }, 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <4 x float> {{%.*}})
+# LEGACY-DAG: call { <2 x float>, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", [12 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4)
+# LEGACY-DAG: call { <3 x float>, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", [16 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4)
+# LEGACY-DAG: call { <4 x float>, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", [20 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4)
+# LEGACY-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", [12 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <2 x float> {{%.*}})
+# LEGACY-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", [16 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <3 x float> {{%.*}})
+# LEGACY-DAG: call void @llvm.dx.resource.store.rawbuffer{{.*}}(target("dx.RawBuffer", [20 x i8], 1, 0) {{%.*}}, i32 {{.*}}, i32 4, <4 x float> {{%.*}})
+# RAISE-NOT: call {{.*}} @dx.op.{{(rawBufferLoad|bufferLoad|rawBufferStore|bufferStore)}}
+# CHECK: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[IN2:42 2147483648 1 42 2139095040 4286578688 42 3222274048 1075838976 42 1065353217 3212836865 42 1123450880]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[IN3:42 3196059648 1056964608 1061158912 42 3214934016 1069547520 1071644672 42 2143363909 4290917462 2147483649 42 3226468352 1080033280 1081081856 42 1120436224 1120468992]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[IN4:42 3196059648 1056964608 1061158912 1065353216 42 2147483648 1 2139095040 4286578688 42 2143363909 4290917462 1065353217 3212836865 42 3226468352 1080033280 1081081856 3229614080 42 1120960512 1120993280 1121026048]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[0:3\]\[0\])}}: [[OUT2:42 2147483648 1 42 2139095040 4286578688 42 42 42 42 1065353217 3212836865 42 0 0 42 0 0 42 0 0 42 0 0 42 0 0 42 0 0 42 0 0 42 0 0 42 0 0 42 0 0 42 0 0 42]]{{$}}
+# CHECK-NEXT: {{(heap\[4\]|binding\[0:4\]\[0\])}}: [[OUT3:42 3196059648 1056964608 1061158912 42 42 42 42 42 2143363909 4290917462 2147483649 42 3226468352 1080033280 1081081856 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42 0 0 0 42]]{{$}}
+# CHECK-NEXT: {{(heap\[5\]|binding\[0:5\]\[0\])}}: [[OUT4:42 3196059648 1056964608 1061158912 1065353216 42 2147483648 1 2139095040 4286578688 42 2143363909 4290917462 1065353217 3212836865 42 3226468352 1080033280 1081081856 3229614080 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42 0 0 0 0 42]]{{$}}
+# CHECK-NEXT: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[IN2]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[IN3]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[IN4]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[0:3\]\[0\])}}: [[OUT2]]{{$}}
+# CHECK-NEXT: {{(heap\[4\]|binding\[0:4\]\[0\])}}: [[OUT3]]{{$}}
+# CHECK-NEXT: {{(heap\[5\]|binding\[0:5\]\[0\])}}: [[OUT4]]{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+struct Float2Record {
+  uint Guard;
+  float2 Values;
+};
+struct Float3Record {
+  uint Guard;
+  float3 Values;
+};
+struct Float4Record {
+  uint Guard;
+  float4 Values;
+};
+#ifndef HEAP
+RWStructuredBuffer<Float2Record> input2 : register(u0);
+RWStructuredBuffer<Float3Record> input3 : register(u1);
+RWStructuredBuffer<Float4Record> input4 : register(u2);
+RWStructuredBuffer<Float2Record> output2 : register(u3);
+RWStructuredBuffer<Float3Record> output3 : register(u4);
+RWStructuredBuffer<Float4Record> output4 : register(u5);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  RWStructuredBuffer<Float2Record> input2 = ResourceDescriptorHeap[0];
+  RWStructuredBuffer<Float3Record> input3 = ResourceDescriptorHeap[1];
+  RWStructuredBuffer<Float4Record> input4 = ResourceDescriptorHeap[2];
+  RWStructuredBuffer<Float2Record> output2 = ResourceDescriptorHeap[3];
+  RWStructuredBuffer<Float3Record> output3 = ResourceDescriptorHeap[4];
+  RWStructuredBuffer<Float4Record> output4 = ResourceDescriptorHeap[5];
+#endif
+  uint i = tid.x;
+  if (i != 2)
+    output2[i].Values = input2[i].Values;
+  if (i != 1)
+    output3[i].Values = input3[i].Values;
+  output4[i].Values = input4[i].Values;
+  output2[i + 5].Values = input2[5].Values;
+  output3[i + 5].Values = input3[5].Values;
+  output4[i + 5].Values = input4[5].Values;
+  output2[i + 10].Values = input2[0xffffffffu].Values;
+  output3[i + 10].Values = input3[0xffffffffu].Values;
+  output4[i + 10].Values = input4[0xffffffffu].Values;
+  input2[4].Values = float2(11, 12);
+  input3[4].Values = float3(13, 14, 15);
+  input4[4].Values = float4(16, 17, 18, 19);
+  input2[5].Values = float2(21, 22);
+  input3[5].Values = float3(23, 24, 25);
+  input4[5].Values = float4(26, 27, 28, 29);
+  input2[0xffffffffu].Values = float2(31, 32);
+  input3[0xffffffffu].Values = float3(33, 34, 35);
+  input4[0xffffffffu].Values = float4(36, 37, 38, 39);
+}
+#--- heap.yaml
+resource-heap:
+  - index: 0
+    size: 56
+    kind: structured-buffer
+    stride: 12
+    data: [42, 2147483648, 1,
+           42, 2139095040, 4286578688,
+           42, 3222274048, 1075838976,
+           42, 1065353217, 3212836865,
+           42, 1123450880]
+  - index: 1
+    size: 76
+    kind: structured-buffer
+    stride: 16
+    data: [42, 3196059648, 1056964608, 1061158912,
+           42, 3214934016, 1069547520, 1071644672,
+           42, 2143363909, 4290917462, 2147483649,
+           42, 3226468352, 1080033280, 1081081856,
+           42, 1120436224, 1120468992]
+  - index: 2
+    size: 96
+    kind: structured-buffer
+    stride: 20
+    data: [42, 3196059648, 1056964608, 1061158912, 1065353216,
+           42, 2147483648, 1, 2139095040, 4286578688,
+           42, 2143363909, 4290917462, 1065353217, 3212836865,
+           42, 3226468352, 1080033280, 1081081856, 3229614080,
+           42, 1120960512, 1120993280, 1121026048]
+  - index: 3
+    size: 184
+    kind: structured-buffer
+    stride: 12
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 4
+    size: 244
+    kind: structured-buffer
+    stride: 16
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 5
+    size: 304
+    kind: structured-buffer
+    stride: 20
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 56
+        kind: structured-buffer
+        stride: 12
+        data: [42, 2147483648, 1,
+               42, 2139095040, 4286578688,
+               42, 3222274048, 1075838976,
+               42, 1065353217, 3212836865,
+               42, 1123450880]
+  - space: 0
+    register: 1
+    entries:
+      - index: 0
+        size: 76
+        kind: structured-buffer
+        stride: 16
+        data: [42, 3196059648, 1056964608, 1061158912,
+               42, 3214934016, 1069547520, 1071644672,
+               42, 2143363909, 4290917462, 2147483649,
+               42, 3226468352, 1080033280, 1081081856,
+               42, 1120436224, 1120468992]
+  - space: 0
+    register: 2
+    entries:
+      - index: 0
+        size: 96
+        kind: structured-buffer
+        stride: 20
+        data: [42, 3196059648, 1056964608, 1061158912, 1065353216,
+               42, 2147483648, 1, 2139095040, 4286578688,
+               42, 2143363909, 4290917462, 1065353217, 3212836865,
+               42, 3226468352, 1080033280, 1081081856, 3229614080,
+               42, 1120960512, 1120993280, 1121026048]
+  - space: 0
+    register: 3
+    entries:
+      - index: 0
+        size: 184
+        kind: structured-buffer
+        stride: 12
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 4
+    entries:
+      - index: 0
+        size: 244
+        kind: structured-buffer
+        stride: 16
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 5
+    entries:
+      - index: 0
+        size: 304
+        kind: structured-buffer
+        stride: 20
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

@@ -2290,6 +2290,18 @@ sized legacy source loads at one address; general legacy partial/
 coalesced-width semantics are not established. Runtime/SPIR-V code and
 ABI 8 remain unchanged.
 
+Native FP32 structured-buffer coverage now includes float2/float3/float4
+loads and stores at offset 4 with strides 12/16/20 in both SM6.6 heap and
+SM6.0 bound shaders across the same CPU modes. Negative zero, signed
+subnormals/infinities/quiet-NaN payloads and adjacent values near one
+preserve exact bits in copies without arithmetic. Four complete input
+records precede a fifth missing its last component: partial/invalid-index
+vectors read all zero, and partial/invalid writes leave inputs unchanged.
+Five lanes, divergent copies, fifteen output records per width, every word
+of 732 output bytes and record/trailing guards pass twice, including
+12-byte float3 stores. This is native copy/bounds evidence, not a runtime
+change, general FP32 arithmetic conformance or broader legacy admission.
+
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded
   `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the

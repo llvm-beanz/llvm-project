@@ -2730,6 +2730,26 @@ the first shader-facing milestone rather than alongside it.
    status handling, images/sampling, runtime/SPIR-V implementation,
    ABI 8 and argument layouts are unchanged. No full-suite, external CTS,
    adapter-matrix, owned D3D12 or W2/W3/conformance closure is claimed.
+   Native packed FP32 structured-buffer follow-up (2026-11-24): actual
+   SDK DXC SM6.6 heap and SM6.0 bound float2/float3/float4 field loads
+   and stores execute through normal waves 4/8, reference and ARM64 AOT.
+   Import/raising checks both directions, modern layouts, legacy stride
+   placeholders, strides 12/16/20 and offset 4. Four complete records
+   precede a fifth missing its last component; partial/upper/negative
+   vectors read all zero and partial/invalid writes leave inputs unchanged.
+   Exact copies preserve negative zero, signed subnormals/infinities/
+   quiet-NaN payloads and adjacent values near one without arithmetic.
+   Five lanes, divergent copies, fifteen output records per width,
+   all 732 guarded output bytes and two repeats pass, including 12-byte
+   float3 stores. Legacy loads use complete leading runs; AOT takes a
+   physical heap. Focused native/raising/CPU packed-buffer LIT passes
+   eight tests with zero failures in 3.56 seconds; one fixture adds one
+   test. No implementation change, rebuild or broader/full-suite run
+   was needed. Raw-load admission, legacy partial/coalesced-width limits,
+   status handling, images/sampling, runtime/SPIR-V code, ABI 8 and
+   argument layouts remain unchanged. This is bounded native CPU copy/
+   bounds evidence, not general FP32 arithmetic conformance, external
+   CTS, adapter-matrix, owned-device or W2/W3 closure.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

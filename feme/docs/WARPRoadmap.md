@@ -2295,6 +2295,41 @@ and argument layouts are unchanged. Broader conformance, bound/static
 D3D12 descriptors and owned-device execution remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) native packed FP32 structured-buffer breadth (2026-11-24):
+the new [`packed-structured-float.test`](../test/Tools/feme-run/HLSL/packed-structured-float.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound float2/float3/float4
+field loads and stores through normal waves 4/8, reference and ARM64
+AOT-object paths. Native import/raising checks all three FP32 vector
+widths for both reads and writes, reconstructed modern field layouts,
+legacy stride placeholders, 12/16/20-byte strides and field offset 4.
+Legacy loads consume complete leading-component runs; AOT supplies an
+explicit physical heap, not object-mode binding YAML.
+
+Four complete input records precede a fifth missing its last component.
+The last complete record reads correctly; the partly present vector,
+upper index 5 and negative-bit-pattern index 0xffffffff read all zero.
+Packed writes to those partial/invalid records leave every input word
+unchanged. Valid outputs retain every record guard and trailing guard,
+including the 12-byte float3 write. Five lanes, divergent float2/float3
+copies and fifteen output records per width are checked twice per mode.
+All 732 output bytes and all input words are compared exactly.
+
+Copies perform no FP32 arithmetic: negative zero, positive/negative
+subnormals, infinities, positive/negative quiet-NaN payloads, adjacent
+nonidentical values near one and negative/fractional values retain their
+bits across native packed FP32 loads and stores. This is bounded copy
+evidence, not a general floating-point arithmetic/conformance claim.
+
+Focused native/raising/CPU packed-buffer LIT passes eight tests with zero
+failures in 3.56 seconds; one new fixture adds one test. No compiler or
+runtime implementation changed, so no rebuild or broader/full-suite run
+was needed. Raw-load admission, legacy partial/coalesced-width limits,
+status handling, image/sampling behavior, runtime/SPIR-V code, artifact
+ABI 8 and argument layouts remain unchanged. This is native CPU evidence,
+not external CTS, an adapter-matrix or owned D3D12 execution. Bound/static
+D3D12 descriptors and broader conformance remain open; `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

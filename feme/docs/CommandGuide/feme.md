@@ -81,6 +81,16 @@ descriptor avoids legacy source-width coalescing; general legacy partial/
 coalesced-width semantics remain unproven. No new runtime/SPIR-V code,
 status support, GPU-target lowering, ABI or owned D3D12 behavior is implied.
 
+Native FP32 structured tests also cover float2/float3/float4 loads and
+stores at offset 4 with strides 12/16/20 across the same SM6.6/SM6.0 CPU
+modes. Exact copies preserve negative zero, signed subnormals/infinities/
+quiet-NaN payloads and adjacent values near one without arithmetic.
+Truncated final vectors and invalid indices read all zero; partial/
+invalid writes preserve inputs. Five lanes, divergent copies, every word
+of 732 output bytes, record/trailing guards and two repeats pass, including
+12-byte float3 stores. No wider legacy admission, implementation or
+general FP32 arithmetic/conformance result is implied.
+
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
 `feme` reuses rather than reimplementing -- has no patterns for SPIR-V image
