@@ -1,0 +1,105 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: cat %t/heap.yaml %t/sampler.yaml > %t/sample.yaml
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/sample.yaml %t/shader.dxil | FileCheck %s --check-prefixes=CHECK,SAMPLE
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/sample.yaml %t/shader.dxil | FileCheck %s --check-prefixes=CHECK,SAMPLE
+# RUN: feme-run --reference --repeat=2 --heap=%t/sample.yaml %t/shader.dxil | FileCheck %s --check-prefixes=CHECK,SAMPLE
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/sample.yaml %t/shader.o | FileCheck %s --check-prefixes=CHECK,SAMPLE
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D QUERY_ONLY /Fo %t/query.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/query.dxil | FileCheck %s --check-prefixes=CHECK,QUERY
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/query.dxil | FileCheck %s --check-prefixes=CHECK,QUERY
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/query.dxil | FileCheck %s --check-prefixes=CHECK,QUERY
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/query.dxil -o %t/query.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/query.o | FileCheck %s --check-prefixes=CHECK,QUERY
+#
+# Three/two cubes occupy eighteen/twelve physical faces, independently of
+# two/one mip counts. Queried cube count selects the last cube's +X face,
+# using queried width/count to reverse two real mips. Lane four is unbound;
+# lane one skips a count store. Query-only has no sampler heap.
+# Every word of 408 image bytes and 248 guarded output bytes is checked.
+# Sampling also checks all 80 sampler bytes, for 736 bytes per case.
+# RAISE-DAG: call <3 x i32> @llvm.dx.resource.getdimensions.xyz{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 9)
+# RAISE-DAG: call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 9)
+# RAISE-DAG: call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz{{.*}}(target("dx.Texture", i32, 0, 0, 1, 9)
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# SAMPLE: heap[2]: [[OUT:42 2 2 3 2 2 3 2 1 1 2 1 1073741824 2 2 3 1 1 3 2 1 1 2 42 1065353216 2 2 3 2 2 3 2 1 1 2 1 1073741824 2 2 3 1 1 3 2 1 1 2 1 1065353216 0 0 0 0 0 0 0 0 0 0 0 0 42]]{{$}}
+# QUERY: heap[2]: [[OUT:42 2 2 3 2 2 3 2 1 1 2 1 42 2 2 3 1 1 3 2 1 1 2 42 42 2 2 3 2 2 3 2 1 1 2 1 42 2 2 3 1 1 3 2 1 1 2 1 42 0 0 0 0 0 0 0 0 0 0 0 42 42]]{{$}}
+# CHECK-NEXT: image[0]: [[F:0( 0){50} 1065353216( 0){32} 1073741824( 0){5}]]{{$}}
+# CHECK-NEXT: image[1]: [[I:0( 0){11}]]{{$}}
+# SAMPLE-NEXT: sampler[0]: [[S:0 0 0 0 0 0 0 0 1148846080 0 0 0 0 0 1065353216 0 0 0 0 0]]{{$}}
+# CHECK-NEXT: heap[2]: [[OUT]]{{$}}
+# CHECK-NEXT: image[0]: [[F]]{{$}}
+# CHECK-NEXT: image[1]: [[I]]{{$}}
+# SAMPLE-NEXT: sampler[0]: [[S]]{{$}}
+# CHECK-NOT: {{(heap|image|sampler)\[}}
+#--- shader.hlsl
+#ifdef QUERY_ONLY
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  TextureCubeArray<float4> full = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 9 : 0)];
+  TextureCubeArray<int> integer = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 8 : 1)];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[2];
+  uint base = 4 + tid.x * 48;
+  uint width, height, cubes, levels;
+  full.GetDimensions(width, height, cubes);
+  output.Store3(base, uint3(width, height, cubes));
+  full.GetDimensions(tid.x & 1, width, height, cubes, levels);
+  output.Store4(base + 12, uint4(width, height, cubes, levels));
+#ifndef QUERY_ONLY
+  SamplerState sampler = SamplerDescriptorHeap[0];
+  float value = full.SampleLevel(sampler, float4(width, 0, 0, cubes - 1),
+                                levels - 1 - (tid.x & 1)).x;
+  output.Store(base + 44, asuint(value));
+#endif
+  integer.GetDimensions(0, width, height, cubes, levels);
+  output.Store3(base + 28, uint3(width, height, cubes));
+  if (tid.x != 1)
+    output.Store(base + 40, levels);
+}
+#--- heap.yaml
+resource-heap:
+  - index: 2
+    size: 248
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42]
+images:
+  - index: 0
+    dimension: cube-array
+    extent: [2, 2]
+    array-layers: 18
+    mip-levels: 2
+    format: r32_float
+    data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 1065353216, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 1073741824, 0, 0, 0, 0, 0]
+  - index: 1
+    dimension: cube-array
+    extent: [1, 1]
+    array-layers: 12
+    format: r32_sint
+    data: []
+#--- sampler.yaml
+samplers:
+  - {index: 0, min-filter: nearest, mag-filter: nearest, mip-filter: nearest}

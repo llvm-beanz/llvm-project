@@ -3152,7 +3152,7 @@ passes normal waves 4/8, reference and ARM64 AOT, including width-only,
 height-only and paired results, a three-mip base extent, divergent/unbound
 indices, query/load coexistence, all words, guards and repeats.
 Sampled plain 2D explicit mips/counts use the separate path below.
-MS/cube-array shapes, non-32-bit declarations, aggregate uses
+MS shapes, non-32-bit declarations, aggregate uses
 and bound/static image queries remain outside this CPU path. Runtime/
 SPIR-V code, ABI 8 and argument layouts remain unchanged; this is shared
 CPU metadata evidence, not draw or owned-device/conformance closure.
@@ -3215,8 +3215,8 @@ live mip and DXIL field-3 count mapping through `getdimensions.levels.xy`.
 Native SM6.6 passes waves 4/8, reference and ARM64 AOT, both without a
 sampler heap and alongside query-derived explicit-LOD sampling. Base
 4x4, three valid face extents, distinct counts, divergent/unbound indices,
-skipped stores, every word, guards and repeats pass. Writable cubes,
-cube arrays and undefined-mip canonical forms reject. Only valid native
+skipped stores, every word, guards and repeats pass. Writable cubes and
+undefined-mip canonical forms reject. Only valid native
 mips are measured; helper clamping, runtime/SPIR-V code, ABI 8 and
 layouts remain unchanged. This is shared CPU evidence, not draw or
 owned-device/conformance closure.
@@ -3230,7 +3230,7 @@ derivatives. Layers stay fixed as mip extents shrink. Native SM6.6 passes
 waves 4/8, reference and ARM64 AOT for base/explicit sampled and base
 writable queries, query-derived exact SINT loads, divergence/unbound zeros,
 skipped stores, all words, guards and repeats. Writable explicit, undefined-
-mip and mismatched-shape canonical forms reject; MS/cube-array
+mip and mismatched-shape canonical forms reject; MS
 dimensions remain unsupported. Only valid native mips are measured.
 Helper clamping, runtime/SPIR-V code, ABI 8 and layouts remain unchanged.
 This is shared CPU evidence, not draw or owned-device/conformance closure.
@@ -3247,6 +3247,19 @@ and guards. Writable explicit, undefined-mip and wrong result-form queries
 reject. Only valid native mips are measured; runtime/SPIR-V code, helper
 clamping, ABI 8 and layouts remain unchanged. This is shared CPU evidence,
 not draw or owned-device/conformance closure.
+
+Heap-backed sampled FP32/i32 cube-array dimensions accept base x/xy/xyz
+and levels.xyz with defined i32 mips. Existing intrinsic forms and
+cube-array size/level metadata helpers preserve face width/height, fixed
+cube element count (`ArrayLayers / 6`) and total mip count, without sampler/
+derivatives in any stage. Native query-only and query-derived sampling
+variants pass waves 4/8, reference and ARM64 AOT, each repeated twice,
+checking all 656/736 bytes, divergence/unbound zeros, skipped stores and
+guards. Queried counts select the last cube and reverse two real mips.
+Writable cube arrays, undefined mips and wrong result forms reject.
+Only valid native mips are measured; runtime/SPIR-V code, helper clamping,
+ABI 8 and layouts remain unchanged. This is shared CPU evidence, not draw
+or owned-device/conformance closure.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

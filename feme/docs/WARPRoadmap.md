@@ -3250,6 +3250,56 @@ MS/cube-array dimensions, bound/static images, full-suite, external CTS,
 adapter-matrix and owned D3D12/conformance closure remain open.
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native cube-array dimensions (2026-11-25).**
+
+FeMe raising and the shared CPU dimension admission/lowering predicate now
+accept heap-backed sampled FP32/i32 cube-array base scalar/pair/triple
+queries and explicit-mip/count queries with defined i32 mips. Existing
+`getdimensions.xyz`/`getdimensions.levels.xyz` forms and LLVM forward
+lowering are reused. DXIL fields 0/1/2 mean face width/height/cube element
+count; field 3 is total mip count. Count-only queries normalize an unused
+native mip to zero; aggregate uses remain unraised. CPU lowering uses the
+existing cube-array size-at-LOD metadata helper, narrowing base scalar/pair
+results, plus the shared level helper. Cube count is fixed `ArrayLayers / 6`,
+not physical face count, while face width/height shrink with mip. Queries
+need no sampler or derivatives in any stage. Writable cube arrays,
+undefined-mip and wrong result-form queries reject early in normal/
+reference/AOT paths; buffer triple forms continue to reject.
+
+[`native-texturecube-array-dimensions.test`](../test/Tools/feme-run/HLSL/native-texturecube-array-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+with query-only and sampling variants: four cases each repeated twice
+per variant. Eighteen FP32 faces report three cubes, two mips and extents
+2x2/1x1; twelve SINT faces report two cubes, one mip and extent 1x1.
+The query-only variant has no sampler heap. The sampling variant uses
+queried cube count to select the last cube's +X face and queried mip count
+to reverse two real mips, returning exact FP32 values. Divergent indices
+make both SRVs unbound in lane four; lane one skips a count store. Every
+word, guard and repeat passes: 408 image bytes plus a guarded 248-byte
+output, exactly 656 compared bytes per query-only case. Sampling also
+compares all 80 sampler bytes, totaling 736 bytes per case.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` rebuild passes
+in 34 steps, including `opt`, `llvm-as`, FeMe tools and runtime tests.
+Sixty-three focused LLVM forward, FeMe round-trip/raising, dimension,
+1D/2D/3D/cube sampling/loading, namespace, typed-load and CPU/SPIR-V LIT
+pass in 36.30 seconds. Seventeen dimension runtime units pass in 6.502
+seconds, zero failures. Three LIT fixtures and one runtime case are added;
+two existing LIT fixtures are extended or updated. Portable checks cover
+scalar/pair narrowing, fragment cube-/count-only projections, live mip
+wiring, round trips, count normalization, idempotence and unsupported
+writable-function preservation. An unreadable-data metadata unit checks
+fixed cube count versus faces and total mips, shrinking face extents and
+inactive/unbound/zero-mip/bounds zeros.
+
+Only valid native mips are measured; unchanged helper clamping is not D3D
+out-of-range-mip evidence. LLVM intrinsic definitions/forward lowering,
+runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+MS dimensions, bound/static images, full-suite, external CTS, adapter-
+matrix and owned D3D12/conformance closure remain open. `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

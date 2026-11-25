@@ -1455,7 +1455,7 @@ it now covers the two largest opcode families:
   Native SDK DXC SM6.6 executes in waves 4/8, reference and ARM64 AOT,
   checking a three-mip base extent, divergent/unbound indices, query/load
   coexistence, every word, guards and repeats. Admission and lowering share
-  a predicate; non-heap, MS/cube-array shapes and non-32-bit declarations
+  a predicate; non-heap, MS shapes and non-32-bit declarations
   remain unsupported. Base scalar/pair intrinsics carry no mip; sampled
   1D-array/plain 2D explicit mips/counts use the separate paths below.
   Other supported shapes use the paths below. Aggregate uses, bound/static
@@ -1525,7 +1525,7 @@ it now covers the two largest opcode families:
   both without a sampler heap and alongside query-derived explicit-LOD
   sampling. Base 4x4, valid 4x4/2x2/1x1 mips, distinct descriptor counts,
   divergent/unbound indices, skipped stores, every word, guards and repeats
-  pass. Writable cubes, cube arrays and undefined-mip canonical forms
+  pass. Writable cubes and undefined-mip canonical forms
   reject. Only valid native mips are measured; helper clamping, runtime/
   SPIR-V code, ABI 8 and owned-device boundaries remain unchanged.
 
@@ -1540,7 +1540,7 @@ it now covers the two largest opcode families:
   AOT for base/explicit sampled and base writable queries, query-derived
   exact SINT loads, divergent/unbound indices, skipped stores, all words,
   guards and repeats. Writable explicit, undefined-mip and mismatched-shape
-  canonical queries reject; MS/cube-array dimensions remain unsupported.
+  canonical queries reject; MS dimensions remain unsupported.
   Only valid native mips are measured. Helper clamping, runtime/SPIR-V code,
   ABI 8 and owned-device boundaries remain unchanged.
 
@@ -1556,6 +1556,21 @@ it now covers the two largest opcode families:
   skipped stores and guards. Writable explicit, undefined-mip and wrong
   result-form queries reject. Only valid native mips are measured; runtime/
   SPIR-V code, helper clamping, ABI 8 and owned-device boundaries are unchanged.
+
+- Heap-backed sampled FP32/i32 cube-array dimensions accept base x/xy/xyz
+  and explicit `getdimensions.levels.xyz` with defined i32 mips. Existing
+  intrinsic forms preserve face width/height, cube element count and total
+  mip count through symmetric forward/reverse mapping. CPU lowering reuses
+  the cube-array size-at-LOD and shared level metadata helpers without
+  sampler/derivatives in any stage; cube count is fixed `ArrayLayers / 6`,
+  not physical face count. Native query-only and query-derived sampling
+  variants pass waves 4/8, reference and ARM64 AOT, each repeated twice.
+  Every word, guard and skipped store is checked: 656 bytes without a
+  sampler, 736 including all sampler bytes. Queried cube count selects the
+  last cube's +X face and queried mip count reverses two real mips.
+  Writable cube arrays, undefined mips and wrong result forms reject.
+  Only valid native mips are measured; runtime/SPIR-V code, helper
+  clamping, ABI 8 and owned-device boundaries remain unchanged.
 
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
@@ -1719,8 +1734,9 @@ reconstructed. `raiseSample`/`raiseSampleBias`/`raiseSampleLevel`/`raiseSampleCm
 scalar FP32 `dx.op.sampleCmp` (64)/`dx.op.sampleCmpLevelZero` (65),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
 `dx.op.getDimensions`'s dimension fields (72). Base queries use scalar/
-pair/triple intrinsics; field 2 represents 2D-array layers or 3D depth.
-Sampled 1D/array, 2D/array, 3D or cube explicit mips or field-3 counts raise to
+pair/triple intrinsics; field 2 represents 2D-array layers, 3D depth or
+cube-array elements. Sampled 1D/array, 2D/array, 3D or cube/array explicit
+mips or field-3 counts raise to
 `getdimensions.levels.x/xy/xyz`. Their final element (1/2/3) maps to DXIL
 field 3, symmetrically with LLVM forward lowering. Other field-2 and aggregate
 uses remain unraised. Typed/byte-address field-zero queries additionally
@@ -1728,8 +1744,8 @@ raise to `getdimensions.x` with unused/zero mip operands; other buffer
 fields remain unraised. Structured field-zero counts also raise, while DXC's
 constant HLSL stride result is preserved rather than treating it as field 1.
 Base dimension raising requires an unused/zero mip operand; sampled
-1D/array, 2D/array, 3D or cube explicit mips/counts retain the live mip through the
-two-/three-/four-component intrinsic. 1D/2D (including arrays), 3D and sampled cube base/explicit
+1D/array, 2D/array, 3D or cube/array explicit mips/counts retain the live mip through the
+two-/three-/four-component intrinsic. 1D/2D (including arrays), 3D and sampled cube/array base/explicit
 heap-backed FP32/i32 queries lower to shared CPU metadata helpers.
 Other shapes and bound/static image queries remain outside that CPU path.
 Before adding comparison mapping, `Sample`,

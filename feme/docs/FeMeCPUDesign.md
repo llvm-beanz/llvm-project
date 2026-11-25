@@ -2420,7 +2420,7 @@ component selection. Scalar/vector FP32/i32 declarations up to four
 components, sampled or writable, share an admission/lowering predicate.
 No sampler, derivatives or texel data are needed. Queries and loads through
 the same handle lower together, unused handles are removed and repeated
-lowering is idempotent. Non-heap, MS/cube-array shapes and non-32-bit
+lowering is idempotent. Non-heap, MS shapes and non-32-bit
 declarations remain unsupported with explicit normal/reference/AOT
 admission diagnostics. Base scalar/pair intrinsics carry no mip; sampled
 1D-array/plain 2D explicit mips/counts use the separate paths below. Other texture
@@ -2527,7 +2527,7 @@ two, divergent/unbound indices, skipped stores, every word, guards and
 repeats. Portable width-/height-/count-only queries, fragment queries,
 idempotence and rejection controls pass. A metadata-only unit uses an
 unreadable data pointer to distinguish face extents/counts from six layers.
-Writable cubes, cube arrays and undefined-mip canonical forms reject.
+Writable cubes and undefined-mip canonical forms reject.
 Only valid native mips are measured; helper clamping, runtime/SPIR-V
 code, ABI 8, layouts and owned-device boundaries remain unchanged.
 
@@ -2546,7 +2546,7 @@ skipped stores, all words, guards and repeats pass. Portable fragment
 layer-/count-only projections and idempotence pass. A metadata-only unit
 checks fixed layers, sampled/storage queries and inactive/unbound/bounds
 zeros using unreadable data. Writable explicit, undefined-mip and
-mismatched-shape canonical forms reject; MS/cube-array dimensions
+mismatched-shape canonical forms reject; MS dimensions
 remain unsupported. Only valid native mips are measured. Helper clamping,
 runtime/SPIR-V code, ABI 8, layouts and owned-device boundaries are unchanged.
 
@@ -2565,6 +2565,24 @@ checks shrinking depth, unrelated array-layer metadata, storage base,
 inactive/unbound/zero-mip/bounds zeros. Writable explicit, undefined-mip
 and wrong result-form queries reject. Only valid native mips are measured;
 runtime/SPIR-V code, helper clamping, ABI 8 and layouts remain unchanged.
+
+Heap-backed sampled FP32/i32 cube-array dimensions accept base x/xy/xyz
+and `getdimensions.levels.xyz` with defined i32 mips. Symmetric
+forward/reverse mapping preserves face width/height, cube element count
+and a separate total mip count. CPU lowering reuses
+`getdimensions.lod.cubearray.v3i32` (mip zero for base queries) and
+`querylevels.i32`, narrowing scalar/pair results. The fixed cube count is
+`ArrayLayers / 6`, not face count. Queries need no sampler/derivatives in
+any stage. Native query-only and sampling variants pass waves 4/8,
+reference and ARM64 AOT, each repeated twice, checking all 656/736 bytes,
+divergence/unbound zeros, skipped stores and guards. Queried cube count
+selects the last cube's +X face; queried mip count reverses two real mips.
+Portable fragment cube-/count-only projections, round trips and idempotence
+pass. An unreadable-data metadata unit checks cube counts, mip extents,
+distinct total levels and inactive/unbound/zero-mip/bounds zeros.
+Writable cube arrays, undefined mips and wrong result forms reject.
+Only valid native mips are measured; runtime/SPIR-V code, helper clamping,
+ABI 8 and layouts remain unchanged.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

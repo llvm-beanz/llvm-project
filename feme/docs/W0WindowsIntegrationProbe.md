@@ -27,6 +27,46 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native cube-array dimensions (VM, 2026-11-25)
+
+FeMe raising and shared CPU dimension admission/lowering now accept
+heap-backed sampled FP32/i32 cube-array base scalar/pair/triple and
+explicit-mip/count queries with defined i32 mips. Existing xyz/levels.xyz
+forms and LLVM forward lowering preserve face width/height, cube element
+count and total mip count. Existing cube-array size-at-LOD and total-level
+metadata helpers need no sampler/derivatives in any stage. Cube count is
+fixed `ArrayLayers / 6`, not face count. Writable cube arrays, undefined
+mips and wrong result forms reject early in normal/reference/AOT paths.
+
+[`native-texturecube-array-dimensions.test`](../test/Tools/feme-run/HLSL/native-texturecube-array-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice in query-only and sampling variants.
+Eighteen FP32 faces report three cubes, two mips and extents 2x2/1x1;
+twelve SINT faces report two cubes, one mip and extent 1x1. Query-only
+uses no sampler heap. Sampling uses queried counts to select the last
+cube's +X face and reverse two real mips, returning exact FP32 values.
+Divergence/unbound zeros, skipped stores, every word, guards and repeats
+pass: 408 image bytes plus a guarded 248-byte output, exactly 656
+compared bytes. Sampling includes all 80 sampler bytes, totaling 736.
+
+The 34-step ARM64 rebuild passes; sixty-three focused LLVM/FeMe LIT
+pass in 36.30 seconds and seventeen dimension runtime units in 6.502
+seconds, zero failures. Three LIT fixtures and one runtime case are added;
+two existing LIT fixtures are extended or updated. Portable checks cover
+scalar/pair narrowing, fragment cube-/count-only projections, live mip
+wiring, round trips, count normalization, idempotence and unsupported
+writable-function preservation. An unreadable-data metadata unit checks
+fixed cube count versus faces and total mips, shrinking face extents and
+inactive/unbound/zero-mip/bounds zeros.
+
+Only valid native mips are measured; helper clamping remains unchanged,
+not D3D out-of-range-mip evidence. LLVM intrinsic definitions/forward
+lowering, runtime/SPIR-V code, load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and layouts remain
+unchanged. MS dimensions, bound/static images, full-suite, external CTS,
+adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native 3D dimensions (VM, 2026-11-25)
 
 FeMe raising and shared CPU dimension admission/lowering now accept

@@ -44,13 +44,13 @@ declare void @consume(<4 x i32>)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
 #--- volume.ll
 define void @main() #0 {
-  %t = call target("dx.Texture", float, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap(i32 0)
-  %d = call <3 x i32> @llvm.dx.resource.getdimensions.xyz(target("dx.Texture", float, 0, 0, 0, 9) %t)
+  %t = call target("dx.Texture", float, 1, 0, 0, 9) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.xyz(target("dx.Texture", float, 1, 0, 0, 9) %t)
   call void @consume(<3 x i32> %d)
   ret void
 }
-declare target("dx.Texture", float, 0, 0, 0, 9) @llvm.dx.resource.handlefromheap(i32)
-declare <3 x i32> @llvm.dx.resource.getdimensions.xyz(target("dx.Texture", float, 0, 0, 0, 9))
+declare target("dx.Texture", float, 1, 0, 0, 9) @llvm.dx.resource.handlefromheap(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.xyz(target("dx.Texture", float, 1, 0, 0, 9))
 declare void @consume(<3 x i32>)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
 #--- buffer.ll

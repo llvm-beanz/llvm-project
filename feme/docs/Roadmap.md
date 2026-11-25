@@ -3141,6 +3141,26 @@ the first shader-facing milestone rather than alongside it.
    descriptor materialization, ABI 8 and layouts remain unchanged.
    MS/cube-array dimensions, bound/static images, full-suite, external CTS,
    adapter-matrix and owned-device/W2/W3 closure remain open.
+   Native cube-array dimensions follow-up (2026-11-25): FeMe raising and
+   shared CPU admission/lowering support heap-backed sampled FP32/i32
+   base x/xy/xyz and levels.xyz queries with defined i32 mips. Existing
+   forms and cube-array size/level metadata helpers preserve face width/
+   height, fixed cube element count (`ArrayLayers / 6`) and total mip
+   count, without sampler/derivatives in any stage. Native query-only and
+   sampling variants pass waves 4/8, reference and ARM64 AOT, four cases
+   repeated twice per variant. Eighteen/twelve faces report three/two
+   cubes, independently of two/one mip counts. Queried counts select the
+   last cube and reverse two real mips; every word, divergence/unbound
+   zeros, skipped stores, guards and repeats pass: 656/736 compared bytes.
+   The 34-step ARM64 rebuild passes; sixty-three focused LLVM/FeMe LIT
+   pass in 36.30 seconds and seventeen dimension units in 6.502 seconds,
+   zero failures. Writable cube arrays, undefined mips and wrong result
+   forms reject. Only valid native mips are measured; LLVM intrinsic
+   definitions/forward lowering, runtime/SPIR-V code, helper clamping,
+   load/store/status/atomic policy, advertisements, descriptor
+   materialization, ABI 8 and layouts remain unchanged. MS dimensions,
+   bound/static images, full-suite, external CTS, adapter-matrix and
+   owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

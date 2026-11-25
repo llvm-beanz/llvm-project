@@ -175,7 +175,7 @@ Width-only, height-only and paired outputs distinguish extents 5x3, 3x2
 and 2x4. The full image has three mips and still reports its base extent;
 the same handle also loads a texel. Divergent unbound indices return zeros;
 sentinels, every word, guards and repeats pass: 128 input bytes plus a
-guarded 108-byte output, exactly 236 bytes per case. MS/cube-array
+guarded 108-byte output, exactly 236 bytes per case. MS
 shapes, non-32-bit declarations, aggregate uses and bound/static
 images remain outside this CPU path. Sampled plain 2D explicit mips/counts
 use the separate path below; unsupported canonical query shapes
@@ -275,7 +275,7 @@ last-X/Y/layer exact SINT loads, divergent/unbound indices, skipped-store
 sentinels, every word, guards and repeats pass: 376 image bytes plus a
 guarded 308-byte output, exactly 684 compared bytes per case. Writable
 explicit, undefined-mip and mismatched-shape canonical queries reject;
-MS/cube-array dimensions remain unsupported. Only valid native mips
+MS dimensions remain unsupported. Only valid native mips
 are measured. Helper clamping, runtime/SPIR-V code, ABI 8, layouts and
 owned-device/conformance boundaries remain unchanged.
 
@@ -293,6 +293,23 @@ repeats pass: 608 image bytes plus a guarded 308-byte output, exactly
 916 compared bytes per case. Writable explicit, undefined-mip and wrong
 result-form queries reject. Only valid native mips are measured; runtime/
 SPIR-V code, helper clamping, ABI 8 and owned-device boundaries are unchanged.
+
+Native heap-backed sampled `TextureCubeArray.GetDimensions` executes
+FP32/i32 base width/height/cube-count and explicit
+`(mip, width, height, cubes, levels)` queries in waves 4/8, reference and
+ARM64 AOT, each repeated twice. YAML uses `dimension: cube-array`,
+two-component `extent`, `mip-levels` and physical `array-layers` (a
+positive multiple of six); data is mip-major with all faces contiguous
+within each mip. Eighteen/twelve physical faces report three/two cubes,
+independently of two/one total mip counts. Metadata queries need no
+sampler/derivatives. A query-only variant has no sampler heap; a sampling
+variant uses queried counts to select the last cube's +X face and reverse
+two real mips. Divergence/unbound zeros, skipped stores, every word, guards
+and repeats pass: 408 image bytes plus a guarded 248-byte output, exactly
+656 compared bytes; sampling also checks all 80 sampler bytes, totaling
+736 bytes per case. Writable cube arrays, undefined mips and wrong result
+forms reject. Only valid native mips are measured; runtime/SPIR-V code,
+helper clamping, ABI 8 and owned-device boundaries remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

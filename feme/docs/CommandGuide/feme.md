@@ -183,7 +183,7 @@ paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
 including a three-mip base extent, divergent/unbound indices, query/load
 coexistence, all words, guards and repeats. Admission and lowering share
 the same predicate. Sampled plain 2D explicit mips/counts use the separate
-path below. MS/cube-array shapes, non-32-bit declarations,
+path below. MS shapes, non-32-bit declarations,
 aggregate uses and bound/static images remain unsupported by
 this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
 layouts remain unchanged; no owned-device closure is established.
@@ -246,7 +246,7 @@ queries preserve live mips and DXIL count field 3 through
 ARM64 AOT without a sampler heap and with query-derived explicit-LOD
 sampling, checking base 4x4, three valid mip extents, distinct counts,
 divergent/unbound indices, skipped stores, all words, guards and repeats.
-Writable cubes, cube arrays and undefined-mip canonical forms reject.
+Writable cubes and undefined-mip canonical forms reject.
 Only valid native mips are measured; helper clamping, runtime/SPIR-V
 code, ABI 8 and owned-device boundaries remain unchanged.
 
@@ -260,7 +260,7 @@ without sampler/derivatives in any stage. Native SM6.6 passes waves 4/8,
 reference and ARM64 AOT for base/explicit sampled and base writable
 queries, exact query-derived SINT loads, divergence/unbound zeros, skipped
 stores, all words, guards and repeats. Writable explicit, undefined-mip
-and mismatched-shape canonical queries reject; MS/cube-array dimensions
+and mismatched-shape canonical queries reject; MS dimensions
 remain unsupported. Only valid native mips are measured. Helper clamping,
 runtime/SPIR-V code, ABI 8 and owned-device boundaries remain unchanged.
 
@@ -275,6 +275,19 @@ divergent/unbound indices, skipped stores and guards. Writable explicit,
 undefined-mip and wrong result-form queries reject. Only valid native
 mips are measured; runtime/SPIR-V code, helper clamping, ABI 8 and
 owned-device boundaries remain unchanged.
+
+Heap-backed sampled `TextureCubeArray.GetDimensions` accepts FP32/i32
+base width/height/cube-count queries and explicit
+`(mip, width, height, cubes, levels)` with defined i32 mips. Existing
+xyz/levels.xyz forms and cube-array size/level metadata helpers preserve
+cube element count, not physical faces, independently of total mip count.
+Queries need no sampler/derivatives in any stage. Native query-only and
+query-derived sampling variants pass waves 4/8, reference and ARM64 AOT,
+each repeated twice, checking all 656/736 bytes, divergence/unbound zeros,
+skipped stores and guards. Queried counts select the last cube and reverse
+two real mips. Writable cube arrays, undefined mips and wrong result forms
+reject. Only valid native mips are measured; runtime/SPIR-V code, helper
+clamping, ABI 8 and owned-device boundaries remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

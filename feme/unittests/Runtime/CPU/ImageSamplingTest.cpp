@@ -858,6 +858,62 @@ TEST_F(ImageSamplingTest, GetDimensionsCubeReportsFaceExtentAndMipCount) {
   }
 }
 
+TEST_F(ImageSamplingTest, GetDimensionsCubeArrayCountsCubesNotFaces) {
+  using GetDimensionsFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                   uint32_t, int32_t, bool, void *);
+  using QueryLevelsFn =
+      int32_t (*)(const FemeImageDescriptor *, uint32_t, uint32_t);
+  Function *SizeWrapper = addWrapper(
+      "dimensions", "feme.cpu.image.getdimensions.lod.cubearray.v3i32");
+  Function *LevelsFunction =
+      getRuntimeFunction(*M, "feme.cpu.image.querylevels.i32");
+  ASSERT_TRUE(LevelsFunction);
+  keepForJIT(LevelsFunction);
+  GetDimensionsFn Size = resolve<GetDimensionsFn>(SizeWrapper);
+  QueryLevelsFn Levels = resolve<QueryLevelsFn>(LevelsFunction);
+  ASSERT_TRUE(Size);
+  ASSERT_TRUE(Levels);
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::TextureCubeArray);
+  Img.Width = Img.Height = 4;
+  Img.ArrayLayers = 12;
+  Img.MipLevels = 3;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  alignas(16) uint32_t Out[4] = {};
+  for (int32_t Mip = 0; Mip < 3; ++Mip) {
+    Size(&Img, 1, 0, Mip, true, Out);
+    EXPECT_EQ(Out[0], 4u >> Mip);
+    EXPECT_EQ(Out[1], 4u >> Mip);
+    EXPECT_EQ(Out[2], 2u);
+    EXPECT_EQ(Levels(&Img, 1, 0), 3);
+  }
+  Img.ArrayLayers = 18;
+  Size(&Img, 1, 0, 1, true, Out);
+  EXPECT_EQ(Out[2], 3u);
+  Size(&Img, 1, 0, 0, false, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  Img.MipLevels = 0;
+  Size(&Img, 1, 0, 0, true, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  Img.MipLevels = 3;
+  Img.Data = nullptr;
+  Size(&Img, 1, 0, 0, true, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  EXPECT_EQ(Levels(&Img, 1, 0), 0);
+  Size(nullptr, 0, 0, 0, true, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  for (uint32_t Index : {1u, 0xffffffffu}) {
+    Size(nullptr, 1, Index, 0, true, Out);
+    for (unsigned I = 0; I < 3; ++I)
+      EXPECT_EQ(Out[I], 0u);
+  }
+}
+
 TEST_F(ImageSamplingTest, GetDimensions2DArrayPreservesLayersAndChecksBounds) {
   using GetDimensionsFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                    uint32_t, int32_t, bool, void *);

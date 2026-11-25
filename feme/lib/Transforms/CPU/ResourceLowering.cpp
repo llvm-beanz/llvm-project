@@ -768,13 +768,13 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         Dimensions =
             Builder.CreateInsertElement(Dimensions, Levels, uint64_t{1});
       } else if (ID == Intrinsic::dx_resource_getdimensions_levels_xyz) {
-        Value *Size =
-            Kind == dxil::ResourceKind::Texture3D
-                ? createQuerySizeLod3D(Builder, Env, Image->getArgOperand(0),
-                                       CI->getArgOperand(1), Builder.getTrue())
-                : createQuerySizeLod2DArray(
-                      Builder, Env, Image->getArgOperand(0),
-                      CI->getArgOperand(1), Builder.getTrue());
+        auto CreateSize = Kind == dxil::ResourceKind::Texture3D
+                              ? createQuerySizeLod3D
+                          : Kind == dxil::ResourceKind::TextureCubeArray
+                              ? createQuerySizeLodCubeArray
+                              : createQuerySizeLod2DArray;
+        Value *Size = CreateSize(Builder, Env, Image->getArgOperand(0),
+                                 CI->getArgOperand(1), Builder.getTrue(), "");
         Value *Levels =
             createQueryLevels(Builder, Env, Image->getArgOperand(0));
         Dimensions = Builder.CreateShuffleVector(
@@ -815,6 +815,10 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         Dimensions =
             createQuerySizeLod3D(Builder, Env, Image->getArgOperand(0),
                                  Builder.getInt32(0), Builder.getTrue());
+      else if (Kind == dxil::ResourceKind::TextureCubeArray)
+        Dimensions =
+            createQuerySizeLodCubeArray(Builder, Env, Image->getArgOperand(0),
+                                        Builder.getInt32(0), Builder.getTrue());
       else
         Dimensions = createGetDimensions2D(
             Builder, Env, Image->getArgOperand(0), Builder.getTrue());
@@ -823,7 +827,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         Dimensions = Builder.CreateExtractElement(Dimensions, uint64_t{0});
       else if (ID == Intrinsic::dx_resource_getdimensions_xy &&
                (Kind == dxil::ResourceKind::Texture2DArray ||
-                Kind == dxil::ResourceKind::Texture3D))
+                Kind == dxil::ResourceKind::Texture3D ||
+                Kind == dxil::ResourceKind::TextureCubeArray))
         Dimensions = Builder.CreateShuffleVector(Dimensions, {0, 1});
       CI->replaceAllUsesWith(Dimensions);
       CI->eraseFromParent();
@@ -1575,7 +1580,9 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
       Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4)
     return false;
   auto Kind = Ty->getDimension();
-  if (Kind == dxil::ResourceKind::TextureCube && Ty->isWriteable())
+  if ((Kind == dxil::ResourceKind::TextureCube ||
+       Kind == dxil::ResourceKind::TextureCubeArray) &&
+      Ty->isWriteable())
     return false;
   if (WithLevels &&
       (Ty->isWriteable() || !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
@@ -1590,14 +1597,16 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
     return false;
   if ((WithLevelsXYZ || ID == Intrinsic::dx_resource_getdimensions_xyz) &&
       Kind != dxil::ResourceKind::Texture2DArray &&
-      Kind != dxil::ResourceKind::Texture3D)
+      Kind != dxil::ResourceKind::Texture3D &&
+      Kind != dxil::ResourceKind::TextureCubeArray)
     return false;
   if ((Kind != dxil::ResourceKind::Texture1D &&
        Kind != dxil::ResourceKind::Texture1DArray &&
        Kind != dxil::ResourceKind::Texture2D &&
        Kind != dxil::ResourceKind::Texture2DArray &&
        Kind != dxil::ResourceKind::Texture3D &&
-       Kind != dxil::ResourceKind::TextureCube) ||
+       Kind != dxil::ResourceKind::TextureCube &&
+       Kind != dxil::ResourceKind::TextureCubeArray) ||
       (Kind == dxil::ResourceKind::Texture1D &&
        ID != Intrinsic::dx_resource_getdimensions_x && !WithLevelsX))
     return false;

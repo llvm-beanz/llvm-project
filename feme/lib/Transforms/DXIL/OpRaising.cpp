@@ -1831,8 +1831,9 @@ bool raiseTextureStore(CallInst &CI) {
 }
 
 /// Raises dimension extracts to scalar/pair/triple queries; field 2 is
-/// supported for 2D-array layers and 3D depth. Sampled 1D/array, 2D/array,
-/// 3D and cube queries with a meaningful mip or field-3 count use
+/// supported for 2D-array layers, 3D depth and cube-array elements.
+/// Sampled 1D/array, 2D/array, 3D and cube/array queries with a meaningful
+/// mip or field-3 count use
 /// `getdimensions.levels.x/xy/xyz`,
 /// mapping field 3 after the dimensions. Aggregate uses remain unsupported.
 /// Other shapes require an unused/zero mip; buffers accept only field 0 (DXC
@@ -1859,7 +1860,9 @@ bool raiseGetDimensions(CallInst &CI) {
                                     dxil::ResourceKind::Texture2DArray;
   bool HasThirdDimension =
       Is2DArray ||
-      (TextureTy && TextureTy->getDimension() == dxil::ResourceKind::Texture3D);
+      (TextureTy &&
+       (TextureTy->getDimension() == dxil::ResourceKind::Texture3D ||
+        TextureTy->getDimension() == dxil::ResourceKind::TextureCubeArray));
   bool CanQueryLevels =
       TextureTy && !TextureTy->isWriteable() &&
       (TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||

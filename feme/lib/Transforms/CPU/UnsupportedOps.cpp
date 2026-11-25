@@ -79,7 +79,7 @@ Error checkSupportedRaisedOps(const Module &M) {
               "queries, sampled cube dimensions, or sampled 1D/array or "
               "plain 2D explicit-mip/count queries, or 2D-array base/sampled "
               "explicit-mip/count queries, or 3D base/sampled "
-              "explicit-mip/count queries",
+              "explicit-mip/count queries, or sampled cube-array dimensions",
               F.getName().str().c_str());
       }
       continue;
