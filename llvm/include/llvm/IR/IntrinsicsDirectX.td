@@ -154,6 +154,12 @@ let TargetPrefix = "dx" in {
       : DefaultAttrsIntrinsic<[llvm_v4i32_ty], [llvm_any_ty, llvm_i32_ty],
                               [IntrReadMem]>;
 
+  def int_dx_resource_getdimensions_samples_xy
+      : DefaultAttrsIntrinsic<[llvm_v3i32_ty], [llvm_any_ty], [IntrReadMem]>;
+
+  def int_dx_resource_getdimensions_samples_xyz
+      : DefaultAttrsIntrinsic<[llvm_v4i32_ty], [llvm_any_ty], [IntrReadMem]>;
+
   def int_dx_resource_sample
       : DefaultAttrsIntrinsic<
             [llvm_any_ty], [llvm_any_ty, llvm_any_ty, llvm_any_ty, llvm_any_ty],

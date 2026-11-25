@@ -77,3 +77,35 @@ define <4 x i32> @test_getdimensions_xyz_with_mips(i32 %mip) {
   ; CHECK-NEXT: ret <4 x i32> %[[V3]]
   ret <4 x i32> %dims
 }
+
+define <3 x i32> @test_getdimensions_xy_with_samples() {
+  ; CHECK-LABEL: define <3 x i32> @test_getdimensions_xy_with_samples(
+  %handle = call target("dx.MSTexture", <4 x float>, 0, 4, 0, 3) @llvm.dx.resource.handlefrombinding(i32 0, i32 5, i32 1, i32 0, ptr null)
+  ; CHECK: %[[D:.*]] = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, {{.*}}, i32 undef)
+  ; CHECK-NEXT: %[[W:.*]] = extractvalue %dx.types.Dimensions %[[D]], 0
+  ; CHECK-NEXT: %[[H:.*]] = extractvalue %dx.types.Dimensions %[[D]], 1
+  ; CHECK-NEXT: %[[V0:.*]] = insertelement <3 x i32> undef, i32 %[[W]], i32 0
+  ; CHECK-NEXT: %[[V1:.*]] = insertelement <3 x i32> %[[V0]], i32 %[[H]], i32 1
+  ; CHECK-NEXT: %[[S:.*]] = extractvalue %dx.types.Dimensions %[[D]], 3
+  ; CHECK-NEXT: %[[V2:.*]] = insertelement <3 x i32> %[[V1]], i32 %[[S]], i32 2
+  %dims = call <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.MSTexture", <4 x float>, 0, 4, 0, 3) %handle)
+  ; CHECK-NEXT: ret <3 x i32> %[[V2]]
+  ret <3 x i32> %dims
+}
+
+define <4 x i32> @test_getdimensions_xyz_with_samples() {
+  ; CHECK-LABEL: define <4 x i32> @test_getdimensions_xyz_with_samples(
+  %handle = call target("dx.MSTexture", i32, 0, 2, 1, 8) @llvm.dx.resource.handlefrombinding(i32 0, i32 6, i32 1, i32 0, ptr null)
+  ; CHECK: %[[D:.*]] = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, {{.*}}, i32 undef)
+  ; CHECK-NEXT: %[[W:.*]] = extractvalue %dx.types.Dimensions %[[D]], 0
+  ; CHECK-NEXT: %[[H:.*]] = extractvalue %dx.types.Dimensions %[[D]], 1
+  ; CHECK-NEXT: %[[A:.*]] = extractvalue %dx.types.Dimensions %[[D]], 2
+  ; CHECK-NEXT: %[[V0:.*]] = insertelement <4 x i32> undef, i32 %[[W]], i32 0
+  ; CHECK-NEXT: %[[V1:.*]] = insertelement <4 x i32> %[[V0]], i32 %[[H]], i32 1
+  ; CHECK-NEXT: %[[V2:.*]] = insertelement <4 x i32> %[[V1]], i32 %[[A]], i32 2
+  ; CHECK-NEXT: %[[S:.*]] = extractvalue %dx.types.Dimensions %[[D]], 3
+  ; CHECK-NEXT: %[[V3:.*]] = insertelement <4 x i32> %[[V2]], i32 %[[S]], i32 3
+  %dims = call <4 x i32> @llvm.dx.resource.getdimensions.samples.xyz(target("dx.MSTexture", i32, 0, 2, 1, 8) %handle)
+  ; CHECK-NEXT: ret <4 x i32> %[[V3]]
+  ret <4 x i32> %dims
+}

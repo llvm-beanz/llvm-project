@@ -1023,7 +1023,8 @@ public:
 
   [[nodiscard]] bool lowerGetDimensionsVector(Function &F,
                                               unsigned NumDimensions,
-                                              bool WithLevels) {
+                                              bool WithLevels,
+                                              bool WithSamples = false) {
     IRBuilder<> &IRB = OpBuilder.getIRB();
     Type *Int32Ty = IRB.getInt32Ty();
 
@@ -1043,7 +1044,7 @@ public:
       Value *Dim = UndefValue::get(CI->getType());
       for (unsigned I = 0; I < NumDimensions; ++I)
         Dim = IRB.CreateInsertElement(Dim, Sizes[I], IRB.getInt32(I));
-      if (WithLevels)
+      if (WithLevels || WithSamples)
         Dim = IRB.CreateInsertElement(Dim, IRB.CreateExtractValue(*OpCall, 3),
                                       IRB.getInt32(NumDimensions));
 
@@ -1572,6 +1573,14 @@ public:
         break;
       case Intrinsic::dx_resource_getdimensions_levels_xyz:
         HasErrors |= lowerGetDimensionsVector(F, 3, /*WithLevels=*/true);
+        break;
+      case Intrinsic::dx_resource_getdimensions_samples_xy:
+        HasErrors |= lowerGetDimensionsVector(F, 2, /*WithLevels=*/false,
+                                              /*WithSamples=*/true);
+        break;
+      case Intrinsic::dx_resource_getdimensions_samples_xyz:
+        HasErrors |= lowerGetDimensionsVector(F, 3, /*WithLevels=*/false,
+                                              /*WithSamples=*/true);
         break;
       case Intrinsic::ctpop:
         HasErrors |= lowerCtpopToCountBits(F);
