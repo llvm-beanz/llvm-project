@@ -8,7 +8,8 @@
 ; `RWStructuredBuffer`/`RWByteAddressBuffer` access in real HLSL (e.g.
 ; `Out[tid.x] = tid.x;`) lowers to -- see feme/test/Tools/feme-run/HLSL for
 ; this raised end-to-end through `feme-run`. Contiguous two/three/four-
-; component i32/FP32 stores also raise; loads retain their scalar scope.
+; component i32/FP32 loads/stores also raise. Legacy loads require complete
+; leading-component uses; isolated later components and status stay unraised.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-ms-dx"

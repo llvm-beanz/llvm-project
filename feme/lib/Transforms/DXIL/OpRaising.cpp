@@ -2152,11 +2152,11 @@ bool raiseAtomicCompareExchange(CallInst &CI) {
 /// Raises a `dx.op.rawBufferLoad` (opcode 139), or a legacy
 /// `dx.op.bufferLoad` (opcode 68), on an already-raised raw/structured
 /// buffer handle into `llvm.dx.resource.load.rawbuffer`,
-/// mirroring `raiseTypedBufferLoad`: the loaded scalar's type is recovered
-/// from the `extractvalue`s reading the DXIL `%dx.types.ResRet` return
-/// struct's component 0 (the only component a single-component load ever
-/// reads), and a load consumed any other way (multiple components, or
-/// `ResRet`'s trailing status field) is left unraised.
+/// mirroring `raiseTypedBufferLoad`. Modern contiguous masks determine the
+/// width; legacy calls require a complete leading run of component extracts
+/// to infer it. Packed i32/FP32 loads retain one vector access through the
+/// existing CPU helpers. Status/aggregate uses and unsupported masks/types
+/// remain unraised; scalar type support is unchanged.
 bool raiseRawBufferLoad(CallInst &CI, bool Legacy) {
   if (CI.arg_size() != (Legacy ? 4 : 6))
     return false;
@@ -2166,35 +2166,49 @@ bool raiseRawBufferLoad(CallInst &CI, bool Legacy) {
   if (!HandleTy || HandleTy->getName() != "dx.RawBuffer")
     return false;
 
-  if (!Legacy) {
-    std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(4));
-    if (!Mask || *Mask != 1)
-      return false;
-  }
-
-  SmallVector<ExtractValueInst *, 2> Extracts;
-  for (User *U : CI.users()) {
-    auto *EV = dyn_cast<ExtractValueInst>(U);
-    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] != 0)
-      return false;
-    Extracts.push_back(EV);
-  }
-  if (Extracts.empty())
+  auto Extracts = getResRetExtracts(CI, 4);
+  if (!Extracts || Extracts->empty())
     return false;
+
+  unsigned Width;
+  if (Legacy) {
+    unsigned Seen = 0;
+    for (ExtractValueInst *EV : *Extracts)
+      Seen |= 1u << EV->getIndices()[0];
+    Width = getContiguousMaskWidth(Seen);
+  } else {
+    std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(4));
+    if (!Mask || *Mask > 15)
+      return false;
+    Width = getContiguousMaskWidth(*Mask);
+    for (ExtractValueInst *EV : *Extracts)
+      if (EV->getIndices()[0] >= Width)
+        return false;
+  }
+  if (Width == 0)
+    return false;
+
+  auto *RetTy = dyn_cast<StructType>(CI.getType());
+  if (!RetTy || RetTy->getNumElements() < Width)
+    return false;
+  Type *ElemTy = RetTy->getElementType(0);
+  if (Width > 1 && !ElemTy->isIntegerTy(32) && !ElemTy->isFloatTy())
+    return false;
+  for (unsigned I = 1; I != Width; ++I)
+    if (RetTy->getElementType(I) != ElemTy)
+      return false;
+  Type *LoadedTy = Width == 1 ? ElemTy : FixedVectorType::get(ElemTy, Width);
 
   IRBuilder<> Builder(&CI);
   Function *LoadFn = Intrinsic::getOrInsertDeclaration(
       CI.getModule(), Intrinsic::dx_resource_load_rawbuffer,
-      {Extracts[0]->getType(), HandleTy});
+      {LoadedTy, HandleTy});
   Value *Loaded = Builder.CreateCall(
       LoadFn, {Handle, CI.getArgOperand(2),
                normalizeRawBufferCoordinate(HandleTy, CI.getArgOperand(3))});
-  Value *Value0 = Builder.CreateExtractValue(Loaded, 0);
-
-  for (ExtractValueInst *EV : Extracts) {
-    EV->replaceAllUsesWith(Value0);
-    EV->eraseFromParent();
-  }
+  Value *Data = Builder.CreateExtractValue(Loaded, 0);
+  if (!replaceResRetExtracts(CI, Width, Data, Builder))
+    llvm_unreachable("raw load result uses were validated before mutation");
   CI.eraseFromParent();
   return true;
 }

@@ -38,8 +38,22 @@ cover normal waves 4/8, reference and ARM64 AOT-object execution, exact
 bits, field strides/sub-offsets, divergent masks, five lanes, per-width/
 per-record guards and two checked repeats. Legacy AOT supplies an explicit
 physical `resource-heap`, not `bindings` YAML. Runtime/SPIR-V implementation,
-raw-load/status handling, artifact ABI 8 and argument layouts are unchanged;
+status handling, artifact ABI 8 and argument layouts are unchanged;
 this is CPU execution, not owned D3D12.
+
+Packed i32/FP32 raw/structured loads likewise use the existing vector
+helpers. Opcode 139 contiguous masks 1/3/7/15 retain explicit widths for
+partial result uses; legacy opcode 68 requires complete leading-component
+uses to infer width. Scalar support remains. Invalid masks/types,
+sparse/isolated-later legacy uses, status/aggregate uses and unused loads
+stay unraised. Native SM6.6/SM6.0 `Load2`/`Load3`/`Load4` and structured
+uint4/float3 tests verify exact bits, five lanes, divergent uses, every
+word of a guarded 784-byte output, last-valid vectors, all-zero partial/
+large-address reads and two repeats in normal waves 4/8, reference and
+ARM64 AOT modes. A separate tail descriptor avoids legacy source-width
+coalescing; general legacy partial/coalesced-width semantics are unproven.
+Legacy AOT still supplies a physical heap; no runtime/SPIR-V, status,
+ABI or owned-device change is implied.
 
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.

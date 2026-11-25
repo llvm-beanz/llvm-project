@@ -1319,17 +1319,25 @@ it now covers the two largest opcode families:
   contiguous masks 3/7/15 for two/three/four i32/FP32 components, retaining
   one vector write through the existing CPU helpers. Sparse/dynamic/
   oversized masks, packed non-32-bit types and mismatched active fields
-  remain unraised. Loads still require a scalar component-0 result;
-  multi-component/status loads are unchanged. The legacy encoding is
+  remain unraised. Modern loads use contiguous masks 1/3/7/15; legacy
+  loads infer width only from a complete leading run of result extracts.
+  Packed i32/FP32 loads retain one vector access; modern explicit widths
+  survive partial uses. Sparse/isolated-later legacy uses, status/aggregate
+  uses and unused loads stay unraised; scalar type support is preserved.
+  The legacy encoding is
   required for DXBC-derived DXIL 1.0 IR; treating it as typed-only left
   raw stores and their `i8` masks in the backend's pre-lowering IR.
   LIT covers both encodings and DXBC-to-DXIL payload round-trips, including
   real FXC SM 5.0/5.1 output. Native SDK DXC SM6.6 heap and SM6.0 bound
-  compute stores execute through normal waves 4/8, reference and ARM64
+  compute loads/stores execute through normal waves 4/8, reference and ARM64
   AOT-object paths, checking exact bits, field strides/sub-offsets,
   divergent masks, five lanes, guards and two repeats. Three-component
   stores write exactly 12 bytes; partly out-of-bounds vectors do not
-  commit any words. Legacy AOT uses an explicit physical heap. This
+  commit any words. Packed-load tests check last-valid reads and all-zero
+  partial/large-address reads, including every word of a guarded 784-byte
+  output. A separate tail descriptor avoids legacy source-width coalescing;
+  general legacy partial/coalesced-width semantics remain unproven.
+  Legacy AOT uses an explicit physical heap. This
   changes DXIL raising only, not runtime/SPIR-V implementation, artifact
   ABI 8, argument layouts or owned D3D12 execution.
 

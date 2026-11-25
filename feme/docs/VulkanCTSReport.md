@@ -1,5 +1,36 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) packed raw/structured DXIL load scope (2026-11-24)
+
+The [packed-load follow-up](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-loads-vm-2026-11-24)
+raises opcode 139 contiguous masks 1/3/7/15 and legacy opcode 68 complete
+leading-component result uses. Packed i32/FP32 widths two/three/four reach
+existing CPU vector helpers; scalar support remains. Modern explicit
+widths survive partial result uses. Invalid masks, sparse/isolated-later
+legacy uses, packed non-32-bit/mixed types, insufficient return fields,
+status/aggregate uses and unused calls remain unraised.
+
+Portable raising/CPU regressions check both encodings, widths, result
+rewriting, rejected calls, strides/sub-offsets and idempotence. Native SDK
+DXC SM6.6 heap and SM6.0 bound compute `Load2`/`Load3`/`Load4` and
+structured uint4/float3 fields pass normal waves 4/8, reference and ARM64
+AOT-object execution. Exact integer/FP32 bits, five lanes, divergent uses,
+guards, all 784 output bytes, last-valid vectors, all-zero partly out-of-
+bounds/large-address reads and two checked repeats pass. A separate tail
+descriptor avoids legacy source-width coalescing at the same address;
+general legacy partial/coalesced-width semantics are not proven. Legacy
+AOT uses a physical heap, not object binding YAML.
+
+The affected ARM64 build and changed-line clang-format pass. Relevant
+DXIL/CPU transforms, CPU units, runner and runtime LIT pass 1,714 with
+4 unsupported and zero failures in 74.71 seconds, adding three fixtures/
+tests. Vulkan advertisements, stores, status handling, images/sampling,
+runtime/SPIR-V implementation, ABI 8 and argument layouts are unchanged.
+This is not full-suite, external CTS, adapter-matrix or owned-device
+evidence. Bound/static D3D12 descriptors, broader conformance and
+owned-device execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) packed raw/structured DXIL store scope (2026-11-24)
 
 The [packed-store follow-up](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-stores-vm-2026-11-24)

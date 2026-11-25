@@ -2272,7 +2272,23 @@ Native SDK DXC SM6.6 heap and SM6.0 bound compute tests pass normal waves
 masks, five lanes, per-width/per-record guards and two checked repeats.
 Legacy AOT uses an explicit physical heap; object binding-prefix
 reflection/materialization is not added. Runtime/SPIR-V implementation,
-loads/status handling, artifact ABI 8 and argument layouts are unchanged.
+status handling, artifact ABI 8 and argument layouts are unchanged.
+
+Packed loads also raise to the existing i32/FP32 vector helpers. Modern
+opcode 139 uses contiguous masks 1/3/7/15 and retains the explicit width
+for partial result uses; legacy opcode 68 requires a complete leading
+run of component extracts to infer width. Scalar types remain supported.
+Invalid masks, sparse/isolated-later legacy uses, packed non-32-bit/mixed
+types, insufficient return fields, status/aggregate uses and unused calls
+stay unraised. Portable tests cover all FP32 widths, result rewriting and
+idempotence. Native SM6.6/SM6.0 tests verify `Load2`/`Load3`/`Load4`,
+structured uint4/float3 fields, exact bits, divergent uses and every word
+of a guarded 784-byte output twice in normal waves 4/8, reference and
+ARM64 AOT modes. Last-valid vectors succeed; partial/large-address vectors
+read all zero. A separate tail descriptor avoids coalescing differently
+sized legacy source loads at one address; general legacy partial/
+coalesced-width semantics are not established. Runtime/SPIR-V code and
+ABI 8 remain unchanged.
 
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded

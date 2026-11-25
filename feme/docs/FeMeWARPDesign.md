@@ -91,8 +91,19 @@ The original compute-only baseline is no longer current:
   masks, five lanes, guards and two repeats. Three-component writes use
   12 bytes; partly out-of-bounds vectors commit no words. Legacy AOT uses
   an explicit physical heap, not new object-mode binding materialization.
-  This changes DXIL raising, not runtime/SPIR-V implementation, loads/
-  status handling, artifact ABI 8, argument layouts or owned-device support.
+  Packed loads also raise: opcode 139 uses contiguous masks 1/3/7/15,
+  keeping explicit widths for partial uses; legacy opcode 68 infers width
+  only from complete leading-component uses. Packed i32/FP32 widths
+  two/three/four retain existing vector-helper bounds without narrowing
+  scalar support. Sparse/isolated-later legacy uses, invalid masks/types
+  and status/aggregate uses stay unraised. Native SM6.6/SM6.0 tests cover
+  exact-bit `Load2`/`Load3`/`Load4` and structured uint4/float3 fields,
+  divergent uses, guards, last-valid and all-zero partial/large-address
+  reads, and two repeats across the same CPU modes. A separate tail
+  descriptor avoids legacy source-width coalescing; general legacy partial/
+  coalesced-width semantics remain unproven. This changes DXIL raising,
+  not runtime/SPIR-V implementation, status handling, artifact ABI 8,
+  argument layouts or owned-device support.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

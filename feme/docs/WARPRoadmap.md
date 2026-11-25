@@ -2255,6 +2255,46 @@ unchanged. Bound/static D3D12 descriptors, broader conformance and
 owned-device execution remain open; `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) packed raw/structured DXIL load progress (2026-11-24):
+opcode 139 `RawBufferLoad` now raises contiguous masks 1/3/7/15;
+legacy opcode 68 `BufferLoad` infers width only from a complete leading
+run of consumed result components. Packed widths two/three/four admit
+i32/FP32, preserving scalar type support. Modern explicit widths remain
+intact even when only component zero is consumed. Sparse/isolated-later
+legacy uses, invalid masks, packed non-32-bit/mixed types, insufficient
+return fields, status/aggregate uses and unused results remain unraised
+without partial mutation or duplicate reads.
+
+Existing result-replacement and CPU vector helpers preserve one packed
+load, raw unused-coordinate poison, byte-address zero-extension, structured
+strides/sub-offsets and full-width bounds. Portable raising/CPU regressions
+check both encodings, all FP32 widths, reordered/duplicate extracts,
+modern partial uses, scalar i64 preservation, malformed calls and
+repeated-pass cleanup/idempotence.
+
+Actual SDK DXC SM6.6 heap and SM6.0 bound compute shaders execute
+`Load2`/`Load3`/`Load4` and structured uint4/float3 fields through normal
+waves 4/8, reference and ARM64 AOT-object paths. High-bit/non-FP32-exact
+integer and negative/fractional FP32 bits, five lanes, divergent uses,
+input/record/output guards and two explicitly checked repeats pass.
+A 784-byte output checks every word; last-valid two/three/four-component
+reads succeed, while partly out-of-bounds vectors and large unsigned byte
+addresses return all zero. A separate tail descriptor keeps differently
+sized legacy source loads from coalescing at the same address; general
+legacy partial/coalesced-width semantics are not established. Legacy AOT
+uses an explicit physical heap, not object-mode binding YAML.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes 25 steps; changed-line clang-format is clean.
+Relevant DXIL/CPU transforms, CPU units, runner and runtime LIT pass
+1,714 with 4 unsupported and zero failures in 74.71 seconds; three new
+fixtures add three tests. This is native CPU evidence, not full-suite,
+external CTS, adapter-matrix or owned D3D12 execution. Stores, status
+handling, images/sampling, runtime/SPIR-V implementation, artifact ABI 8
+and argument layouts are unchanged. Broader conformance, bound/static
+D3D12 descriptors and owned-device execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

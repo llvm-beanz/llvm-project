@@ -3031,6 +3031,20 @@ oversized masks, packed non-32-bit types and mixed active fields remain
 unraised. This is shared CPU buffer evidence, not a new draw or owned
 D3D12 result; runtime/SPIR-V implementation and ABI 8 are unchanged.
 
+Packed raw/structured loads also reach the existing CPU vector helpers:
+opcode 139 uses contiguous masks 1/3/7/15, preserving explicit widths
+for partial uses; legacy opcode 68 infers width only from a complete
+leading run of consumed components. Packed i32/FP32 widths two/three/four
+are admitted without narrowing scalar support. Invalid masks/types,
+sparse/isolated-later legacy uses and status/aggregate uses stay unraised.
+Native SM6.6/SM6.0 compute tests verify exact-bit `Load2`/`Load3`/`Load4`
+and structured uint4/float3 fields, last-valid and all-zero partial/
+large-address reads, divergent uses, guards and two repeats in normal
+waves 4/8, reference and ARM64 AOT modes. A separate tail descriptor
+avoids legacy source-width coalescing; general legacy partial/coalesced-
+width semantics remain unproven. This adds CPU buffer evidence, not draw,
+owned-device, runtime/SPIR-V or ABI changes.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into

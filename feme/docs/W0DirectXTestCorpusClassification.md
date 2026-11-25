@@ -262,6 +262,24 @@ Legacy AOT supplies a physical heap. This is not a new FXC-profile,
 external corpus or owned D3D12 result; see the
 [packed-store evidence](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-stores-vm-2026-11-24).
 
+Packed-load follow-up (2026-11-24): opcode 139 contiguous masks 1/3/7/15
+and legacy opcode 68 complete leading-component result uses now raise
+packed i32/FP32 widths two/three/four through existing CPU helpers.
+Scalar support and modern explicit widths for partial uses are preserved.
+Invalid masks/types, sparse/isolated-later legacy uses, status/aggregate
+uses and unused calls remain unraised. Portable raising/CPU regressions
+check rewriting, rejected calls, strides/sub-offsets and idempotence.
+Native SDK DXC SM6.6 heap and SM6.0 bound compute tests verify exact-bit
+`Load2`/`Load3`/`Load4` and structured uint4/float3 fields, divergent uses,
+guards, last-valid and all-zero partial/large-address reads, and two
+checked repeats through normal waves 4/8, reference and ARM64 AOT.
+A separate tail descriptor avoids legacy source-width coalescing; general
+legacy partial/coalesced-width semantics remain unproven. Legacy AOT uses
+a physical heap. The affected build passes; relevant LIT passes 1,714
+with 4 unsupported and zero failures in 74.71 seconds. This is not a new
+FXC-profile, external corpus or owned D3D12 result; see the
+[packed-load evidence](W0WindowsIntegrationProbe.md#w2aw3b-packed-rawstructured-dxil-loads-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

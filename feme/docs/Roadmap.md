@@ -2709,6 +2709,27 @@ the first shader-facing milestone rather than alongside it.
    fixtures/tests. Runtime/SPIR-V implementation, loads/status handling,
    images/sampling, ABI 8 and argument layouts are unchanged. No full-
    suite, external CTS, adapter-matrix or owned D3D12 closure is claimed.
+   Packed raw/structured DXIL load follow-up (2026-11-24): opcode 139
+   uses contiguous masks 1/3/7/15; legacy opcode 68 infers width only
+   from complete leading-component uses. Packed i32/FP32 widths two/
+   three/four preserve scalar type support and modern explicit widths
+   for partial result uses. Invalid masks/types, sparse/isolated-later
+   legacy uses, status/aggregate uses and unused calls stay unraised.
+   Portable raising/CPU tests cover result rewriting, strides/sub-offsets,
+   malformed calls and idempotence. Native SDK DXC SM6.6 heap and SM6.0
+   bound compute `Load2`/`Load3`/`Load4` and structured uint4/float3
+   fields pass normal waves 4/8, reference and ARM64 AOT modes with exact
+   bits, five lanes, divergent uses, guards, every word of a 784-byte
+   output and two checked repeats. Last-valid vectors succeed; partial/
+   large-address vectors read all zero. A separate tail descriptor avoids
+   legacy source-width coalescing; general legacy partial/coalesced-width
+   semantics remain unproven. Legacy AOT uses a physical heap. The
+   affected ARM64 build passes 25 steps; relevant DXIL/CPU transforms,
+   CPU units, runner and runtime LIT pass 1,714 with 4 unsupported and
+   zero failures in 74.71 seconds, adding three fixtures/tests. Stores,
+   status handling, images/sampling, runtime/SPIR-V implementation,
+   ABI 8 and argument layouts are unchanged. No full-suite, external CTS,
+   adapter-matrix, owned D3D12 or W2/W3/conformance closure is claimed.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

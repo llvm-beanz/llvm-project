@@ -66,8 +66,20 @@ SM6.6 heap and SM6.0 bound compute tests execute through normal waves
 sub-offsets, divergent masks, five lanes, guards and two repeats.
 Existing vector helpers reject an entire partly out-of-bounds write and
 write exactly 12 bytes for three components. Legacy AOT takes an explicit
-physical heap. No new runtime/SPIR-V implementation, raw-load/status
-support, GPU-target lowering, ABI or owned D3D12 behavior is implied.
+physical heap.
+
+Packed i32/FP32 raw/structured loads also use existing CPU vector helpers.
+Modern opcode 139 accepts contiguous masks 1/3/7/15 and keeps explicit
+widths for partial result uses; legacy opcode 68 infers width only from
+complete leading-component uses. Scalar type support is preserved.
+Invalid masks/types, sparse/isolated-later legacy uses, status/aggregate
+uses and unused loads stay unraised. Native SM6.6/SM6.0 tests verify
+exact-bit `Load2`/`Load3`/`Load4` and structured uint4/float3 fields,
+divergent uses, guards, last-valid vectors, all-zero partial/large-address
+reads and two repeats across the same CPU modes. A separate tail
+descriptor avoids legacy source-width coalescing; general legacy partial/
+coalesced-width semantics remain unproven. No new runtime/SPIR-V code,
+status support, GPU-target lowering, ABI or owned D3D12 behavior is implied.
 
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which

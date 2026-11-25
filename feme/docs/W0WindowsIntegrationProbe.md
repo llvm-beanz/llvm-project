@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) packed raw/structured DXIL loads (VM, 2026-11-24)
+
+Opcode 139 now raises contiguous masks 1/3/7/15; legacy opcode 68 infers
+width only from a complete leading run of consumed components. Packed
+two/three/four-component i32/FP32 loads use the existing CPU vector helpers;
+scalar type support is preserved. Modern explicit widths survive partial
+result uses. Invalid masks, sparse/isolated-later legacy uses, packed
+non-32-bit/mixed types, insufficient return fields, status/aggregate uses
+and unused results stay unraised without partial mutation or duplicate
+reads. Raw unused coordinates become poison; structured indices/sub-
+offsets and vector bounds are preserved.
+
+Portable raising/CPU tests check widths, both encodings, reordered/
+duplicate extracts, modern partial uses, scalar i64, rejected calls,
+coordinate/stride arithmetic and repeated-pass idempotence. Actual SDK
+DXC SM6.6 heap and SM6.0 bound compute shaders execute `Load2`/`Load3`/
+`Load4` and structured uint4/float3 fields in normal waves 4/8, reference
+and ARM64 AOT-object paths. Exact integer/FP32 bits, five lanes, divergent
+uses, guards, every word of a 784-byte output and two checked repeats pass.
+Last-valid vector reads succeed; partly out-of-bounds vectors and large
+unsigned byte addresses return all zero. A separate tail descriptor avoids
+legacy source-width coalescing at one address; general legacy partial/
+coalesced-width semantics remain outside this evidence. Legacy AOT takes
+an explicit physical heap; object binding YAML stays unsupported.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes 25 steps; changed-line clang-format is clean.
+Relevant DXIL/CPU transforms, CPU units, runner and runtime LIT pass
+1,714 with 4 unsupported and zero failures in 74.71 seconds; three new
+fixtures add three tests. Stores, status handling, images/sampling,
+runtime/SPIR-V implementation, artifact ABI 8 and argument layouts are
+unchanged. No full-suite, external CTS, adapter-matrix or owned D3D12
+result is claimed. Bound/static D3D12 descriptors, broader conformance
+and owned-device execution remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) packed raw/structured DXIL stores (VM, 2026-11-24)
 
 Native opcode 140 and legacy opcode 69 raw/structured stores now raise
