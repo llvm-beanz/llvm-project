@@ -134,8 +134,8 @@ Native typed-buffer `GetDimensions` now executes SDK DXC SM6.6/SM6.0
 SINT/UINT/FP32 SRV/UAV queries on RGB32 and mixed R32/RG32/RGBA32
 layouts across the same CPU modes. Field-zero queries with unused/zero
 mip operands raise/lower to the existing typed element-count helper;
-other fields, aggregate uses, meaningful mips and structured DXIL
-queries remain outside this path. Physical format/byte size determine
+other fields, aggregate uses and meaningful mips remain outside this path.
+Physical format/byte size determine
 complete-element counts, including partial/too-short views. Namespace
 separation, divergence, all input/output words, guards and repeats pass:
 224 input bytes plus a guarded 128-byte output, exactly 352 bytes per case.
@@ -151,8 +151,21 @@ those byte counts, not 5/7/1/22 DWORD counts. Namespace separation,
 divergence, query/store use of the output handle, every word, guards and
 repeats pass: 52 input bytes plus a guarded 88-byte output, exactly 140
 bytes per case. Heap YAML uses `kind: raw-buffer`; legacy AOT uses physical
-heaps. Structured queries and buffer xy fields remain unsupported.
+heaps. Buffer xy fields remain unsupported.
 Runtime/SPIR-V code, ABI 8 and argument layouts remain unchanged.
+
+Native `StructuredBuffer`/`RWStructuredBuffer.GetDimensions` now also
+executes SDK DXC SM6.6/SM6.0 SRV/UAV queries across the same CPU modes.
+Field-zero counts lower to the raw metadata helper using the handle's
+declared structure size as stride, prefix zero; DXC's constant HLSL stride
+output is preserved. Ranges of 32/64/8 bytes and strides 12/20/12 yield
+counts 2/3/0, excluding incomplete elements while still reporting declared
+stride for the too-short bound view. Namespaces, divergence, every word,
+guards and repeats pass: 104 input bytes plus a guarded 128-byte output,
+exactly 232 bytes per case. Heap YAML uses `kind: structured-buffer` and
+matching `stride`; legacy AOT uses physical heaps. Buffer xy fields,
+aggregate uses and meaningful mips remain unsupported. Runtime/SPIR-V
+code, ABI 8 and argument layouts remain unchanged; no owned-device closure.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

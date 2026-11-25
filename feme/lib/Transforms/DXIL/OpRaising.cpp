@@ -1845,8 +1845,8 @@ bool raiseTextureStore(CallInst &CI) {
 /// also covered field 1); fields 0 and/or 1 together raise to the
 /// `<2 x i32>`-returning `_xy` overload instead, with each surviving
 /// `extractvalue` rewritten to the matching `extractelement`.
-/// Typed and byte-address buffers support only field 0 (element/byte count),
-/// with an unused or zero mip operand; structured queries remain unraised.
+/// Buffers support only field 0 (element/byte count), with an unused or zero
+/// mip operand. DXC supplies a structured buffer's HLSL stride as a constant.
 bool raiseGetDimensions(CallInst &CI) {
   if (CI.arg_size() != 3) // opcode, Handle, MipLevel
     return false;
@@ -1854,9 +1854,7 @@ bool raiseGetDimensions(CallInst &CI) {
   if (!Handle)
     return false;
   auto *RawType = dyn_cast<dxil::RawBufferExtType>(Handle->getType());
-  bool IsByteAddress = RawType && RawType->getTypeParameter(0)->isIntegerTy(8);
-  bool IsBuffer =
-      IsByteAddress || isa<dxil::TypedBufferExtType>(Handle->getType());
+  bool IsBuffer = RawType || isa<dxil::TypedBufferExtType>(Handle->getType());
   if (!IsBuffer &&
       !isa<dxil::TextureExtType, dxil::MSTextureExtType>(Handle->getType()))
     return false;

@@ -1,0 +1,133 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/heap.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/legacy.o | FileCheck %s
+#
+# Counts use declared 12/20-byte structure strides, not bytes or DWORDs.
+# Partial final elements are excluded; a bound view too short for one
+# element still reports its declared stride. Different counts/strides at
+# the same SRV/UAV register prove namespace separation. Five lanes and
+# divergence exercise partial waves and sentinels. No input data is read.
+# Every word of 104 input bytes and 128 output bytes is checked twice.
+# Native CPU metadata evidence, not owned D3D12 descriptor construction.
+# RAISE-COUNT-3: call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.RawBuffer",
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# CHECK: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42( 42){7}]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U:42( 42){15}]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[T:42 42]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[OUT:42 2 12 3 20 0 12 2 12 42 42 0 12 2 12 3 20 0 12 2 12 3 20 0 12 2 12 3 20 0 12 42]]{{$}}
+# CHECK-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[T]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[OUT]]{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+struct Three {
+  uint3 value;
+};
+struct Five {
+  uint3 first;
+  uint2 second;
+};
+#ifndef HEAP
+StructuredBuffer<Three> input : register(t0);
+RWStructuredBuffer<Five> readWrite : register(u0);
+StructuredBuffer<Three> tiny : register(t1);
+RWByteAddressBuffer output : register(u1);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  StructuredBuffer<Three> input = ResourceDescriptorHeap[0];
+  RWStructuredBuffer<Five> readWrite = ResourceDescriptorHeap[1];
+  StructuredBuffer<Three> tiny = ResourceDescriptorHeap[2];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[3];
+#endif
+  uint base = 4 + tid.x * 24;
+  uint count, stride;
+  input.GetDimensions(count, stride);
+  output.Store2(base, uint2(count, stride));
+  if (tid.x != 1) {
+    readWrite.GetDimensions(count, stride);
+    output.Store2(base + 8, uint2(count, stride));
+  }
+  tiny.GetDimensions(count, stride);
+  output.Store2(base + 16, uint2(count, stride));
+}
+#--- heap.yaml
+resource-heap:
+  - index: 0
+    size: 32
+    kind: structured-buffer
+    stride: 12
+    data: [42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 64
+    kind: structured-buffer
+    stride: 20
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 8
+    kind: structured-buffer
+    stride: 12
+    data: [42, 42]
+  - index: 3
+    size: 128
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 32
+        kind: structured-buffer
+        stride: 12
+        data: [42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 64
+        kind: structured-buffer
+        stride: 20
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 8
+        kind: structured-buffer
+        stride: 12
+        data: [42, 42]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 128
+        kind: raw-buffer
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

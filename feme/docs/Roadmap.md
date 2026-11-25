@@ -2969,6 +2969,24 @@ the first shader-facing milestone rather than alongside it.
    descriptor materialization, ABI 8 and argument layouts remain unchanged.
    Structured DXIL count/stride, broader format/full-suite, external CTS,
    adapter-matrix and owned-device/W2/W3 closure remain open.
+   Native structured-buffer dimensions follow-up (2026-11-25):
+   field-zero counts now raise/lower through the existing raw metadata
+   helper using the handle's declared structure size as stride, prefix zero.
+   DXC's constant HLSL stride output is preserved, not treated as DXIL
+   field 1. Buffer xy/mixed fields, aggregate uses and meaningful mips
+   remain unsupported. Portable SRV/UAV, index, query/load, zero-size
+   rejection and idempotence controls pass. SDK DXC SM6.6/SM6.0
+   queries execute in waves 4/8, reference and ARM64 AOT with eight
+   cases each repeated twice. Ranges 32/64/8 and strides 12/20/12 yield
+   counts 2/3/0; partial/too-short views, namespaces, divergence, all words,
+   guards and sentinels pass: exactly 232 bytes per case. The affected
+   32-step ARM64 build passes; 29 focused LIT pass in 14.08 seconds and
+   eight runtime units pass in 1.557 seconds, with zero failures. One
+   native LIT fixture and one runtime case are added; two portable fixtures
+   are extended. Runtime/SPIR-V code, load/store/status/atomic policy,
+   advertisements, descriptor materialization, ABI 8 and argument layouts
+   remain unchanged. Broader format/full-suite, external CTS, adapter-
+   matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

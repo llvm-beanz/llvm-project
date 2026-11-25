@@ -179,7 +179,15 @@ bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
         return false;
       if (Kind == Family::Raw) {
         auto *RawType = dyn_cast<dxil::RawBufferExtType>(Handle.getType());
-        if (!RawType || !RawType->getTypeParameter(0)->isIntegerTy(8))
+        if (!RawType)
+          return false;
+        Type *ElemTy = RawType->getTypeParameter(0);
+        if (!ElemTy->isSized())
+          return false;
+        TypeSize Size =
+            Handle.getModule()->getDataLayout().getTypeStoreSize(ElemTy);
+        if (Size.isScalable() || Size.getFixedValue() == 0 ||
+            Size.getFixedValue() > 0xffffffffULL)
           return false;
       }
       continue;
@@ -551,9 +559,10 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
           Info.Kind == Family::Typed
               ? createGetDimensionsTyped(Builder, Env, DescriptorIndex, Mask,
                                          Access->getName())
-              : createGetDimensionsRaw(Builder, Env, DescriptorIndex,
-                                       Builder.getInt64(1), Builder.getInt64(0),
-                                       Mask, Access->getName());
+              : createGetDimensionsRaw(
+                    Builder, Env, DescriptorIndex,
+                    Builder.getInt64(Info.Stride ? Info.Stride : 1),
+                    Builder.getInt64(0), Mask, Access->getName());
       Access->replaceAllUsesWith(Dimensions);
       Access->eraseFromParent();
       continue;

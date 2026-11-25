@@ -36,9 +36,10 @@
 //    Full inter-procedural threading -- a resource access reached through a
 //    helper function the entry point calls -- is deferred; a function is
 //    rewritten only if every resource access it performs is local to it.
-//  - Typed/byte-address `getdimensions.x` lowers to existing metadata-only
-//    element/byte-count helpers. Structured and buffer `getdimensions.xy`
-//    queries remain outside this buffer path's scope.
+//  - Buffer `getdimensions.x` lowers to existing metadata-only element/byte-
+//    count helpers. Structured counts use the handle's declared stride;
+//    byte-address counts use stride one. Buffer `getdimensions.xy` remains
+//    outside this path's scope; DXC supplies HLSL structured stride constants.
 //
 // Image follow-up: ordinary 2D/array/cube sampling/loading and heap-backed
 // scalar FP32 1D/2D/cube (including array) SampleCmpLevelZero lower to shared

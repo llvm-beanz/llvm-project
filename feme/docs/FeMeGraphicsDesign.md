@@ -3115,7 +3115,7 @@ Typed-buffer opcode-72 field-zero dimensions now raise to
 `llvm.dx.resource.getdimensions.x` and lower to the existing shared CPU
 typed element-count helper. Descriptor format/byte size, not shader width,
 determine complete-element counts without reading texel data. Unsupported
-fields, aggregate uses, meaningful mips and structured DXIL queries
+fields, aggregate uses and meaningful mips
 remain unraised. Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV
 queries pass RGB32 and mixed R32/RG32/RGBA32 layouts across the same
 CPU modes, including partial/too-short views, namespace separation,
@@ -3129,9 +3129,20 @@ instead of DWORDs or structured elements. Native SDK DXC SM6.6/SM6.0
 SRV/UAV queries pass namespace separation, divergence, output query/store
 coexistence, guards and repeats across the same CPU modes. Runtime units
 cover odd-byte counts, metadata-only access and inactive/unbound/bounds
-zeros. Structured queries and buffer xy fields remain unsupported.
+zeros. Buffer xy fields remain unsupported.
 Runtime/SPIR-V code, ABI 8 and argument layouts are unchanged; this is
 shared CPU evidence, not draw, new advertisements or owned-device closure.
+
+Structured-buffer field-zero element counts now also raise/lower to the
+raw metadata helper using the handle's declared structure size as stride,
+prefix zero. DXC's constant HLSL stride result is preserved, not treated
+as a second DXIL dimension field. Native SDK DXC SM6.6/SM6.0 SRV/UAV
+queries pass 12/20-byte strides, partial/too-short views, namespaces,
+divergence, guards and repeats across the same CPU modes. Runtime tests
+confirm metadata-only complete-element counts using the declared stride.
+Buffer xy fields and meaningful mips remain unsupported. Runtime/SPIR-V
+code, ABI 8 and argument layouts are unchanged; this is shared CPU evidence,
+not draw, new advertisements or owned-device/conformance closure.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

@@ -1099,6 +1099,25 @@ TEST_F(RuntimeCPUTest, GetDimensionsRawByteCountIsMetadataOnly) {
   EXPECT_EQ(GetDimensions(Heap, 1, 0, 1, 0, true), 0u);
 }
 
+TEST_F(RuntimeCPUTest, GetDimensionsStructuredCountsCompleteDeclaredElements) {
+  RawGetDimensionsFn GetDimensions = getRawGetDimensionsFn();
+  ASSERT_TRUE(GetDimensions);
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = reinterpret_cast<void *>(uintptr_t{1});
+  Heap[0].SizeInBytes = 32;
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Structured);
+  Heap[0].Stride = 4;
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 12, 0, true), 2u);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 12, 0, false), 0u);
+  Heap[0].SizeInBytes = 64;
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 20, 0, true), 3u);
+  Heap[0].SizeInBytes = 8;
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 12, 0, true), 0u);
+  Heap[0].Data = nullptr;
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 12, 0, true), 0u);
+}
+
 TEST_F(RuntimeCPUTest, GetDimensionsRawByteCountBoundsDoNotTouchHeap) {
   RawGetDimensionsFn GetDimensions = getRawGetDimensionsFn();
   ASSERT_TRUE(GetDimensions);

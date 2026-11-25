@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native structured-buffer dimensions (VM, 2026-11-25)
+
+Structured opcode-72 field-zero element counts now raise to the scalar
+dimension intrinsic and lower to the existing raw metadata helper with
+the handle's declared structure size as stride, prefix zero. DXC supplies
+the HLSL stride result as a constant; it is preserved, not treated as a
+second DXIL dimension field. Portable SRV/UAV, descriptor-index,
+query/load, zero-size rejection and idempotence controls pass. Buffer
+xy/mixed fields, aggregate uses and meaningful mips remain unsupported.
+
+[`native-structured-buffer-dimensions.test`](../test/Tools/feme-run/HLSL/native-structured-buffer-dimensions.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound SRV/UAV queries in
+waves 4/8, reference and ARM64 AOT. Eight execution cases each repeat
+twice. Ranges 32/64/8 bytes with declared strides 12/20/12 return
+counts 2/3/0, excluding partial final elements and preserving stride
+results 12/20/12 even for the too-short bound view. Counts/strides at
+overlapping registers prove namespace separation; legacy AOT supplies
+space/register/namespace-ordered physical heaps. Divergence, every
+input/output word, guards, sentinels and repeats pass: 104 input bytes
+plus a guarded 128-byte output, exactly 232 bytes per case.
+
+The affected 32-step ARM64 build passes. Twenty-nine focused buffer-
+resource, namespace, raising/lowering, texture-dimension and SPIR-V
+array-length LIT pass with zero failures in 14.08 seconds; eight dimension
+runtime units pass in 1.557 seconds. A new runtime case checks metadata-
+only counts with an unreadable pointer and a deliberately different
+descriptor stride, plus partial/too-short/inactive/unbound behavior.
+One native LIT fixture and one runtime case are added; two portable
+fixtures are extended.
+
+Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+This is native HLSL count/stride CPU evidence, not full-suite, broader
+format, external CTS, adapter-matrix or owned D3D12/conformance closure.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native byte-address buffer dimensions (VM, 2026-11-24)
 
 Opcode-72 field-zero `ByteAddressBuffer`/`RWByteAddressBuffer` queries

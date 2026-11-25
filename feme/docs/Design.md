@@ -1417,8 +1417,8 @@ it now covers the two largest opcode families:
 - Typed-buffer dimensions now raise opcode-72 field-zero queries to
   `llvm.dx.resource.getdimensions.x`, then lower to the existing CPU
   typed element-count helper. Only unused/zero mip operands and field-zero
-  extracts are accepted; mixed fields, aggregate uses, meaningful mips
-  and structured DXIL queries remain unraised. Descriptor format and
+  extracts are accepted; mixed fields, aggregate uses and meaningful mips
+  remain unraised. Descriptor format and
   byte size determine complete-element counts, not shader width. Native
   SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32 and
   mixed R32/RG32/RGBA32 layouts across the same CPU modes, including
@@ -1433,9 +1433,20 @@ it now covers the two largest opcode families:
   SM6.6/SM6.0 queries pass across the same CPU modes, including overlapping
   SRV/UAV registers, divergence, query/store use of the output handle,
   guards and repeats. Runtime units prove odd-byte counts, no data reads,
-  inactive/unbound zeros and invalid-index bounds. Structured queries,
-  buffer xy fields and meaningful mips remain unsupported; runtime/
+  inactive/unbound zeros and invalid-index bounds. Buffer xy fields
+  and meaningful mips remain unsupported; runtime/
   SPIR-V code, ABI 8 and argument layouts are unchanged.
+
+- Structured-buffer dimensions now raise field-zero element counts and
+  lower to the raw metadata helper with the handle's declared structure
+  size as stride, prefix zero. DXC supplies HLSL's stride result as a
+  constant, not a second DXIL dimension field; it remains unchanged.
+  Native SM6.6/SM6.0 SRV/UAV queries pass 12/20-byte strides, complete/
+  partial/too-short ranges, namespace separation, divergence, guards and
+  repeats across the same CPU modes. Zero-size, scalable or oversized
+  structure strides are not lowered; buffer xy fields and meaningful mips
+  remain unsupported. Runtime/SPIR-V code, ABI 8 and argument layouts
+  remain unchanged; this adds no descriptor materialization or conformance.
 
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
@@ -1604,7 +1615,8 @@ a mip-count out-parameter, DXIL's `.z`/`.w` fields, is still left unraised,
 since `DXILOpLowering.cpp` has no `levels_xy`-shaped forward lowering to
 verify against yet). Typed/byte-address field-zero queries additionally
 raise to `getdimensions.x` with unused/zero mip operands; other buffer
-fields and structured DXIL queries remain unraised.
+fields remain unraised. Structured field-zero counts also raise, while DXC's
+constant HLSL stride result is preserved rather than treating it as field 1.
 Before adding comparison mapping, `Sample`,
 `SampleLevel`, `TextureLoad` and `getDimensions` were the only texture
 ops LLVM's own `DXILOpLowering.cpp` already lowered a canonical

@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native structured-buffer dimension scope (2026-11-25)
+
+The [structured-buffer dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-structured-buffer-dimensions-vm-2026-11-25)
+adds field-zero element-count raising and CPU lowering through the existing
+raw metadata helper, using declared structure size as stride and prefix
+zero. DXC's constant HLSL stride output is preserved; buffer xy/mixed
+fields, aggregate uses and meaningful mips remain unsupported. Portable
+SRV/UAV, index, query/load, zero-size rejection and idempotence controls pass.
+
+SDK DXC SM6.6/SM6.0 queries execute in waves 4/8, reference and ARM64
+AOT with eight cases each repeated twice. Ranges 32/64/8 and strides
+12/20/12 return counts 2/3/0 and preserve declared strides. Partial/
+too-short views, namespaces, divergence, all words, guards and sentinels
+pass: exactly 232 compared bytes per case, including a guarded 128-byte
+output. The affected 32-step ARM64 build passes; 29 focused buffer-
+resource, namespace, raising/lowering, texture-dimension and SPIR-V
+array-length LIT pass in 14.08 seconds with zero failures. Eight dimension
+units pass in 1.557 seconds. One native LIT fixture and one runtime case
+are added; two portable fixtures are extended.
+
+Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+This is native HLSL count/stride CPU evidence, not full-suite, broader
+format, external CTS, adapter-matrix or owned D3D12/conformance closure.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native byte-address dimension scope (2026-11-24)
 
 The [byte-address dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-byte-address-buffer-dimensions-vm-2026-11-24)

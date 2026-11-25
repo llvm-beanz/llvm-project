@@ -491,6 +491,25 @@ This is native CPU metadata evidence, not new FXC-profile/external corpus,
 external CTS, adapter-matrix or owned-device closure; see the
 [byte-address dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-byte-address-buffer-dimensions-vm-2026-11-24).
 
+Native structured-buffer dimensions follow-up (2026-11-25): field-zero
+counts now raise/lower through the existing raw metadata helper using
+declared structure size as stride, prefix zero. DXC's constant HLSL stride
+output is preserved, not treated as DXIL field 1. Buffer xy/mixed fields,
+aggregate uses and meaningful mips remain unsupported. Portable SRV/
+UAV, index, query/load, zero-size rejection and idempotence controls pass.
+SDK DXC SM6.6/SM6.0 queries execute in waves 4/8, reference and ARM64
+AOT with eight cases repeated twice. Ranges 32/64/8 and strides
+12/20/12 yield counts 2/3/0; partial/too-short views, namespaces,
+divergence, all words, guards and sentinels pass: exactly 232 bytes.
+The affected 32-step ARM64 build passes; 29 focused LIT pass in 14.08
+seconds and eight runtime units pass in 1.557 seconds, with zero failures.
+One native LIT fixture and one runtime case are added; two portable
+fixtures are extended. Runtime/SPIR-V code, load/store/status/atomic
+policy, advertisements, ABI 8 and argument layouts remain unchanged.
+This is native HLSL count/stride CPU evidence, not new FXC-profile/
+external corpus, external CTS, adapter-matrix or owned-device closure;
+see the [structured-buffer dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-structured-buffer-dimensions-vm-2026-11-25).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

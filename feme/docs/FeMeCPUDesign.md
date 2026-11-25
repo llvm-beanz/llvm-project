@@ -2374,8 +2374,8 @@ Typed-buffer opcode-72 field-zero queries now raise to
 element-index operand: it counts complete physical texels from descriptor
 byte size/format, without reading texel data. Inactive/unbound/invalid
 descriptors still return zero. Only unused/zero mip operands and field-zero
-extracts are raised; mixed fields, aggregate uses, meaningful mips and
-structured DXIL queries remain outside this path. Queries and loads
+extracts are raised; mixed fields, aggregate uses and meaningful mips
+remain outside this path. Queries and loads
 through the same typed handle lower together without changing the ABI.
 Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32
 and mixed R32/RG32/RGBA32 layouts in normal waves 4/8, reference and
@@ -2387,14 +2387,31 @@ Byte-address field-zero queries now also raise to the scalar dimension
 intrinsic and lower to `feme.cpu.resource.getdimensions.raw.i32` with
 literal stride one and prefix zero. This returns declared bytes, not
 DWORDs or structured elements. Only canonical i8 raw handles are admitted
-by this path; structured count/stride and buffer xy queries remain
-unsupported. The existing helper reads metadata, not data: an odd 17-byte
+by this byte-address path; buffer xy queries remain unsupported.
+The existing helper reads metadata, not data: an odd 17-byte
 range returns 17, while inactive/unbound/invalid descriptors return zero.
 Prefix/stride helper behavior and SPIR-V array-length controls remain
 unchanged. Native SDK DXC SM6.6/SM6.0 SRV/UAV queries pass namespace
 separation, divergence, output query/store coexistence, guards and repeats
 in waves 4/8, reference and ARM64 AOT. No runtime/SPIR-V code, ABI 8,
 argument layout, advertisement or descriptor-materialization changes.
+
+Structured field-zero queries now raise to the scalar dimension intrinsic
+and lower through the same raw metadata helper with the handle's declared
+structure size as stride and prefix zero. Counts are complete elements,
+not bytes/DWORDs or descriptor `Stride` values. Queries and ordinary
+accesses share the existing handle-stride calculation. Zero-size, scalable
+or greater-than-32-bit structure sizes are left unsupported by buffer
+dimension lowering. Native DXC supplies the HLSL stride output as a constant;
+it is preserved, not reinterpreted as a second DXIL dimension field.
+SDK DXC SM6.6/SM6.0 SRV/UAV queries pass 12/20-byte stride cases,
+partial/too-short views, namespaces, divergence, guards and repeats in
+waves 4/8, reference and ARM64 AOT. Runtime metadata tests use an
+unreadable pointer and deliberately different descriptor stride to verify
+the helper uses the declared stride operand without reading data.
+Buffer xy/aggregate fields and meaningful mips remain unsupported.
+Runtime/SPIR-V code, ABI 8, argument layouts and advertisements remain
+unchanged; no owned-device closure is established.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

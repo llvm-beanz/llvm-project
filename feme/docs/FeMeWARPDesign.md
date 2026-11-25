@@ -171,8 +171,8 @@ The original compute-only baseline is no longer current:
   `llvm.dx.resource.getdimensions.x` and lower to the existing CPU typed
   element-count helper. Complete physical texels are counted from descriptor
   byte size/format, not shader width. Unused/zero mip operands are accepted;
-  other fields, aggregate uses, meaningful mips and structured DXIL
-  queries remain unraised. Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32
+  other fields, aggregate uses and meaningful mips remain unraised.
+  Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32
   SRV/UAV queries pass RGB32 and mixed R32/RG32/RGBA32 layouts across
   the same CPU modes, including partial/too-short views, namespaces,
   divergence, guards and repeats. Runtime/SPIR-V code, ABI 8 and argument
@@ -184,9 +184,18 @@ The original compute-only baseline is no longer current:
   queries pass namespaces, divergence, output query/store coexistence,
   guards and repeats across the same CPU modes. Odd-byte counts,
   metadata-only access and inactive/unbound/bounds zeros have runtime
-  tests. Structured queries and buffer xy fields remain unsupported.
+  tests. Buffer xy fields remain unsupported.
   Runtime/SPIR-V code, ABI 8 and argument layouts remain unchanged;
   no advertisements, descriptor materialization or owned-device closure.
+  Structured field-zero element counts now also raise/lower to the raw
+  metadata helper with the handle's declared structure size as stride and
+  prefix zero. DXC's constant HLSL stride result is preserved, not treated
+  as a second DXIL dimension field. Native SM6.6/SM6.0 SRV/UAV queries
+  pass 12/20-byte strides, partial/too-short views, namespaces, divergence,
+  guards and repeats across the same CPU modes. Buffer xy fields and
+  meaningful mips remain unsupported. Runtime/SPIR-V code, ABI 8 and
+  argument layouts remain unchanged; this adds no descriptor materialization,
+  advertisements or owned-device/conformance closure.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

@@ -147,8 +147,8 @@ Typed-buffer `GetDimensions` now raises opcode-72 field-zero queries to
 `llvm.dx.resource.getdimensions.x` and lowers to the existing CPU typed
 element-count helper. Complete physical texels are counted from descriptor
 byte size/format, not shader width. Only unused/zero mip operands and
-field-zero extracts are supported; mixed fields, aggregate uses, meaningful
-mips and structured DXIL queries remain unraised. Native SDK DXC
+field-zero extracts are supported; mixed fields, aggregate uses and meaningful
+mips remain unraised. Native SDK DXC
 SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32 and mixed
 R32/RG32/RGBA32 layouts across the same CPU modes, including partial/
 too-short views, namespaces, divergence, guards and repeats. Runtime/
@@ -161,9 +161,20 @@ stride one/prefix zero. The result is bytes, not DWORDs or structured
 elements. Native SDK DXC SM6.6/SM6.0 SRV/UAV queries pass across the
 same CPU modes, with namespace separation, divergence, output query/store
 coexistence, guards and repeats. Runtime tests cover odd-byte counts,
-metadata-only reads and inactive/unbound/bounds zeros. Structured queries,
-buffer xy fields and meaningful mips remain unsupported; runtime/
+metadata-only reads and inactive/unbound/bounds zeros. Buffer xy fields
+and meaningful mips remain unsupported; runtime/
 SPIR-V code, ABI 8 and argument layouts are unchanged.
+
+`StructuredBuffer`/`RWStructuredBuffer.GetDimensions` now also executes
+through field-zero raising and the raw metadata helper, using the handle's
+declared structure size as stride, prefix zero. Counts exclude incomplete
+elements. DXC supplies the HLSL stride result as a constant; it is preserved,
+not interpreted as DXIL field 1. Native SM6.6/SM6.0 SRV/UAV cases pass
+12/20-byte strides, partial/too-short views, namespace separation,
+divergence, guards and repeats across the same CPU modes. Buffer xy fields,
+aggregate uses and meaningful mips remain unsupported. Runtime/SPIR-V
+code, ABI 8 and argument layouts are unchanged; no owned-device or
+general conformance closure is established.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

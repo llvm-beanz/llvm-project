@@ -2807,6 +2807,57 @@ suite, external CTS, adapter-matrix and owned D3D12/conformance closure
 remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native structured-buffer dimensions (2026-11-25).**
+
+The native reproduction confirmed structured opcode-72 element-count
+queries remained unraised. They now raise to
+`llvm.dx.resource.getdimensions.x` and lower through the existing raw
+metadata helper using the handle's declared structure size as stride,
+prefix zero. Counts exclude incomplete elements rather than returning
+bytes or DWORDs. DXC emits the HLSL stride output as a constant, not a
+second DXIL dimension field; this constant is preserved. Query/load
+lowering uses the same declared structure-stride calculation.
+
+The existing portable dimension fixtures now check structured SRV/UAV
+raising, descriptor indices, 12/20-byte helper strides, query/load
+coexistence and idempotence. Buffer xy/mixed-field queries remain
+unsupported: a structured HLSL stride is not synthesized from DXIL field 1.
+Zero-size structures are rejected by CPU dimension lowering; scalable
+or greater-than-32-bit sizes are also outside that lowering's scope.
+Unused/zero mip operands remain required, and aggregate uses/meaningful
+mips retain the existing rejection policy.
+
+The new
+[`native-structured-buffer-dimensions.test`](../test/Tools/feme-run/HLSL/native-structured-buffer-dimensions.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound `StructuredBuffer`/
+`RWStructuredBuffer` queries in normal waves 4/8, reference and ARM64
+AOT. Eight execution cases each repeat twice. Ranges 32/64/8 bytes
+with declared strides 12/20/12 return counts 2/3/0 and preserve stride
+results 12/20/12. Partial final elements are excluded; a bound view too
+short for one element still reports its declared stride. Different
+counts/strides at the same logical SRV/UAV register prove namespace
+separation; legacy AOT uses space/register/namespace-ordered physical
+heaps. Divergence, every input/output word, guards, sentinels and repeats
+pass: 104 input bytes plus a guarded 128-byte output, exactly 232 bytes.
+
+A new runtime case verifies complete-element counts without dereferencing
+an unreadable data pointer, using the declared stride operand rather than
+a deliberately different descriptor stride. Partial/too-short ranges,
+SRV/UAV flags, inactive and unbound behavior are checked. The affected
+assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes 32
+steps. Twenty-nine focused native buffer-resource, namespace, raising/
+round-trip, CPU/SPIR-V lowering, texture-dimension and array-length LIT
+pass with zero failures in 14.08 seconds. Eight dimension runtime units
+pass in 1.557 seconds. One native fixture adds one LIT test, two portable
+fixtures are extended and one runtime case is added.
+
+This adds structured count raising/CPU lowering and native HLSL count/
+stride evidence only. Runtime/SPIR-V code, load/store/status/atomic
+policy, advertisements, descriptor materialization, ABI 8 and argument
+layouts remain unchanged. Broader format support, a full suite, external
+CTS, adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.
