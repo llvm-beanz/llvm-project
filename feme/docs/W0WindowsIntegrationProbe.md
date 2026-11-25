@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native 1D/array texture dimensions (VM, 2026-11-25)
+
+The native reproduction raised 1D/array dimensions but failed CPU admission.
+Heap-backed FP32/i32 scalar/vector SRV/UAV queries now share the dimension
+admission/lowering predicate. Plain 1D accepts scalar width only; array
+1D accepts width or width/layer count. Existing 1D/array metadata helpers
+receive literal mip zero in any stage without sampler or derivatives.
+Portable tests check indices, writable arrays, fragment layer-derived
+loads, cleanup, unsupported plain-1D pairs and idempotence.
+
+[`native-texture1d-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture1d-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. Three-mip plain/array SRVs report base
+widths 5/7 and array layers 2; UAVs report width 3 and width 2/layers 3.
+Divergent/unbound indices, skipped-store sentinels, exact high-bit integer
+loads from alternating layers through a queried handle, all words, guards
+and repeats pass: 156 input bytes plus a guarded 148-byte output,
+exactly 304 bytes per case. Native dynamic-mip array queries and canonical
+plain-1D pair queries reject in normal/reference/AOT paths.
+
+The affected 30-step ARM64 build passes. Thirty-four focused dimension,
+1D/2D loading/sampling, raising, namespace, typed-load and CPU/SPIR-V
+LIT pass with zero failures in 22.53 seconds; eleven dimension runtime
+units pass in 2.659 seconds. Three LIT fixtures and two runtime cases
+are added; the existing 2D admission diagnostic expectation is updated.
+Runtime cases use unreadable pointers and check sampled/storage extents,
+inactive/unbound/zero-mip/invalid-index zeros and invalid heaps. Helper
+LOD controls preserve fixed layer counts as width shrinks, without
+claiming native explicit-mip support.
+
+Raising, runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and layouts remain
+unchanged. Other shapes/mips/fields, bound/static images, full-suite,
+external CTS, adapter-matrix and owned D3D12/conformance closure remain
+open. `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native plain-2D texture dimensions (VM, 2026-11-25)
 
 The native reproduction raised scalar/pair texture dimensions but left

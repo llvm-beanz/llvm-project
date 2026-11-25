@@ -68,7 +68,8 @@ Error checkSupportedRaisedOps(const Module &M) {
           return createStringError(
               inconvertibleErrorCode(),
               "unsupported raised operation: '%s' requires heap-backed "
-              "FP32/i32 plain 2D mip-zero texture dimension queries",
+              "FP32/i32 1D/array or plain 2D mip-zero texture dimension "
+              "queries",
               F.getName().str().c_str());
       }
       continue;

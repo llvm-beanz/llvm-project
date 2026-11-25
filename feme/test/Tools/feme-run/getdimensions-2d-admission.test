@@ -14,7 +14,7 @@
 # RUN: not feme-run --reference %t/half.ll 2>&1 | FileCheck %s
 # RUN: llvm-as %t/half.ll -o %t/half.bc
 # RUN: not feme --target=%feme_host_triple %t/half.bc -o %t/half.o 2>&1 | FileCheck %s
-# CHECK: requires heap-backed FP32/i32 plain 2D mip-zero texture dimension queries
+# CHECK: requires heap-backed FP32/i32 1D/array or plain 2D mip-zero texture dimension queries
 #--- array.ll
 define void @main() #0 {
   %t = call target("dx.Texture", float, 0, 0, 0, 7) @llvm.dx.resource.handlefromheap.a(i32 0)

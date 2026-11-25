@@ -3152,10 +3152,22 @@ passes normal waves 4/8, reference and ARM64 AOT, including width-only,
 height-only and paired results, a three-mip base extent, divergent/unbound
 indices, query/load coexistence, all words, guards and repeats.
 Nonzero/dynamic texture mips now stay unraised rather than being dropped.
-Array/MS/other shapes, non-32-bit declarations, mip-count/other fields
+2D-array/MS/3D/cube shapes, non-32-bit declarations, mip-count/other fields
 and bound/static image queries remain outside this CPU path. Runtime/
 SPIR-V code, ABI 8 and argument layouts remain unchanged; this is shared
 CPU metadata evidence, not draw or owned-device/conformance closure.
+
+Heap-backed 1D/array scalar/pair dimensions now also lower through
+existing metadata helpers with literal mip zero. Plain 1D accepts scalar
+width; array 1D accepts width or width/layer count. FP32/i32 SRV/UAV
+queries share admission/lowering eligibility without samplers or
+derivatives. Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64
+AOT with three-mip base widths, distinct fixed layer counts, divergent/
+unbound indices, query/load coexistence, all words, guards and repeats.
+Portable fragment tests verify layer-derived loads and idempotence;
+plain 1D pair queries and explicit mips remain rejected. Raising, runtime/
+SPIR-V code, ABI 8 and layouts remain unchanged. This is shared CPU
+metadata evidence, not draw or bound/static/owned-device closure.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

@@ -527,6 +527,24 @@ unchanged. Bound/static images, broader shapes/mips/fields, new FXC-
 profile/external corpus, external CTS, adapter-matrix and owned-device
 closure remain open; see the [plain-2D dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-2d-texture-dimensions-vm-2026-11-25).
 
+Native 1D/array texture dimensions follow-up (2026-11-25): heap-backed
+FP32/i32 SRV/UAV scalar/pair queries now share dimension admission/
+lowering through existing metadata helpers with literal mip zero in any
+stage, without sampler/derivatives. Plain 1D accepts width; array 1D accepts
+width or width/layer count. Plain 1D pairs and native explicit mips retain
+rejection. SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT,
+four cases repeated twice. Three-mip base widths, distinct layer counts,
+divergent/unbound indices, exact integer query/load results, all words,
+guards and sentinels pass: exactly 304 bytes. The affected 30-step ARM64
+build passes; 34 focused LIT pass in 22.53 seconds and eleven dimension
+units in 2.659 seconds, zero failures. Three LIT fixtures and two runtime
+cases are added; the existing 2D admission diagnostic expectation is updated.
+Raising, runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, ABI 8 and layouts remain unchanged. Other shapes/mips/
+fields, bound/static images, new FXC-profile/external corpus, external CTS,
+adapter-matrix and owned-device closure remain open; see the
+[1D/array dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-1darray-texture-dimensions-vm-2026-11-25).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

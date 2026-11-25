@@ -2911,6 +2911,54 @@ Bound/static images, broader shapes/mips/fields, full-suite, external CTS,
 adapter-matrix and owned D3D12/conformance closure remain open.
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native 1D/array texture dimensions (2026-11-25).**
+
+The native reproduction confirmed 1D/array scalar/pair queries already
+raised but failed CPU admission. Heap-backed FP32/i32 scalar/vector
+`Texture1D`/`RWTexture1D` and array counterparts now share the existing
+dimension admission/lowering predicate. Plain 1D accepts scalar width
+only; array 1D accepts width or width/layer count. Existing 1D/array
+explicit-LOD metadata helpers receive literal mip zero, without sampler
+or derivatives, in any stage. No new runtime helper or ABI is added.
+Array layer count is independent of the spatial width and mip chain.
+
+Portable tests cover plain scalar and array scalar/pair lowering,
+indices, writable arrays, fragment query-derived layer/load dependence,
+handle cleanup and idempotence. Plain 1D pair queries remain unchanged
+by lowering and reject explicitly in normal/reference/AOT admission;
+the existing non-heap/non-32-bit/2D-array controls still pass. Raising
+is unchanged: native dynamic-mip array queries remain unraised and
+reject in all three paths rather than executing at mip zero.
+
+[`native-texture1d-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture1d-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT.
+Four cases each repeat twice. Three-mip plain/array SRVs report base
+widths 5/7, the array SRV reports two layers, a plain UAV reports width
+3 and an array UAV reports width 2/three layers. Lane four selects an
+unbound array descriptor, returning zero dimensions and a zero load;
+lane one skips the plain UAV store, preserving its sentinel. The queried
+array also loads exact high-bit signed integer bits from alternating
+layers. Every word, guard and repeat passes: 156 input bytes plus a
+guarded 148-byte output, exactly 304 compared bytes per case.
+
+Two runtime units check sampled/storage metadata-only queries using
+unreadable data pointers, inactive/unbound/zero-mip/invalid-index zeros
+and invalid heaps. Helper LOD tests verify shrinking width with fixed
+array layers; they are shared-helper controls, not native explicit-mip
+support. The affected assertions-enabled, PCH-disabled, sccache ARM64
+`-j2` build passes 30 steps. Thirty-four focused dimension, 1D/2D loading/
+sampling, raising, namespace, typed-load and CPU/SPIR-V LIT pass with
+zero failures in 22.53 seconds. Eleven dimension runtime units pass in
+2.659 seconds. Three new LIT fixtures and two runtime cases are added;
+the existing 2D admission fixture's diagnostic expectation is updated.
+
+Raising, runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and argument layouts
+remain unchanged. Other shapes/mips/fields, bound/static images, full-
+suite, external CTS, adapter-matrix and owned D3D12/conformance closure
+remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

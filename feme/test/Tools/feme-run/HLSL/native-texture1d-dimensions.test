@@ -1,0 +1,102 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIP /Fo %t/mip.dxil %t/shader.hlsl
+# RUN: not feme-run %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
+# RUN: not feme-run --reference %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
+# RUN: not feme --target=%feme_host_triple %t/mip.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=MIP
+#
+# Three-mip plain/array SRVs query their base width, not the last mip.
+# Different UAV widths/layer counts distinguish all four descriptors.
+# A divergent array index is unbound in lane four; lane one skips a store.
+# The queried array also loads exact signed bits from alternating layers.
+# Every word of 156 input bytes and 148 guarded output bytes is checked.
+# Heap-backed mip-zero CPU evidence, not bound/static or owned D3D12 views.
+# RAISE-DAG: call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.Texture", float,
+# RAISE-DAG: call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.Texture", i32,
+# RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <2 x i32>,
+# RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <4 x float>,
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# MIP: unsupported raised operation: 'dx.op.getDimensions' was not raised
+# CHECK: heap[4]: [[OUT:42 5 3 7 2 2 3 2147483649 5 42 7 2 2 3 0 5 3 7 2 2 3 2147483649 5 3 7 2 2 3 0 5 3 0 0 2 3 0 42]]{{$}}
+# CHECK-NEXT: image[0]: [[F:0( 0){7}]]{{$}}
+# CHECK-NEXT: image[1]: [[U:0 0 0]]{{$}}
+# CHECK-NEXT: image[2]: [[A:2147483649( 0){21}]]{{$}}
+# CHECK-NEXT: image[3]: [[W:0( 0){5}]]{{$}}
+# CHECK-NEXT: heap[4]: [[OUT]]{{$}}
+# CHECK-NEXT: image[0]: [[F]]{{$}}
+# CHECK-NEXT: image[1]: [[U]]{{$}}
+# CHECK-NEXT: image[2]: [[A]]{{$}}
+# CHECK-NEXT: image[3]: [[W]]{{$}}
+# CHECK-NOT: {{(heap|image)\[}}
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture1D<float> plain = ResourceDescriptorHeap[0];
+  RWTexture1D<uint> writable = ResourceDescriptorHeap[1];
+  Texture1DArray<int2> array = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 9 : 2)];
+  RWTexture1DArray<float4> writableArray = ResourceDescriptorHeap[3];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[4];
+  uint base = 4 + tid.x * 28;
+  uint width, elements;
+  plain.GetDimensions(width);
+  output.Store(base, width);
+  if (tid.x != 1) {
+    writable.GetDimensions(width);
+    output.Store(base + 4, width);
+  }
+#ifdef MIP
+  uint levels;
+  array.GetDimensions(tid.x, width, elements, levels);
+#else
+  array.GetDimensions(width, elements);
+#endif
+  output.Store2(base + 8, uint2(width, elements));
+  writableArray.GetDimensions(width, elements);
+  output.Store2(base + 16, uint2(width, elements));
+  output.Store(base + 24, asuint(array.Load(int3(0, tid.x & 1, 0)).x));
+}
+#--- heap.yaml
+resource-heap:
+  - index: 4
+    size: 148
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 1d
+    extent: [5]
+    mip-levels: 3
+    format: r32_float
+    data: [0, 0, 0, 0, 0, 0, 0, 0]
+  - index: 1
+    dimension: 1d
+    extent: [3]
+    format: r32_uint
+    data: [0, 0, 0]
+  - index: 2
+    dimension: 1d-array
+    extent: [7]
+    array-layers: 2
+    mip-levels: 3
+    format: r32_sint
+    data: [2147483649, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - index: 3
+    dimension: 1d-array
+    extent: [2]
+    array-layers: 3
+    format: r32_float
+    data: [0, 0, 0, 0, 0, 0]

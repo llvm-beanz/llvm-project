@@ -66,8 +66,9 @@
 // signed spatial offsets in every stage, without a sampler. FP32/i32 2D/array
 // Load shares this path with paired XY spatial offsets. FP32/i32 2DMS/array
 // Load uses mip zero and an explicit i32 sample index.
-// FP32/i32 plain 2D heap-backed getdimensions.x/xy uses the existing
-// metadata-only mip-zero helper in any stage, without a sampler.
+// FP32/i32 1D/array and plain 2D heap-backed getdimensions.x/xy use existing
+// metadata-only helpers at mip zero in any stage, without a sampler.
+// Plain 1D accepts only scalar width; array 1D returns width/layer count.
 //
 //===----------------------------------------------------------------------===//
 
@@ -82,9 +83,10 @@ class CallInst;
 
 namespace feme::cpu {
 
-/// Tests heap-backed FP32/i32 plain 2D mip-zero scalar/pair dimension
-/// queries in any stage. Sampled and writable textures share the same
-/// metadata helper; array, MS and explicit-mip queries are not included.
+/// Tests heap-backed FP32/i32 1D/array or plain 2D mip-zero scalar/pair
+/// dimension queries in any stage. Sampled and writable textures share the same
+/// metadata helpers; plain 1D accepts only scalar width. Other array
+/// shapes, MS and explicit-mip queries are not included.
 bool isSupportedDXILGetDimensions(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32/i32 1D/2D (including array) or 3D loading in any

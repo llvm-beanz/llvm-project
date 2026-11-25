@@ -708,6 +708,80 @@ FemeSamplerDescriptor makeSampler(SamplerFilter MagFilter,
   return Samp;
 }
 
+TEST_F(ImageSamplingTest, GetDimensions1DIsMetadataOnlyAndChecksBounds) {
+  using GetDimensionsFn = int32_t (*)(const FemeImageDescriptor *, uint32_t,
+                                      uint32_t, int32_t, bool);
+  GetDimensionsFn Fn = resolveRuntime<GetDimensionsFn>(
+      "feme.cpu.image.getdimensions.lod.1d.i32");
+  ASSERT_TRUE(Fn);
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Width = 5;
+  Img.MipLevels = 3;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  EXPECT_EQ(Fn(&Img, 1, 0, 0, true), 5);
+  EXPECT_EQ(Fn(&Img, 1, 0, 2, true), 1);
+  Img.Width = 3;
+  Img.Flags = FEME_IMAGE_STORAGE;
+  EXPECT_EQ(Fn(&Img, 1, 0, 0, true), 3);
+  EXPECT_EQ(Fn(&Img, 1, 0, 0, false), 0);
+  Img.MipLevels = 0;
+  EXPECT_EQ(Fn(&Img, 1, 0, 0, true), 0);
+  Img.MipLevels = 3;
+  Img.Data = nullptr;
+  EXPECT_EQ(Fn(&Img, 1, 0, 0, true), 0);
+  EXPECT_EQ(Fn(nullptr, 0, 0, 0, true), 0);
+  EXPECT_EQ(Fn(nullptr, 1, 1, 0, true), 0);
+  EXPECT_EQ(Fn(nullptr, 1, 0xffffffffu, 0, true), 0);
+}
+
+TEST_F(ImageSamplingTest, GetDimensions1DArrayPreservesLayersAndChecksBounds) {
+  using GetDimensionsFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                   uint32_t, int32_t, bool, void *);
+  GetDimensionsFn Fn = resolve<GetDimensionsFn>(addWrapper(
+      "dimensions", "feme.cpu.image.getdimensions.lod.1darray.v2i32"));
+  ASSERT_TRUE(Fn);
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Width = 7;
+  Img.ArrayLayers = 2;
+  Img.MipLevels = 3;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  alignas(8) uint32_t Out[2] = {};
+  Fn(&Img, 1, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 7u);
+  EXPECT_EQ(Out[1], 2u);
+  Fn(&Img, 1, 0, 2, true, Out);
+  EXPECT_EQ(Out[0], 1u);
+  EXPECT_EQ(Out[1], 2u);
+  Img.Width = 2;
+  Img.ArrayLayers = 3;
+  Img.Flags = FEME_IMAGE_STORAGE;
+  Fn(&Img, 1, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 2u);
+  EXPECT_EQ(Out[1], 3u);
+  Fn(&Img, 1, 0, 0, false, Out);
+  EXPECT_EQ(Out[0], 0u);
+  EXPECT_EQ(Out[1], 0u);
+  Img.MipLevels = 0;
+  Fn(&Img, 1, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 0u);
+  EXPECT_EQ(Out[1], 0u);
+  Img.MipLevels = 3;
+  Img.Data = nullptr;
+  Fn(&Img, 1, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 0u);
+  EXPECT_EQ(Out[1], 0u);
+  Fn(nullptr, 0, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 0u);
+  EXPECT_EQ(Out[1], 0u);
+  for (uint32_t Index : {1u, 0xffffffffu}) {
+    Fn(nullptr, 1, Index, 0, true, Out);
+    EXPECT_EQ(Out[0], 0u);
+    EXPECT_EQ(Out[1], 0u);
+  }
+}
+
 TEST_F(ImageSamplingTest, GetDimensions2DIsMetadataOnlyAndChecksBounds) {
   using GetDimensionsFn =
       void (*)(const FemeImageDescriptor *, uint32_t, uint32_t, bool, void *);

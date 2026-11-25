@@ -183,10 +183,21 @@ paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
 including a three-mip base extent, divergent/unbound indices, query/load
 coexistence, all words, guards and repeats. Admission and lowering share
 the same predicate. Nonzero/dynamic texture mips now remain unraised,
-not silently discarded. Array/MS/other shapes, non-32-bit declarations,
+not silently discarded. 2D-array/MS/3D/cube shapes, non-32-bit declarations,
 mip-count/other fields and bound/static images remain unsupported by
 this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
 layouts remain unchanged; no owned-device closure is established.
+
+Heap-backed `Texture1D`/`RWTexture1D` and their array counterparts now
+also execute mip-zero FP32/i32 dimensions through the existing metadata
+helpers. Plain 1D accepts scalar width only; array 1D accepts scalar width
+or width/layer count. Native SDK DXC SM6.6 passes waves 4/8, reference
+and ARM64 AOT, including three-mip base widths, distinct layer counts,
+divergent/unbound indices, exact integer query/load results, all words,
+guards and repeats. Plain 1D pair queries and explicit mips remain
+rejected in normal/reference/AOT paths. No sampler/derivatives are
+needed. Raising, runtime/SPIR-V code, ABI 8, layouts and advertisements
+remain unchanged; no bound/static images or owned-device closure.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

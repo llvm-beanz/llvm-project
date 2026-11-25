@@ -755,9 +755,21 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     if (isSupportedDXILGetDimensions(*CI)) {
       IRBuilder<> Builder(CI);
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
-      Value *Dimensions = createGetDimensions2D(
-          Builder, Env, Image->getArgOperand(0), Builder.getTrue());
-      if (ID == Intrinsic::dx_resource_getdimensions_x)
+      auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
+      Value *Dimensions;
+      if (Kind == dxil::ResourceKind::Texture1D)
+        Dimensions =
+            createQuerySizeLod1D(Builder, Env, Image->getArgOperand(0),
+                                 Builder.getInt32(0), Builder.getTrue());
+      else if (Kind == dxil::ResourceKind::Texture1DArray)
+        Dimensions =
+            createQuerySizeLod1DArray(Builder, Env, Image->getArgOperand(0),
+                                      Builder.getInt32(0), Builder.getTrue());
+      else
+        Dimensions = createGetDimensions2D(
+            Builder, Env, Image->getArgOperand(0), Builder.getTrue());
+      if (ID == Intrinsic::dx_resource_getdimensions_x &&
+          Kind != dxil::ResourceKind::Texture1D)
         Dimensions = Builder.CreateExtractElement(Dimensions, uint64_t{0});
       CI->replaceAllUsesWith(Dimensions);
       CI->eraseFromParent();
@@ -1501,8 +1513,14 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
   auto *Ty = dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
   if (!Image ||
       getIntrinsicID(Image) != Intrinsic::dx_resource_handlefromheap || !Ty ||
-      Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4 ||
-      Ty->getDimension() != dxil::ResourceKind::Texture2D)
+      Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4)
+    return false;
+  auto Kind = Ty->getDimension();
+  if ((Kind != dxil::ResourceKind::Texture1D &&
+       Kind != dxil::ResourceKind::Texture1DArray &&
+       Kind != dxil::ResourceKind::Texture2D) ||
+      (Kind == dxil::ResourceKind::Texture1D &&
+       ID != Intrinsic::dx_resource_getdimensions_x))
     return false;
   Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
   return (ScalarTy->isFloatTy() || ScalarTy->isIntegerTy(32)) &&

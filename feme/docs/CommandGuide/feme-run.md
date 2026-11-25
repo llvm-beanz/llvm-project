@@ -175,13 +175,28 @@ Width-only, height-only and paired outputs distinguish extents 5x3, 3x2
 and 2x4. The full image has three mips and still reports its base extent;
 the same handle also loads a texel. Divergent unbound indices return zeros;
 sentinels, every word, guards and repeats pass: 128 input bytes plus a
-guarded 108-byte output, exactly 236 bytes per case. Array/MS/other
+guarded 108-byte output, exactly 236 bytes per case. 2D-array/MS/3D/cube
 shapes, non-32-bit declarations, mip-count/other fields and bound/static
 images remain outside this CPU path. Nonzero/dynamic texture mips are
 rejected during raising, not discarded; unsupported canonical query shapes
 fail early normal/reference/AOT admission. Runtime/SPIR-V code, buffer
 dimensions, ABI 8 and argument layouts remain unchanged; no owned-device
 or conformance closure is added.
+
+Native heap-backed 1D/array dimensions now also execute SDK DXC SM6.6
+FP32/i32 SRV/UAV queries in waves 4/8, reference and ARM64 AOT. YAML
+`images` uses `dimension: 1d`/`1d-array`, one-component `extent` and
+`array-layers` for arrays. No sampler is needed. Existing metadata helpers
+receive literal mip zero. Plain 1D accepts scalar width only; array 1D
+accepts scalar width or width/layer count. Three-mip plain/array SRVs
+report base widths 5/7 and array layers 2; UAVs report width 3 and
+width 2/layers 3. Divergent/unbound indices, alternating-layer exact
+integer loads through a queried handle, sentinels, every word, guards
+and repeats pass: 156 input bytes plus a guarded 148-byte output,
+exactly 304 bytes per case. Plain 1D pair queries and native explicit
+mips remain rejected in normal/reference/AOT paths. Raising, runtime/
+SPIR-V code, ABI 8 and layouts remain unchanged. Other shapes/fields,
+bound/static images and owned-device/conformance closure remain open.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native 1D/array texture dimension scope (2026-11-25)
+
+The [1D/array dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-1darray-texture-dimensions-vm-2026-11-25)
+adds heap-backed FP32/i32 SRV/UAV scalar/pair CPU lowering through existing
+metadata helpers with literal mip zero in any stage, without samplers or
+derivatives. Plain 1D accepts width only; array 1D accepts width or width/
+layer count. Plain 1D pairs and native explicit-mip queries retain rejection.
+
+SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT, four cases
+each repeated twice. Three-mip base widths, distinct fixed layer counts,
+divergent/unbound indices, exact alternating-layer query/load results,
+all words, guards and sentinels pass: exactly 304 compared bytes,
+including a guarded 148-byte output. The affected 30-step ARM64 build
+passes; 34 focused dimension/image/buffer/CPU/SPIR-V LIT pass in
+22.53 seconds and eleven dimension units in 2.659 seconds, zero failures.
+Three LIT fixtures and two runtime cases are added; the existing 2D
+admission diagnostic expectation is updated.
+
+Raising, runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and layouts remain
+unchanged. This is native mip-zero CPU metadata evidence, not broader
+shapes/mips/fields, bound/static images, full-suite, new CTS, adapter-
+matrix or owned D3D12/conformance closure. `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native plain-2D texture dimension scope (2026-11-25)
 
 The [plain-2D dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-2d-texture-dimensions-vm-2026-11-25)

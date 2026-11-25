@@ -3005,6 +3005,23 @@ the first shader-facing milestone rather than alongside it.
    descriptor materialization, ABI 8 and layouts remain unchanged.
    Bound/static images, broader shapes/mips/fields, full-suite, external
    CTS, adapter-matrix and owned-device/W2/W3 closure remain open.
+   Native 1D/array texture dimensions follow-up (2026-11-25):
+   heap-backed FP32/i32 SRV/UAV scalar/pair queries now share dimension
+   admission/lowering through existing metadata helpers with literal mip
+   zero in any stage, without sampler/derivatives. Plain 1D accepts width;
+   array 1D accepts width or width/layer count. Plain 1D pairs and native
+   explicit mips retain rejection. SDK DXC SM6.6 passes waves 4/8,
+   reference and ARM64 AOT, four cases repeated twice. Three-mip base
+   widths, distinct layer counts, divergent/unbound indices, exact integer
+   query/load results, all words, guards and sentinels pass: exactly 304
+   bytes per case. The affected 30-step ARM64 build passes; 34 focused
+   LIT pass in 22.53 seconds and eleven dimension units in 2.659 seconds,
+   zero failures. Three LIT fixtures and two runtime cases are added; the
+   existing 2D admission diagnostic expectation is updated. Raising,
+   runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+   descriptor materialization, ABI 8 and layouts remain unchanged.
+   Other shapes/mips/fields, bound/static images, full-suite, external
+   CTS, adapter-matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

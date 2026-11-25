@@ -1455,11 +1455,23 @@ it now covers the two largest opcode families:
   Native SDK DXC SM6.6 executes in waves 4/8, reference and ARM64 AOT,
   checking a three-mip base extent, divergent/unbound indices, query/load
   coexistence, every word, guards and repeats. Admission and lowering share
-  a predicate; non-heap, array/MS/other shapes and non-32-bit declarations
+  a predicate; non-heap, 2D-array/MS/3D/cube shapes and non-32-bit declarations
   remain unsupported. Texture raising now rejects nonzero/dynamic mips
   rather than dropping an operand absent from the scalar/pair intrinsics.
   Mip-count/other result fields, bound/static images and owned-device
   execution remain open. Runtime/SPIR-V code, ABI 8 and layouts are unchanged.
+
+- Heap-backed 1D/array texture dimensions now share that admission/lowering
+  predicate. Plain 1D accepts scalar width only; array 1D accepts scalar
+  width or a width/layer-count pair. Existing explicit-LOD metadata helpers
+  receive literal mip zero, without sampler or derivatives. Native SDK DXC
+  SM6.6 SRV/UAV queries pass waves 4/8, reference and ARM64 AOT, including
+  three-mip base widths, independent layer counts, divergent/unbound
+  indices, query/load coexistence, every word, guards and repeats.
+  Portable fragment tests cover layer-derived loads and idempotence; plain
+  1D pair queries and explicit mips retain early rejection. Runtime/SPIR-V
+  code, existing load/store/status/atomic policy, ABI 8 and layouts remain
+  unchanged. No bound/static images or owned-device closure is added.
 
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
@@ -1632,8 +1644,8 @@ fields remain unraised. Structured field-zero counts also raise, while DXC's
 constant HLSL stride result is preserved rather than treating it as field 1.
 All scalar/pair dimension raising requires an unused/zero mip operand:
 nonzero/dynamic texture mips stay unraised rather than silently becoming
-mip-zero queries. Plain 2D heap-backed FP32/i32 texture scalar/pair queries
-now lower to the shared CPU metadata helper; other texture shapes,
+mip-zero queries. 1D/array and plain 2D heap-backed FP32/i32 texture
+scalar/pair queries now lower to shared CPU metadata helpers; other shapes,
 mip-count fields and bound/static image queries remain outside that path.
 Before adding comparison mapping, `Sample`,
 `SampleLevel`, `TextureLoad` and `getDimensions` were the only texture

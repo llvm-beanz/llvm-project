@@ -203,10 +203,21 @@ The original compute-only baseline is no longer current:
   height-only and paired results, a three-mip base extent, divergent/
   unbound indices, query/load coexistence, all words, guards and repeats.
   Nonzero/dynamic texture mips now remain unraised rather than being
-  dropped. Array/MS/other shapes, non-32-bit declarations, mip-count/
+  dropped. 2D-array/MS/3D/cube shapes, non-32-bit declarations, mip-count/
   other fields and bound/static images remain outside this CPU path.
   Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; this adds no
   descriptor materialization, advertisements or owned-device closure.
+  Heap-backed 1D/array dimensions now share admission/lowering eligibility
+  through existing metadata helpers with literal mip zero, no sampler or
+  derivatives. Plain 1D accepts scalar width; array 1D accepts width or
+  width/layer count. Native SDK DXC SM6.6 FP32/i32 SRV/UAV queries
+  pass waves 4/8, reference and ARM64 AOT, including three-mip base
+  widths, distinct layer counts, divergent/unbound indices, query/load
+  coexistence, all words, guards and repeats. Portable fragment tests
+  verify layer-derived loads and idempotence; plain 1D pair queries and
+  explicit mips remain rejected. Raising, runtime/SPIR-V code, ABI 8 and
+  layouts remain unchanged; no bound/static images, advertisements or
+  owned-device closure are added.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

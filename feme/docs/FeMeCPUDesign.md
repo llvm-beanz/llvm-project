@@ -2420,7 +2420,7 @@ component selection. Scalar/vector FP32/i32 declarations up to four
 components, sampled or writable, share an admission/lowering predicate.
 No sampler, derivatives or texel data are needed. Queries and loads through
 the same handle lower together, unused handles are removed and repeated
-lowering is idempotent. Non-heap, array/MS/other shapes and non-32-bit
+lowering is idempotent. Non-heap, 2D-array/MS/3D/cube shapes and non-32-bit
 declarations remain unsupported with explicit normal/reference/AOT
 admission diagnostics. The raiser now rejects nonzero/dynamic texture
 mips instead of dropping an operand the scalar/pair intrinsics cannot
@@ -2434,6 +2434,28 @@ unreadable pointer, plus inactive/unbound/out-of-range zeros without
 touching invalid heaps. Runtime/SPIR-V code, buffer dimensions, load/
 store/status/atomic policy, ABI 8, argument layouts and advertisements
 remain unchanged. No bound/static images or owned-device closure is added.
+
+Heap-backed 1D/array texture dimensions now share that admission/lowering
+predicate for scalar/vector FP32/i32 SRV/UAV declarations up to four
+components. Plain 1D accepts scalar width only; array 1D accepts scalar
+width or a width/layer-count pair. Existing `getdimensions.lod.1d.i32`/
+`getdimensions.lod.1darray.v2i32` helpers receive literal mip zero; the
+array scalar form extracts width from the pair. No sampler or derivatives
+are needed. Query/load coexistence, fragment layer-derived coordinates,
+handle cleanup and idempotence have portable tests; plain 1D pair
+queries reject explicitly in normal/reference/AOT admission.
+Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT:
+three-mip plain/array SRVs report base widths 5/7, a plain UAV reports
+width 3 and an array UAV reports width 2/layers 3 versus SRV layers 2.
+Divergent/unbound indices, exact integer query/load results, sentinels,
+all words, guards and two repeats pass. Two runtime units use unreadable
+data pointers to check sampled/storage metadata, inactive/unbound/zero-
+mip/invalid-index zeros and fixed layers while helper LOD shrinks width.
+The helper LOD tests preserve shared SPIR-V behavior; native lowering
+still passes zero and native dynamic-mip shaders remain rejected.
+Raising, runtime/SPIR-V code, existing load/store/status/atomic policy,
+ABI 8, layouts and advertisements remain unchanged. Other shapes/fields,
+bound/static images and owned-device execution remain open.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This
