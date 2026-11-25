@@ -2675,6 +2675,22 @@ the first shader-facing milestone rather than alongside it.
    No compiler/runtime change or rebuild was needed. Implicit sampling,
    ABI 8 and argument layouts are unchanged; no owned-device,
    adapter-matrix, external CTS or W2/W3/conformance closure is claimed.
+   Native 2D `Load` chain follow-up (2026-11-24): existing SDK DXC
+   FP32/SINT/UINT plain/array fixtures also execute three rectangular
+   non-power-of-two mips, extents 5x3/2x1/1x1 and two fixed layers.
+   Signed/omitted XY offsets select first/last texels and RGBA components;
+   all lower/upper X/Y/layer/mip bounds read zero without subresource
+   aliasing. Negative quarter-valued FP32 data and high-bit/negative/
+   adjacent non-FP32-exact integers use exact `asuint` bits. Normal
+   waves 4/8, reference and ARM64 AOT-object paths pass with five lanes,
+   twelve words per lane, 248-byte guards and repeat 2. Original one/
+   two-mip execution remains and two-mip import/raising checks are added.
+   Focused LIT passes both expanded fixtures with zero failures in
+   5.74 seconds; no new discovered test, compiler/runtime change,
+   rebuild or broader/full-suite result is claimed. Implicit sampling,
+   artifact ABI 8, argument layouts and raw-store admission are unchanged.
+   This is bounded native CPU execution, not D3D12 mip/format support,
+   owned-device, adapter-matrix, external CTS or W2/W3/conformance closure.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

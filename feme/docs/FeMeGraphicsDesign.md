@@ -3295,7 +3295,11 @@ documented reason rather than an oversight:
   layers/components, all result widths, offsets, bounds, partial waves,
   guards and repeats; fragment tests add divergent mips/layers and helper
   masks. Native SDK DXC plain/array shaders execute through normal/
-  reference/AOT paths on one and two real mips.
+  reference/AOT paths on one, two and three real mips. The 5x3/2x1/1x1
+  chain retains two fixed layers and checks exact negative quarter-valued
+  FP32 bits, signed/omitted offsets, first/last texels and all lower/
+  upper X/Y/layer/mip bounds, with normal waves 4/8, five lanes, guards
+  and repeat 2.
   Existing 1D/3D loads, sampling,
   SPIR-V lowering, artifact ABI 8 and argument layouts are unchanged;
   no bound/static descriptors or owned-device execution are added.
@@ -3310,7 +3314,11 @@ documented reason rather than an oversight:
   result widths, offsets, bounds, partial waves, guards and repeats.
   Fragment array tests add integer outputs, divergent mips/layers and
   helper masks. Native SDK DXC plain/array `int4`/`uint4` shaders execute
-  through normal/reference/AOT paths on one mip. Mixed scalar types,
+  through normal/reference/AOT paths on one, two and three real mips.
+  The 5x3/2x1/1x1 chain retains two fixed layers and checks exact integer
+  bits, signed/omitted offsets, first/last texels and all lower/upper
+  X/Y/layer/mip bounds, with normal waves 4/8, five lanes, guards and
+  repeat 2. Mixed scalar types,
   non-32-bit texels, too-wide results, non-heap handles and dynamic/
   undefined/poison or partial offsets reject. Existing FP32 loads,
   1D/3D loads, sampling, SPIR-V lowering, artifact ABI 8 and argument
@@ -3831,8 +3839,12 @@ and (for a non-array dimension) a single array layer. The runner now accepts
 sample-interleaved one-mip layouts and native CPU execution tests.
 Non-MS dimensions also accept `mip-levels` with checked mip-major layouts,
 shrinking spatial extents/3D depth and fixed array/cube layers; canonical
-mip/LOD fixtures and native 2D/plain-array two-mip loads execute through
-normal/reference/AOT-object paths.
+mip/LOD fixtures and native FP32/SINT/UINT 2D/plain-array three-mip
+loads execute through normal/reference/AOT-object paths. The latter
+retain one/two-mip regressions and check 5x3/2x1/1x1 extents, fixed
+layers, exact negative/fractional FP32 and integer bits, signed/omitted
+offsets, first/last texels/components, all lower/upper X/Y/layer/mip
+bounds, normal waves 4/8, five lanes, guards and repeat 2.
 The textual image
 fixture (`feme::graphics::ImageFixture`) and scene
 (`feme::graphics::Scene`) formats "Textual scene and image fixtures" in

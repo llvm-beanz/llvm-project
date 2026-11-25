@@ -3013,8 +3013,11 @@ Compiled normal/reference compute tests distinguish mips 0/1/2, X/Y,
 layers/components, all result widths, offsets, bounds, waves 4/8, five
 lanes, guards and repeats; fragment tests add divergent mips/layers,
 both bounds axes, invalid layers/mips and helper masks. Native SDK DXC
-plain/array shaders execute through normal/reference/AOT paths on one
-mip in the original fixture. Existing 1D/3D loads, sampling,
+plain/array shaders execute through normal/reference/AOT paths on one,
+two and three real mips. The 5x3/2x1/1x1 chain retains two fixed layers
+and checks exact negative quarter-valued FP32 bits, signed/omitted
+offsets, first/last texels and every lower/upper X/Y/layer/mip bound,
+with normal waves 4/8, five lanes, guards and repeat 2. Existing 1D/3D loads, sampling,
 artifact ABI 8
 and argument layouts are unchanged; no bound/static
 descriptors or owned D3D12 execution are added.
@@ -3038,7 +3041,11 @@ bounds, waves 4/8, five lanes, guards and repeats, including high-bit/
 negative and adjacent non-FP32-exact values. Fragment array tests add
 integer outputs, divergent mips/layers and helper masks. Native SDK DXC
 plain/array `int4`/`uint4` shaders execute through normal/reference/AOT
-paths on one mip. Mixed scalar types, non-32-bit texels, too-wide results,
+paths on one, two and three real mips. The 5x3/2x1/1x1 chain retains
+two fixed layers and checks exact integer bits, signed/omitted offsets,
+first/last texels and every lower/upper X/Y/layer/mip bound, with normal
+waves 4/8, five lanes, guards and repeat 2.
+Mixed scalar types, non-32-bit texels, too-wide results,
 non-heap handles and dynamic/undefined/poison or partial offsets reject.
 Existing FP32 loads, 1D/3D loads, sampling, artifact ABI 8 and argument
 layouts are unchanged; no bound/static descriptors or owned D3D12
@@ -3122,8 +3129,11 @@ Single-mip defaults, zero-fill and repeated-dispatch ownership are
 preserved. Canonical all-path tests cover 1D/2D plain/array and 3D mips,
 non-power-of-two geometry, mip-31 bounds, trailing zero-fill and cube
 half-mip blending. Native SDK DXC FP32/SINT/UINT 2D/plain-array fixtures
-also execute two mips with exact components, signed offsets, bounds,
-waves 4/8, guards and repeats. Image-binding preparation is checked
+also execute three mips with extents 5x3/2x1/1x1 and two fixed layers,
+retaining one/two-mip regressions. Exact negative/fractional FP32 and
+integer bits check signed/omitted offsets, first/last texels/components
+and all lower/upper X/Y/layer/mip bounds, with normal waves 4/8, five
+lanes, guards and repeat 2. Image-binding preparation is checked
 separately, without bound-image execution. Native FP32/SINT/UINT
 1D/plain-array and 3D load fixtures also execute three mips through all
 three CPU paths. Widths 5/2/1 retain fixed layers; 3D extents

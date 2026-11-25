@@ -17,6 +17,8 @@
 # RUN: feme-run --object --repeat=2 --heap=%t/uint.yaml %t/uint.o | FileCheck %s
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /Fo %t/sint-mips.dxil %t/shader.hlsl
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /D UNSIGNED /Fo %t/uint-mips.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/sint-mips.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-translate --import-dxil %t/uint-mips.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
 # RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
 # RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
 # RUN: feme-run --reference --repeat=2 --heap=%t/sint-mips.yaml %t/sint-mips.dxil | FileCheck %s --check-prefix=MIPS
@@ -27,8 +29,24 @@
 # RUN: feme-run --reference --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.dxil | FileCheck %s --check-prefix=MIPS
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint-mips.dxil -o %t/uint-mips.o
 # RUN: feme-run --object --repeat=2 --heap=%t/uint-mips.yaml %t/uint-mips.o | FileCheck %s --check-prefix=MIPS
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D CHAIN /Fo %t/sint-chain.dxil %t/shader.hlsl
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D CHAIN /D UNSIGNED /Fo %t/uint-chain.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/sint-chain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-translate --import-dxil %t/uint-chain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/sint-chain.yaml %t/sint-chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/sint-chain.yaml %t/sint-chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme-run --reference --repeat=2 --heap=%t/sint-chain.yaml %t/sint-chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/sint-chain.dxil -o %t/sint-chain.o
+# RUN: feme-run --object --repeat=2 --heap=%t/sint-chain.yaml %t/sint-chain.o | FileCheck %s --check-prefix=CHAIN
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/uint-chain.yaml %t/uint-chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/uint-chain.yaml %t/uint-chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme-run --reference --repeat=2 --heap=%t/uint-chain.yaml %t/uint-chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/uint-chain.dxil -o %t/uint-chain.o
+# RUN: feme-run --object --repeat=2 --heap=%t/uint-chain.yaml %t/uint-chain.o | FileCheck %s --check-prefix=CHAIN
 # Native import plus CPU execution, not owned D3D12. MIPS preserves high
 # bits/non-FP32-exact integers while distinguishing mip/layer/component.
+# CHAIN retains both variants and checks three rectangular non-power-of-two
+# mips, independent XY/layer bounds and exact signed/unsigned component bits.
 # RAISE: call <4 x i32> @llvm.dx.resource.load.level
 # RAISE-SAME: <2 x i32> splat (i32 1))
 # RAISE: call <4 x i32> @llvm.dx.resource.load.level
@@ -40,6 +58,7 @@
 # RAISE-NOT: call %dx.types.ResRet.i32 @dx.op.textureLoad
 # CHECK: heap[2]: 42 2147483659 0 0 0 2147483663 0 0 0 0 2147483649 2147483750 0 0 2147483653 0 0 0 0 0 0 42
 # MIPS: heap[2]: 42 0 0 0 0 2147483663 2147483649 2147483750 0 4294967295 16777218 16777319 0 0 0 0 0 0 0 0 0 42
+# CHAIN: heap[2]: 42 0 0 0 0 0 0 0 0 0 0 0 0 2147483633 16777217 4294967279 0 2147483618 2147483648 0 0 0 0 0 0 2147483631 16777232 4294967264 0 2147483616 2147483663 0 0 0 0 0 0 2147483630 16777234 4294967259 0 2147483612 2147483665 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 42
 #--- shader.hlsl
 #ifdef UNSIGNED
 #define TEXEL uint4
@@ -66,15 +85,142 @@ void main(uint3 tid : SV_DispatchThreadID) {
   layer = int(tid.x & 1);
   upperMip = 2;
 #endif
+#ifdef CHAIN
+  mip = int(tid.x) - 1;
+  int width = (mip == 0) ? 5 : (mip == 1) ? 2 : 1;
+  int height = (mip == 0) ? 3 : 1;
+  x = width - 2;
+  y = height - 2;
+  nx = 1;
+  layer = int(tid.x & 1);
+  upperMip = 3;
+#endif
   TEXEL p = t.Load(int3(x, y, mip), int2(1, 1));
   TEXEL n = t.Load(int3(nx, 1, mip), int2(-1, -1));
   TEXEL ap = a.Load(int4(nx, 1, layer, mip), int2(-1, -1));
   TEXEL invalid = a.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : upperMip));
+#ifdef CHAIN
+  TEXEL arrayEnd = a.Load(int4(x, y, layer, mip), int2(1, 1));
+  TEXEL first = t.Load(int3(0, 0, mip));
+  TEXEL lowerLayer = a.Load(int4(0, 0, -1, mip));
+  TEXEL upperLayer = a.Load(int4(0, 0, 2, mip));
+  TEXEL lowerX = a.Load(int4(-1, 0, layer, mip));
+  TEXEL upperX = t.Load(int3(width, 0, mip));
+  TEXEL lowerY = t.Load(int3(0, -1, mip));
+  TEXEL upperY = a.Load(int4(0, height, layer, mip));
+  outBuffer.Store(4 + tid.x * 48, asuint(p.a));
+  outBuffer.Store(8 + tid.x * 48, asuint(n.g));
+  outBuffer.Store(12 + tid.x * 48, asuint(ap.b));
+  outBuffer.Store(16 + tid.x * 48, asuint(invalid.r));
+  outBuffer.Store(20 + tid.x * 48, asuint(arrayEnd.a));
+  outBuffer.Store(24 + tid.x * 48, asuint(first.r));
+  outBuffer.Store(28 + tid.x * 48, asuint(lowerLayer.r));
+  outBuffer.Store(32 + tid.x * 48, asuint(upperLayer.r));
+  outBuffer.Store(36 + tid.x * 48, asuint(lowerX.r));
+  outBuffer.Store(40 + tid.x * 48, asuint(upperX.r));
+  outBuffer.Store(44 + tid.x * 48, asuint(lowerY.r));
+  outBuffer.Store(48 + tid.x * 48, asuint(upperY.r));
+#else
   outBuffer.Store(4 + tid.x * 16, asuint(p.a));
   outBuffer.Store(8 + tid.x * 16, asuint(n.g));
   outBuffer.Store(12 + tid.x * 16, asuint(ap.b));
   outBuffer.Store(16 + tid.x * 16, asuint(invalid.r));
+#endif
 }
+#--- sint-chain.yaml
+resource-heap:
+  - index: 2
+    size: 248
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [5, 3]
+    mip-levels: 3
+    format: r32g32b32a32_sint
+    data: [2147483648, 16777217, 4294967294, 2147483647, 2147483649, 16777218, 4294967293, 2147483646,
+           2147483650, 16777219, 4294967292, 2147483645, 2147483651, 16777220, 4294967291, 2147483644,
+           2147483652, 16777221, 4294967290, 2147483643, 2147483653, 16777222, 4294967289, 2147483642,
+           2147483654, 16777223, 4294967288, 2147483641, 2147483655, 16777224, 4294967287, 2147483640,
+           2147483656, 16777225, 4294967286, 2147483639, 2147483657, 16777226, 4294967285, 2147483638,
+           2147483658, 16777227, 4294967284, 2147483637, 2147483659, 16777228, 4294967283, 2147483636,
+           2147483660, 16777229, 4294967282, 2147483635, 2147483661, 16777230, 4294967281, 2147483634,
+           2147483662, 16777231, 4294967280, 2147483633, 2147483663, 16777232, 4294967279, 2147483632,
+           2147483664, 16777233, 4294967278, 2147483631, 2147483665, 16777234, 4294967277, 2147483630]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [5, 3]
+    mip-levels: 3
+    format: r32g32b32a32_sint
+    data: [2147483648, 16777217, 4294967294, 2147483647, 2147483649, 16777218, 4294967293, 2147483646,
+           2147483650, 16777219, 4294967292, 2147483645, 2147483651, 16777220, 4294967291, 2147483644,
+           2147483652, 16777221, 4294967290, 2147483643, 2147483653, 16777222, 4294967289, 2147483642,
+           2147483654, 16777223, 4294967288, 2147483641, 2147483655, 16777224, 4294967287, 2147483640,
+           2147483656, 16777225, 4294967286, 2147483639, 2147483657, 16777226, 4294967285, 2147483638,
+           2147483658, 16777227, 4294967284, 2147483637, 2147483659, 16777228, 4294967283, 2147483636,
+           2147483660, 16777229, 4294967282, 2147483635, 2147483661, 16777230, 4294967281, 2147483634,
+           2147483662, 16777231, 4294967280, 2147483633, 2147483663, 16777232, 4294967279, 2147483632,
+           2147483664, 16777233, 4294967278, 2147483631, 2147483665, 16777234, 4294967277, 2147483630,
+           2147483666, 16777235, 4294967276, 2147483629, 2147483667, 16777236, 4294967275, 2147483628,
+           2147483668, 16777237, 4294967274, 2147483627, 2147483669, 16777238, 4294967273, 2147483626,
+           2147483670, 16777239, 4294967272, 2147483625, 2147483671, 16777240, 4294967271, 2147483624,
+           2147483672, 16777241, 4294967270, 2147483623, 2147483673, 16777242, 4294967269, 2147483622,
+           2147483674, 16777243, 4294967268, 2147483621, 2147483675, 16777244, 4294967267, 2147483620,
+           2147483676, 16777245, 4294967266, 2147483619, 2147483677, 16777246, 4294967265, 2147483618,
+           2147483678, 16777247, 4294967264, 2147483617, 2147483679, 16777248, 4294967263, 2147483616,
+           2147483680, 16777249, 4294967262, 2147483615, 2147483681, 16777250, 4294967261, 2147483614,
+           2147483682, 16777251, 4294967260, 2147483613, 2147483683, 16777252, 4294967259, 2147483612]
+#--- uint-chain.yaml
+resource-heap:
+  - index: 2
+    size: 248
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [5, 3]
+    mip-levels: 3
+    format: r32g32b32a32_uint
+    data: [2147483648, 16777217, 4294967294, 2147483647, 2147483649, 16777218, 4294967293, 2147483646,
+           2147483650, 16777219, 4294967292, 2147483645, 2147483651, 16777220, 4294967291, 2147483644,
+           2147483652, 16777221, 4294967290, 2147483643, 2147483653, 16777222, 4294967289, 2147483642,
+           2147483654, 16777223, 4294967288, 2147483641, 2147483655, 16777224, 4294967287, 2147483640,
+           2147483656, 16777225, 4294967286, 2147483639, 2147483657, 16777226, 4294967285, 2147483638,
+           2147483658, 16777227, 4294967284, 2147483637, 2147483659, 16777228, 4294967283, 2147483636,
+           2147483660, 16777229, 4294967282, 2147483635, 2147483661, 16777230, 4294967281, 2147483634,
+           2147483662, 16777231, 4294967280, 2147483633, 2147483663, 16777232, 4294967279, 2147483632,
+           2147483664, 16777233, 4294967278, 2147483631, 2147483665, 16777234, 4294967277, 2147483630]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [5, 3]
+    mip-levels: 3
+    format: r32g32b32a32_uint
+    data: [2147483648, 16777217, 4294967294, 2147483647, 2147483649, 16777218, 4294967293, 2147483646,
+           2147483650, 16777219, 4294967292, 2147483645, 2147483651, 16777220, 4294967291, 2147483644,
+           2147483652, 16777221, 4294967290, 2147483643, 2147483653, 16777222, 4294967289, 2147483642,
+           2147483654, 16777223, 4294967288, 2147483641, 2147483655, 16777224, 4294967287, 2147483640,
+           2147483656, 16777225, 4294967286, 2147483639, 2147483657, 16777226, 4294967285, 2147483638,
+           2147483658, 16777227, 4294967284, 2147483637, 2147483659, 16777228, 4294967283, 2147483636,
+           2147483660, 16777229, 4294967282, 2147483635, 2147483661, 16777230, 4294967281, 2147483634,
+           2147483662, 16777231, 4294967280, 2147483633, 2147483663, 16777232, 4294967279, 2147483632,
+           2147483664, 16777233, 4294967278, 2147483631, 2147483665, 16777234, 4294967277, 2147483630,
+           2147483666, 16777235, 4294967276, 2147483629, 2147483667, 16777236, 4294967275, 2147483628,
+           2147483668, 16777237, 4294967274, 2147483627, 2147483669, 16777238, 4294967273, 2147483626,
+           2147483670, 16777239, 4294967272, 2147483625, 2147483671, 16777240, 4294967271, 2147483624,
+           2147483672, 16777241, 4294967270, 2147483623, 2147483673, 16777242, 4294967269, 2147483622,
+           2147483674, 16777243, 4294967268, 2147483621, 2147483675, 16777244, 4294967267, 2147483620,
+           2147483676, 16777245, 4294967266, 2147483619, 2147483677, 16777246, 4294967265, 2147483618,
+           2147483678, 16777247, 4294967264, 2147483617, 2147483679, 16777248, 4294967263, 2147483616,
+           2147483680, 16777249, 4294967262, 2147483615, 2147483681, 16777250, 4294967261, 2147483614,
+           2147483682, 16777251, 4294967260, 2147483613, 2147483683, 16777252, 4294967259, 2147483612]
 #--- sint.yaml
 resource-heap:
   - index: 2

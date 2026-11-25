@@ -1,5 +1,32 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) native FP32/SINT/UINT 2D/array three-mip texel-load scope (2026-11-24)
+
+The [native 2D load-chain follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-fp32sintuint-2darray-three-mip-texel-loads-vm-2026-11-24)
+extends existing SDK DXC SM6.6 heap-backed FP32/SINT/UINT 2D/plain-array
+`Load` fixtures with three rectangular non-power-of-two mips, extents
+5x3, 2x1 and 1x1, and two fixed array layers. Signed/omitted XY offsets,
+first/last texels, RGBA components and all lower/upper X/Y/layer/mip
+bounds are checked. Invalid accesses read zero without aliasing adjacent
+subresources. Negative quarter-valued FP32 data uses exact `asuint`
+bits; integer data checks high-bit/negative and adjacent non-FP32-exact
+values without float conversions.
+
+Native import/raising, normal waves 4/8, reference and ARM64 AOT-object
+execution pass with twelve words per lane, five lanes, 248-byte guarded
+output and repeat 2. Original one- and two-mip execution remains;
+two-mip variants also gain import/raising checks. Focused LIT passes
+both expanded fixtures with zero failures in 5.74 seconds.
+No new discovered tests, implementation change, rebuild or broader/
+full-suite run is claimed.
+
+Vulkan advertisements are unchanged; this is not external CTS,
+D3D12 mip/format support, an adapter-matrix or owned-device execution.
+Implicit sampling, artifact ABI 8, argument layouts and raw-store
+admission are unchanged. Bound/static D3D12 descriptors, broader
+conformance and owned-device execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native FP32 1D/array and cube/array explicit-gradient sampling scope (2026-11-24)
 
 The [native gradient breadth follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-fp32-1darray-and-cubearray-explicit-gradient-sampling-vm-2026-11-24)

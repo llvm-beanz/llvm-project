@@ -350,7 +350,12 @@ coverage" in [../Design.md](../Design.md).
   Non-MS runner YAML also accepts `mip-levels`, default 1, in [1, 32],
   using checked mip-major layouts with shrinking spatial extents/3D
   depth and fixed array/cube layers. Native FP32/SINT/UINT 2D/plain-array
-  two-mip fixtures execute through normal/reference/AOT-object paths;
+  three-mip fixtures execute through normal/reference/AOT-object paths,
+  with extents 5x3/2x1/1x1 and two fixed layers. Original one/two-mip
+  regressions remain. Exact negative/fractional FP32 and integer bits
+  check signed/omitted offsets, first/last texels/components and all
+  lower/upper X/Y/layer/mip bounds, with normal waves 4/8, five lanes,
+  guards and repeat 2;
   native 1D/plain-array and 3D fixtures also execute three real mips.
   Widths 5/2/1 retain fixed layers, rectangular 3D depth shrinks and
   signed offsets select first/last texels/components. Invalid X/layers/

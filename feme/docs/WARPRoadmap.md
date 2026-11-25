@@ -2183,6 +2183,37 @@ MS sampling, bound/static D3D12 descriptors and owned-device execution
 remain open; `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) native FP32/SINT/UINT 2D/array three-mip texel-load progress
+(2026-11-24): the existing SDK DXC SM6.6 heap-backed `Load` fixtures now
+also execute rectangular non-power-of-two extents 5x3, 2x1 and 1x1,
+retaining two fixed array layers. Signed XY offsets select first/last
+texels; omitted offsets remain zero. Five lanes distinguish mips
+-1/0/1/2/3, separate layers and RGBA components.
+
+Twelve output words per lane check valid plain/array texels, negative/
+upper mips and each independent lower/upper X/Y/layer bound. Invalid
+accesses read zero instead of aliasing the next row/layer/subresource.
+New FP32 data includes negative quarter-valued components, stored with
+`asuint` for exact-bit checks rather than numeric casts. SINT/UINT data
+checks high-bit/negative and adjacent non-FP32-exact integers without
+float conversions. Output uses the existing scalar raw-store path;
+no wider raw-store admission is added.
+
+All three variants pass native import/raising, normal waves 4/8,
+reference and ARM64 AOT-object execution, with 248-byte guarded output,
+five lanes and repeat 2. Original one- and two-mip execution regressions
+remain; the two-mip variants also gain import/raising checks.
+Focused LIT passes both expanded fixtures with zero failures in 5.74
+seconds. No new discovered tests, compiler/runtime implementation,
+rebuild or broader/full-suite run is claimed.
+
+Implicit sampling, artifact ABI 8 and argument layouts are unchanged.
+This is bounded native CPU execution evidence, not D3D12 mip/format
+support, external Vulkan CTS, an adapter-matrix or owned-device result.
+Bound/static D3D12 descriptors, broader conformance and owned-device
+execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

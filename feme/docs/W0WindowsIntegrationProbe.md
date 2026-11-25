@@ -27,6 +27,37 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) native FP32/SINT/UINT 2D/array three-mip texel loads (VM, 2026-11-24)
+
+The existing SDK DXC SM6.6 heap-backed 2D/plain-array `Load` fixtures now
+also execute three rectangular non-power-of-two mips with extents 5x3,
+2x1 and 1x1. Two array layers remain fixed. Signed XY offsets select
+first/last texels and distinct RGBA components; omitted offsets remain
+zero. Five lanes select mips -1/0/1/2/3.
+
+Twelve output words per lane check valid plain/array texels, lower/upper
+mips and every independent lower/upper X/Y/layer bound. Invalid accesses
+read zero without aliasing adjacent rows/layers/subresources. Negative
+quarter-valued FP32 components use exact `asuint` bits; SINT/UINT data
+checks high-bit/negative and adjacent non-FP32-exact integers without
+float conversions. Output retains the existing scalar raw-store path;
+no wider raw-store admission is added.
+
+FP32/SINT/UINT variants pass native import/raising, normal waves 4/8,
+reference and ARM64 AOT-object execution with 248-byte guarded output,
+five lanes and repeat 2. Original one- and two-mip execution regressions
+remain; the two-mip variants also gain import/raising checks.
+Focused LIT passes both expanded fixtures with zero failures in 5.74
+seconds. No new discovered tests or compiler/runtime implementation
+change required a rebuild or broader/full-suite run.
+
+Implicit sampling, artifact ABI 8 and argument layouts are unchanged.
+This is bounded native CPU execution evidence, not D3D12 mip/format
+support, owned-device execution, an adapter-matrix or external Vulkan
+CTS result. Bound/static D3D12 descriptors, broader conformance and
+owned-device execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native FP32 1D/array and cube/array explicit-gradient sampling (VM, 2026-11-24)
 
 Actual SDK DXC SM6.6 heap-backed 1D/plain-array and cube/plain-array

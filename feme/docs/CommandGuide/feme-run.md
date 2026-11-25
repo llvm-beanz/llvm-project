@@ -301,7 +301,11 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   fragment tests add divergent mips/layers and helper masks. Native SDK
   DXC plain/array shaders execute in all three paths with signed/omitted
   offsets, components, invalid mips, five lanes, guards and repeats on
-  one and two real mips. Dynamic-offset admission rejects in all three paths.
+  one, two and three real mips. The 5x3/2x1/1x1 chain retains two fixed
+  layers and checks exact negative quarter-valued FP32 bits, signed/
+  omitted offsets, first/last texels and all lower/upper X/Y/layer/mip
+  bounds, with normal waves 4/8, five lanes, guards and repeat 2.
+  Dynamic-offset admission rejects in all three paths.
   Existing 1D/3D loads, sampling, SPIR-V
   lowering, artifact ABI 8 and argument layouts are unchanged; SPIR-V
   FP32 users share the runtime bounds correction. No bound/static
@@ -317,8 +321,10 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   and repeats; fragment array tests add integer outputs, divergent
   mips/layers and helper masks. Native SDK DXC plain/array `int4`/`uint4`
   shaders execute in all three paths with signed/omitted offsets, exact
-  components, invalid mips, five lanes, guards and repeats on one mip;
-  the two-mip follow-up also executes. Dynamic-offset admission rejects
+  components, invalid mips, five lanes, guards and repeats on one, two
+  and three real mips. The 5x3/2x1/1x1 chain retains two fixed layers
+  and checks first/last texels, all lower/upper X/Y/layer/mip bounds
+  and normal waves 4/8. Dynamic-offset admission rejects
   in all three paths. Mixed scalar types, non-32-bit texels, too-wide
   results, non-heap handles and dynamic/undefined/poison or partial
   offsets reject. Existing FP32 loads, 1D/3D loads, sampling, SPIR-V
@@ -521,10 +527,13 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   excess word data is truncated as before. The schema applies equally to
   `images` and `image-bindings`. Counts describe CPU storage, including
   repeated one-texel levels, not D3D12 legal mip-count/format support.
-  Native SDK DXC FP32/SINT/UINT 2D/plain-array loads execute one/two-mip
-  fixtures in normal/reference/AOT-object modes with signed offsets,
-  layers/components, invalid mips, exact integer bits, waves 4/8, partial
-  waves, guards and repeats. Canonical fixtures add non-power-of-two
+  Native SDK DXC FP32/SINT/UINT 2D/plain-array loads execute three-mip
+  fixtures in normal/reference/AOT-object modes with extents 5x3/2x1/
+  1x1 and two fixed layers, retaining one/two-mip regressions. Exact
+  negative/fractional FP32 and integer bits check signed/omitted offsets,
+  first/last texels/components and all lower/upper X/Y/layer/mip bounds,
+  with normal waves 4/8, five lanes, guards and repeat 2.
+  Canonical fixtures add non-power-of-two
   1D/2D arrays, 3D depth, mip-31 bounds, zero-fill and cube mip blending.
   Native SDK DXC FP32/SINT/UINT 1D/plain-array and 3D load fixtures also
   execute three real mips through normal/reference/AOT-object paths.

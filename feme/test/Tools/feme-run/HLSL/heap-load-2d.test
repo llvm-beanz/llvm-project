@@ -10,13 +10,23 @@
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
 # RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIPS /Fo %t/mips.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/mips.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
 # RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/mips.yaml %t/mips.dxil | FileCheck %s --check-prefix=MIPS
 # RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/mips.yaml %t/mips.dxil | FileCheck %s --check-prefix=MIPS
 # RUN: feme-run --reference --repeat=2 --heap=%t/mips.yaml %t/mips.dxil | FileCheck %s --check-prefix=MIPS
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/mips.dxil -o %t/mips.o
 # RUN: feme-run --object --repeat=2 --heap=%t/mips.yaml %t/mips.o | FileCheck %s --check-prefix=MIPS
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D CHAIN /Fo %t/chain.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/chain.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/chain.yaml %t/chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/chain.yaml %t/chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme-run --reference --repeat=2 --heap=%t/chain.yaml %t/chain.dxil | FileCheck %s --check-prefix=CHAIN
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/chain.dxil -o %t/chain.o
+# RUN: feme-run --object --repeat=2 --heap=%t/chain.yaml %t/chain.o | FileCheck %s --check-prefix=CHAIN
 # Native import plus CPU execution, not owned D3D12. MIPS distinguishes
 # mip/layer/component selection and lower/upper mip bounds in a partial wave.
+# CHAIN retains both variants and checks three rectangular non-power-of-two
+# mips, independent XY/layer bounds and exact negative/fractional FP32 bits.
 # RAISE: call <4 x float> @llvm.dx.resource.load.level
 # RAISE-SAME: <2 x i32> splat (i32 1))
 # RAISE: call <4 x float> @llvm.dx.resource.load.level
@@ -28,6 +38,7 @@
 # RAISE-NOT: call %dx.types.ResRet.f32 @dx.op.textureLoad
 # CHECK: heap[2]: 42 12 0 0 0 16 0 0 0 0 2 14 0 0 6 0 0 0 0 0 0 42
 # MIPS: heap[2]: 42 0 0 0 0 16 2 14 0 24 22 33 0 0 0 0 0 0 0 0 0 42
+# CHAIN: heap[2]: 42 0 0 0 0 0 0 0 0 0 0 0 0 3261923328 3214934016 1115226112 0 3270410240 1048576000 0 0 0 0 0 0 3263594496 3262447616 1123319808 0 3271458816 1114701824 0 0 0 0 0 0 3264118784 3263856640 1125007360 0 3272556544 1116241920 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 42
 #--- shader.hlsl
 [RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
 [numthreads(5, 1, 1)]
@@ -49,15 +60,95 @@ void main(uint3 tid : SV_DispatchThreadID) {
   layer = int(tid.x & 1);
   upperMip = 2;
 #endif
+#ifdef CHAIN
+  mip = int(tid.x) - 1;
+  int width = (mip == 0) ? 5 : (mip == 1) ? 2 : 1;
+  int height = (mip == 0) ? 3 : 1;
+  x = width - 2;
+  y = height - 2;
+  nx = 1;
+  layer = int(tid.x & 1);
+  upperMip = 3;
+#endif
   float4 p = t.Load(int3(x, y, mip), int2(1, 1));
   float4 n = t.Load(int3(nx, 1, mip), int2(-1, -1));
   float4 ap = a.Load(int4(nx, 1, layer, mip), int2(-1, -1));
   float4 invalid = a.Load(int4(0, 0, 0, (tid.x & 1) ? -1 : upperMip));
+#ifdef CHAIN
+  float4 arrayEnd = a.Load(int4(x, y, layer, mip), int2(1, 1));
+  float4 first = t.Load(int3(0, 0, mip));
+  float4 lowerLayer = a.Load(int4(0, 0, -1, mip));
+  float4 upperLayer = a.Load(int4(0, 0, 2, mip));
+  float4 lowerX = a.Load(int4(-1, 0, layer, mip));
+  float4 upperX = t.Load(int3(width, 0, mip));
+  float4 lowerY = t.Load(int3(0, -1, mip));
+  float4 upperY = a.Load(int4(0, height, layer, mip));
+  outBuffer.Store(4 + tid.x * 48, asuint(p.a));
+  outBuffer.Store(8 + tid.x * 48, asuint(n.g));
+  outBuffer.Store(12 + tid.x * 48, asuint(ap.b));
+  outBuffer.Store(16 + tid.x * 48, asuint(invalid.r));
+  outBuffer.Store(20 + tid.x * 48, asuint(arrayEnd.a));
+  outBuffer.Store(24 + tid.x * 48, asuint(first.r));
+  outBuffer.Store(28 + tid.x * 48, asuint(lowerLayer.r));
+  outBuffer.Store(32 + tid.x * 48, asuint(upperLayer.r));
+  outBuffer.Store(36 + tid.x * 48, asuint(lowerX.r));
+  outBuffer.Store(40 + tid.x * 48, asuint(upperX.r));
+  outBuffer.Store(44 + tid.x * 48, asuint(lowerY.r));
+  outBuffer.Store(48 + tid.x * 48, asuint(upperY.r));
+#else
   outBuffer.Store(4 + tid.x * 16, (uint)p.a);
   outBuffer.Store(8 + tid.x * 16, (uint)n.g);
   outBuffer.Store(12 + tid.x * 16, (uint)ap.b);
   outBuffer.Store(16 + tid.x * 16, (uint)invalid.r);
+#endif
 }
+#--- chain.yaml
+resource-heap:
+  - index: 2
+    size: 248
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [5, 3]
+    mip-levels: 3
+    format: r32g32b32a32_float
+    data: [1048576000, 3214934016, 1074790400, 3226468352, 1082654720, 3232235520, 1086849024, 3236429824,
+           1090781184, 3239313408, 1092878336, 3241410560, 1094975488, 3243507712, 1097072640, 3245604864,
+           1099038720, 3247046656, 1100087296, 3248095232, 1101135872, 3249143808, 1102184448, 3250192384,
+           1103233024, 3251240960, 1104281600, 3252289536, 1105330176, 3253338112, 1106378752, 3254386688,
+           1107361792, 3255107584, 1107886080, 3255631872, 1108410368, 3256156160, 1108934656, 3256680448,
+           1109458944, 3257204736, 1109983232, 3257729024, 1110507520, 3258253312, 1111031808, 3258777600,
+           1111556096, 3259301888, 1112080384, 3259826176, 1112604672, 3260350464, 1113128960, 3260874752,
+           1113653248, 3261399040, 1114177536, 3261923328, 1114701824, 3262447616, 1115226112, 3262971904,
+           1115717632, 3263332352, 1115979776, 3263594496, 1116241920, 3263856640, 1116504064, 3264118784]
+  - index: 1
+    dimension: 2d-array
+    array-layers: 2
+    extent: [5, 3]
+    mip-levels: 3
+    format: r32g32b32a32_float
+    data: [1048576000, 3214934016, 1074790400, 3226468352, 1082654720, 3232235520, 1086849024, 3236429824,
+           1090781184, 3239313408, 1092878336, 3241410560, 1094975488, 3243507712, 1097072640, 3245604864,
+           1099038720, 3247046656, 1100087296, 3248095232, 1101135872, 3249143808, 1102184448, 3250192384,
+           1103233024, 3251240960, 1104281600, 3252289536, 1105330176, 3253338112, 1106378752, 3254386688,
+           1107361792, 3255107584, 1107886080, 3255631872, 1108410368, 3256156160, 1108934656, 3256680448,
+           1109458944, 3257204736, 1109983232, 3257729024, 1110507520, 3258253312, 1111031808, 3258777600,
+           1111556096, 3259301888, 1112080384, 3259826176, 1112604672, 3260350464, 1113128960, 3260874752,
+           1113653248, 3261399040, 1114177536, 3261923328, 1114701824, 3262447616, 1115226112, 3262971904,
+           1115717632, 3263332352, 1115979776, 3263594496, 1116241920, 3263856640, 1116504064, 3264118784,
+           1116766208, 3264380928, 1117028352, 3264643072, 1117290496, 3264905216, 1117552640, 3265167360,
+           1117814784, 3265429504, 1118076928, 3265691648, 1118339072, 3265953792, 1118601216, 3266215936,
+           1118863360, 3266478080, 1119125504, 3266740224, 1119387648, 3267002368, 1119649792, 3267264512,
+           1119911936, 3267526656, 1120174080, 3267788800, 1120436224, 3268050944, 1120698368, 3268313088,
+           1120960512, 3268575232, 1121222656, 3268837376, 1121484800, 3269099520, 1121746944, 3269361664,
+           1122009088, 3269623808, 1122271232, 3269885952, 1122533376, 3270148096, 1122795520, 3270410240,
+           1123057664, 3270672384, 1123319808, 3270934528, 1123581952, 3271196672, 1123844096, 3271458816,
+           1124089856, 3271639040, 1124220928, 3271770112, 1124352000, 3271901184, 1124483072, 3272032256,
+           1124614144, 3272163328, 1124745216, 3272294400, 1124876288, 3272425472, 1125007360, 3272556544]
 #--- heap.yaml
 resource-heap:
   - index: 2
