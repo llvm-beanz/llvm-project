@@ -2423,7 +2423,7 @@ the same handle lower together, unused handles are removed and repeated
 lowering is idempotent. Non-heap, 2D-array/MS/3D/cube shapes and non-32-bit
 declarations remain unsupported with explicit normal/reference/AOT
 admission diagnostics. Base scalar/pair intrinsics carry no mip; sampled
-plain 2D explicit mips/counts use the separate path below. Other texture
+1D-array/plain 2D explicit mips/counts use the separate paths below. Other texture
 shapes retain unused/zero-mip guards; depth/aggregate uses remain unraised.
 Native SDK DXC SM6.6 passes normal waves 4/8, reference and ARM64 AOT:
 5x3 with three mips reports the base extent, a UINT UAV reports width 3
@@ -2451,8 +2451,8 @@ Divergent/unbound indices, exact integer query/load results, sentinels,
 all words, guards and two repeats pass. Two runtime units use unreadable
 data pointers to check sampled/storage metadata, inactive/unbound/zero-
 mip/invalid-index zeros and fixed layers while helper LOD shrinks width.
-The helper LOD tests preserve shared SPIR-V behavior; native lowering
-still passes zero for 1D/array and their native dynamic-mip shaders remain rejected.
+The helper LOD tests preserve shared SPIR-V behavior; base native queries
+pass zero. Sampled 1D-array explicit queries use the path described below.
 Raising, runtime/SPIR-V code, existing load/store/status/atomic policy,
 ABI 8, layouts and advertisements remain unchanged. Other shapes/fields,
 bound/static images and owned-device execution remain open.
@@ -2472,7 +2472,7 @@ SM6.6 passes waves 4/8, reference and ARM64 AOT, distinguishing
 indices and query-derived exact SINT loads. The prior extent-only native
 variant now executes rather than rejecting when count is unused.
 Portable forward/reverse, idempotence, fragment count-only and rejection
-controls pass. Canonical writable/other-shape/undefined-mip forms reject;
+controls pass. Canonical writable/unsupported-shape/undefined-mip forms reject;
 depth/aggregate uses stay unraised. Runtime units verify metadata-only
 extents and total counts using unreadable pointers, inactive size queries,
 unbound/zero-mip descriptors and invalid heaps/indices. Shared helper mip
@@ -2480,6 +2480,21 @@ clamping remains unchanged; only valid-mip native results are measured,
 not D3D out-of-range-mip behavior. Runtime/SPIR-V code, existing load/
 store/status/atomic policy, ABI 8, layouts and advertisements remain
 unchanged. Bound/static images and owned-device closure remain open.
+
+Sampled 1D-array explicit queries now use the same three-component
+intrinsic and shared eligibility predicate for heap-backed FP32/i32
+declarations with defined i32 mips. CPU lowering selects
+`getdimensions.lod.1darray.v2i32` for width/layers and `querylevels.i32`
+for total mip count. Layer count does not shrink with mip. No sampler or
+derivatives are needed, including fragment queries. Native SDK DXC
+SM6.6 passes waves 4/8, reference and ARM64 AOT for widths 7/3/1,
+two layers/three mips and widths 5/2, three layers/two mips. Exact
+query-derived SINT loads, divergent/unbound indices, skipped stores,
+every word, guards and two repeats pass. Count-unused queries also execute.
+The existing array metadata unit now checks mip one as well as zero/two.
+Writable arrays and plain 1D explicit queries remain unsupported.
+Only valid-mip native results are measured; shared helper clamping,
+runtime/SPIR-V code, ABI 8, layouts and owned-device boundaries are unchanged.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

@@ -566,6 +566,29 @@ shapes/fields, bound/static images, new FXC-profile/external corpus,
 external CTS, adapter-matrix and owned-device closure remain open; see
 the [plain-2D explicit-mip evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-2d-explicit-mip-dimensions-vm-2026-11-25).
 
+Native 1D-array explicit-mip dimensions follow-up (2026-11-25): raising
+and shared CPU admission/lowering now extend `getdimensions.levels.xy`
+to heap-backed sampled FP32/i32 1D arrays with defined i32 mips.
+Width/layers/total mip count preserve DXIL fields 0/1/3 and the live mip
+through existing 1D-array size/level helpers, without sampler/derivatives
+in any stage. Existing LLVM forward lowering is reused. Writable arrays
+and plain 1D explicit queries remain unsupported. SDK DXC SM6.6 passes
+waves 4/8, reference and ARM64 AOT, four cases repeated twice, for
+widths 7/3/1, two layers/three mips and widths 5/2, three layers/two
+mips. Query-derived exact SINT loads, divergent/unbound indices, skipped-
+store sentinels, every word, guards and repeats pass: exactly 320
+compared bytes. The prior count-unused variant adds four execution
+cases, repeated twice, checking 304 bytes each. The affected 15-step
+ARM64 build passes; forty focused LLVM/FeMe LIT pass in 28.36 seconds
+and thirteen dimension units in 2.771 seconds, zero failures. Two LIT
+fixtures are added; three LIT fixtures and one runtime case are extended.
+Only valid-mip native results are measured; shared helper clamping,
+runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+ABI 8 and layouts remain unchanged. Other shapes/fields, bound/static
+images, new FXC-profile/external corpus, external CTS, adapter-matrix
+and owned-device closure remain open; see the
+[1D-array explicit-mip evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-1d-array-explicit-mip-dimensions-vm-2026-11-25).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

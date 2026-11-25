@@ -194,9 +194,9 @@ helpers. Plain 1D accepts scalar width only; array 1D accepts scalar width
 or width/layer count. Native SDK DXC SM6.6 passes waves 4/8, reference
 and ARM64 AOT, including three-mip base widths, distinct layer counts,
 divergent/unbound indices, exact integer query/load results, all words,
-guards and repeats. Plain 1D pair queries and 1D/array explicit mips remain
+guards and repeats. Plain 1D pair and plain 1D explicit-mip queries remain
 rejected in normal/reference/AOT paths. No sampler/derivatives are
-needed. Raising, runtime/SPIR-V code, ABI 8, layouts and advertisements
+needed. Runtime/SPIR-V code, ABI 8, layouts and advertisements
 remain unchanged; no bound/static images or owned-device closure.
 
 Heap-backed sampled `Texture2D.GetDimensions(mip, width, height, levels)`
@@ -207,11 +207,22 @@ shared size/level metadata helpers without sampler/derivatives, in any
 stage. Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT
 for three valid mip extents, fixed counts, divergent/unbound indices,
 query-derived exact integer loads, all words, guards and repeats.
-Queries whose count output is unused now also execute. Writable/other-
+Queries whose count output is unused now also execute. Writable/unsupported-
 shape/undefined-mip canonical forms reject; depth/aggregate uses remain
 unraised. Shared helper clamping is unchanged; native out-of-range-mip
 semantics are not claimed. Runtime/SPIR-V code, ABI 8 and layouts remain
 unchanged; no bound/static images or owned-device closure is added.
+
+Heap-backed sampled `Texture1DArray.GetDimensions(mip, width, layers, levels)`
+now uses the same canonical form and shared CPU eligibility predicate,
+selecting the existing 1D-array size-at-LOD helper and total-level helper.
+Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT for
+widths 7/3/1, two layers/three mips and widths 5/2, three layers/two
+mips. Query-derived exact SINT loads, divergent/unbound indices, skipped
+stores, every word, guards and repeats pass. Count-unused queries also
+execute. Writable arrays and plain 1D explicit queries remain unsupported.
+Only valid mips are measured; shared helper clamping, runtime/SPIR-V code,
+ABI 8 and layouts are unchanged. No owned-device closure is established.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

@@ -18,6 +18,18 @@ define <3 x i32> @dynamic(i32 %mip) {
   ret <3 x i32> %dims
 }
 
+; CHECK-LABEL: define <3 x i32> @array_dynamic(
+; CHECK: [[D:%.*]] = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 6) {{.*}}, i32 %mip)
+; CHECK: extractelement <3 x i32> [[D]], i32 0
+; CHECK: extractelement <3 x i32> [[D]], i32 1
+; CHECK: extractelement <3 x i32> [[D]], i32 2
+; CHECK-NOT: @dx.op.getDimensions
+define <3 x i32> @array_dynamic(i32 %mip) {
+  %handle = call target("dx.Texture", <4 x float>, 0, 0, 1, 6) @llvm.dx.resource.handlefrombinding(i32 0, i32 2, i32 1, i32 0, ptr null)
+  %dims = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy(target("dx.Texture", <4 x float>, 0, 0, 1, 6) %handle, i32 %mip)
+  ret <3 x i32> %dims
+}
+
 ; CHECK-LABEL: define <3 x i32> @zero(
 ; CHECK: [[D:%.*]] = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy{{.*}}({{.*}}, i32 0)
 ; CHECK: extractelement <3 x i32> [[D]], i32 2

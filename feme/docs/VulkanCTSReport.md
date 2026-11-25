@@ -1,5 +1,35 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native 1D-array explicit-mip dimension scope (2026-11-25)
+
+The [1D-array explicit-mip follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-1d-array-explicit-mip-dimensions-vm-2026-11-25)
+extends raising and shared CPU dimension admission/lowering to heap-backed
+sampled FP32/i32 1D arrays with defined i32 mips. The existing
+`getdimensions.levels.xy` form preserves width/layers/total mip count and
+the live mip, reusing LLVM forward lowering and existing 1D-array size/
+level metadata helpers without samplers or derivatives in any stage.
+Writable arrays and plain 1D explicit queries remain unsupported.
+
+SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT, four cases
+each repeated twice. Widths 7/3/1 with two layers/three mips and widths
+5/2 with three layers/two mips distinguish layers from levels. Query-
+derived exact SINT loads, divergent/unbound indices, skipped-store
+sentinels, every word, guards and repeats pass: exactly 320 compared
+bytes including a guarded 148-byte output. The prior count-unused
+variant adds four execution cases, repeated twice, checking 304 bytes
+each. The affected 15-step ARM64 build passes; forty focused LLVM/
+FeMe LIT pass in 28.36 seconds and thirteen dimension runtime units in
+2.771 seconds, zero failures. Two LIT fixtures are added; three LIT
+fixtures and one runtime case are extended.
+
+Only valid-mip native results are measured; unchanged helper clamping
+is not D3D out-of-range-mip evidence. Runtime/SPIR-V code, existing load/
+store/status/atomic policy, advertisements, descriptor materialization,
+ABI 8 and layouts remain unchanged. Other shapes/fields, bound/static
+images, full-suite, new CTS, adapter-matrix and owned D3D12/conformance
+closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native plain-2D explicit-mip dimension scope (2026-11-25)
 
 The [plain-2D explicit-mip follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-2d-explicit-mip-dimensions-vm-2026-11-25)

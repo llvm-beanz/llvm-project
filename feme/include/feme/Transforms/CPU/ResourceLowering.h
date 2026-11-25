@@ -69,8 +69,8 @@
 // FP32/i32 1D/array and plain 2D heap-backed getdimensions.x/xy use existing
 // metadata-only helpers at mip zero in any stage, without a sampler.
 // Plain 1D accepts only scalar width; array 1D returns width/layer count.
-// Sampled plain 2D getdimensions.levels.xy preserves an explicit i32 mip
-// and total mip count through the existing size/level metadata helpers.
+// Sampled 1D-array/plain 2D getdimensions.levels.xy preserves an explicit
+// i32 mip and total mip count through existing size/level metadata helpers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -88,8 +88,9 @@ namespace feme::cpu {
 /// Tests heap-backed FP32/i32 1D/array or plain 2D mip-zero scalar/pair
 /// dimension queries in any stage. Sampled and writable textures share the same
 /// metadata helpers; plain 1D accepts only scalar width. Other array
-/// shapes and MS are not included. Sampled plain 2D additionally accepts
-/// explicit, defined i32 mip queries returning width/height/total mip count.
+/// shapes and MS are not included. Sampled 1D arrays and plain 2D additionally
+/// accept explicit, defined i32 mip queries returning width/layers-or-height/
+/// total mip count.
 bool isSupportedDXILGetDimensions(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32/i32 1D/2D (including array) or 3D loading in any

@@ -27,6 +27,48 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native 1D-array explicit-mip dimensions (VM, 2026-11-25)
+
+The native reproduction left sampled 1D-array explicit-mip/count queries
+unraised. Raising and the shared CPU dimension admission/lowering predicate
+now extend the existing `getdimensions.levels.xy` form to heap-backed
+sampled FP32/i32 1D arrays with defined i32 mips. Existing LLVM forward
+lowering is reused. DXIL fields 0/1/3 map to width/layers/total mip count,
+vector elements 0/1/2. CPU lowering selects the existing 1D-array
+size-at-LOD helper and shared level helper in any stage, without
+samplers or derivatives. Writable arrays and plain 1D explicit queries
+remain unsupported; base queries retain their existing scope.
+
+[`native-texture1d-array-mip-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture1d-array-mip-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 widths 7/3/1, two layers/three
+mips and SINT widths 5/2, three layers/two mips distinguish the
+components. Query-derived last-X/last-layer loads preserve exact high-bit/
+non-FP32-exact integer values. Divergent/unbound indices, skipped-store
+sentinels, every word, guards and repeats pass: 172 input bytes plus a
+guarded 148-byte output, exactly 320 compared bytes. The prior
+count-unused 1D-array explicit-mip variant now also executes four cases,
+repeated twice, checking exactly 304 bytes each.
+
+The affected 15-step ARM64 build passes (`opt` was also requested and
+already up to date). Forty focused LLVM forward, FeMe round-trip/raising,
+dimension, image, namespace, typed-load and CPU/SPIR-V LIT pass in
+28.36 seconds; thirteen dimension runtime units pass in 2.771 seconds,
+zero failures. Two LIT fixtures are added; three existing LIT fixtures
+and one runtime case are extended. Portable checks cover live mip/helper
+wiring, fragment layer-only queries, idempotence and unchanged writable
+array lowering. Normal/reference/AOT controls reject writable arrays and
+native plain 1D explicit queries. The existing array metadata unit checks
+mip one shrinks width to three without shrinking its two layers.
+
+Only valid-mip native results are measured; unchanged helper clamping
+is not D3D out-of-range-mip evidence. Runtime/SPIR-V code, existing load/
+store/status/atomic policy, advertisements, descriptor materialization,
+ABI 8 and layouts remain unchanged. Other shapes/fields, bound/static
+images, full-suite, external CTS, adapter-matrix and owned D3D12/
+conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native plain-2D explicit-mip dimensions (VM, 2026-11-25)
 
 The native reproduction left explicit-mip/count queries unraised. The

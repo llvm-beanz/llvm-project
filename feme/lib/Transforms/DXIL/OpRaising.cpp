@@ -1304,16 +1304,14 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // scalar FP32 `SampleCmp`
 // (64)/`SampleCmpLevelZero` (65), `TextureLoad` (66) and
 // `GetDimensions`' width/height fields (72, via
-// `int_dx_resource_getdimensions_x`/`_xy`), plus sampled plain 2D explicit
-// mips/counts via `_levels_xy`. Gather remains outside this raiser's scope.
-// Gradient sampling
-// preserves spatial/direction derivatives/clamp; heap-backed FP32 1D/2D/3D/cube
-// (including arrays) executes on CPU. Biased sampling preserves bias/clamp;
-// CPU lowering is
-// stage/shape-limited. Implicit comparison preserves the wire clamp but
-// requires derivative-aware CPU lowering. Heap-backed scalar FP32 1D/2D/cube
-// (and array) comparison executes in fragment stages; level zero also supports
-// compute.
+// `int_dx_resource_getdimensions_x`/`_xy`), plus sampled 1D-array/plain 2D
+// explicit mips/counts via `_levels_xy`. Gather remains outside this raiser's
+// scope. Gradient sampling preserves spatial/direction derivatives/clamp;
+// heap-backed FP32 1D/2D/3D/cube (including arrays) executes on CPU. Biased
+// sampling preserves bias/clamp; CPU lowering is stage/shape-limited. Implicit
+// comparison preserves the wire clamp but requires derivative-aware CPU
+// lowering. Heap-backed scalar FP32 1D/2D/cube (and array) comparison executes
+// in fragment stages; level zero also supports compute.
 //===----------------------------------------------------------------------===//
 
 /// The number of texture coordinate components DXIL's sample/load ops
@@ -1831,8 +1829,8 @@ bool raiseTextureStore(CallInst &CI) {
   return true;
 }
 
-/// Raises field-0/1 dimension extracts to scalar/pair queries. Sampled plain
-/// 2D queries with a meaningful mip or field-3 mip count instead use
+/// Raises field-0/1 dimension extracts to scalar/pair queries. Sampled 1D-array
+/// and plain 2D queries with a meaningful mip or field-3 mip count instead use
 /// `getdimensions.levels.xy`, mapping DXIL field 3 to vector element 2.
 /// Field 2 and aggregate uses remain unsupported. Other shapes require an
 /// unused/zero mip; buffers accept only field 0 (DXC supplies a structured
@@ -1855,7 +1853,8 @@ bool raiseGetDimensions(CallInst &CI) {
   auto *TextureTy = dyn_cast<dxil::TextureExtType>(Handle->getType());
   bool CanQueryLevels =
       TextureTy && !TextureTy->isWriteable() &&
-      TextureTy->getDimension() == dxil::ResourceKind::Texture2D;
+      (TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
+       TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray);
   if (NeedsLevels && !CanQueryLevels)
     return false;
 

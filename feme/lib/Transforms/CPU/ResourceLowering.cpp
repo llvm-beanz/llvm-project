@@ -759,8 +759,12 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
       Value *Dimensions;
       if (ID == Intrinsic::dx_resource_getdimensions_levels_xy) {
         Value *Size =
-            createQuerySizeLod2D(Builder, Env, Image->getArgOperand(0),
-                                 CI->getArgOperand(1), Builder.getTrue());
+            Kind == dxil::ResourceKind::Texture1DArray
+                ? createQuerySizeLod1DArray(
+                      Builder, Env, Image->getArgOperand(0),
+                      CI->getArgOperand(1), Builder.getTrue())
+                : createQuerySizeLod2D(Builder, Env, Image->getArgOperand(0),
+                                       CI->getArgOperand(1), Builder.getTrue());
         Value *Levels =
             createQueryLevels(Builder, Env, Image->getArgOperand(0));
         Dimensions = Builder.CreateShuffleVector(
@@ -1528,8 +1532,9 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
     return false;
   auto Kind = Ty->getDimension();
   if (WithLevels &&
-      (Kind != dxil::ResourceKind::Texture2D || Ty->isWriteable() ||
-       !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
+      ((Kind != dxil::ResourceKind::Texture2D &&
+        Kind != dxil::ResourceKind::Texture1DArray) ||
+       Ty->isWriteable() || !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
        isa<UndefValue>(CI.getArgOperand(1))))
     return false;
   if ((Kind != dxil::ResourceKind::Texture1D &&

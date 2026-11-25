@@ -11,9 +11,15 @@
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
 # RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIP /Fo %t/mip.dxil %t/shader.hlsl
-# RUN: not feme-run %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
-# RUN: not feme-run --reference %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
-# RUN: not feme --target=%feme_host_triple %t/mip.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=MIP
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/mip.dxil | FileCheck %s --check-prefix=MIP
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/mip.dxil | FileCheck %s --check-prefix=MIP
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/mip.dxil | FileCheck %s --check-prefix=MIP
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/mip.dxil -o %t/mip.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/mip.o | FileCheck %s --check-prefix=MIP
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D PLAIN_MIP /Fo %t/plain.dxil %t/shader.hlsl
+# RUN: not feme-run %t/plain.dxil 2>&1 | FileCheck %s --check-prefix=PLAIN
+# RUN: not feme-run --reference %t/plain.dxil 2>&1 | FileCheck %s --check-prefix=PLAIN
+# RUN: not feme --target=%feme_host_triple %t/plain.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=PLAIN
 #
 # Three-mip plain/array SRVs query their base width, not the last mip.
 # Different UAV widths/layer counts distinguish all four descriptors.
@@ -26,7 +32,18 @@
 # RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <2 x i32>,
 # RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <4 x float>,
 # RAISE-NOT: call {{.*}} @dx.op.getDimensions
-# MIP: unsupported raised operation: 'dx.op.getDimensions' was not raised
+# PLAIN: unsupported raised operation: 'dx.op.getDimensions' was not raised
+# MIP: heap[4]: [[MO:42 5 3 7 2 2 3 2147483649 5 42 3 2 2 3 0 5 3 1 2 2 3 2147483649 5 3 7 2 2 3 0 5 3 0 0 2 3 0 42]]{{$}}
+# MIP-NEXT: image[0]: [[MF:0( 0){7}]]{{$}}
+# MIP-NEXT: image[1]: [[MU:0 0 0]]{{$}}
+# MIP-NEXT: image[2]: [[MA:2147483649( 0){21}]]{{$}}
+# MIP-NEXT: image[3]: [[MW:0( 0){5}]]{{$}}
+# MIP-NEXT: heap[4]: [[MO]]{{$}}
+# MIP-NEXT: image[0]: [[MF]]{{$}}
+# MIP-NEXT: image[1]: [[MU]]{{$}}
+# MIP-NEXT: image[2]: [[MA]]{{$}}
+# MIP-NEXT: image[3]: [[MW]]{{$}}
+# MIP-NOT: {{(heap|image)\[}}
 # CHECK: heap[4]: [[OUT:42 5 3 7 2 2 3 2147483649 5 42 7 2 2 3 0 5 3 7 2 2 3 2147483649 5 3 7 2 2 3 0 5 3 0 0 2 3 0 42]]{{$}}
 # CHECK-NEXT: image[0]: [[F:0( 0){7}]]{{$}}
 # CHECK-NEXT: image[1]: [[U:0 0 0]]{{$}}
@@ -49,7 +66,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
   RWByteAddressBuffer output = ResourceDescriptorHeap[4];
   uint base = 4 + tid.x * 28;
   uint width, elements;
+#ifdef PLAIN_MIP
+  uint plainLevels;
+  plain.GetDimensions(tid.x % 3, width, plainLevels);
+#else
   plain.GetDimensions(width);
+#endif
   output.Store(base, width);
   if (tid.x != 1) {
     writable.GetDimensions(width);
@@ -57,7 +79,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
   }
 #ifdef MIP
   uint levels;
-  array.GetDimensions(tid.x, width, elements, levels);
+  array.GetDimensions(tid.x % 3, width, elements, levels);
 #else
   array.GetDimensions(width, elements);
 #endif

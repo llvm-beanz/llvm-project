@@ -215,7 +215,7 @@ The original compute-only baseline is no longer current:
   widths, distinct layer counts, divergent/unbound indices, query/load
   coexistence, all words, guards and repeats. Portable fragment tests
   verify layer-derived loads and idempotence; plain 1D pair queries and
-  1D/array explicit mips remain rejected. Raising, runtime/SPIR-V code, ABI 8 and
+  plain 1D explicit mips remain rejected. Runtime/SPIR-V code, ABI 8 and
   layouts remain unchanged; no bound/static images, advertisements or
   owned-device closure are added.
   Sampled plain 2D explicit dimensions now preserve live i32 mips and total
@@ -224,11 +224,22 @@ The original compute-only baseline is no longer current:
   Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT for
   three valid mip extents, fixed counts, divergent/unbound indices,
   query-derived exact integer loads, all words, guards and repeats.
-  Count-unused queries also execute. Writable/other-shape/undefined-mip
+  Count-unused queries also execute. Writable/unsupported-shape/undefined-mip
   canonical forms reject; depth/aggregate uses remain unraised. Helper
   clamping is unchanged, with no native out-of-range-mip claim.
   Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; no bound/
   static images, advertisements or owned-device closure are added.
+  Sampled 1D-array explicit dimensions now use the same three-component
+  intrinsic, preserving width/layers/count and the live mip. CPU lowering
+  selects the existing 1D-array size helper plus shared total-level helper.
+  Native SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT for
+  widths 7/3/1, two layers/three mips and widths 5/2, three layers/two
+  mips, including exact query-derived SINT loads, divergent/unbound indices,
+  skipped stores, every word, guards and repeats. Count-unused queries also
+  execute. Writable arrays and plain 1D explicit queries remain unsupported.
+  Only valid mips are measured; helper clamping, runtime/SPIR-V code,
+  ABI 8, layouts and advertisements are unchanged. No bound/static
+  images or owned-device/conformance closure is added.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

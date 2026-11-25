@@ -193,8 +193,8 @@ report base widths 5/7 and array layers 2; UAVs report width 3 and
 width 2/layers 3. Divergent/unbound indices, alternating-layer exact
 integer loads through a queried handle, sentinels, every word, guards
 and repeats pass: 156 input bytes plus a guarded 148-byte output,
-exactly 304 bytes per case. Plain 1D pair queries and native 1D/array
-explicit mips remain rejected in normal/reference/AOT paths. Raising, runtime/
+exactly 304 bytes per case. Plain 1D pair queries and native plain 1D
+explicit mips remain rejected in normal/reference/AOT paths. Runtime/
 SPIR-V code, ABI 8 and layouts remain unchanged. Other shapes/fields,
 bound/static images and owned-device/conformance closure remain open.
 
@@ -207,11 +207,28 @@ the live mip and fixed total count. Native extents 7x3/3x1/1x1 and
 indices, query-derived exact SINT loads, all words, guards and repeats:
 152 input bytes plus a guarded 128-byte output, exactly 280 bytes.
 The prior count-unused explicit-mip variant now also passes four CPU
-modes, 236 bytes per case. Both variants repeat twice. Writable/other-
+modes, 236 bytes per case. Both variants repeat twice. Writable/unsupported-
 shape/undefined-mip canonical forms reject; depth/aggregate uses remain
 unraised. Shared helper clamping is unchanged; native out-of-range-mip
 semantics are not claimed. Runtime/SPIR-V code, ABI 8 and layouts remain
 unchanged; no bound/static images or owned-device closure is added.
+
+Native heap-backed sampled `Texture1DArray.GetDimensions(mip, width,
+layers, levels)` now executes SDK DXC SM6.6 FP32/i32 queries in the same
+four CPU modes, each repeated twice. YAML uses `dimension: 1d-array`,
+one-component `extent`, `array-layers` and `mip-levels`; data is mip-major,
+with all layers contiguous within each mip. Existing size/level metadata
+helpers preserve the live mip, fixed layers and total mip count without
+samplers or derivatives. Widths 7/3/1 with two layers/three mips and
+widths 5/2 with three layers/two mips distinguish the components.
+Query-derived last-X/last-layer exact SINT loads, divergent/unbound
+indices, skipped-store sentinels, every word, guards and repeats pass:
+172 input bytes plus a guarded 148-byte output, exactly 320 compared
+bytes per case. The prior count-unused 1D-array variant also executes
+four modes, repeated twice, checking 304 bytes each. Writable arrays and
+plain 1D explicit queries remain unsupported. Only valid mips are measured;
+helper clamping, runtime/SPIR-V code, ABI 8 and layouts are unchanged.
+No bound/static images or owned-device/conformance closure is added.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

@@ -751,6 +751,9 @@ TEST_F(ImageSamplingTest, GetDimensions1DArrayPreservesLayersAndChecksBounds) {
   Fn(&Img, 1, 0, 0, true, Out);
   EXPECT_EQ(Out[0], 7u);
   EXPECT_EQ(Out[1], 2u);
+  Fn(&Img, 1, 0, 1, true, Out);
+  EXPECT_EQ(Out[0], 3u);
+  EXPECT_EQ(Out[1], 2u);
   Fn(&Img, 1, 0, 2, true, Out);
   EXPECT_EQ(Out[0], 1u);
   EXPECT_EQ(Out[1], 2u);

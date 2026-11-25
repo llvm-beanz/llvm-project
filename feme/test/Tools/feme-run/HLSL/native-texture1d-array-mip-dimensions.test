@@ -1,0 +1,72 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+#
+# Valid dynamic mips shrink widths, not layer counts or total mip counts.
+# Distinct layer/mip counts separate both descriptors. Lane four selects
+# unbound arrays; lane one skips a count store. Query-derived last-X and
+# last-layer coordinates load exact SINT bits from two real mips.
+# Every word of 172 input bytes and 148 guarded output bytes is checked.
+# CPU metadata evidence, not bound/static or owned D3D12 conformance.
+# RAISE-DAG: call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy{{.*}}(target("dx.Texture", <4 x float>,
+# RAISE-DAG: call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy{{.*}}(target("dx.Texture", i32,
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# CHECK: heap[2]: [[OUT:42 7 2 3 5 3 2 2147483649 3 2 3 2 3 42 16777217 1 2 3 5 3 2 2147483649 7 2 3 2 3 2 16777217 0 0 0 0 0 0 0 42]]{{$}}
+# CHECK-NEXT: image[0]: [[F:0( 0){21}]]{{$}}
+# CHECK-NEXT: image[1]: [[I:0( 0){13} 2147483649( 0){5} 16777217]]{{$}}
+# CHECK-NEXT: heap[2]: [[OUT]]{{$}}
+# CHECK-NEXT: image[0]: [[F]]{{$}}
+# CHECK-NEXT: image[1]: [[I]]{{$}}
+# CHECK-NOT: {{(heap|image)\[}}
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture1DArray<float4> full = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 9 : 0)];
+  Texture1DArray<int> integer = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 8 : 1)];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[2];
+  uint base = 4 + tid.x * 28;
+  uint width, layers, levels;
+  full.GetDimensions(tid.x % 3, width, layers, levels);
+  output.Store3(base, uint3(width, layers, levels));
+  uint mip = tid.x & 1;
+  integer.GetDimensions(mip, width, layers, levels);
+  output.Store2(base + 12, uint2(width, layers));
+  if (tid.x != 1)
+    output.Store(base + 20, levels);
+  output.Store(base + 24, asuint(integer.Load(int3(width - 1, layers - 1, mip))));
+}
+#--- heap.yaml
+resource-heap:
+  - index: 2
+    size: 148
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 1d-array
+    extent: [7]
+    array-layers: 2
+    mip-levels: 3
+    format: r32_float
+    data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - index: 1
+    dimension: 1d-array
+    extent: [5]
+    array-layers: 3
+    mip-levels: 2
+    format: r32_sint
+    data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2147483649,
+           0, 0, 0, 0, 0, 16777217]

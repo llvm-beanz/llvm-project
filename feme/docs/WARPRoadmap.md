@@ -3011,6 +3011,52 @@ Other shapes/fields, bound/static images, full-suite, external CTS,
 adapter-matrix and owned D3D12/conformance closure remain open.
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native 1D-array explicit-mip dimensions (2026-11-25).**
+
+The native reproduction confirmed sampled 1D-array explicit-mip/count
+queries remained unraised. Raising and the shared CPU dimension
+admission/lowering predicate now extend `getdimensions.levels.xy` to
+heap-backed sampled FP32/i32 1D arrays with defined i32 mips. Width/
+layer count use the existing 1D-array size-at-LOD metadata helper; total
+mip count uses the shared level helper. DXIL fields 0/1/3 map to vector
+elements 0/1/2, preserving the live mip and fixed layer count, without
+samplers or derivatives in any stage. Existing LLVM forward lowering is
+reused. Writable arrays, plain 1D explicit queries and unsupported shapes/
+fields remain rejected; plain 1D base scalar queries remain supported.
+
+[`native-texture1d-array-mip-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture1d-array-mip-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 widths 7/3/1 with two layers and
+three mips and SINT widths 5/2 with three layers and two mips distinguish
+layer count from mip count. Query-derived last-X/last-layer loads preserve
+exact high-bit/non-FP32-exact integer values from both integer mips.
+Divergent indices make both images unbound in lane four, returning zeros.
+Lane one skips a count store, preserving its sentinel. Every word, guard
+and repeat passes: 172 input bytes plus a guarded 148-byte output,
+exactly 320 compared bytes. The earlier count-unused 1D-array variant
+now executes rather than rejecting: four additional CPU cases, each
+repeated twice, check exactly 304 bytes. Base/mip-zero cases remain.
+
+Portable tests cover 1D-array forward/reverse mapping, live mips,
+fragment layer-only queries, helper selection, handle cleanup,
+idempotence and unchanged writable-array lowering. Normal/reference/AOT
+admission rejects writable-array canonical queries and native plain 1D
+explicit queries. The existing array metadata unit additionally checks
+mip one yields width three while retaining two layers. The affected
+assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build, requesting
+`opt` as well as the FeMe tools/runtime tests, passes 15 steps. Forty
+focused LLVM/FeMe LIT pass in 28.36 seconds; thirteen dimension runtime
+units pass in 2.771 seconds, zero failures. Two LIT fixtures are added;
+three existing LIT fixtures and one runtime case are extended.
+
+Only valid-mip native results are measured; shared helper clamping is
+unchanged and is not D3D out-of-range-mip evidence. Runtime/SPIR-V code,
+existing load/store/status/atomic policy, advertisements, descriptor
+materialization, ABI 8 and argument layouts remain unchanged. Other
+shapes/fields, bound/static images, full-suite, external CTS, adapter-matrix
+and owned D3D12/conformance closure remain open. `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

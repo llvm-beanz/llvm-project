@@ -26,6 +26,10 @@
 # RUN: not feme-run --reference %t/poison-mip.ll 2>&1 | FileCheck %s
 # RUN: llvm-as %t/poison-mip.ll -o %t/poison-mip.bc
 # RUN: not feme --target=%feme_host_triple %t/poison-mip.bc -o %t/poison-mip.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/writable-array-levels.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/writable-array-levels.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/writable-array-levels.ll -o %t/writable-array-levels.bc
+# RUN: not feme --target=%feme_host_triple %t/writable-array-levels.bc -o %t/writable-array-levels.o 2>&1 | FileCheck %s
 # CHECK: requires heap-backed FP32/i32 1D/array or plain 2D mip-zero texture dimension queries
 #--- array.ll
 define void @main() #0 {
@@ -47,6 +51,17 @@ define void @main() #0 {
 }
 declare target("dx.Texture", float, 1, 0, 0, 2) @llvm.dx.resource.handlefromheap.u(i32)
 declare <3 x i32> @llvm.dx.resource.getdimensions.levels.xy.u(target("dx.Texture", float, 1, 0, 0, 2), i32)
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- writable-array-levels.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", float, 1, 0, 0, 6) @llvm.dx.resource.handlefromheap.u(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.levels.xy.u(target("dx.Texture", float, 1, 0, 0, 6) %t, i32 0)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.Texture", float, 1, 0, 0, 6) @llvm.dx.resource.handlefromheap.u(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.levels.xy.u(target("dx.Texture", float, 1, 0, 0, 6), i32)
 declare void @consume(<3 x i32>)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
 #--- array-levels.ll
