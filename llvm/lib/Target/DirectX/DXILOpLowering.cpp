@@ -1021,7 +1021,7 @@ public:
     });
   }
 
-  [[nodiscard]] bool lowerGetDimensionsXY(Function &F) {
+  [[nodiscard]] bool lowerGetDimensionsXY(Function &F, bool WithLevels) {
     IRBuilder<> &IRB = OpBuilder.getIRB();
     Type *Int32Ty = IRB.getInt32Ty();
 
@@ -1029,18 +1029,20 @@ public:
       IRB.SetInsertPoint(CI);
       Value *Handle =
           createTmpHandleCast(CI->getArgOperand(0), OpBuilder.getHandleType());
-      Value *Undef = UndefValue::get(Int32Ty);
+      Value *Mip = WithLevels ? CI->getArgOperand(1) : UndefValue::get(Int32Ty);
 
       Expected<CallInst *> OpCall = OpBuilder.tryCreateOp(
-          OpCode::GetDimensions, {Handle, Undef}, CI->getName(), Int32Ty);
+          OpCode::GetDimensions, {Handle, Mip}, CI->getName(), Int32Ty);
       if (Error E = OpCall.takeError())
         return E;
       Value *Width = IRB.CreateExtractValue(*OpCall, 0);
       Value *Height = IRB.CreateExtractValue(*OpCall, 1);
-      Value *Dim = IRB.CreateInsertElement(
-          UndefValue::get(FixedVectorType::get(Int32Ty, 2)), Width,
-          IRB.getInt32(0));
+      Value *Dim = IRB.CreateInsertElement(UndefValue::get(CI->getType()),
+                                           Width, IRB.getInt32(0));
       Dim = IRB.CreateInsertElement(Dim, Height, IRB.getInt32(1));
+      if (WithLevels)
+        Dim = IRB.CreateInsertElement(Dim, IRB.CreateExtractValue(*OpCall, 3),
+                                      IRB.getInt32(2));
 
       CI->replaceAllUsesWith(Dim);
       CI->eraseFromParent();
@@ -1554,7 +1556,10 @@ public:
         HasErrors |= lowerGetDimensionsX(F);
         break;
       case Intrinsic::dx_resource_getdimensions_xy:
-        HasErrors |= lowerGetDimensionsXY(F);
+        HasErrors |= lowerGetDimensionsXY(F, /*WithLevels=*/false);
+        break;
+      case Intrinsic::dx_resource_getdimensions_levels_xy:
+        HasErrors |= lowerGetDimensionsXY(F, /*WithLevels=*/true);
         break;
       case Intrinsic::ctpop:
         HasErrors |= lowerCtpopToCountBits(F);
