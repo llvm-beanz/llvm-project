@@ -731,7 +731,7 @@ unsigned getTexelWidth(Type *Ty, Type *ScalarTy) {
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
 /// `samplebias[.clamp]`/`samplegrad[.clamp]`/`samplecmp[.clamp]`/
-/// `samplecmplevelzero`/`load.level`/`load.ms`/`getdimensions.x[y]`
+/// `samplecmplevelzero`/`load.level`/`load.ms`/`getdimensions.*`
 /// calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
@@ -769,8 +769,12 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
             Builder.CreateInsertElement(Dimensions, Levels, uint64_t{1});
       } else if (ID == Intrinsic::dx_resource_getdimensions_levels_xyz) {
         Value *Size =
-            createQuerySizeLod2DArray(Builder, Env, Image->getArgOperand(0),
-                                      CI->getArgOperand(1), Builder.getTrue());
+            Kind == dxil::ResourceKind::Texture3D
+                ? createQuerySizeLod3D(Builder, Env, Image->getArgOperand(0),
+                                       CI->getArgOperand(1), Builder.getTrue())
+                : createQuerySizeLod2DArray(
+                      Builder, Env, Image->getArgOperand(0),
+                      CI->getArgOperand(1), Builder.getTrue());
         Value *Levels =
             createQueryLevels(Builder, Env, Image->getArgOperand(0));
         Dimensions = Builder.CreateShuffleVector(
@@ -807,6 +811,10 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
         Dimensions =
             createQuerySizeLod2DArray(Builder, Env, Image->getArgOperand(0),
                                       Builder.getInt32(0), Builder.getTrue());
+      else if (Kind == dxil::ResourceKind::Texture3D)
+        Dimensions =
+            createQuerySizeLod3D(Builder, Env, Image->getArgOperand(0),
+                                 Builder.getInt32(0), Builder.getTrue());
       else
         Dimensions = createGetDimensions2D(
             Builder, Env, Image->getArgOperand(0), Builder.getTrue());
@@ -814,7 +822,8 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
           Kind != dxil::ResourceKind::Texture1D)
         Dimensions = Builder.CreateExtractElement(Dimensions, uint64_t{0});
       else if (ID == Intrinsic::dx_resource_getdimensions_xy &&
-               Kind == dxil::ResourceKind::Texture2DArray)
+               (Kind == dxil::ResourceKind::Texture2DArray ||
+                Kind == dxil::ResourceKind::Texture3D))
         Dimensions = Builder.CreateShuffleVector(Dimensions, {0, 1});
       CI->replaceAllUsesWith(Dimensions);
       CI->eraseFromParent();
@@ -1580,12 +1589,14 @@ bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
       Kind != dxil::ResourceKind::TextureCube)
     return false;
   if ((WithLevelsXYZ || ID == Intrinsic::dx_resource_getdimensions_xyz) &&
-      Kind != dxil::ResourceKind::Texture2DArray)
+      Kind != dxil::ResourceKind::Texture2DArray &&
+      Kind != dxil::ResourceKind::Texture3D)
     return false;
   if ((Kind != dxil::ResourceKind::Texture1D &&
        Kind != dxil::ResourceKind::Texture1DArray &&
        Kind != dxil::ResourceKind::Texture2D &&
        Kind != dxil::ResourceKind::Texture2DArray &&
+       Kind != dxil::ResourceKind::Texture3D &&
        Kind != dxil::ResourceKind::TextureCube) ||
       (Kind == dxil::ResourceKind::Texture1D &&
        ID != Intrinsic::dx_resource_getdimensions_x && !WithLevelsX))

@@ -1831,8 +1831,9 @@ bool raiseTextureStore(CallInst &CI) {
 }
 
 /// Raises dimension extracts to scalar/pair/triple queries; field 2 is
-/// supported for 2D-array layers. Sampled 1D/array, 2D/array and cube queries
-/// with a meaningful mip or field-3 count use `getdimensions.levels.x/xy/xyz`,
+/// supported for 2D-array layers and 3D depth. Sampled 1D/array, 2D/array,
+/// 3D and cube queries with a meaningful mip or field-3 count use
+/// `getdimensions.levels.x/xy/xyz`,
 /// mapping field 3 after the dimensions. Aggregate uses remain unsupported.
 /// Other shapes require an unused/zero mip; buffers accept only field 0 (DXC
 /// supplies a structured buffer's HLSL stride as a constant).
@@ -1856,29 +1857,32 @@ bool raiseGetDimensions(CallInst &CI) {
       TextureTy && TextureTy->getDimension() == dxil::ResourceKind::Texture1D;
   bool Is2DArray = TextureTy && TextureTy->getDimension() ==
                                     dxil::ResourceKind::Texture2DArray;
+  bool HasThirdDimension =
+      Is2DArray ||
+      (TextureTy && TextureTy->getDimension() == dxil::ResourceKind::Texture3D);
   bool CanQueryLevels =
       TextureTy && !TextureTy->isWriteable() &&
       (TextureTy->getDimension() == dxil::ResourceKind::Texture2D ||
        TextureTy->getDimension() == dxil::ResourceKind::Texture1DArray ||
        TextureTy->getDimension() == dxil::ResourceKind::TextureCube || Is1D ||
-       Is2DArray);
+       HasThirdDimension);
   if (NeedsLevels && !CanQueryLevels)
     return false;
 
   SmallVector<ExtractValueInst *, 2> Extracts;
   bool NeedsHeight = false;
-  bool NeedsLayers = false;
+  bool NeedsThirdDimension = false;
   for (User *U : CI.users()) {
     auto *EV = dyn_cast<ExtractValueInst>(U);
     if (!EV || EV->getNumIndices() != 1)
       return false;
     uint64_t Field = EV->getIndices()[0];
-    if (Field > 3 || (Field == 2 && !Is2DArray) ||
+    if (Field > 3 || (Field == 2 && !HasThirdDimension) ||
         (Field == 3 && !CanQueryLevels) || (IsBuffer && Field != 0) ||
         (Is1D && Field == 1))
       return false;
     NeedsHeight |= (Field == 1);
-    NeedsLayers |= (Field == 2);
+    NeedsThirdDimension |= (Field == 2);
     NeedsLevels |= (Field == 3);
     Extracts.push_back(EV);
   }
@@ -1897,13 +1901,13 @@ bool raiseGetDimensions(CallInst &CI) {
   if (NeedsLevels) {
     Function *GetDimensionsLevelsFn = Intrinsic::getOrInsertDeclaration(
         CI.getModule(),
-        Is1D        ? Intrinsic::dx_resource_getdimensions_levels_x
-        : Is2DArray ? Intrinsic::dx_resource_getdimensions_levels_xyz
-                    : Intrinsic::dx_resource_getdimensions_levels_xy,
+        Is1D                ? Intrinsic::dx_resource_getdimensions_levels_x
+        : HasThirdDimension ? Intrinsic::dx_resource_getdimensions_levels_xyz
+                            : Intrinsic::dx_resource_getdimensions_levels_xy,
         {Handle->getType()});
     Value *Level = isa<UndefValue>(Mip) ? Builder.getInt32(0) : Mip;
     Dimensions = Builder.CreateCall(GetDimensionsLevelsFn, {Handle, Level});
-  } else if (NeedsLayers) {
+  } else if (NeedsThirdDimension) {
     Function *GetDimensionsXYZFn = Intrinsic::getOrInsertDeclaration(
         CI.getModule(), Intrinsic::dx_resource_getdimensions_xyz,
         {Handle->getType()});
@@ -1922,12 +1926,12 @@ bool raiseGetDimensions(CallInst &CI) {
 
   for (ExtractValueInst *EV : Extracts) {
     Value *Replacement =
-        NeedsHeight || NeedsLayers || NeedsLevels
+        NeedsHeight || NeedsThirdDimension || NeedsLevels
             ? Builder.CreateExtractElement(
                   Dimensions, Builder.getInt32(EV->getIndices()[0] == 3
-                                                   ? (Is1D        ? 1
-                                                      : Is2DArray ? 3
-                                                                  : 2)
+                                                   ? (Is1D                ? 1
+                                                      : HasThirdDimension ? 3
+                                                                          : 2)
                                                    : EV->getIndices()[0]))
             : Dimensions;
     EV->replaceAllUsesWith(Replacement);

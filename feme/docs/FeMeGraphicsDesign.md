@@ -3152,7 +3152,7 @@ passes normal waves 4/8, reference and ARM64 AOT, including width-only,
 height-only and paired results, a three-mip base extent, divergent/unbound
 indices, query/load coexistence, all words, guards and repeats.
 Sampled plain 2D explicit mips/counts use the separate path below.
-MS/3D/cube-array shapes, non-32-bit declarations, depth/aggregate uses
+MS/cube-array shapes, non-32-bit declarations, aggregate uses
 and bound/static image queries remain outside this CPU path. Runtime/
 SPIR-V code, ABI 8 and argument layouts remain unchanged; this is shared
 CPU metadata evidence, not draw or owned-device/conformance closure.
@@ -3230,10 +3230,23 @@ derivatives. Layers stay fixed as mip extents shrink. Native SM6.6 passes
 waves 4/8, reference and ARM64 AOT for base/explicit sampled and base
 writable queries, query-derived exact SINT loads, divergence/unbound zeros,
 skipped stores, all words, guards and repeats. Writable explicit, undefined-
-mip and mismatched-shape canonical forms reject; 3D/MS/cube-array
+mip and mismatched-shape canonical forms reject; MS/cube-array
 dimensions remain unsupported. Only valid native mips are measured.
 Helper clamping, runtime/SPIR-V code, ABI 8 and layouts remain unchanged.
 This is shared CPU evidence, not draw or owned-device/conformance closure.
+
+Heap-backed FP32/i32 3D dimensions accept base x/xy/xyz SRV/UAV queries
+and sampled `getdimensions.levels.xyz` with defined i32 mips. Symmetric
+forward/reverse mapping keeps width/height/depth separate from total mip
+count. Existing 3D size-at-LOD and shared level metadata helpers need no
+sampler/derivatives in any stage; depth shrinks with width/height instead
+of preserving array layers. Native SM6.6 passes waves 4/8, reference and
+ARM64 AOT, each repeated twice, checking every word of 916 bytes,
+query-derived exact SINT loads, divergence/unbound zeros, skipped stores
+and guards. Writable explicit, undefined-mip and wrong result-form queries
+reject. Only valid native mips are measured; runtime/SPIR-V code, helper
+clamping, ABI 8 and layouts remain unchanged. This is shared CPU evidence,
+not draw or owned-device/conformance closure.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

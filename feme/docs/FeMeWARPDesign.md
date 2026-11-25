@@ -203,7 +203,7 @@ The original compute-only baseline is no longer current:
   height-only and paired results, a three-mip base extent, divergent/
   unbound indices, query/load coexistence, all words, guards and repeats.
   Sampled plain 2D explicit mips/counts use the separate path below.
-  MS/3D/cube-array shapes, non-32-bit declarations, depth/aggregate
+  MS/cube-array shapes, non-32-bit declarations, aggregate
   uses and bound/static images remain outside this CPU path.
   Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; this adds no
   descriptor materialization, advertisements or owned-device closure.
@@ -274,9 +274,20 @@ The original compute-only baseline is no longer current:
   sampled and base writable queries, exact query-derived SINT loads,
   divergence/unbound zeros, skipped stores, all words, guards and repeats.
   Writable explicit, undefined-mip and mismatched-shape canonical queries
-  reject; 3D/MS/cube-array dimensions remain unsupported. Only valid native
+  reject; MS/cube-array dimensions remain unsupported. Only valid native
   mips are measured; helper clamping, runtime/SPIR-V code, ABI 8, layouts
   and advertisements are unchanged. No owned-device closure is established.
+  Heap-backed FP32/i32 3D dimensions accept base x/xy/xyz SRV/UAV queries
+  and sampled levels.xyz with defined i32 mips. Existing intrinsic forms
+  preserve width/height/depth and a separate total mip count; existing 3D
+  size-at-LOD and shared level helpers need no sampler/derivatives in any
+  stage. Depth shrinks with mip, unlike fixed array layers. Native SM6.6
+  passes waves 4/8, reference and ARM64 AOT, each repeated twice,
+  checking all 916 bytes, exact query-derived SINT loads, divergent/
+  unbound indices, skipped stores and guards. Writable explicit, undefined-
+  mip and wrong result-form queries reject. Only valid native mips are
+  measured; runtime/SPIR-V code, helper clamping, ABI 8, advertisements and
+  layouts remain unchanged. This adds no owned-device/conformance closure.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

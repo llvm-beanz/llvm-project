@@ -77,6 +77,8 @@
 // optional total mip count through the shared 2D size/level helpers.
 // 2D-array x/xy/xyz queries use the array size helper at mip zero;
 // sampled levels.xyz queries append total mip count at an explicit mip.
+// 3D queries share those result forms, with depth shrinking at each mip
+// through the 3D size helper instead of preserving array layers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -101,6 +103,7 @@ namespace feme::cpu {
 /// through those same 2D metadata helpers; writable cubes are not included.
 /// 2D arrays accept x/xy/xyz base queries for sampled/writable declarations
 /// and sampled levels.xyz with a defined i32 mip, preserving fixed layers.
+/// 3D textures accept the same forms with shrinking width/height/depth.
 bool isSupportedDXILGetDimensions(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32/i32 1D/2D (including array) or 3D loading in any

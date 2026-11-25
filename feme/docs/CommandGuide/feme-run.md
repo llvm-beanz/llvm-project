@@ -175,8 +175,8 @@ Width-only, height-only and paired outputs distinguish extents 5x3, 3x2
 and 2x4. The full image has three mips and still reports its base extent;
 the same handle also loads a texel. Divergent unbound indices return zeros;
 sentinels, every word, guards and repeats pass: 128 input bytes plus a
-guarded 108-byte output, exactly 236 bytes per case. MS/3D/cube-array
-shapes, non-32-bit declarations, depth/aggregate uses and bound/static
+guarded 108-byte output, exactly 236 bytes per case. MS/cube-array
+shapes, non-32-bit declarations, aggregate uses and bound/static
 images remain outside this CPU path. Sampled plain 2D explicit mips/counts
 use the separate path below; unsupported canonical query shapes
 fail early normal/reference/AOT admission. Runtime/SPIR-V code, buffer
@@ -275,9 +275,24 @@ last-X/Y/layer exact SINT loads, divergent/unbound indices, skipped-store
 sentinels, every word, guards and repeats pass: 376 image bytes plus a
 guarded 308-byte output, exactly 684 compared bytes per case. Writable
 explicit, undefined-mip and mismatched-shape canonical queries reject;
-3D/MS/cube-array dimensions remain unsupported. Only valid native mips
+MS/cube-array dimensions remain unsupported. Only valid native mips
 are measured. Helper clamping, runtime/SPIR-V code, ABI 8, layouts and
 owned-device/conformance boundaries remain unchanged.
+
+Native heap-backed `Texture3D`/`RWTexture3D.GetDimensions` executes FP32/i32
+base width/height/depth queries and sampled explicit
+`(mip, width, height, depth, levels)` queries in waves 4/8, reference and
+ARM64 AOT, each repeated twice. YAML uses `dimension: 3d`, three-component
+`extent` and `mip-levels`; data is mip-major with depth slices contiguous
+within each mip. Existing metadata helpers need no sampler/derivatives.
+FP32 extents 7x3x5/3x1x2/1x1x1 with three mips, SINT 5x2x3/2x1x1
+with two mips and UINT UAV 2x1x4 distinguish shrinking depth from total
+mip count and fixed array layers. Query-derived last-X/Y/Z exact SINT
+loads, divergence/unbound zeros, skipped stores, every word, guards and
+repeats pass: 608 image bytes plus a guarded 308-byte output, exactly
+916 compared bytes per case. Writable explicit, undefined-mip and wrong
+result-form queries reject. Only valid native mips are measured; runtime/
+SPIR-V code, helper clamping, ABI 8 and owned-device boundaries are unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

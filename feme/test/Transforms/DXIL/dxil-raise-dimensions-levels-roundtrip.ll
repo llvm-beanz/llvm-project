@@ -109,3 +109,39 @@ define i32 @array2d_count_only() {
   %count = extractelement <4 x i32> %dims, i32 3
   ret i32 %count
 }
+
+; CHECK-LABEL: define <3 x i32> @volume_base(
+; CHECK: [[D:%.*]] = call <3 x i32> @llvm.dx.resource.getdimensions.xyz{{.*}}(target("dx.Texture", i32, 1, 0, 0, 4) {{.*}})
+; CHECK: extractelement <3 x i32> [[D]], i32 0
+; CHECK: extractelement <3 x i32> [[D]], i32 1
+; CHECK: extractelement <3 x i32> [[D]], i32 2
+; CHECK-NOT: @dx.op.getDimensions
+define <3 x i32> @volume_base() {
+  %handle = call target("dx.Texture", i32, 1, 0, 0, 4) @llvm.dx.resource.handlefrombinding(i32 0, i32 9, i32 1, i32 0, ptr null)
+  %dims = call <3 x i32> @llvm.dx.resource.getdimensions.xyz(target("dx.Texture", i32, 1, 0, 0, 4) %handle)
+  ret <3 x i32> %dims
+}
+
+; CHECK-LABEL: define <4 x i32> @volume_dynamic(
+; CHECK: [[D:%.*]] = call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 4) {{.*}}, i32 %mip)
+; CHECK: extractelement <4 x i32> [[D]], i32 0
+; CHECK: extractelement <4 x i32> [[D]], i32 1
+; CHECK: extractelement <4 x i32> [[D]], i32 2
+; CHECK: extractelement <4 x i32> [[D]], i32 3
+; CHECK-NOT: @dx.op.getDimensions
+define <4 x i32> @volume_dynamic(i32 %mip) {
+  %handle = call target("dx.Texture", <4 x float>, 0, 0, 1, 4) @llvm.dx.resource.handlefrombinding(i32 0, i32 10, i32 1, i32 0, ptr null)
+  %dims = call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz(target("dx.Texture", <4 x float>, 0, 0, 1, 4) %handle, i32 %mip)
+  ret <4 x i32> %dims
+}
+
+; CHECK-LABEL: define i32 @volume_count_only(
+; CHECK: [[D:%.*]] = call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz{{.*}}({{.*}}, i32 0)
+; CHECK: extractelement <4 x i32> [[D]], i32 3
+; CHECK-NOT: @dx.op.getDimensions
+define i32 @volume_count_only() {
+  %handle = call target("dx.Texture", i32, 0, 0, 1, 4) @llvm.dx.resource.handlefrombinding(i32 0, i32 11, i32 1, i32 0, ptr null)
+  %dims = call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz(target("dx.Texture", i32, 0, 0, 1, 4) %handle, i32 undef)
+  %count = extractelement <4 x i32> %dims, i32 3
+  ret i32 %count
+}

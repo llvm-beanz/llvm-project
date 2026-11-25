@@ -897,6 +897,54 @@ TEST_F(ImageSamplingTest, GetDimensions2DArrayPreservesLayersAndChecksBounds) {
   }
 }
 
+TEST_F(ImageSamplingTest, GetDimensions3DShrinksDepthAndChecksBounds) {
+  using GetDimensionsFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                   uint32_t, int32_t, bool, void *);
+  GetDimensionsFn Fn = resolve<GetDimensionsFn>(
+      addWrapper("dimensions", "feme.cpu.image.getdimensions.lod.3d.v3i32"));
+  ASSERT_TRUE(Fn);
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Width = 7;
+  Img.Height = 3;
+  Img.Depth = 5;
+  Img.ArrayLayers = 11;
+  Img.MipLevels = 3;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  alignas(16) uint32_t Out[4] = {};
+  constexpr uint32_t Expected[3][3] = {{7, 3, 5}, {3, 1, 2}, {1, 1, 1}};
+  for (int32_t Mip = 0; Mip < 3; ++Mip) {
+    Fn(&Img, 1, 0, Mip, true, Out);
+    for (unsigned I = 0; I < 3; ++I)
+      EXPECT_EQ(Out[I], Expected[Mip][I]);
+  }
+  Img.Flags = FEME_IMAGE_STORAGE;
+  Fn(&Img, 1, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 7u);
+  EXPECT_EQ(Out[1], 3u);
+  EXPECT_EQ(Out[2], 5u);
+  Fn(&Img, 1, 0, 0, false, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  Img.MipLevels = 0;
+  Fn(&Img, 1, 0, 0, true, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  Img.MipLevels = 3;
+  Img.Data = nullptr;
+  Fn(&Img, 1, 0, 0, true, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  Fn(nullptr, 0, 0, 0, true, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  for (uint32_t Index : {1u, 0xffffffffu}) {
+    Fn(nullptr, 1, Index, 0, true, Out);
+    for (unsigned I = 0; I < 3; ++I)
+      EXPECT_EQ(Out[I], 0u);
+  }
+}
+
 TEST_F(ImageSamplingTest, GetDimensions2DTotalLevelsIsMetadataOnly) {
   using QueryLevelsFn =
       int32_t (*)(const FemeImageDescriptor *, uint32_t, uint32_t);

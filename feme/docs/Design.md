@@ -1455,10 +1455,10 @@ it now covers the two largest opcode families:
   Native SDK DXC SM6.6 executes in waves 4/8, reference and ARM64 AOT,
   checking a three-mip base extent, divergent/unbound indices, query/load
   coexistence, every word, guards and repeats. Admission and lowering share
-  a predicate; non-heap, MS/3D/cube-array shapes and non-32-bit declarations
+  a predicate; non-heap, MS/cube-array shapes and non-32-bit declarations
   remain unsupported. Base scalar/pair intrinsics carry no mip; sampled
   1D-array/plain 2D explicit mips/counts use the separate paths below.
-  Other texture shapes retain unused/zero-mip guards. Depth/aggregate uses, bound/static
+  Other supported shapes use the paths below. Aggregate uses, bound/static
   images and owned-device execution remain open. Runtime/SPIR-V code,
   ABI 8 and layouts are unchanged.
 
@@ -1540,9 +1540,22 @@ it now covers the two largest opcode families:
   AOT for base/explicit sampled and base writable queries, query-derived
   exact SINT loads, divergent/unbound indices, skipped stores, all words,
   guards and repeats. Writable explicit, undefined-mip and mismatched-shape
-  canonical queries reject; 3D/MS/cube-array dimensions remain unsupported.
+  canonical queries reject; MS/cube-array dimensions remain unsupported.
   Only valid native mips are measured. Helper clamping, runtime/SPIR-V code,
   ABI 8 and owned-device boundaries remain unchanged.
+
+- Heap-backed FP32/i32 3D dimensions accept base x/xy/xyz SRV/UAV queries
+  and sampled `getdimensions.levels.xyz` with defined i32 mips. Existing
+  xyz/levels.xyz forms preserve width/height/depth and a separate total mip
+  count through symmetric LLVM forward lowering and FeMe raising. CPU
+  lowering uses the existing 3D size-at-LOD and shared level metadata
+  helpers without sampler/derivatives in any stage. All three extents
+  shrink with mip, unlike fixed 2D-array layers. Native SM6.6 passes waves
+  4/8, reference and ARM64 AOT, each repeated twice, checking every word
+  of 916 bytes, query-derived exact SINT loads, divergent/unbound indices,
+  skipped stores and guards. Writable explicit, undefined-mip and wrong
+  result-form queries reject. Only valid native mips are measured; runtime/
+  SPIR-V code, helper clamping, ABI 8 and owned-device boundaries are unchanged.
 
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
@@ -1706,8 +1719,8 @@ reconstructed. `raiseSample`/`raiseSampleBias`/`raiseSampleLevel`/`raiseSampleCm
 scalar FP32 `dx.op.sampleCmp` (64)/`dx.op.sampleCmpLevelZero` (65),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
 `dx.op.getDimensions`'s dimension fields (72). Base queries use scalar/
-pair/triple intrinsics; 2D-array field 2 represents layers. Sampled 1D/array,
-2D/array or cube explicit mips or field-3 counts raise to
+pair/triple intrinsics; field 2 represents 2D-array layers or 3D depth.
+Sampled 1D/array, 2D/array, 3D or cube explicit mips or field-3 counts raise to
 `getdimensions.levels.x/xy/xyz`. Their final element (1/2/3) maps to DXIL
 field 3, symmetrically with LLVM forward lowering. Other field-2 and aggregate
 uses remain unraised. Typed/byte-address field-zero queries additionally
@@ -1715,8 +1728,8 @@ raise to `getdimensions.x` with unused/zero mip operands; other buffer
 fields remain unraised. Structured field-zero counts also raise, while DXC's
 constant HLSL stride result is preserved rather than treating it as field 1.
 Base dimension raising requires an unused/zero mip operand; sampled
-1D/array, 2D/array or cube explicit mips/counts retain the live mip through the
-two-/three-/four-component intrinsic. 1D/2D (including arrays) and sampled cube base/explicit
+1D/array, 2D/array, 3D or cube explicit mips/counts retain the live mip through the
+two-/three-/four-component intrinsic. 1D/2D (including arrays), 3D and sampled cube base/explicit
 heap-backed FP32/i32 queries lower to shared CPU metadata helpers.
 Other shapes and bound/static image queries remain outside that CPU path.
 Before adding comparison mapping, `Sample`,

@@ -1,0 +1,89 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+#
+# Depth shrinks with width/height and is distinct from the total mip count.
+# Query-derived last-X/Y/Z loads preserve exact SINT bits at both mips.
+# Lane four has unbound SRVs but a bound UAV; lane one skips a count store.
+# Every word of 608 image bytes and 308 guarded output bytes is checked.
+# RAISE-DAG: call <3 x i32> @llvm.dx.resource.getdimensions.xyz{{.*}}(target("dx.Texture", <4 x float>,
+# RAISE-DAG: call <3 x i32> @llvm.dx.resource.getdimensions.xyz{{.*}}(target("dx.Texture", i32, 1,
+# RAISE-DAG: call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz{{.*}}(target("dx.Texture", <4 x float>,
+# RAISE-DAG: call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz{{.*}}(target("dx.Texture", i32, 0,
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# CHECK: heap[3]: [[OUT:42 7 3 5 7 3 5 3 5 2 3 2 2147483649 2 1 4 7 3 5 3 1 2 3 2 1 1 42 16777217 2 1 4 7 3 5 1 1 1 3 5 2 3 2 2147483649 2 1 4 7 3 5 7 3 5 3 2 1 1 2 16777217 2 1 4 0 0 0 0 0 0 0 0 0 0 0 0 2 1 4 42]]{{$}}
+# CHECK-NEXT: image[0]: [[F:0( 0){111}]]{{$}}
+# CHECK-NEXT: image[1]: [[I:0( 0){28} 2147483649 0 16777217]]{{$}}
+# CHECK-NEXT: image[2]: [[U:0( 0){7}]]{{$}}
+# CHECK-NEXT: heap[3]: [[OUT]]{{$}}
+# CHECK-NEXT: image[0]: [[F]]{{$}}
+# CHECK-NEXT: image[1]: [[I]]{{$}}
+# CHECK-NEXT: image[2]: [[U]]{{$}}
+# CHECK-NOT: {{(heap|image)\[}}
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture3D<float4> full = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 9 : 0)];
+  Texture3D<int> integer = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 8 : 1)];
+  RWTexture3D<uint> writable = ResourceDescriptorHeap[2];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[3];
+  uint base = 4 + tid.x * 60;
+  uint width, height, depth, levels;
+  full.GetDimensions(width, height, depth);
+  output.Store3(base, uint3(width, height, depth));
+  full.GetDimensions(tid.x % 3, width, height, depth, levels);
+  output.Store4(base + 12, uint4(width, height, depth, levels));
+  uint mip = tid.x & 1;
+  integer.GetDimensions(mip, width, height, depth, levels);
+  output.Store3(base + 28, uint3(width, height, depth));
+  if (tid.x != 1)
+    output.Store(base + 40, levels);
+  output.Store(base + 44, asuint(integer.Load(int4(width - 1, height - 1, depth - 1, mip))));
+  writable.GetDimensions(width, height, depth);
+  output.Store3(base + 48, uint3(width, height, depth));
+}
+#--- heap.yaml
+resource-heap:
+  - index: 3
+    size: 308
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 3d
+    extent: [7, 3, 5]
+    mip-levels: 3
+    format: r32_float
+    data: []
+  - index: 1
+    dimension: 3d
+    extent: [5, 2, 3]
+    mip-levels: 2
+    format: r32_sint
+    data: [0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 0, 0, 0, 0, 0, 0, 0,
+           0, 0, 2147483649, 0, 16777217]
+  - index: 2
+    dimension: 3d
+    extent: [2, 1, 4]
+    format: r32_uint
+    sampled: false
+    storage: true
+    data: []

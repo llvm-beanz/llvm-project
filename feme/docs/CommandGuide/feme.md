@@ -183,8 +183,8 @@ paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
 including a three-mip base extent, divergent/unbound indices, query/load
 coexistence, all words, guards and repeats. Admission and lowering share
 the same predicate. Sampled plain 2D explicit mips/counts use the separate
-path below. MS/3D/cube-array shapes, non-32-bit declarations,
-depth/aggregate uses and bound/static images remain unsupported by
+path below. MS/cube-array shapes, non-32-bit declarations,
+aggregate uses and bound/static images remain unsupported by
 this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
 layouts remain unchanged; no owned-device closure is established.
 
@@ -260,9 +260,21 @@ without sampler/derivatives in any stage. Native SM6.6 passes waves 4/8,
 reference and ARM64 AOT for base/explicit sampled and base writable
 queries, exact query-derived SINT loads, divergence/unbound zeros, skipped
 stores, all words, guards and repeats. Writable explicit, undefined-mip
-and mismatched-shape canonical queries reject; 3D/MS/cube-array dimensions
+and mismatched-shape canonical queries reject; MS/cube-array dimensions
 remain unsupported. Only valid native mips are measured. Helper clamping,
 runtime/SPIR-V code, ABI 8 and owned-device boundaries remain unchanged.
+
+Heap-backed `Texture3D`/`RWTexture3D.GetDimensions` accepts FP32/i32 base
+width/height/depth queries; sampled textures additionally accept
+`(mip, width, height, depth, levels)` with a defined i32 mip. Existing
+xyz/levels.xyz forms and 3D size/level metadata helpers preserve shrinking
+depth and a separate total mip count, without sampler/derivatives in any
+stage. Native SM6.6 passes waves 4/8, reference and ARM64 AOT, each
+repeated twice, checking all 916 bytes, query-derived exact SINT loads,
+divergent/unbound indices, skipped stores and guards. Writable explicit,
+undefined-mip and wrong result-form queries reject. Only valid native
+mips are measured; runtime/SPIR-V code, helper clamping, ABI 8 and
+owned-device boundaries remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

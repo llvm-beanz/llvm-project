@@ -78,6 +78,7 @@ Error checkSupportedRaisedOps(const Module &M) {
               "FP32/i32 1D/array or plain 2D mip-zero texture dimension "
               "queries, sampled cube dimensions, or sampled 1D/array or "
               "plain 2D explicit-mip/count queries, or 2D-array base/sampled "
+              "explicit-mip/count queries, or 3D base/sampled "
               "explicit-mip/count queries",
               F.getName().str().c_str());
       }

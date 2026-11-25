@@ -27,6 +27,44 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native 3D dimensions (VM, 2026-11-25)
+
+FeMe raising and shared CPU dimension admission/lowering now accept
+heap-backed FP32/i32 3D base scalar/pair/triple SRV/UAV queries and sampled
+explicit-mip/count queries with defined i32 mips. Existing xyz/levels.xyz
+intrinsics and LLVM forward lowering preserve width/height/depth and a
+separate total mip count. Existing 3D size-at-LOD and total-level metadata
+helpers need no sampler/derivatives in any stage. All three extents shrink
+with mip, unlike fixed 2D-array layers. Writable explicit, undefined-mip,
+wrong result-form, cube-array and buffer triple queries reject early.
+
+[`native-texture3d-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture3d-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 extents 7x3x5/3x1x2/1x1x1 with
+three mips, SINT 5x2x3/2x1x1 with two mips and a base UINT UAV 2x1x4
+distinguish depth from total count. Query-derived last-X/Y/Z exact SINT
+loads, divergence/unbound zeros, skipped stores, every word, guards and
+repeats pass: 608 image bytes plus a guarded 308-byte output, exactly
+916 compared bytes per case. The UAV stays bound when both SRVs are unbound.
+
+The 34-step ARM64 rebuild passes. Sixty focused LLVM/FeMe LIT pass in
+37.15 seconds; sixteen dimension runtime units pass in 2.927 seconds,
+zero failures. Three LIT fixtures and one runtime case are added; three
+existing LIT fixtures are extended or updated. Portable checks cover
+scalar/pair narrowing, fragment depth-/count-only queries, live mip wiring,
+round trips, count normalization, idempotence and unsupported preservation.
+The unreadable-data metadata unit distinguishes shrinking depth from
+array-layer metadata and checks storage base and inactive/unbound/
+zero-mip/bounds zeros.
+
+Only valid native mips are measured; helper clamping is unchanged, not
+D3D out-of-range-mip evidence. LLVM intrinsic definitions/forward lowering,
+runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and layouts remain unchanged.
+MS/cube-array dimensions, bound/static images, full-suite, external CTS,
+adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native 2D-array dimensions (VM, 2026-11-25)
 
 The native reproduction left full 2D-array queries unraised. New

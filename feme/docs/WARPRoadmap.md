@@ -3202,6 +3202,54 @@ bound/static images, full-suite, external CTS, adapter-matrix and owned
 D3D12/conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native 3D dimensions (2026-11-25).**
+
+FeMe raising and the shared CPU dimension admission/lowering predicate now
+accept heap-backed FP32/i32 3D base scalar/pair/triple SRV/UAV queries and
+sampled explicit-mip/count queries with defined i32 mips. Existing
+`getdimensions.xyz`/`getdimensions.levels.xyz` forms and LLVM forward
+lowering are reused: DXIL fields 0/1/2 mean width/height/depth, while
+field 3 is total mip count. Count-only queries normalize an unused native
+mip to zero. Aggregate uses remain unraised. CPU lowering uses the existing
+3D size-at-LOD metadata helper, narrowing base scalar/pair results, and
+the shared total-level helper. Unlike 2D-array layers, depth shrinks with
+width/height. Queries need no sampler or derivatives in any stage.
+Writable explicit, undefined-mip and wrong result-form queries reject
+early in normal/reference/AOT paths; cube-array and buffer triple forms
+continue to reject.
+
+[`native-texture3d-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture3d-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 extents 7x3x5/3x1x2/1x1x1 with
+three mips and SINT 5x2x3/2x1x1 with two mips distinguish shrinking depth
+from fixed layers and total mip count. A UINT UAV reports base 2x1x4.
+Query-derived last-X/Y/Z integer loads preserve high-bit/non-FP32-exact
+SINT values from both integer mips. Divergent indices make both SRVs
+unbound in lane four while the UAV stays bound; lane one skips a count
+store. Every word, guard and repeat passes: 608 image bytes plus a guarded
+308-byte output, exactly 916 compared bytes per case.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` rebuild passes
+in 34 steps, including `opt`, `llvm-as`, FeMe tools and runtime tests.
+Sixty focused LLVM forward, FeMe round-trip/raising, dimension, 1D/2D/3D/
+cube sampling/loading, namespace, typed-load and CPU/SPIR-V LIT pass in
+37.15 seconds. Sixteen dimension runtime units pass in 2.927 seconds,
+zero failures. Three LIT fixtures and one runtime case are added; three
+existing LIT fixtures are extended or updated for the support change.
+Portable checks cover scalar/pair narrowing, fragment depth-/count-only
+queries, live mip wiring, round trips, count normalization, idempotence
+and unsupported-function preservation. An unreadable-data metadata unit
+checks shrinking depth independently of array-layer metadata, storage
+base queries and inactive/unbound/zero-mip/bounds zeros.
+
+Only valid native mips are measured; unchanged helper clamping is not
+D3D out-of-range-mip evidence. LLVM intrinsic definitions/forward lowering,
+runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+MS/cube-array dimensions, bound/static images, full-suite, external CTS,
+adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

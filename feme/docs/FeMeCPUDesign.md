@@ -2420,11 +2420,11 @@ component selection. Scalar/vector FP32/i32 declarations up to four
 components, sampled or writable, share an admission/lowering predicate.
 No sampler, derivatives or texel data are needed. Queries and loads through
 the same handle lower together, unused handles are removed and repeated
-lowering is idempotent. Non-heap, MS/3D/cube-array shapes and non-32-bit
+lowering is idempotent. Non-heap, MS/cube-array shapes and non-32-bit
 declarations remain unsupported with explicit normal/reference/AOT
 admission diagnostics. Base scalar/pair intrinsics carry no mip; sampled
 1D-array/plain 2D explicit mips/counts use the separate paths below. Other texture
-shapes retain unused/zero-mip guards; depth/aggregate uses remain unraised.
+shapes use the separate paths below; aggregate uses remain unraised.
 Native SDK DXC SM6.6 passes normal waves 4/8, reference and ARM64 AOT:
 5x3 with three mips reports the base extent, a UINT UAV reports width 3
 and a SINT SRV reports height 4. Divergent unbound indices return zeros;
@@ -2546,9 +2546,25 @@ skipped stores, all words, guards and repeats pass. Portable fragment
 layer-/count-only projections and idempotence pass. A metadata-only unit
 checks fixed layers, sampled/storage queries and inactive/unbound/bounds
 zeros using unreadable data. Writable explicit, undefined-mip and
-mismatched-shape canonical forms reject; 3D/MS/cube-array dimensions
+mismatched-shape canonical forms reject; MS/cube-array dimensions
 remain unsupported. Only valid native mips are measured. Helper clamping,
 runtime/SPIR-V code, ABI 8, layouts and owned-device boundaries are unchanged.
+
+Heap-backed FP32/i32 3D dimensions accept base x/xy/xyz SRV/UAV queries
+and sampled `getdimensions.levels.xyz` with defined i32 mips. Raising and
+existing LLVM forward lowering preserve width/height/depth in fields 0/1/2
+and total mip count in field 3. CPU lowering reuses
+`getdimensions.lod.3d.v3i32` (mip zero for base queries) and `querylevels.i32`,
+narrowing scalar/pair results. Unlike array layers, depth shrinks with
+width/height. Queries need no sampler/derivatives in any stage. Native
+SM6.6 passes waves 4/8, reference and ARM64 AOT, each repeated twice,
+checking all 916 bytes, exact query-derived SINT loads, divergence/unbound
+zeros, skipped stores and guards. Portable fragment depth-/count-only,
+round-trip and idempotence checks pass. An unreadable-data metadata unit
+checks shrinking depth, unrelated array-layer metadata, storage base,
+inactive/unbound/zero-mip/bounds zeros. Writable explicit, undefined-mip
+and wrong result-form queries reject. Only valid native mips are measured;
+runtime/SPIR-V code, helper clamping, ABI 8 and layouts remain unchanged.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This
