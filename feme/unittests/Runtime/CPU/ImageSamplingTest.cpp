@@ -22,6 +22,7 @@
 
 #include "feme/Target/CPU/RuntimeABI.h"
 
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -1060,6 +1061,75 @@ TEST_F(ImageSamplingTest, GetDimensionsMultisampleCountsAreMetadataOnly) {
       EXPECT_EQ(Out[I], 0u);
     EXPECT_EQ(Samples(nullptr, 1, Index), 0);
   }
+}
+
+TEST_F(ImageSamplingTest,
+       GetDimensionsPreservesBitsAndFloatConversionSignedness) {
+  Function *Target =
+      getRuntimeFunction(*M, "feme.cpu.image.getdimensions.2d.v2i32");
+  ASSERT_TRUE(Target);
+  LLVMContext &C = M->getContext();
+  Type *PtrTy = PointerType::get(C, 0);
+  Type *I32Ty = Type::getInt32Ty(C);
+  Type *FloatTy = Type::getFloatTy(C);
+  FunctionType *Ty = FunctionType::get(Type::getVoidTy(C),
+                                       {PtrTy, I32Ty, I32Ty, PtrTy}, false);
+  Function *Wrapper =
+      Function::Create(Ty, Function::ExternalLinkage, "conversions", M);
+  IRBuilder<> Builder(BasicBlock::Create(C, "entry", Wrapper));
+  Value *Dimensions =
+      Builder.CreateCall(Target, {Wrapper->getArg(0), Wrapper->getArg(1),
+                                  Wrapper->getArg(2), Builder.getTrue()});
+  Value *Width = Builder.CreateExtractElement(Dimensions, uint64_t{0});
+  Value *Signed =
+      Builder.CreateBitCast(Builder.CreateSIToFP(Width, FloatTy), I32Ty);
+  Value *Unsigned =
+      Builder.CreateBitCast(Builder.CreateUIToFP(Width, FloatTy), I32Ty);
+  Value *Result = PoisonValue::get(FixedVectorType::get(I32Ty, 3));
+  Result = Builder.CreateInsertElement(Result, Width, uint64_t{0});
+  Result = Builder.CreateInsertElement(Result, Signed, uint64_t{1});
+  Result = Builder.CreateInsertElement(Result, Unsigned, uint64_t{2});
+  Builder.CreateStore(Result, Wrapper->getArg(3));
+  Builder.CreateRetVoid();
+  keepForJIT(Wrapper);
+  using ConvertFn =
+      void (*)(const FemeImageDescriptor *, uint32_t, uint32_t, void *);
+  ConvertFn Convert = resolve<ConvertFn>(Wrapper);
+  ASSERT_TRUE(Convert);
+  struct Case {
+    uint32_t Width;
+    uint32_t SignedBits;
+    uint32_t UnsignedBits;
+  };
+  constexpr Case Cases[] = {
+      {0, 0, 0},
+      {0x01000000, 0x4b800000, 0x4b800000},
+      {0x01000001, 0x4b800000, 0x4b800000},
+      {0x01000003, 0x4b800002, 0x4b800002},
+      {0x7fffffff, 0x4f000000, 0x4f000000},
+      {0x80000000, 0xcf000000, 0x4f000000},
+      {0xffffffff, 0xbf800000, 0x4f800000},
+  };
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Height = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  alignas(16) uint32_t Out[4] = {};
+  for (const Case &Test : Cases) {
+    SCOPED_TRACE(Test.Width);
+    Img.Width = Test.Width;
+    Convert(&Img, 1, 0, Out);
+    EXPECT_EQ(Out[0], Test.Width);
+    EXPECT_EQ(Out[1], Test.SignedBits);
+    EXPECT_EQ(Out[2], Test.UnsignedBits);
+  }
+  Img.Data = nullptr;
+  Convert(&Img, 1, 0, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  Convert(nullptr, 1, 1, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
 }
 
 TEST_F(ImageSamplingTest, GetDimensions2DTotalLevelsIsMetadataOnly) {
