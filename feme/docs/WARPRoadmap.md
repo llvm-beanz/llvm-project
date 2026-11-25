@@ -2330,6 +2330,39 @@ not external CTS, an adapter-matrix or owned D3D12 execution. Bound/static
 D3D12 descriptors and broader conformance remain open; `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W2(b) native raw/structured i32 buffer atomics (2026-11-24):
+the new [`native-buffer-atomics.test`](../test/Tools/feme-run/HLSL/native-buffer-atomics.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound resource atomics through
+normal waves 4/8, reference and ARM64 AOT-object paths. Opcode 78 raising
+is checked for add, and, or, xor, signed/unsigned min/max and exchange;
+opcode 79 raises successful/failed compare-exchange. Existing
+`llvm.dx.resource.getpointer` plus monotonic `atomicrmw`/`cmpxchg` and
+CPU atomic helpers are reused. Native handle checks retain reconstructed
+modern layouts, legacy placeholders, structured stride 12 and field
+sub-offsets 4/8. Legacy AOT uses a physical heap, not object binding YAML.
+
+Five lanes each initialize and own their two state words on every repeat.
+Exact high-bit/non-FP32-exact old values, signed/unsigned extrema,
+UINT_MAX + 1 wrap to zero, successful/failed comparisons and even-lane
+increments are checked independently of lane scheduling. Inactive odd
+lanes keep the old-value sentinel and leave UINT_MAX unchanged. Upper/
+negative-bit-pattern raw addresses and structured indices return zero
+for add/compare-exchange without changing valid state or guards.
+All words of two guarded 64-byte state buffers and a guarded 744-byte
+old-value output are checked in two repeats per mode.
+
+Focused native, retained Clang resource-atomic, DXIL raising and CPU
+atomic LIT passes fourteen tests with zero failures in 2.55 seconds;
+one new fixture adds one test. No compiler/runtime implementation changed,
+so no rebuild or broader/full-suite run was needed. This proves bounded
+native i32 buffer atomic execution, not cross-lane/host-thread contention,
+memory-order/barrier conformance, typed/image/int64 atomic breadth,
+external CTS, an adapter-matrix or owned D3D12. Descriptor materialization,
+legacy partial/coalesced-load limits, status handling, images/sampling,
+runtime/SPIR-V code, ABI 8 and argument layouts are unchanged.
+Bound/static D3D12 descriptors and broader conformance remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

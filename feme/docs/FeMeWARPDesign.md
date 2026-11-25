@@ -114,6 +114,16 @@ The original compute-only baseline is no longer current:
   bytes and two repeats pass, including 12-byte float3 stores. This adds
   native CPU copy/bounds evidence, not general FP32 arithmetic conformance,
   broader legacy admission or owned-device execution.
+  Native raw/structured i32 atomics also check add/and/or/xor, signed/
+  unsigned min/max, exchange and successful/failed compare-exchange
+  across the same SM6.6/SM6.0 CPU modes. Existing getpointer/atomicrmw/
+  cmpxchg and CPU helpers retain stride 12 and field offsets 4/8.
+  Five lanes own independently initialized state; exact old values,
+  high bits, UINT_MAX + 1 wraparound, divergent increments, invalid-
+  address zero/no-op behavior and guards pass twice. This adds native
+  buffer evidence, not contention/memory-order/barrier conformance,
+  typed/image/int64 atomic breadth, owned-device support or new descriptor
+  materialization. Runtime/SPIR-V code and ABI remain unchanged.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

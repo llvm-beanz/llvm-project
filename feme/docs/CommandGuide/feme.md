@@ -91,6 +91,16 @@ of 732 output bytes, record/trailing guards and two repeats pass, including
 12-byte float3 stores. No wider legacy admission, implementation or
 general FP32 arithmetic/conformance result is implied.
 
+Native raw/structured i32 resource-atomic tests cover add/and/or/xor,
+signed/unsigned min/max, exchange and successful/failed compare-exchange
+in SM6.6 heap and SM6.0 bound shaders across the same CPU modes. Existing
+getpointer/atomicrmw/cmpxchg and CPU helpers preserve stride 12 and field
+offsets 4/8. Independently initialized lanes check exact old values,
+high bits, UINT_MAX + 1 wraparound, divergent increments, invalid-address
+zero/no-op behavior and guards twice. Legacy AOT uses a physical heap.
+No contention/memory-order/barrier conformance, typed/image/int64 breadth,
+new implementation, descriptor materialization or ABI change is implied.
+
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
 `feme` reuses rather than reimplementing -- has no patterns for SPIR-V image

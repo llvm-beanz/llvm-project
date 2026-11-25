@@ -27,6 +27,38 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native raw/structured i32 buffer atomics (VM, 2026-11-24)
+
+The new [`native-buffer-atomics.test`](../test/Tools/feme-run/HLSL/native-buffer-atomics.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound i32 resource atomics in
+normal waves 4/8, reference and ARM64 AOT-object modes. Native opcode 78
+raising checks add/and/or/xor, signed/unsigned min/max and exchange;
+opcode 79 checks compare-exchange. Existing getpointer plus monotonic
+atomicrmw/cmpxchg and CPU helpers are reused. Modern layouts, legacy
+placeholders, stride 12 and field sub-offsets 4/8 are checked.
+Legacy AOT supplies a physical heap, not object binding YAML.
+
+Five lanes each initialize and own two state words on each repeat.
+Exact old values, high-bit/adjacent non-FP32-exact integers, signed/
+unsigned extrema, UINT_MAX + 1 wraparound, successful/failed comparisons
+and even-lane increments pass without depending on lane scheduling.
+Inactive lanes retain the old-value sentinel and leave state unchanged.
+Upper/negative-bit-pattern raw addresses and structured indices return
+zero for add/compare-exchange without changing valid state or guards.
+Every word of two 64-byte state buffers and a 744-byte old-value output
+is checked twice per mode.
+
+Focused native, retained Clang resource-atomic, DXIL raising and CPU
+atomic LIT passes fourteen tests with zero failures in 2.55 seconds;
+one fixture adds one test. No implementation change required a rebuild
+or broader/full-suite run. This is bounded i32 buffer execution, not
+contention, memory-order/barrier conformance, new typed/image/int64
+atomic breadth, external CTS, an adapter-matrix or owned D3D12.
+Descriptor materialization, legacy partial/coalesced-load limits, status,
+images/sampling, runtime/SPIR-V code, ABI 8 and argument layouts remain
+unchanged. Bound/static D3D12 descriptors and broader conformance remain
+open; `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native packed FP32 structured-buffer breadth (VM, 2026-11-24)
 
 The new [`packed-structured-float.test`](../test/Tools/feme-run/HLSL/packed-structured-float.test)

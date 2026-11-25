@@ -2302,6 +2302,18 @@ of 732 output bytes and record/trailing guards pass twice, including
 12-byte float3 stores. This is native copy/bounds evidence, not a runtime
 change, general FP32 arithmetic conformance or broader legacy admission.
 
+Native raw/structured i32 resource atomics also exercise opcode 78
+add/and/or/xor, signed/unsigned min/max and exchange, and opcode 79
+successful/failed compare-exchange. Existing getpointer plus monotonic
+atomicrmw/cmpxchg lower through the CPU atomic helpers, preserving stride
+12 and field sub-offsets 4/8. Native SM6.6 heap and SM6.0 bound shaders
+run in normal waves 4/8, reference and ARM64 AOT modes. Five lanes own
+independently initialized state on every repeat; exact old values, high
+bits, UINT_MAX + 1 wraparound, divergent increments, invalid-address
+zero/no-op behavior and all state/output guards pass twice. This is
+native i32 buffer evidence, not new runtime code, contention/memory-order/
+barrier conformance, typed/image/int64 breadth or ABI changes.
+
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded
   `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the

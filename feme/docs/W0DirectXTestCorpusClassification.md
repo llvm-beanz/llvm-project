@@ -295,6 +295,22 @@ or a rebuild. This is copy/bounds evidence, not a new FXC-profile,
 external corpus, general FP32 arithmetic or owned-device result; see the
 [native FP32 evidence](W0WindowsIntegrationProbe.md#w2aw3b-native-packed-fp32-structured-buffer-breadth-vm-2026-11-24).
 
+Native buffer-atomic follow-up (2026-11-24): SDK DXC SM6.6 heap and
+SM6.0 bound raw/structured i32 shaders execute add/and/or/xor, signed/
+unsigned min/max, exchange and successful/failed compare-exchange through
+normal waves 4/8, reference and ARM64 AOT. Existing getpointer/atomicrmw/
+cmpxchg and CPU helpers preserve stride 12 and field offsets 4/8. Exact
+old values, high bits, UINT_MAX + 1 wraparound, divergent increments,
+invalid-address zero/no-op behavior and guards pass twice with lane-owned
+initialized state. All 64-byte state/744-byte output words are checked;
+legacy AOT uses a physical heap. Focused native, retained Clang resource-
+atomic, DXIL raising and CPU atomic LIT passes fourteen tests with zero
+failures in 2.55 seconds; one fixture adds one test without implementation
+changes or a rebuild. This is not a new FXC-profile/external corpus,
+contention/memory-order/barrier, typed/image/int64 atomic or owned-device
+result; see the
+[native atomic evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-rawstructured-i32-buffer-atomics-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

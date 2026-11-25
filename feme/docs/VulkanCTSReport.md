@@ -1,5 +1,33 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native raw/structured i32 buffer atomic scope (2026-11-24)
+
+The [native buffer-atomic follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-rawstructured-i32-buffer-atomics-vm-2026-11-24)
+adds SDK DXC SM6.6 heap and SM6.0 bound i32 resource-atomic execution in
+normal waves 4/8, reference and ARM64 AOT modes. Opcode 78 checks
+add/and/or/xor, signed/unsigned min/max and exchange; opcode 79 checks
+successful/failed compare-exchange. Existing getpointer/atomicrmw/cmpxchg
+and CPU helpers are reused with modern/legacy handle layouts, structured
+stride 12 and offsets 4/8. Legacy AOT uses a physical heap.
+
+Five lanes own independently initialized state, so exact high-bit/
+non-FP32-exact old values, extrema, UINT_MAX + 1 wraparound, comparisons
+and divergent increments do not depend on scheduling order. Invalid raw
+addresses and structured indices return zero without modifying valid
+state/guards. All words of two 64-byte state buffers and a 744-byte
+old-value output are checked in two repeats per mode.
+
+Focused native, retained Clang resource-atomic, DXIL raising and CPU
+atomic LIT passes fourteen tests with zero failures in 2.55 seconds;
+one fixture adds one test without implementation changes or a rebuild.
+Vulkan advertisements, descriptor materialization, legacy load limits,
+status, images/sampling, runtime/SPIR-V code, ABI 8 and argument layouts
+are unchanged. No broader/full-suite, contention, memory-order/barrier,
+typed/image/int64 atomic, external CTS, adapter-matrix or owned-device
+result is claimed. Bound/static D3D12 descriptors and broader conformance
+remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native packed FP32 structured-buffer scope (2026-11-24)
 
 The [native FP32 buffer follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-packed-fp32-structured-buffer-breadth-vm-2026-11-24)

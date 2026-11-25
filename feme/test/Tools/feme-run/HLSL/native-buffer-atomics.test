@@ -1,0 +1,231 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,HEAP
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/heap.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,LEGACY
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/legacy.o | FileCheck %s
+#
+# Native CPU buffer atomics, not owned D3D12 or contention/order evidence.
+# Each lane initializes and owns its two state words on each repeat.
+# Signed/unsigned extrema, high bits, returned old values, successful/failed
+# compare-exchange, inactive lanes and invalid addresses are checked exactly.
+# Structured fields retain stride 12 and sub-offsets 4/8. All state/output
+# guards and both repeats are checked; legacy AOT takes a physical heap.
+# HEAP-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.RawBuffer", i8, 1, 0) {{%.*}}, i32 {{.*}})
+# HEAP-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.RawBuffer", { i32, [8 x i8] }, 1, 0) {{%.*}}, i32 {{.*}})
+# LEGACY-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.RawBuffer", i8, 1, 0) {{%.*}}, i32 {{.*}})
+# LEGACY-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.RawBuffer", [12 x i8], 1, 0) {{%.*}}, i32 {{.*}})
+# RAISE-DAG: getelementptr i8, ptr {{%.*}}, i32 4
+# RAISE-DAG: getelementptr i8, ptr {{%.*}}, i32 8
+# RAISE-DAG: atomicrmw add ptr {{%.*}}, i32 3 monotonic
+# RAISE-DAG: atomicrmw and ptr {{%.*}}, i32 2147483647 monotonic
+# RAISE-DAG: atomicrmw or ptr {{%.*}}, i32 16 monotonic
+# RAISE-DAG: atomicrmw xor ptr {{%.*}}, i32 3 monotonic
+# RAISE-DAG: atomicrmw min ptr {{%.*}}, i32 -7 monotonic
+# RAISE-DAG: atomicrmw max ptr {{%.*}}, i32 -4 monotonic
+# RAISE-DAG: atomicrmw umin ptr {{%.*}}, i32 7 monotonic
+# RAISE-DAG: atomicrmw umax ptr {{%.*}}, i32 -2147483646 monotonic
+# RAISE-DAG: atomicrmw xchg ptr {{%.*}}, i32 -2147483647 monotonic
+# RAISE-DAG: cmpxchg ptr {{%.*}}, i32 -2147483647, i32 {{.*}} monotonic monotonic
+# RAISE-NOT: call {{.*}} @dx.op.{{(atomicBinOp|atomicCompareExchange)}}
+# CHECK: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[STATE:42 16777217 0 42 16777218 4294967295 42 16777219 0 42 16777220 4294967295 42 16777221 0 42]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[STATE]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[OLD:42 2147483653 2147483656 8 24 27 4294967289 4294967292 2147483649 16777217 2147483653 7 2147483650 2147483649 4294967295 0 0 0 0 2147483653 2147483656 8 24 27 4294967289 4294967292 2147483649 16777217 2147483653 7 2147483650 2147483649 4294967295 0 0 0 0 42 2147483654 2147483657 9 25 26 4294967289 4294967292 2147483649 16777218 2147483654 7 2147483650 2147483649 42 0 0 0 0 2147483654 2147483657 9 25 26 4294967289 4294967292 2147483649 16777218 2147483654 7 2147483650 2147483649 42 0 0 0 0 42 2147483655 2147483658 10 26 25 4294967289 4294967292 2147483649 16777219 2147483655 7 2147483650 2147483649 4294967295 0 0 0 0 2147483655 2147483658 10 26 25 4294967289 4294967292 2147483649 16777219 2147483655 7 2147483650 2147483649 4294967295 0 0 0 0 42 2147483656 2147483659 11 27 24 4294967289 4294967292 2147483649 16777220 2147483656 7 2147483650 2147483649 42 0 0 0 0 2147483656 2147483659 11 27 24 4294967289 4294967292 2147483649 16777220 2147483656 7 2147483650 2147483649 42 0 0 0 0 42 2147483657 2147483660 12 28 31 4294967289 4294967292 2147483649 16777221 2147483657 7 2147483650 2147483649 4294967295 0 0 0 0 2147483657 2147483660 12 28 31 4294967289 4294967292 2147483649 16777221 2147483657 7 2147483650 2147483649 4294967295 0 0 0 0 42]]{{$}}
+# CHECK-NEXT: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[STATE]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[STATE]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[OLD]]{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+struct Record {
+  uint Guard;
+  int Signed;
+  uint Unsigned;
+};
+#ifndef HEAP
+RWByteAddressBuffer raw : register(u0);
+RWStructuredBuffer<Record> records : register(u1);
+RWByteAddressBuffer output : register(u2);
+#endif
+
+void RunRaw(RWByteAddressBuffer state, RWByteAddressBuffer result, uint i,
+            uint base) {
+  uint s = 4 + i * 12;
+  uint u = s + 4;
+  uint init = 0x80000005u + i;
+  state.Store(s, init);
+  state.Store(u, init);
+  int old;
+  state.InterlockedAdd(s, 3, old);
+  result.Store(base, asuint(old));
+  state.InterlockedAnd(s, 0x7fffffff, old);
+  result.Store(base + 4, asuint(old));
+  state.InterlockedOr(s, 16, old);
+  result.Store(base + 8, asuint(old));
+  state.InterlockedXor(s, 3, old);
+  result.Store(base + 12, asuint(old));
+  state.InterlockedMin(s, -7, old);
+  result.Store(base + 16, asuint(old));
+  state.InterlockedMax(s, -4, old);
+  result.Store(base + 20, asuint(old));
+  state.InterlockedExchange(s, asint(0x80000001u), old);
+  result.Store(base + 24, asuint(old));
+  state.InterlockedCompareExchange(s, asint(0x80000001u),
+                                   asint(0x01000001u + i), old);
+  result.Store(base + 28, asuint(old));
+  state.InterlockedCompareExchange(s, asint(0x80000001u), 123, old);
+  result.Store(base + 32, asuint(old));
+  uint previous;
+  state.InterlockedMin(u, 7u, previous);
+  result.Store(base + 36, previous);
+  state.InterlockedMax(u, 0x80000002u, previous);
+  result.Store(base + 40, previous);
+  state.InterlockedAdd(u, 0xffffffffu, previous);
+  result.Store(base + 44, previous);
+  state.InterlockedExchange(u, 0xffffffffu, previous);
+  result.Store(base + 48, previous);
+  previous = 42;
+  if ((i & 1) == 0)
+    state.InterlockedAdd(u, 1u, previous);
+  result.Store(base + 52, previous);
+  state.InterlockedAdd(64, 55u, previous);
+  result.Store(base + 56, previous);
+  state.InterlockedCompareExchange(64, 0u, 77u, previous);
+  result.Store(base + 60, previous);
+  state.InterlockedAdd(0xfffffffcu, 66u, previous);
+  result.Store(base + 64, previous);
+  state.InterlockedCompareExchange(0xfffffffcu, 0u, 88u, previous);
+  result.Store(base + 68, previous);
+}
+
+void RunStructured(RWStructuredBuffer<Record> state, RWByteAddressBuffer result,
+                   uint i, uint base) {
+  uint init = 0x80000005u + i;
+  state[i].Signed = asint(init);
+  state[i].Unsigned = init;
+  int old;
+  InterlockedAdd(state[i].Signed, 3, old);
+  result.Store(base, asuint(old));
+  InterlockedAnd(state[i].Signed, 0x7fffffff, old);
+  result.Store(base + 4, asuint(old));
+  InterlockedOr(state[i].Signed, 16, old);
+  result.Store(base + 8, asuint(old));
+  InterlockedXor(state[i].Signed, 3, old);
+  result.Store(base + 12, asuint(old));
+  InterlockedMin(state[i].Signed, -7, old);
+  result.Store(base + 16, asuint(old));
+  InterlockedMax(state[i].Signed, -4, old);
+  result.Store(base + 20, asuint(old));
+  InterlockedExchange(state[i].Signed, asint(0x80000001u), old);
+  result.Store(base + 24, asuint(old));
+  InterlockedCompareExchange(state[i].Signed, asint(0x80000001u),
+                             asint(0x01000001u + i), old);
+  result.Store(base + 28, asuint(old));
+  InterlockedCompareExchange(state[i].Signed, asint(0x80000001u), 123, old);
+  result.Store(base + 32, asuint(old));
+  uint previous;
+  InterlockedMin(state[i].Unsigned, 7u, previous);
+  result.Store(base + 36, previous);
+  InterlockedMax(state[i].Unsigned, 0x80000002u, previous);
+  result.Store(base + 40, previous);
+  InterlockedAdd(state[i].Unsigned, 0xffffffffu, previous);
+  result.Store(base + 44, previous);
+  InterlockedExchange(state[i].Unsigned, 0xffffffffu, previous);
+  result.Store(base + 48, previous);
+  previous = 42;
+  if ((i & 1) == 0)
+    InterlockedAdd(state[i].Unsigned, 1u, previous);
+  result.Store(base + 52, previous);
+  InterlockedAdd(state[5].Unsigned, 55u, previous);
+  result.Store(base + 56, previous);
+  InterlockedCompareExchange(state[5].Unsigned, 0u, 77u, previous);
+  result.Store(base + 60, previous);
+  InterlockedAdd(state[0xffffffffu].Unsigned, 66u, previous);
+  result.Store(base + 64, previous);
+  InterlockedCompareExchange(state[0xffffffffu].Unsigned, 0u, 88u, previous);
+  result.Store(base + 68, previous);
+}
+
+#ifdef HEAP
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  RWByteAddressBuffer raw = ResourceDescriptorHeap[0];
+  RWStructuredBuffer<Record> records = ResourceDescriptorHeap[1];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[2];
+#endif
+  uint base = 4 + tid.x * 148;
+  RunRaw(raw, output, tid.x, base);
+  RunStructured(records, output, tid.x, base + 72);
+}
+#--- heap.yaml
+resource-heap:
+  - index: 0
+    size: 64
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 64
+    kind: structured-buffer
+    stride: 12
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 744
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 64
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    entries:
+      - index: 0
+        size: 64
+        kind: structured-buffer
+        stride: 12
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 2
+    entries:
+      - index: 0
+        size: 744
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

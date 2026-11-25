@@ -2750,6 +2750,24 @@ the first shader-facing milestone rather than alongside it.
    argument layouts remain unchanged. This is bounded native CPU copy/
    bounds evidence, not general FP32 arithmetic conformance, external
    CTS, adapter-matrix, owned-device or W2/W3 closure.
+   Native raw/structured i32 buffer-atomic follow-up (2026-11-24): SDK
+   DXC SM6.6 heap and SM6.0 bound shaders execute opcode 78 add/and/or/
+   xor, signed/unsigned min/max and exchange, plus opcode 79 successful/
+   failed compare-exchange in normal waves 4/8, reference and ARM64 AOT.
+   Existing getpointer/atomicrmw/cmpxchg and CPU helpers retain modern/
+   legacy layouts, stride 12 and field offsets 4/8. Five independently
+   initialized lanes check exact high-bit/non-FP32-exact old values,
+   extrema, UINT_MAX + 1 wraparound, divergent increments, invalid-
+   address zero/no-op behavior and all guarded 64-byte state/744-byte
+   output words twice per mode. Legacy AOT uses a physical heap. Focused
+   native, retained Clang resource-atomic, DXIL raising and CPU atomic
+   LIT passes fourteen tests with zero failures in 2.55 seconds; one
+   fixture adds one test. No implementation change, rebuild or broader/
+   full-suite run was needed. This is native i32 buffer evidence, not
+   contention/memory-order/barrier conformance, typed/image/int64 atomic
+   breadth, external CTS, adapter-matrix or owned-device/W2/W3 closure.
+   Descriptor materialization, legacy load limits, status, images/sampling,
+   runtime/SPIR-V code, ABI 8 and argument layouts remain unchanged.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

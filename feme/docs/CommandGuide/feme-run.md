@@ -66,6 +66,18 @@ record/trailing guards and two repeats pass, including 12-byte float3
 stores. This adds copy/bounds evidence, not wider legacy admission,
 implementation changes or general FP32 arithmetic/conformance.
 
+Native raw/structured i32 atomics additionally cover add/and/or/xor,
+signed/unsigned min/max, exchange and successful/failed compare-exchange
+in SM6.6 heap and SM6.0 bound shaders across the same CPU modes. Existing
+getpointer/atomicrmw/cmpxchg and CPU helpers preserve stride 12 and field
+offsets 4/8. Five independently initialized lanes check exact old values,
+high bits, UINT_MAX + 1 wraparound, divergent increments, invalid-address
+zero/no-op behavior and all words of two guarded 64-byte state buffers
+and a guarded 744-byte output twice. Legacy AOT takes a physical heap.
+This is not contention/memory-order/barrier conformance, typed/image/int64
+atomic breadth, new descriptor materialization or an implementation/ABI
+change.
+
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.
 

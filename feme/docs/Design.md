@@ -1351,6 +1351,18 @@ it now covers the two largest opcode families:
   evidence, not new implementation, general FP32 arithmetic conformance
   or broader legacy partial/coalesced-width semantics.
 
+- Raw/structured resource atomics: native SDK DXC SM6.6 heap and SM6.0
+  bound compute tests check opcode 78 add/and/or/xor, signed/unsigned
+  min/max and exchange, and opcode 79 successful/failed compare-exchange.
+  Existing getpointer plus monotonic atomicrmw/cmpxchg and CPU helpers
+  preserve stride 12 and field sub-offsets 4/8. Five independently
+  initialized lanes verify exact old values, high bits, UINT_MAX + 1
+  wraparound, divergent increments, invalid-address zero/no-op behavior
+  and guards twice in normal waves 4/8, reference and ARM64 AOT modes.
+  Legacy AOT uses a physical heap. This adds native i32 buffer evidence,
+  not implementation changes, contention/memory-order/barrier conformance,
+  typed/image/int64 breadth, new descriptor materialization or ABI changes.
+
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard
 32-bit-per-component row shape is covered as of roadmap step R12

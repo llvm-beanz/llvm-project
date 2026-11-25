@@ -3056,6 +3056,17 @@ pass, including 12-byte float3 stores. This is shared native CPU copy/
 bounds evidence, not draw, general FP32 arithmetic or owned-device proof;
 legacy admission, runtime/SPIR-V code and ABI remain unchanged.
 
+Native raw/structured i32 resource atomics additionally check add/and/or/
+xor, signed/unsigned min/max, exchange and successful/failed compare-
+exchange in SM6.6 heap and SM6.0 bound compute shaders across the same
+CPU modes. Existing getpointer/atomicrmw/cmpxchg and CPU helpers preserve
+stride 12 and field offsets 4/8. Independently initialized lane state
+checks exact old values, high bits, UINT_MAX + 1 wraparound, divergent
+increments, invalid-address zero/no-op behavior and guards twice.
+This is shared CPU buffer evidence, not draw, contention, memory-order/
+barrier conformance, typed/image/int64 atomic breadth or owned-device proof;
+runtime/SPIR-V code, descriptor materialization and ABI are unchanged.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into
