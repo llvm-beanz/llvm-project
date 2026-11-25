@@ -708,6 +708,44 @@ FemeSamplerDescriptor makeSampler(SamplerFilter MagFilter,
   return Samp;
 }
 
+TEST_F(ImageSamplingTest, GetDimensions2DIsMetadataOnlyAndChecksBounds) {
+  using GetDimensionsFn =
+      void (*)(const FemeImageDescriptor *, uint32_t, uint32_t, bool, void *);
+  GetDimensionsFn Fn = resolve<GetDimensionsFn>(
+      addWrapper("dimensions", "feme.cpu.image.getdimensions.2d.v2i32"));
+  ASSERT_TRUE(Fn);
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Width = 5;
+  Img.Height = 3;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  alignas(8) uint32_t Out[2] = {};
+  Fn(&Img, 1, 0, true, Out);
+  EXPECT_EQ(Out[0], 5u);
+  EXPECT_EQ(Out[1], 3u);
+  Img.Flags = FEME_IMAGE_STORAGE;
+  Img.Width = 3;
+  Img.Height = 2;
+  Fn(&Img, 1, 0, true, Out);
+  EXPECT_EQ(Out[0], 3u);
+  EXPECT_EQ(Out[1], 2u);
+  Fn(&Img, 1, 0, false, Out);
+  EXPECT_EQ(Out[0], 0u);
+  EXPECT_EQ(Out[1], 0u);
+  Img.Data = nullptr;
+  Fn(&Img, 1, 0, true, Out);
+  EXPECT_EQ(Out[0], 0u);
+  EXPECT_EQ(Out[1], 0u);
+  Fn(nullptr, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 0u);
+  EXPECT_EQ(Out[1], 0u);
+  for (uint32_t Index : {1u, 0xffffffffu}) {
+    Fn(nullptr, 1, Index, true, Out);
+    EXPECT_EQ(Out[0], 0u);
+    EXPECT_EQ(Out[1], 0u);
+  }
+}
+
 TEST_F(ImageSamplingTest, PointSampleIdentityFormat) {
   // A 2x2 R32G32B32A32_FLOAT image; point-sampling the center of texel
   // (1, 0) must read that texel exactly, with no blending from its

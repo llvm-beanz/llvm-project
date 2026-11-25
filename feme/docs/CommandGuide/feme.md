@@ -176,6 +176,18 @@ aggregate uses and meaningful mips remain unsupported. Runtime/SPIR-V
 code, ABI 8 and argument layouts are unchanged; no owned-device or
 general conformance closure is established.
 
+Heap-backed `Texture2D`/`RWTexture2D.GetDimensions` now lowers scalar/
+pair FP32/i32 queries to the existing CPU width/height metadata helper
+in any stage, with no sampler or derivatives. Width-only, height-only and
+paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+including a three-mip base extent, divergent/unbound indices, query/load
+coexistence, all words, guards and repeats. Admission and lowering share
+the same predicate. Nonzero/dynamic texture mips now remain unraised,
+not silently discarded. Array/MS/other shapes, non-32-bit declarations,
+mip-count/other fields and bound/static images remain unsupported by
+this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
+layouts remain unchanged; no owned-device closure is established.
+
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are
 unchanged. Portable i32/FP32 regressions and native SM6.6/SM6.0 FP32

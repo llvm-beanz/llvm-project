@@ -196,6 +196,17 @@ The original compute-only baseline is no longer current:
   meaningful mips remain unsupported. Runtime/SPIR-V code, ABI 8 and
   argument layouts remain unchanged; this adds no descriptor materialization,
   advertisements or owned-device/conformance closure.
+  Plain 2D heap-backed texture scalar/pair dimensions now lower to the
+  existing CPU metadata width/height helper in any stage, without sampler
+  or derivatives. FP32/i32 scalar/vector SRV/UAV queries pass native SDK
+  DXC SM6.6 in waves 4/8, reference and ARM64 AOT, including width-only,
+  height-only and paired results, a three-mip base extent, divergent/
+  unbound indices, query/load coexistence, all words, guards and repeats.
+  Nonzero/dynamic texture mips now remain unraised rather than being
+  dropped. Array/MS/other shapes, non-32-bit declarations, mip-count/
+  other fields and bound/static images remain outside this CPU path.
+  Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; this adds no
+  descriptor materialization, advertisements or owned-device closure.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

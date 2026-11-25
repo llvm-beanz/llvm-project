@@ -57,6 +57,21 @@ Error checkSupportedRaisedOps(const Module &M) {
           F.getName().str().c_str());
 
     switch (F.getIntrinsicID()) {
+    case Intrinsic::dx_resource_getdimensions_x:
+    case Intrinsic::dx_resource_getdimensions_xy:
+      for (const User *U : F.users()) {
+        const auto *CI = dyn_cast<CallInst>(U);
+        if (CI && isa<dxil::TypedBufferExtType, dxil::RawBufferExtType>(
+                      CI->getArgOperand(0)->getType()))
+          continue;
+        if (!CI || !isSupportedDXILGetDimensions(*CI))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "unsupported raised operation: '%s' requires heap-backed "
+              "FP32/i32 plain 2D mip-zero texture dimension queries",
+              F.getName().str().c_str());
+      }
+      continue;
     case Intrinsic::dx_resource_load_ms:
       for (const User *U : F.users()) {
         const auto *CI = dyn_cast<CallInst>(U);

@@ -2858,6 +2858,59 @@ layouts remain unchanged. Broader format support, a full suite, external
 CTS, adapter-matrix and owned D3D12/conformance closure remain open.
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native plain-2D texture dimensions (2026-11-25).**
+
+The native reproduction confirmed scalar/pair texture queries raised but
+had no CPU lowering; a divergent pair reached SIMDization unchanged and
+failed. Heap-backed plain `Texture2D`/`RWTexture2D` FP32/i32 scalar/
+vector declarations now lower `getdimensions.x/xy` to the existing CPU
+metadata-only width/height helper, without a sampler or derivatives, in
+any stage. The scalar form selects width; height-only and paired queries
+retain their component selection. Early admission, image-use discovery
+and lowering share one predicate, including writable textures and
+query/load coexistence. Buffer dimension helpers/policy are unchanged.
+
+The raiser also now refuses nonzero/dynamic texture mips: the scalar/
+pair intrinsics carry no mip operand, so accepting these queries used
+to silently turn them into mip-zero queries. Unused/zero mip operands
+remain accepted. Other result fields, aggregate uses, mip counts and
+explicit mip queries remain unraised. Non-heap, array/MS/other shapes
+and non-32-bit texture declarations remain outside this CPU increment,
+with explicit normal/reference/AOT admission diagnostics. Portable CPU
+tests cover scalar/pair lowering, indices, UAV queries, a fragment
+query/load dependency, unchanged unsupported functions and idempotence.
+Texture raising tests add nonzero/dynamic-mip and mixed-field rejection
+plus idempotence; the existing AMDGPU texture-dimension path still passes.
+
+[`native-texture2d-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture2d-dimensions.test)
+executes SDK DXC SM6.6 in normal waves 4/8, reference and ARM64 AOT.
+Four execution cases each repeat twice. Paired FP32 dimensions report
+5x3 from a three-mip image, a UINT UAV width-only query reports 3 and
+a SINT SRV height-only query reports 4. A divergent image index makes
+lane four unbound, returning zero dimensions and a zero load. Lane one
+skips the width store, preserving its sentinel. The full-query handle
+also loads an exact FP32 texel. Every word, guard and repeat passes:
+128 input bytes plus a guarded 108-byte output, exactly 236 compared
+bytes per case. A native dynamic-mip shader rejects in normal/reference/
+AOT paths instead of executing a mip-zero substitute.
+
+A new runtime unit verifies metadata-only sampled/storage queries using
+an unreadable data pointer, plus inactive/unbound/invalid-index zeros
+without dereferencing invalid heaps. The affected assertions-enabled,
+PCH-disabled, sccache ARM64 `-j2` build passes 31 steps, followed by a
+two-step unit rebuild. Twenty-five focused dimension, texture loading/
+sampling, raising, namespace, typed-load and CPU/SPIR-V regressions pass
+with zero failures in 21.97 seconds. Nine dimension runtime units pass
+in 1.651 seconds. Three new LIT fixtures and one runtime case are added;
+one texture-raising fixture is extended.
+
+This adds native mip-zero plain-2D metadata CPU execution only. Runtime/
+SPIR-V code, existing load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+Bound/static images, broader shapes/mips/fields, full-suite, external CTS,
+adapter-matrix and owned D3D12/conformance closure remain open.
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

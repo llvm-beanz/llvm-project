@@ -510,6 +510,23 @@ This is native HLSL count/stride CPU evidence, not new FXC-profile/
 external corpus, external CTS, adapter-matrix or owned-device closure;
 see the [structured-buffer dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-structured-buffer-dimensions-vm-2026-11-25).
 
+Native plain-2D texture dimensions follow-up (2026-11-25): heap-backed
+FP32/i32 scalar/pair queries now lower to the existing CPU metadata
+helper in any stage without sampler/derivatives. Width-only, height-only
+and paired queries share admission/lowering eligibility; nonzero/dynamic
+texture mips now stay unraised, not discarded. SDK DXC SM6.6 passes
+waves 4/8, reference and ARM64 AOT, four cases repeated twice. Distinct
+extents, a three-mip base query, divergent/unbound indices, query/load
+coexistence, all words, guards and sentinels pass: exactly 236 bytes.
+The affected 31-step ARM64 build and two-step unit rebuild pass; 25
+focused LIT pass in 21.97 seconds and nine dimension units in 1.651
+seconds, zero failures. Three LIT fixtures and one runtime case are
+added; one raising fixture is extended. Runtime/SPIR-V code, existing
+load/store/status/atomic policy, advertisements, ABI 8 and layouts remain
+unchanged. Bound/static images, broader shapes/mips/fields, new FXC-
+profile/external corpus, external CTS, adapter-matrix and owned-device
+closure remain open; see the [plain-2D dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-2d-texture-dimensions-vm-2026-11-25).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

@@ -1,4 +1,5 @@
 ; RUN: feme-opt --llvm -passes=feme-dxil-raise-ops -S %s | FileCheck %s
+; RUN: feme-opt --llvm -passes=feme-dxil-raise-ops,feme-dxil-raise-ops,verify -S %s | FileCheck %s
 
 ; Covers feme::dxil::OpRaisingPass's texture/sampler access raising
 ; (raiseSample/raiseSampleLevel/raiseTextureLoad/raiseTextureStore/
@@ -137,6 +138,42 @@ define <2 x i32> @dimensions_2d_xy(i32 %idx) {
   %v0 = insertelement <2 x i32> poison, i32 %w, i32 0
   %v1 = insertelement <2 x i32> %v0, i32 %h, i32 1
   ret <2 x i32> %v1
+}
+
+; No mip operand can be discarded: even a width-only query at mip 1
+; must remain unraised, as must a query at a dynamic mip.
+; CHECK-LABEL: define i32 @dimensions_nonzero_mip(
+; CHECK: call %dx.types.Dimensions @dx.op.getDimensions(i32 72, {{.*}}, i32 1)
+; CHECK-NOT: @llvm.dx.resource.getdimensions
+define i32 @dimensions_nonzero_mip(i32 %idx) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 2, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 1)
+  %w = extractvalue %dx.types.Dimensions %d, 0
+  ret i32 %w
+}
+; CHECK-LABEL: define i32 @dimensions_dynamic_mip(
+; CHECK: call %dx.types.Dimensions @dx.op.getDimensions(i32 72, {{.*}}, i32 %mip)
+; CHECK-NOT: @llvm.dx.resource.getdimensions
+define i32 @dimensions_dynamic_mip(i32 %idx, i32 %mip) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 2, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 %mip)
+  %w = extractvalue %dx.types.Dimensions %d, 1
+  ret i32 %w
+}
+; A consumed mip-count field must leave the entire query unraised.
+; CHECK-LABEL: define i32 @dimensions_mixed_fields(
+; CHECK: call %dx.types.Dimensions @dx.op.getDimensions
+; CHECK-NOT: @llvm.dx.resource.getdimensions
+define i32 @dimensions_mixed_fields(i32 %idx) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 2, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %t, i32 0)
+  %w = extractvalue %dx.types.Dimensions %d, 0
+  %levels = extractvalue %dx.types.Dimensions %d, 3
+  %r = add i32 %w, %levels
+  ret i32 %r
 }
 
 ; A writeable `RWTexture2D<float4>` (kind 2, `IsUAV`) texel write:

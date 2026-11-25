@@ -3144,6 +3144,19 @@ Buffer xy fields and meaningful mips remain unsupported. Runtime/SPIR-V
 code, ABI 8 and argument layouts are unchanged; this is shared CPU evidence,
 not draw, new advertisements or owned-device/conformance closure.
 
+Heap-backed plain 2D texture scalar/pair dimensions now lower to the
+existing CPU metadata width/height helper in any stage, without samplers
+or derivatives. FP32/i32 scalar/vector SRV/UAV declarations are admitted
+by the same predicate used for early CPU admission. Native SDK DXC SM6.6
+passes normal waves 4/8, reference and ARM64 AOT, including width-only,
+height-only and paired results, a three-mip base extent, divergent/unbound
+indices, query/load coexistence, all words, guards and repeats.
+Nonzero/dynamic texture mips now stay unraised rather than being dropped.
+Array/MS/other shapes, non-32-bit declarations, mip-count/other fields
+and bound/static image queries remain outside this CPU path. Runtime/
+SPIR-V code, ABI 8 and argument layouts remain unchanged; this is shared
+CPU metadata evidence, not draw or owned-device/conformance closure.
+
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling
 nonexistent `v3` helpers. Physical descriptor formats retain stride and

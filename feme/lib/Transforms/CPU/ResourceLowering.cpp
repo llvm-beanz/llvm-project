@@ -731,7 +731,7 @@ unsigned getTexelWidth(Type *Ty, Type *ScalarTy) {
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
 /// `samplebias[.clamp]`/`samplegrad[.clamp]`/`samplecmp[.clamp]`/
-/// `samplecmplevelzero`/`load.level`/`load.ms`
+/// `samplecmplevelzero`/`load.level`/`load.ms`/`getdimensions.x[y]`
 /// calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
@@ -752,6 +752,19 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (isSupportedDXILGetDimensions(*CI)) {
+      IRBuilder<> Builder(CI);
+      auto *Image = cast<CallInst>(CI->getArgOperand(0));
+      Value *Dimensions = createGetDimensions2D(
+          Builder, Env, Image->getArgOperand(0), Builder.getTrue());
+      if (ID == Intrinsic::dx_resource_getdimensions_x)
+        Dimensions = Builder.CreateExtractElement(Dimensions, uint64_t{0});
+      CI->replaceAllUsesWith(Dimensions);
+      CI->eraseFromParent();
+      SampleHandles.insert(Image);
+      Changed = true;
+      continue;
+    }
     if (isSupportedDXILLoad(*CI)) {
       IRBuilder<> Builder(CI);
       auto *Image = cast<CallInst>(CI->getArgOperand(0));
@@ -1211,8 +1224,8 @@ bool hasImageAccesses(const Function &F) {
     if (!CI)
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
-    if (isSupportedDXILLoad(*CI) || isSupportedDXILSampleLevel(*CI) ||
-        isSupportedDXILSample(*CI))
+    if (isSupportedDXILGetDimensions(*CI) || isSupportedDXILLoad(*CI) ||
+        isSupportedDXILSampleLevel(*CI) || isSupportedDXILSample(*CI))
       return true;
     if (ID == Intrinsic::dx_resource_samplegrad ||
         ID == Intrinsic::dx_resource_samplegrad_clamp) {
@@ -1476,6 +1489,24 @@ bool feme::cpu::isSupportedDXILSampleLevel(const CallInst &CI) {
 
 bool feme::cpu::isSupportedDXILSample(const CallInst &CI) {
   return isSupportedDXILFloatingSample(CI, Intrinsic::dx_resource_sample);
+}
+
+bool feme::cpu::isSupportedDXILGetDimensions(const CallInst &CI) {
+  Intrinsic::ID ID = getIntrinsicID(&CI);
+  if ((ID != Intrinsic::dx_resource_getdimensions_x &&
+       ID != Intrinsic::dx_resource_getdimensions_xy) ||
+      CI.arg_size() != 1)
+    return false;
+  auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
+  auto *Ty = dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
+  if (!Image ||
+      getIntrinsicID(Image) != Intrinsic::dx_resource_handlefromheap || !Ty ||
+      Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4 ||
+      Ty->getDimension() != dxil::ResourceKind::Texture2D)
+    return false;
+  Type *ScalarTy = Ty->getTypeParameter(0)->getScalarType();
+  return (ScalarTy->isFloatTy() || ScalarTy->isIntegerTy(32)) &&
+         getTexelWidth(Ty->getTypeParameter(0), ScalarTy);
 }
 
 bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {

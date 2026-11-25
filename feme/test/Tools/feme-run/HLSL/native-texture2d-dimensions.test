@@ -1,0 +1,86 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D MIP /Fo %t/mip.dxil %t/shader.hlsl
+# RUN: not feme-run %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
+# RUN: not feme-run --reference %t/mip.dxil 2>&1 | FileCheck %s --check-prefix=MIP
+# RUN: not feme --target=%feme_host_triple %t/mip.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=MIP
+#
+# Full XY, width-only and height-only queries use three different extents
+# and FP32/UINT/SINT declarations. Lane four selects an unbound image;
+# lane one skips the width store. The full-query handle also loads a texel.
+# The full image has three mips; queries must report the base extent.
+# Every word of 128 input bytes and 108 guarded output bytes is checked.
+# Heap-backed mip-zero CPU evidence, not bound/static or owned D3D12 views.
+# RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <4 x float>,
+# RAISE-DAG: call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.Texture", <2 x i32>,
+# RAISE-DAG: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", i32,
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# MIP: unsupported raised operation: 'dx.op.getDimensions' was not raised
+# CHECK: heap[3]: [[OUT:42 5 3 3 4 1067450368 5 3 42 4 1067450368 5 3 3 4 1067450368 5 3 3 4 1067450368 0 0 3 4 0 42]]{{$}}
+# CHECK-NEXT: image[0]: [[F:1067450368( 0){17}]]{{$}}
+# CHECK-NEXT: image[1]: [[U:0( 0){5}]]{{$}}
+# CHECK-NEXT: image[2]: [[I:0( 0){7}]]{{$}}
+# CHECK-NEXT: heap[3]: [[OUT]]{{$}}
+# CHECK-NEXT: image[0]: [[F]]{{$}}
+# CHECK-NEXT: image[1]: [[U]]{{$}}
+# CHECK-NEXT: image[2]: [[I]]{{$}}
+# CHECK-NOT: {{(heap|image)\[}}
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture2D<float4> full = ResourceDescriptorHeap[NonUniformResourceIndex(tid.x == 4 ? 9 : 0)];
+  RWTexture2D<uint2> widthOnly = ResourceDescriptorHeap[1];
+  Texture2D<int> heightOnly = ResourceDescriptorHeap[2];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[3];
+  uint base = 4 + tid.x * 20;
+  uint width, height;
+#ifdef MIP
+  uint levels;
+  full.GetDimensions(tid.x, width, height, levels);
+#else
+  full.GetDimensions(width, height);
+#endif
+  output.Store2(base, uint2(width, height));
+  if (tid.x != 1) {
+    widthOnly.GetDimensions(width, height);
+    output.Store(base + 8, width);
+  }
+  heightOnly.GetDimensions(width, height);
+  output.Store(base + 12, height);
+  output.Store(base + 16, asuint(full.Load(int3(0, 0, 0)).r));
+}
+#--- heap.yaml
+resource-heap:
+  - index: 3
+    size: 108
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [5, 3]
+    mip-levels: 3
+    format: r32_float
+    data: [1067450368, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - index: 1
+    dimension: 2d
+    extent: [3, 2]
+    format: r32_uint
+    data: [0, 0, 0, 0, 0, 0]
+  - index: 2
+    dimension: 2d
+    extent: [2, 4]
+    format: r32_sint
+    data: [0, 0, 0, 0, 0, 0, 0, 0]

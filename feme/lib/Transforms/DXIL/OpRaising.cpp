@@ -1845,8 +1845,9 @@ bool raiseTextureStore(CallInst &CI) {
 /// also covered field 1); fields 0 and/or 1 together raise to the
 /// `<2 x i32>`-returning `_xy` overload instead, with each surviving
 /// `extractvalue` rewritten to the matching `extractelement`.
-/// Buffers support only field 0 (element/byte count), with an unused or zero
-/// mip operand. DXC supplies a structured buffer's HLSL stride as a constant.
+/// Buffers support only field 0 (element/byte count). All queries require an
+/// unused or zero mip operand because the raised intrinsics carry no mip.
+/// DXC supplies a structured buffer's HLSL stride as a constant.
 bool raiseGetDimensions(CallInst &CI) {
   if (CI.arg_size() != 3) // opcode, Handle, MipLevel
     return false;
@@ -1858,12 +1859,10 @@ bool raiseGetDimensions(CallInst &CI) {
   if (!IsBuffer &&
       !isa<dxil::TextureExtType, dxil::MSTextureExtType>(Handle->getType()))
     return false;
-  if (IsBuffer) {
-    Value *Mip = CI.getArgOperand(2);
-    auto *ConstantMip = dyn_cast<ConstantInt>(Mip);
-    if (!isa<UndefValue>(Mip) && (!ConstantMip || !ConstantMip->isZero()))
-      return false;
-  }
+  Value *Mip = CI.getArgOperand(2);
+  auto *ConstantMip = dyn_cast<ConstantInt>(Mip);
+  if (!isa<UndefValue>(Mip) && (!ConstantMip || !ConstantMip->isZero()))
+    return false;
 
   SmallVector<ExtractValueInst *, 2> Extracts;
   bool NeedsHeight = false;

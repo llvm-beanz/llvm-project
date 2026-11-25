@@ -2413,6 +2413,28 @@ Buffer xy/aggregate fields and meaningful mips remain unsupported.
 Runtime/SPIR-V code, ABI 8, argument layouts and advertisements remain
 unchanged; no owned-device closure is established.
 
+Heap-backed plain 2D texture `getdimensions.x/xy` now lowers to
+`feme.cpu.image.getdimensions.2d.v2i32` in any stage. The scalar form
+extracts width; height-only and paired queries retain the pair intrinsic's
+component selection. Scalar/vector FP32/i32 declarations up to four
+components, sampled or writable, share an admission/lowering predicate.
+No sampler, derivatives or texel data are needed. Queries and loads through
+the same handle lower together, unused handles are removed and repeated
+lowering is idempotent. Non-heap, array/MS/other shapes and non-32-bit
+declarations remain unsupported with explicit normal/reference/AOT
+admission diagnostics. The raiser now rejects nonzero/dynamic texture
+mips instead of dropping an operand the scalar/pair intrinsics cannot
+represent; mip-count/other result fields remain unraised.
+Native SDK DXC SM6.6 passes normal waves 4/8, reference and ARM64 AOT:
+5x3 with three mips reports the base extent, a UINT UAV reports width 3
+and a SINT SRV reports height 4. Divergent unbound indices return zeros;
+query/load coexistence, sentinels, all words, guards and two repeats pass.
+A runtime unit verifies sampled/storage metadata-only queries using an
+unreadable pointer, plus inactive/unbound/out-of-range zeros without
+touching invalid heaps. Runtime/SPIR-V code, buffer dimensions, load/
+store/status/atomic policy, ABI 8, argument layouts and advertisements
+remain unchanged. No bound/static images or owned-device closure is added.
+
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This
 avoids nonexistent typed `v3` entry points; physical descriptor formats

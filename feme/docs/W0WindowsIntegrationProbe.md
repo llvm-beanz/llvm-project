@@ -27,6 +27,47 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native plain-2D texture dimensions (VM, 2026-11-25)
+
+The native reproduction raised scalar/pair texture dimensions but left
+them without CPU lowering, failing SIMDization for a divergent pair.
+Plain heap-backed FP32/i32 `Texture2D`/`RWTexture2D` queries now lower
+to the existing metadata width/height helper in any stage, without a
+sampler or derivatives. Width-only, height-only and paired queries share
+one admission/lowering predicate. Nonzero/dynamic texture mips now stay
+unraised rather than losing an operand the scalar/pair intrinsics cannot
+represent; other result fields/aggregate uses remain unraised. Non-heap,
+array/MS/other shapes and non-32-bit declarations retain explicit early
+normal/reference/AOT rejection.
+
+[`native-texture2d-dimensions.test`](../test/Tools/feme-run/HLSL/native-texture2d-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT.
+Four cases each repeat twice. Extents 5x3, 3x2 and 2x4 distinguish paired
+FP32, width-only UINT UAV and height-only SINT SRV queries. The full image
+has three mips but reports its base extent, and the same handle loads an
+exact FP32 texel. Divergent/unbound indices, skipped-store sentinels,
+all words, guards and repeats pass: 128 input bytes plus a guarded
+108-byte output, exactly 236 bytes per case. A native dynamic-mip
+shader rejects in all three paths instead of executing at mip zero.
+
+The affected 31-step ARM64 build and two-step unit rebuild pass.
+Twenty-five focused dimension, texture loading/sampling, raising,
+namespace, typed-load and CPU/SPIR-V LIT pass with zero failures in
+21.97 seconds; nine dimension runtime units pass in 1.651 seconds.
+Three LIT fixtures and one metadata-only runtime case are added, and
+one texture-raising fixture gains rejection/idempotence coverage.
+The runtime case uses an unreadable pointer and checks sampled/storage
+extents, inactive/unbound zeros and invalid heaps/indices. Portable CPU
+tests also verify fragment query/load dependence, unsupported controls
+and idempotence; the existing AMDGPU dimension test still passes.
+
+Runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and argument layouts
+remain unchanged. Bound/static images, broader shapes/mips/fields,
+full-suite, external CTS, adapter-matrix and owned D3D12/conformance
+closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native structured-buffer dimensions (VM, 2026-11-25)
 
 Structured opcode-72 field-zero element counts now raise to the scalar

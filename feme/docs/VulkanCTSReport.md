@@ -1,5 +1,32 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native plain-2D texture dimension scope (2026-11-25)
+
+The [plain-2D dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-plain-2d-texture-dimensions-vm-2026-11-25)
+adds heap-backed FP32/i32 texture scalar/pair CPU lowering through the
+existing metadata width/height helper in any stage, without samplers or
+derivatives. Width-only, height-only and paired queries share an admission/
+lowering predicate. Nonzero/dynamic texture mips now stay unraised rather
+than being discarded. Non-heap, array/MS/other shapes, non-32-bit
+declarations, other result fields and bound/static images remain outside
+this CPU path.
+
+SDK DXC SM6.6 queries execute in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. Paired 5x3 dimensions from a three-mip
+image, UINT UAV width 3, SINT SRV height 4, divergent/unbound indices,
+query/load coexistence, every word, guards and sentinels pass: exactly
+236 compared bytes, including a guarded 108-byte output. A native dynamic-
+mip shader rejects in all three paths. The affected 31-step ARM64 build
+and two-step unit rebuild pass; 25 focused LIT pass in 21.97 seconds and
+nine dimension units in 1.651 seconds, with zero failures. Three LIT
+fixtures and one runtime case are added; one raising fixture is extended.
+
+Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+This is native mip-zero metadata CPU evidence, not a full-suite, new CTS,
+adapter-matrix or owned D3D12/conformance result. `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native structured-buffer dimension scope (2026-11-25)
 
 The [structured-buffer dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-structured-buffer-dimensions-vm-2026-11-25)

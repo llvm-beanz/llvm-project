@@ -167,6 +167,22 @@ matching `stride`; legacy AOT uses physical heaps. Buffer xy fields,
 aggregate uses and meaningful mips remain unsupported. Runtime/SPIR-V
 code, ABI 8 and argument layouts remain unchanged; no owned-device closure.
 
+Native heap-backed `Texture2D`/`RWTexture2D.GetDimensions` now executes
+SDK DXC SM6.6 FP32/i32 scalar/pair queries in waves 4/8, reference and
+ARM64 AOT. YAML `images` supplies the descriptors; no sampler is needed.
+The existing CPU metadata helper returns width/height at mip zero.
+Width-only, height-only and paired outputs distinguish extents 5x3, 3x2
+and 2x4. The full image has three mips and still reports its base extent;
+the same handle also loads a texel. Divergent unbound indices return zeros;
+sentinels, every word, guards and repeats pass: 128 input bytes plus a
+guarded 108-byte output, exactly 236 bytes per case. Array/MS/other
+shapes, non-32-bit declarations, mip-count/other fields and bound/static
+images remain outside this CPU path. Nonzero/dynamic texture mips are
+rejected during raising, not discarded; unsupported canonical query shapes
+fail early normal/reference/AOT admission. Runtime/SPIR-V code, buffer
+dimensions, ABI 8 and argument layouts remain unchanged; no owned-device
+or conformance closure is added.
+
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and
 complete-texel bounds: RGB32 uses 12 bytes; an RGBA32 texel missing W

@@ -1448,6 +1448,19 @@ it now covers the two largest opcode families:
   remain unsupported. Runtime/SPIR-V code, ABI 8 and argument layouts
   remain unchanged; this adds no descriptor materialization or conformance.
 
+- Heap-backed plain 2D texture dimensions now lower `getdimensions.x/xy`
+  to the existing CPU metadata-only width/height helper, in any stage.
+  Scalar/vector FP32/i32 SRV/UAV declarations are admitted; width-only,
+  height-only and paired results require no sampler or derivatives.
+  Native SDK DXC SM6.6 executes in waves 4/8, reference and ARM64 AOT,
+  checking a three-mip base extent, divergent/unbound indices, query/load
+  coexistence, every word, guards and repeats. Admission and lowering share
+  a predicate; non-heap, array/MS/other shapes and non-32-bit declarations
+  remain unsupported. Texture raising now rejects nonzero/dynamic mips
+  rather than dropping an operand absent from the scalar/pair intrinsics.
+  Mip-count/other result fields, bound/static images and owned-device
+  execution remain open. Runtime/SPIR-V code, ABI 8 and layouts are unchanged.
+
 - Three-component typed loads: CPU lowering uses existing vector-four
   i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
   calls. Descriptor formats retain physical stride/bounds; the existing
@@ -1617,6 +1630,11 @@ verify against yet). Typed/byte-address field-zero queries additionally
 raise to `getdimensions.x` with unused/zero mip operands; other buffer
 fields remain unraised. Structured field-zero counts also raise, while DXC's
 constant HLSL stride result is preserved rather than treating it as field 1.
+All scalar/pair dimension raising requires an unused/zero mip operand:
+nonzero/dynamic texture mips stay unraised rather than silently becoming
+mip-zero queries. Plain 2D heap-backed FP32/i32 texture scalar/pair queries
+now lower to the shared CPU metadata helper; other texture shapes,
+mip-count fields and bound/static image queries remain outside that path.
 Before adding comparison mapping, `Sample`,
 `SampleLevel`, `TextureLoad` and `getDimensions` were the only texture
 ops LLVM's own `DXILOpLowering.cpp` already lowered a canonical
