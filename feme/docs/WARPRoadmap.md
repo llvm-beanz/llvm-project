@@ -2597,6 +2597,46 @@ ABI 8 and argument layouts remain unchanged. Bound/static D3D12
 descriptors and broader conformance remain open; `CreateDevice` remains
 `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) RGB32 integer read decoding (2026-11-24).**
+
+The shared CPU runtime now recognizes `R32G32B32_UINT` and
+`R32G32B32_SINT` as 12-byte texels and copies their three integer words
+without floating conversion, supplying alpha one. Existing typed scalar/
+vector-two/vector-four loads and integer image loads reuse this decoder.
+Typed dimensions count only complete texels; null descriptors remain
+unbound. The integer RGB component mask also preserves fixed alpha one
+for transparent-black border expansion.
+
+The existing
+[`native-int3-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-int3-typed-buffer-loads.test)
+now executes RGB32 alongside RGBA32 SINT/UINT with SDK DXC SM6.6 heap
+and SM6.0 bound SRV/UAV shaders, normal waves 4/8, reference and ARM64
+AOT. Three-component handles still use vector-four helpers/XYZ selection.
+Exact signed/high/non-FP32-exact bits, real 12-byte RGB stride, discarded
+RGBA W, namespace separation, valid-end loads, divergence, every input/
+output word, guards and two repeats pass. Missing RGB Z/RGBA W and upper/
+negative indices return all zero: 520 RGB or 600 RGBA compared bytes per
+case, including a guarded 296-byte output.
+
+Five new runtime cases cover both integer formats: typed narrow/wide
+reads, masked/partial/invalid accesses without dereferencing an unreadable
+pointer, complete-element/inactive/unbound dimensions, shared integer
+image loads, fixed-alpha borders and unsupported typed-store no-ops.
+The affected ARM64 build passes 24 steps; the corrected dimensions fixture
+passes a two-step unit rebuild. All 76 selected typed/dimensions/border/
+integer-image-load units pass in 16.89 seconds. Nineteen focused native
+typed-resource, namespace, raising/round-trip and lowering LIT pass in
+12.67 seconds, with zero failures. The existing native fixture is extended,
+not a new LIT test.
+
+This closes the read-side RGB32 integer gap only. No RGB32 integer stores
+or Vulkan advertisements are added. Raising/lowering policy, SPIR-V code,
+status, atomics, raw/structured behavior, descriptor materialization,
+ABI 8 and argument layouts remain unchanged. No broader/full-suite,
+external CTS, adapter-matrix or owned D3D12/conformance result is claimed.
+Bound/static descriptors and broader format support remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

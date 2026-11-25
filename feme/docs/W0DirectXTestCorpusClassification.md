@@ -406,6 +406,24 @@ general format closure, a new FXC-profile/external corpus or owned-device
 proof; see the
 [native integer-three evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-three-component-integer-typed-loads-vm-2026-11-24).
 
+RGB32 integer read follow-up (2026-11-24): shared CPU decoding now uses
+12-byte RGB32 SINT/UINT texels with exact integer bits and alpha one.
+The existing native integer-three fixture adds RGB32 alongside RGBA32
+SDK DXC SM6.6/SM6.0 SRV/UAV loads in waves 4/8, reference and ARM64
+AOT. Exact bits, physical stride, RGBA W discard, partial/invalid zero
+reads, namespaces, divergence, guards and repeats pass: 520 RGB or
+600 RGBA compared bytes per case. Five new runtime cases cover typed
+narrow/wide reads, dimensions, integer image loads, fixed-alpha borders
+and unsupported typed-store no-ops. The affected 24-step ARM64 build and
+two-step corrected-unit rebuild pass; 76 selected runtime units pass in
+16.89 seconds and nineteen focused LIT pass in 12.67 seconds, with zero
+failures. The native fixture is extended, not a new LIT test. No Vulkan
+advertisements, stores, raising/lowering policy, SPIR-V code, ABI 8 or
+argument layouts change. This is read-side CPU evidence, not general format,
+a new FXC-profile/external corpus, external CTS, adapter-matrix or owned-
+device proof; see the
+[RGB32 integer evidence](W0WindowsIntegrationProbe.md#w2aw2b-rgb32-integer-read-decoding-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

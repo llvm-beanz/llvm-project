@@ -174,13 +174,16 @@ The original compute-only baseline is no longer current:
   32-bit paths, raising, stores, status, runtime/SPIR-V code and ABI are
   unchanged. Broader format and owned-device closure are not established.
   Native integer-three typed loads now execute SDK DXC SM6.6/SM6.0
-  `int3`/`uint3` SRV/UAV shaders on RGBA32 SINT/UINT across the same
-  CPU modes. Exact high/non-FP32-exact bits, XYZ order, distinct-W discard,
-  all-zero incomplete/invalid loads, namespace separation, valid-end
-  accesses, divergence, complete input/output words, guards and two repeats
-  pass. This closes native RGBA32 integer-three evidence, not RGB32-
-  integer/general typed-format or owned-device closure; implementation,
-  status, stores, runtime/SPIR-V code and ABI remain unchanged.
+  `int3`/`uint3` SRV/UAV shaders on RGB32/RGBA32 SINT/UINT across
+  the same CPU modes. Shared RGB32 integer decoding now preserves exact
+  bits at a real 12-byte stride and supplies alpha one; typed narrow/wide
+  reads, complete-element dimensions, integer image loads and fixed-alpha
+  borders have runtime tests. XYZ order, distinct-W discard, all-zero
+  incomplete/invalid loads, namespace separation, divergence, guards and
+  repeats pass natively. RGB32 integer typed stores remain tested no-ops;
+  Vulkan advertisements, raising/lowering, status, SPIR-V code, ABI 8 and
+  argument layouts remain unchanged. General typed-format and owned-device
+  closure remain open.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

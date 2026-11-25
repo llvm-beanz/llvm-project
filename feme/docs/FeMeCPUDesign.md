@@ -2381,14 +2381,19 @@ raising, stores, status, runtime/SPIR-V code
 and ABI remain unchanged.
 
 Native integer-three coverage now executes SDK DXC SM6.6/SM6.0 `int3`/
-`uint3` SRV/UAV loads on RGBA32_SINT/RGBA32_UINT across the same CPU
-modes. Existing vector-four helpers/XYZ selection preserve exact signed/
-high/non-FP32-exact bits and discard distinct W values. Incomplete texels
-missing W and upper/negative indices read all zero. Namespace separation,
-valid-end loads, divergence, every input/output word, guards and two repeats
-pass. This closes native RGBA32 integer-three evidence, not RGB32-integer
-decoding or general typed closure; lowering policy, runtime/SPIR-V code,
-status, stores and ABI are unchanged.
+`uint3` SRV/UAV loads on RGB32/RGBA32 SINT/UINT across the same CPU
+modes. The shared runtime now recognizes RGB32 integer formats as 12-byte
+texels and copies exactly three integer words with alpha one, without
+floating conversion. Scalar/vector-two/vector-four typed reads and integer
+image loads share this decoding; the RGB component mask also keeps border
+alpha fixed at one. Typed dimensions count only complete texels and still
+return zero for inactive/unbound resources. Existing vector-four helpers/
+XYZ selection preserve exact bits and discard alpha/distinct RGBA32 W.
+Missing-Z RGB32/missing-W RGBA32 and upper/negative loads read all zero.
+Namespace separation, divergence, guards and repeats pass natively.
+RGB32 integer typed stores remain tested no-ops. No Vulkan advertisement,
+lowering policy, SPIR-V code, status, ABI 8 or argument layout changes;
+general typed-format and owned-device closure remain open.
 
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded

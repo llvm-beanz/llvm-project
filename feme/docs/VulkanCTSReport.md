@@ -1,5 +1,32 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) RGB32 integer read scope (2026-11-24)
+
+The [RGB32 integer follow-up](W0WindowsIntegrationProbe.md#w2aw2b-rgb32-integer-read-decoding-vm-2026-11-24)
+adds shared CPU decoding for `R32G32B32_UINT`/`R32G32B32_SINT`:
+12-byte physical texels, exact integer RGB and alpha one. Typed scalar/
+vector-two/vector-four reads, complete-element dimensions, integer image
+loads and fixed-alpha border expansion have runtime tests. Unsupported
+RGB32 integer typed stores remain tested no-ops.
+
+The existing native integer-three fixture now executes RGB32/RGBA32 SDK
+DXC SM6.6/SM6.0 SRV/UAV loads in waves 4/8, reference and ARM64 AOT.
+Exact bits, 12-byte stride, RGBA W discard, incomplete/invalid all-zero
+reads, namespace separation, divergence, guards and repeats pass:
+520 RGB or 600 RGBA bytes per case, including a guarded 296-byte output.
+The affected 24-step ARM64 build and two-step corrected-unit rebuild pass.
+All 76 selected typed/dimensions/border/integer-image-load units pass in
+16.89 seconds; nineteen focused native typed-resource/namespace/raising/
+lowering LIT pass in 12.67 seconds, with zero failures. Five runtime cases
+are added; the native fixture is extended without a new LIT test.
+
+No Vulkan format advertisements, RGB32 integer stores, raising/lowering
+policy, SPIR-V code, status, atomics, descriptor materialization, ABI 8 or
+argument layouts change. Read-side CPU support is not general format,
+broader/full-suite, external CTS, adapter-matrix or owned D3D12/conformance
+closure. Bound/static descriptors remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native integer-three typed-load scope (2026-11-24)
 
 The [native integer-three follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-three-component-integer-typed-loads-vm-2026-11-24)

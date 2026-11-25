@@ -396,6 +396,65 @@ TEST_F(RuntimeCPUTest, TypedLoadV4I32InactiveMaskReadsZero) {
   EXPECT_EQ(Result[0], 0);
 }
 
+TEST_F(RuntimeCPUTest, TypedLoadRGB32IntegersUsePhysicalStrideAndBounds) {
+  Function *Wrappers[] = {
+      addLoadWrapper("rgb_scalar", "feme.cpu.resource.load.typed.i32"),
+      addLoadWrapper("rgb_two", "feme.cpu.resource.load.typed.v2i32"),
+      addLoadWrapper("rgb_four", "feme.cpu.resource.load.typed.v4i32")};
+  LoadFn Loads[] = {resolve<LoadFn>(Wrappers[0]), resolve<LoadFn>(Wrappers[1]),
+                    resolve<LoadFn>(Wrappers[2])};
+  const unsigned Widths[] = {1, 2, 4};
+  uint32_t Storage[] = {42,          42, 42, 0x80000001u, 0xffffffffu,
+                        0x01000001u, 91, 92, 0xabcdef01u};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].SizeInBytes = 8 * sizeof(uint32_t);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  for (ResourceFormat Format :
+       {ResourceFormat::R32G32B32_UINT, ResourceFormat::R32G32B32_SINT}) {
+    SCOPED_TRACE(static_cast<uint32_t>(Format));
+    Heap[0].Format = static_cast<uint32_t>(Format);
+    Heap[0].Data = Storage;
+    const uint32_t Expected[] = {0x80000001u, 0xffffffffu, 0x01000001u, 1};
+    for (unsigned I = 0; I != 3; ++I) {
+      ASSERT_TRUE(Loads[I]);
+      alignas(16) uint32_t Result[4] = {42, 42, 42, 42};
+      Loads[I](Heap, 1, 0, 1, true, Result);
+      for (unsigned C = 0; C != 4; ++C)
+        EXPECT_EQ(Result[C], C < Widths[I] ? Expected[C] : 42u);
+    }
+    Heap[0].Data = reinterpret_cast<void *>(uintptr_t{1});
+    for (uint64_t Index :
+         {uint64_t{1}, uint64_t{2}, uint64_t{3}, uint64_t{0xffffffffu}}) {
+      alignas(16) uint32_t Result[4] = {42, 42, 42, 42};
+      Loads[2](Heap, 1, 0, Index, Index != 1, Result);
+      for (uint32_t Component : Result)
+        EXPECT_EQ(Component, 0u);
+    }
+  }
+  EXPECT_EQ(Storage[8], 0xabcdef01u);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreRGB32IntegersRemainUnsupported) {
+  StoreFn Store =
+      getStoreWrapper("rgb_store", "feme.cpu.resource.store.typed.v4i32",
+                      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  ASSERT_TRUE(Store);
+  uint32_t Storage[] = {42, 42, 42, 42};
+  uint32_t Value[] = {11, 12, 13, 14};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = 3 * sizeof(uint32_t);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+  for (ResourceFormat Format :
+       {ResourceFormat::R32G32B32_UINT, ResourceFormat::R32G32B32_SINT}) {
+    Heap[0].Format = static_cast<uint32_t>(Format);
+    Store(Heap, 1, 0, 0, Value, true);
+    for (uint32_t Component : Storage)
+      EXPECT_EQ(Component, 42u);
+  }
+}
+
 TEST_F(RuntimeCPUTest, TypedStoreV4I32RoundTrips) {
   int32_t Storage[4] = {0, 0, 0, 0};
   FemeDescriptor Heap[1] = {};
@@ -1060,6 +1119,24 @@ TEST_F(RuntimeCPUTest, GetDimensionsTypedInactiveMaskReadsZero) {
       getGetDimensionsFn("feme.cpu.resource.getdimensions.typed.i32");
   ASSERT_TRUE(GetDimensions);
   EXPECT_EQ(GetDimensions(Heap, 1, 0, false), 0u);
+}
+
+TEST_F(RuntimeCPUTest, GetDimensionsTypedRGB32CountsOnlyCompleteElements) {
+  GetDimensionsFn GetDimensions =
+      getGetDimensionsFn("feme.cpu.resource.getdimensions.typed.i32");
+  ASSERT_TRUE(GetDimensions);
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = reinterpret_cast<void *>(uintptr_t{1});
+  Heap[0].SizeInBytes = 32;
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  for (ResourceFormat Format :
+       {ResourceFormat::R32G32B32_UINT, ResourceFormat::R32G32B32_SINT}) {
+    Heap[0].Format = static_cast<uint32_t>(Format);
+    EXPECT_EQ(GetDimensions(Heap, 1, 0, true), 2u);
+    EXPECT_EQ(GetDimensions(Heap, 1, 0, false), 0u);
+  }
+  Heap[0].Data = nullptr;
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, true), 0u);
 }
 
 TEST_F(RuntimeCPUTest, GetDimensionsTypedOutOfRangeIndexReadsZeroWithoutTouchingHeap) {

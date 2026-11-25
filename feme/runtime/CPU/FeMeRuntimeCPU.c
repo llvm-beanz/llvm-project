@@ -97,6 +97,11 @@
 // never legalizes `OpImageSample*` against an integer-sampled image, only
 // `OpImageFetch`, so there is nothing for one to mean.
 //
+// RGB32 integer read follow-up: `R32G32B32_UINT`/`_SINT` now use a
+// 12-byte identity decoder shared by typed buffers and image reads.
+// Missing alpha is one, including integer border-color expansion.
+// Store support and API format advertisements are unchanged.
+//
 // Update (roadmap F8b): the single-component depth (`D16_UNORM`/
 // `D32_FLOAT`) and stencil (`S8_UINT`) formats are now decoded too --
 // `feme::vulkan::buildSubpassInputHeap` (CommandBuffer.cpp) has been
@@ -158,8 +163,9 @@
 // readable -- `feme.cpu.image.load.2d.v4f32`/`.v4i32` already read one
 // (see their own comments: "sampled or storage"), but no
 // `feme.cpu.image.store.*` entry point existed for `OpImageWrite` to lower
-// to (see `SPIRVResourceLowering.cpp`'s own former `classifySampledImage2DHandle`
-// comment). Two new entry points, `feme.cpu.image.store.2d.v4f32`/`.v4i32`
+// to (see `SPIRVResourceLowering.cpp`'s own former
+// `classifySampledImage2DHandle` comment). Two new entry points,
+// `feme.cpu.image.store.2d.v4f32`/`.v4i32`
 // (`femeCpuImageStore2DV4F32`/`V4I32` below), and their own
 // `femeRTStoreTexel2D`/`femeRTStoreTexel2DI32` helpers -- the write-side
 // mirror of `femeRTFetchTexel2D`/`femeRTFetchTexel2DI32`, always level 0,
@@ -2148,6 +2154,8 @@ femeRTImageFormatElementSize(uint32_t Format) {
   case 10: // R32G32_SINT
     return 8;
   case 3:  // R32G32B32_FLOAT
+  case 7:  // R32G32B32_UINT
+  case 11: // R32G32B32_SINT
     return 12;
   case 4: // R32G32B32A32_FLOAT
   case 8: // R32G32B32A32_UINT
@@ -3108,6 +3116,12 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
     __builtin_memcpy(RG, Ptr, sizeof(RG));
     FemeRTv4i32 V = {RG[0], RG[1], 0, 1};
     return V;
+  }
+  case 7:    // R32G32B32_UINT
+  case 11: { // R32G32B32_SINT
+    int32_t RGB[3];
+    __builtin_memcpy(RGB, Ptr, sizeof(RGB));
+    return (FemeRTv4i32){RGB[0], RGB[1], RGB[2], 1};
   }
   case 15: { // R8G8B8A8_UINT
     uint32_t Raw;
@@ -4519,6 +4533,9 @@ femeRTImageFormatComponentMaskI32(uint32_t Format) {
   case 101: // R16G16_UINT
   case 102: // R16G16_SINT
     return 0x3u; // R, G.
+  case 7:        // R32G32B32_UINT
+  case 11:       // R32G32B32_SINT
+    return 0x7u; // R, G, B.
   case 8:   // R32G32B32A32_UINT
   case 12:  // R32G32B32A32_SINT
   case 15:  // R8G8B8A8_UINT

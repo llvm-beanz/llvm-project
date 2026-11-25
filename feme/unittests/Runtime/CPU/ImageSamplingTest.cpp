@@ -1319,6 +1319,32 @@ TEST_F(ImageSamplingTest,
   EXPECT_EQ(Out[3], 0); // A <- B (pre-swizzle border B is forced 0)
 }
 
+TEST_F(ImageSamplingTest, SampleI32RGB32BorderHasFixedAlpha) {
+  int32_t Storage[3] = {11, 12, 13};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor ImageHeap[1] = {makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32_UINT, Layout)};
+  FemeSamplerDescriptor SamplerHeap[1] = {
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToBorder)};
+  for (float &Component : SamplerHeap[0].BorderColor)
+    Component = 0.0f;
+  SampleI32Fn Fn = resolve<SampleI32Fn>(
+      addWrapper("rgb_border", "feme.cpu.image.sample.2d.v4i32"));
+  ASSERT_TRUE(Fn);
+  for (ResourceFormat Format :
+       {ResourceFormat::R32G32B32_UINT, ResourceFormat::R32G32B32_SINT}) {
+    ImageHeap[0].Format = static_cast<uint32_t>(Format);
+    int32_t Out[4] = {42, 42, 42, 42};
+    Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+       0.0f, true, 0.0f, 0, 0, -std::numeric_limits<float>::infinity(), true,
+       Out);
+    EXPECT_EQ(Out[0], 0);
+    EXPECT_EQ(Out[1], 0);
+    EXPECT_EQ(Out[2], 0);
+    EXPECT_EQ(Out[3], 1);
+  }
+}
+
 // (Roadmap L262) Confirms `femeCpuImageSample2DV4I32`'s newly widened
 // `Bias` operand actually shifts the selected mip level for an
 // integer-format image, mirroring `Sample1DBiasSelectsCoarserMipLevel`'s
@@ -3966,6 +3992,26 @@ TEST_F(ImageSamplingTest, LoadI32FetchesR8G8B8A8Sint) {
   EXPECT_EQ(Out[1], 2);
   EXPECT_EQ(Out[2], -3);
   EXPECT_EQ(Out[3], 4);
+}
+
+TEST_F(ImageSamplingTest, LoadI32RGB32UsesTwelveByteTexels) {
+  int32_t Storage[2][3] = {{11, 12, 13}, {-2147483647, -1, 16777217}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor ImageHeap[1] = {makeImage2D(
+      Storage, sizeof(Storage), 2, 1, ResourceFormat::R32G32B32_UINT, Layout)};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_rgb_i32", "feme.cpu.image.load.2d.v4i32"));
+  ASSERT_TRUE(Fn);
+  for (ResourceFormat Format :
+       {ResourceFormat::R32G32B32_UINT, ResourceFormat::R32G32B32_SINT}) {
+    ImageHeap[0].Format = static_cast<uint32_t>(Format);
+    int32_t Out[4] = {42, 42, 42, 42};
+    Fn(ImageHeap, 1, 0, 1, 0, 0, 0, true, Out);
+    EXPECT_EQ(Out[0], -2147483647);
+    EXPECT_EQ(Out[1], -1);
+    EXPECT_EQ(Out[2], 16777217);
+    EXPECT_EQ(Out[3], 1);
+  }
 }
 
 TEST_F(ImageSamplingTest, LoadI32FetchesR16G16B16A16Uint) {

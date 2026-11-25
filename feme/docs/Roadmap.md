@@ -2879,6 +2879,26 @@ the first shader-facing milestone rather than alongside it.
    a broader/full-suite, external CTS, adapter-matrix or owned-device/W2/
    W3 closure. Raising/lowering policy, stores, status, descriptor
    materialization, runtime/SPIR-V code, ABI 8 and argument layouts remain.
+   RGB32 integer read follow-up (2026-11-24): shared CPU size/decoder/
+   component-mask tables now support 12-byte `R32G32B32_UINT`/
+   `R32G32B32_SINT` reads with exact integer bits and alpha one.
+   Scalar/vector-two/vector-four typed reads, complete-element dimensions,
+   integer image loads and fixed-alpha borders have runtime tests; RGB32
+   integer typed stores remain tested no-ops. The existing native integer-
+   three fixture executes RGB32 alongside RGBA32 with SDK DXC SM6.6/
+   SM6.0 SRV/UAV loads in waves 4/8, reference and ARM64 AOT. Exact
+   bits, real RGB stride, RGBA W discard, missing-component/invalid zero
+   reads, namespaces, divergence, guards and repeats pass: 520 RGB or
+   600 RGBA bytes per case, including a guarded 296-byte output.
+   The affected 24-step ARM64 build and two-step corrected-unit rebuild
+   pass; 76 selected runtime units pass in 16.89 seconds and nineteen
+   focused native typed-resource/namespace/raising/lowering LIT pass in
+   12.67 seconds, with zero failures. Five runtime cases are added; the
+   native fixture is extended without a new LIT test. No new Vulkan
+   advertisements, stores, raising/lowering policy, SPIR-V code, status,
+   atomics, descriptor materialization, ABI 8 or argument layouts change.
+   General format, broader/full-suite, external CTS, adapter-matrix and
+   owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

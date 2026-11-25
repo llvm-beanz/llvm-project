@@ -150,12 +150,15 @@ replaces nonexistent typed `v3` calls without new runtime/SPIR-V, store,
 status, ABI or owned-device behavior; general format closure is not claimed.
 
 Native integer-three typed loads now execute SDK DXC SM6.6/SM6.0 `int3`/
-`uint3` SRV/UAV shaders on RGBA32 SINT/UINT across the same CPU modes.
-Exact high/non-FP32-exact bits, XYZ order, distinct-W discard, all-zero
-incomplete/invalid loads, namespace separation, valid-end accesses,
-divergence, complete input/output words, guards and two repeats pass.
-This adds native RGBA32 integer-three evidence, not RGB32-integer/general
-typed-format or owned-device closure; implementation and ABI are unchanged.
+`uint3` SRV/UAV shaders on RGB32/RGBA32 SINT/UINT across the same CPU
+modes. Shared RGB32 integer reads now use a real 12-byte stride, preserve
+exact bits and supply alpha one. Typed scalar/vector-two/vector-four reads,
+complete-element dimensions, integer image loads and fixed-alpha borders
+have runtime tests. Native XYZ order, distinct-W discard, incomplete/
+invalid all-zero reads, namespace separation, divergence, guards and
+repeats pass. RGB32 integer typed stores remain tested no-ops; no Vulkan
+advertisements, raising/lowering, SPIR-V code, ABI 8 or argument layouts
+change. General typed-format and owned-device closure remain open.
 
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
