@@ -2648,6 +2648,18 @@ the first shader-facing milestone rather than alongside it.
    units, runner and runtime LIT passes 1,635 with 4 unsupported and
    zero failures in 76.36 seconds; the affected ARM64 build passes.
    This adds no owned D3D12 execution or W2/W3/conformance closure.
+   Native spatial `SampleGrad` follow-up (2026-11-24): actual SDK DXC
+   SM6.6 2D/plain-array and 3D shaders execute three real mips with live
+   U/dX, negative V/dY and 3D W/dX gradients, signed/omitted offsets,
+   fixed layers and shrinking depth. Shader MinLod floors 0.5/1.5 check
+   exact FP32-bit half-mip blends; independent plain-gradient samples
+   check sampler clamps at mip 1. Normal waves 4/8, reference and ARM64
+   AOT-object paths pass with five lanes, guards and repeat 2. Focused
+   gradient LIT passes six tests with zero failures in 19.23 seconds;
+   two new native fixtures add two tests. No compiler/runtime change
+   or rebuild was needed. Implicit sampling and ABI 8 are unchanged;
+   native 1D/cube gradient execution and owned-device/conformance
+   closure are not added.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

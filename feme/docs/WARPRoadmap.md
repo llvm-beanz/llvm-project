@@ -2121,6 +2121,35 @@ Bound/static D3D12 descriptors, MS sampling and owned-device execution
 remain open. Artifact ABI 8 and argument layouts are unchanged;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) native FP32 2D/array and 3D explicit-gradient sampling
+progress (2026-11-24): actual SDK DXC SM6.6 heap-backed `SampleGrad`
+and shader-clamped `SampleGrad` now execute through normal/reference/
+ARM64 AOT-object paths against three real mips. This extends native
+execution evidence beyond the existing seven-shape pixel-shader
+import/raising fixture and canonical compiled-stage tests.
+
+Rectangular 2D/plain-array extents 4x2, 2x1 and 1x1 retain two fixed
+array layers; 3D extents 4x2x2, 2x1x1 and 1x1x1 shrink depth. Live
+U/dX and negative V/dY gradients select mips 0/1/2; the 3D variant
+also isolates W/dX. Shader MinLod floors 0.5/1.5 produce half-mip blends
+checked as exact FP32 bits, not truncating integer casts. Independent
+plain-gradient samples use sampler MinLod=MaxLod=1. Signed/omitted XY/
+XYZ offsets, distinct texels/components and alternating array layers
+are preserved. Import/raising checks verify plain/clamped intrinsics
+and offset/clamp forwarding. Both fixtures execute with normal waves
+4/8, reference and ARM64 AOT-object paths, five lanes, guards and repeat 2.
+
+Focused gradient LIT passes six tests with zero failures in 19.23 seconds.
+Two new native fixtures add two discovered tests; existing import and
+canonical execution regressions remain. No compiler/runtime implementation
+changed, so no new build or broader/full-suite run was needed. Existing
+implicit sampling, artifact ABI 8 and argument layouts are unchanged.
+This is native CPU execution evidence, not owned D3D12 execution, an
+adapter-matrix or external Vulkan CTS result. Native 1D/cube gradient
+execution is not added here. Broader sampling conformance, MS sampling,
+bound/static D3D12 descriptors and owned-device execution remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

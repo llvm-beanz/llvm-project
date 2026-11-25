@@ -1944,7 +1944,15 @@ projection/sampling helpers, without synthesized derivatives or an LOD-zero
 approximation. Scalar/vector results up to the declared texel width (at
 most four) are supported. Compiled fragment and normal/reference compute
 tests verify multi-mip, face and array-element selection; single-mip runner
-tests cover normal/reference/AOT execution. All seven raised shapes now
+tests cover normal/reference/AOT execution. Actual SDK DXC SM6.6
+2D/plain-array and 3D gradient shaders also execute three real mips through
+normal waves 4/8, reference and ARM64 AOT-object paths. Live U/dX,
+negative V/dY and 3D W/dX distinguish gradient-derived mips 0/1/2.
+Shader MinLod floors 0.5/1.5 check exact FP32-bit half-mip blends;
+independent plain-gradient samples check sampler clamps at mip 1.
+Signed/omitted offsets, fixed array layers, shrinking depth, components,
+five lanes, guards and repeat 2 are covered. Native 1D/cube gradient
+execution is not added by these fixtures. All seven raised shapes now
 have bounded heap-backed CPU execution; malformed or non-heap calls remain
 explicitly rejected. This does not materialize descriptors or establish
 owned D3D12 execution.

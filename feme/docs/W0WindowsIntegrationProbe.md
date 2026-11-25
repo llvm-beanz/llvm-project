@@ -27,6 +27,32 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) native FP32 2D/array and 3D explicit-gradient sampling (VM, 2026-11-24)
+
+Actual SDK DXC SM6.6 heap-backed 2D/plain-array and 3D shaders now execute
+plain/shader-clamped `SampleGrad` against three real mips. Rectangular
+2D extents 4x2, 2x1 and 1x1 retain two fixed array layers; rectangular
+3D extents 4x2x2, 2x1x1 and 1x1x1 shrink depth. Live U/dX, negative
+V/dY and 3D W/dX gradients distinguish mips 0/1/2 on both screen axes.
+Signed/omitted XY/XYZ offsets and distinct texels/components/layers
+are preserved.
+
+Shader MinLod floors 0.5/1.5 produce exact FP32-bit half-mip blends;
+independent plain-gradient samples check sampler MinLod=MaxLod=1.
+Native import/raising verifies plain/clamped calls and offset/clamp
+forwarding. Normal waves 4/8, reference and ARM64 AOT-object execution
+all pass with five lanes, output guards and repeat 2.
+
+Focused gradient LIT passes six tests with zero failures in 19.23 seconds.
+Two new fixtures add two tests; existing import/canonical regressions
+remain. No compiler/runtime implementation changed, so no new build or
+broader/full-suite run was needed. Implicit sampling, artifact ABI 8
+and argument layouts are unchanged. This is native CPU execution evidence,
+not owned D3D12 execution, an adapter-matrix or external Vulkan CTS result.
+Native 1D/cube gradient execution is not added. Broader conformance, MS
+sampling, bound/static D3D12 descriptors and owned-device execution remain
+open; `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) FP32 cube/array explicit-LOD sampling (VM, 2026-11-24)
 
 Heap-backed FP32 `TextureCube::SampleLevel`/`TextureCubeArray::SampleLevel`

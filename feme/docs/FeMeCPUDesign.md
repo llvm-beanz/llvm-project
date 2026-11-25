@@ -3218,6 +3218,16 @@ dW/dY and independently clamp them.
 Compiled fragment and normal/reference compute tests verify divergent
 multi-mip/face/element selection and clamps; single-mip runner tests cover
 normal, reference and AOT dispatch, components, partial waves and repeats.
+Actual SDK DXC SM6.6 heap-backed 2D/plain-array and 3D gradient shaders
+also execute three real rectangular mips through normal waves 4/8,
+reference and ARM64 AOT-object paths. Live U/dX, negative V/dY and
+3D W/dX distinguish gradient-derived mips 0/1/2. Shader MinLod floors
+0.5/1.5 check exact FP32-bit half-mip blends; independent plain-gradient
+samples check sampler MinLod=MaxLod=1. Signed/omitted XY/XYZ offsets,
+fixed array layers, shrinking depth, distinct components, five lanes,
+guards and repeat 2 are covered. Native import/raising checks plain/
+clamped calls and offset/clamp forwarding; native 1D/cube gradient
+execution is not added by these fixtures.
 All seven raised shapes now have bounded CPU execution; malformed or non-heap gradient calls remain explicitly
 rejected. Existing biased/comparison execution and SPIR-V gradient handling
 are unchanged. No descriptor materialization or owned-device execution is added.

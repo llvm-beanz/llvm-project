@@ -410,7 +410,15 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   cube/array fixture tests divergent MinLod clamps and linear half-mip
   blending, in addition to faces/elements, offsets, components, partial
   waves and repeats. 1D gradients/offsets are scalar; 3D coordinates,
-  gradients and offsets have three U/V/W components. All seven raised
+  gradients and offsets have three U/V/W components. Actual SDK DXC SM6.6
+  2D/plain-array and 3D gradient shaders execute three real rectangular
+  mips through normal waves 4/8, reference and ARM64 AOT-object paths.
+  Live U/dX, negative V/dY and 3D W/dX distinguish mips 0/1/2. Shader
+  MinLod floors 0.5/1.5 check exact FP32-bit half-mip blends; independent
+  plain-gradient samples check sampler MinLod=MaxLod=1, with signed/
+  omitted offsets, fixed layers, shrinking depth, components, five
+  lanes, guards and repeat 2. Native 1D/cube gradient execution is not
+  added by these fixtures. All seven raised
   shapes have bounded CPU execution; dynamic or partially undefined 3D
   offsets remain rejected in normal/reference/AOT admission. No descriptor
   materialization or owned-device execution is enabled.

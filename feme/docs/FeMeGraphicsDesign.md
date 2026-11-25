@@ -3425,7 +3425,15 @@ documented reason rather than an oversight:
   the existing projection/LOD helpers without synthesized derivatives or
   an LOD-zero approximation. Compiled fragment and normal/reference
   compute tests verify multi-mip/face/element selection; single-mip runner
-  tests cover normal/reference/AOT execution. 1D gradients/offsets are scalar;
+  tests cover normal/reference/AOT execution. Actual SDK DXC SM6.6
+  2D/plain-array and 3D gradient shaders also execute three real mips
+  through normal waves 4/8, reference and ARM64 AOT-object paths. Live
+  U/dX, negative V/dY and 3D W/dX distinguish mips 0/1/2; shader MinLod
+  floors 0.5/1.5 check exact FP32-bit half-mip blends. Independent plain-
+  gradient samples check sampler clamps at mip 1, with signed/omitted
+  offsets, fixed layers, shrinking depth, components, five lanes, guards
+  and repeat 2. Native 1D/cube gradient execution is not added by these
+  fixtures. 1D gradients/offsets are scalar;
   3D coordinates, gradients and offsets have three U/V/W components.
   All seven raised gradient shapes have bounded CPU execution; malformed
   or non-heap calls remain explicitly rejected. No descriptor

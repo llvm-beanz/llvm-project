@@ -399,7 +399,15 @@ coverage" in [../Design.md](../Design.md).
   LOD-zero approximation. Array elements remain coordinate-only, excluded
   from scalar U, two-component U/V or three-component raw-direction gradients.
   1D gradients/offsets are scalar; 3D coordinates, gradients and offsets
-  have three U/V/W components. All seven raised shapes have bounded CPU
+  have three U/V/W components. Actual SDK DXC SM6.6 2D/plain-array and
+  3D gradient shaders execute three real mips through normal waves 4/8,
+  reference and ARM64 AOT-object paths. Live U/dX, negative V/dY and
+  3D W/dX distinguish mips 0/1/2; shader MinLod floors 0.5/1.5 check
+  exact FP32-bit half-mip blends. Independent plain-gradient samples
+  check sampler clamps at mip 1, with signed/omitted offsets, layers/
+  depth, components, five lanes, guards and repeat 2. Native 1D/cube
+  gradient execution is not added by these fixtures.
+  All seven raised shapes have bounded CPU
   execution; malformed or non-heap calls remain explicitly unsupported.
   This does not
   materialize descriptors or establish owned D3D12 rendering.

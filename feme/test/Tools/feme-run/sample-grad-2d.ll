@@ -8,8 +8,9 @@
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 ; Five lanes exercise scalar/vector results, signed offsets, clamps, partial
-; waves and guarded repeats. Multi-mip LOD selection is covered by compiled
-; stage tests; the runner's image YAML currently prepares one mip only.
+; waves and guarded repeats. This canonical fixture uses one mip; native
+; heap-sample-grad-2d.test also executes three real mips with live gradients,
+; shader/sampler clamps and fixed array layers.
 ; CHECK: heap[1]: 42 5 10 7 8 5 10 7 8 5 10 7 8 5 10 7 8 5 10 7 8 42
 ;--- shader.ll
 define void @main() #0 {
