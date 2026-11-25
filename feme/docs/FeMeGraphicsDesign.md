@@ -3115,13 +3115,23 @@ Typed-buffer opcode-72 field-zero dimensions now raise to
 `llvm.dx.resource.getdimensions.x` and lower to the existing shared CPU
 typed element-count helper. Descriptor format/byte size, not shader width,
 determine complete-element counts without reading texel data. Unsupported
-fields, aggregate uses, meaningful mips and raw/structured DXIL queries
+fields, aggregate uses, meaningful mips and structured DXIL queries
 remain unraised. Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV
 queries pass RGB32 and mixed R32/RG32/RGBA32 layouts across the same
 CPU modes, including partial/too-short views, namespace separation,
 divergence, guards and repeats. Runtime/SPIR-V code, ABI 8 and argument
 layouts remain unchanged. This is shared CPU evidence, not draw, new
 stores/advertisements or general typed/owned-device closure.
+
+Byte-address field-zero dimensions now similarly raise/lower to the
+existing raw metadata helper with stride one/prefix zero, returning bytes
+instead of DWORDs or structured elements. Native SDK DXC SM6.6/SM6.0
+SRV/UAV queries pass namespace separation, divergence, output query/store
+coexistence, guards and repeats across the same CPU modes. Runtime units
+cover odd-byte counts, metadata-only access and inactive/unbound/bounds
+zeros. Structured queries and buffer xy fields remain unsupported.
+Runtime/SPIR-V code, ABI 8 and argument layouts are unchanged; this is
+shared CPU evidence, not draw, new advertisements or owned-device closure.
 
 Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
 and select XYZ via shared texel-result narrowing, rather than calling

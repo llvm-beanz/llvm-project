@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native byte-address buffer dimensions (VM, 2026-11-24)
+
+Opcode-72 field-zero `ByteAddressBuffer`/`RWByteAddressBuffer` queries
+now raise to the scalar dimension intrinsic and lower to the existing raw
+metadata helper with stride one/prefix zero. The result is bytes, not
+DWORDs or structured elements. Canonical i8 handles and unused/zero mip
+operands are supported; structured handles, buffer xy fields, mixed/
+aggregate uses and meaningful mips remain unsupported. Existing portable
+dimension fixtures cover raw SRV/UAV handles, helper arguments, descriptor
+indices, rejection and idempotence.
+
+[`native-raw-buffer-dimensions.test`](../test/Tools/feme-run/HLSL/native-raw-buffer-dimensions.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound queries in waves 4/8,
+reference and ARM64 AOT. Eight cases each repeat twice. Byte sizes
+20/28/4/88 produce exactly those counts, not 5/7/1/22 DWORDs.
+Different counts at overlapping registers prove SRV/UAV namespace
+separation; legacy AOT uses space/register/namespace-ordered physical
+heaps. Query/store use of the output handle, divergence, every input/output
+word, guards, sentinels and repeats pass: 52 input bytes plus a guarded
+88-byte output, exactly 140 bytes per case.
+
+Two new runtime cases verify odd-byte metadata counts without reading
+an unreadable data pointer, inactive/unbound zeros, invalid-index bounds
+without touching the heap and preserved prefix/stride behavior.
+The affected ARM64 build passes 32 steps; 28 focused raw/typed-resource,
+namespace, raising/lowering, texture-dimension and SPIR-V array-length
+LIT pass in 7.07 seconds, with zero failures. Seven dimension runtime
+units pass in 1.329 seconds. One native fixture adds one LIT test; two
+portable fixtures are extended and two runtime cases added.
+
+Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+Structured DXIL count/stride queries and broader format/full-suite,
+external CTS, adapter-matrix or owned D3D12/conformance closure remain
+open. `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native typed-buffer dimensions (VM, 2026-11-24)
 
 Typed-buffer opcode-72 field-zero queries now raise to

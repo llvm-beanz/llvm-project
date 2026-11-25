@@ -4,12 +4,12 @@
 target triple = "dxil-pc-shadermodel6.6-compute"
 
 ; Unsupported functions stay ahead of the rewritten functions in the module.
-; CHECK-LABEL: define i32 @raw_dimensions()
-; CHECK: call target("dx.RawBuffer", i8, 0, 0) @llvm.dx.resource.handlefromheap{{.*}}
+; CHECK-LABEL: define i32 @structured_dimensions()
+; CHECK: call target("dx.RawBuffer", [12 x i8], 0, 0) @llvm.dx.resource.handlefromheap{{.*}}
 ; CHECK: call i32 @llvm.dx.resource.getdimensions.x{{.*}}
-define i32 @raw_dimensions() {
-  %h = call target("dx.RawBuffer", i8, 0, 0) @llvm.dx.resource.handlefromheap.raw(i32 0)
-  %n = call i32 @llvm.dx.resource.getdimensions.x.raw(target("dx.RawBuffer", i8, 0, 0) %h)
+define i32 @structured_dimensions() {
+  %h = call target("dx.RawBuffer", [12 x i8], 0, 0) @llvm.dx.resource.handlefromheap.structured(i32 0)
+  %n = call i32 @llvm.dx.resource.getdimensions.x.structured(target("dx.RawBuffer", [12 x i8], 0, 0) %h)
   ret i32 %n
 }
 
@@ -19,6 +19,15 @@ define i32 @raw_dimensions() {
 define <2 x i32> @typed_xy() {
   %h = call target("dx.TypedBuffer", float, 0, 0, 1) @llvm.dx.resource.handlefromheap.f32(i32 0)
   %n = call <2 x i32> @llvm.dx.resource.getdimensions.xy.f32(target("dx.TypedBuffer", float, 0, 0, 1) %h)
+  ret <2 x i32> %n
+}
+
+; CHECK-LABEL: define <2 x i32> @raw_xy()
+; CHECK: call target("dx.RawBuffer", i8, 0, 0) @llvm.dx.resource.handlefromheap{{.*}}
+; CHECK: call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}
+define <2 x i32> @raw_xy() {
+  %h = call target("dx.RawBuffer", i8, 0, 0) @llvm.dx.resource.handlefromheap.raw(i32 0)
+  %n = call <2 x i32> @llvm.dx.resource.getdimensions.xy.raw(target("dx.RawBuffer", i8, 0, 0) %h)
   ret <2 x i32> %n
 }
 
@@ -57,13 +66,37 @@ define i32 @unsigned_dimensions() {
   ret i32 %n
 }
 
+; Byte-address queries use stride one and prefix zero, never a DWORD divisor.
+; CHECK-LABEL: define i32 @raw_dimensions(
+; CHECK: [[N:%.*]] = call i32 @feme.cpu.resource.getdimensions.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 %index, i64 1, i64 0, i1 true)
+; CHECK-NEXT: ret i32 [[N]]
+define i32 @raw_dimensions(i32 %index) {
+  %h = call target("dx.RawBuffer", i8, 0, 0) @llvm.dx.resource.handlefromheap.raw(i32 %index)
+  %n = call i32 @llvm.dx.resource.getdimensions.x.raw(target("dx.RawBuffer", i8, 0, 0) %h)
+  ret i32 %n
+}
+
+; CHECK-LABEL: define i32 @raw_uav_dimensions(
+; CHECK: [[N:%.*]] = call i32 @feme.cpu.resource.getdimensions.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 -1, i64 1, i64 0, i1 true)
+; CHECK-NEXT: ret i32 [[N]]
+define i32 @raw_uav_dimensions() {
+  %h = call target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefromheap.uavraw(i32 -1)
+  %n = call i32 @llvm.dx.resource.getdimensions.x.uavraw(target("dx.RawBuffer", i8, 1, 0) %h)
+  ret i32 %n
+}
+
 declare target("dx.TypedBuffer", float, 0, 0, 1) @llvm.dx.resource.handlefromheap.f32(i32)
 declare target("dx.TypedBuffer", <3 x i32>, 1, 0, 1) @llvm.dx.resource.handlefromheap.i3(i32)
 declare target("dx.TypedBuffer", <4 x i32>, 0, 0, 0) @llvm.dx.resource.handlefromheap.u4(i32)
 declare target("dx.RawBuffer", i8, 0, 0) @llvm.dx.resource.handlefromheap.raw(i32)
+declare target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefromheap.uavraw(i32)
+declare target("dx.RawBuffer", [12 x i8], 0, 0) @llvm.dx.resource.handlefromheap.structured(i32)
 declare i32 @llvm.dx.resource.getdimensions.x.f32(target("dx.TypedBuffer", float, 0, 0, 1))
 declare i32 @llvm.dx.resource.getdimensions.x.i3(target("dx.TypedBuffer", <3 x i32>, 1, 0, 1))
 declare i32 @llvm.dx.resource.getdimensions.x.u4(target("dx.TypedBuffer", <4 x i32>, 0, 0, 0))
 declare i32 @llvm.dx.resource.getdimensions.x.raw(target("dx.RawBuffer", i8, 0, 0))
+declare i32 @llvm.dx.resource.getdimensions.x.uavraw(target("dx.RawBuffer", i8, 1, 0))
+declare i32 @llvm.dx.resource.getdimensions.x.structured(target("dx.RawBuffer", [12 x i8], 0, 0))
+declare <2 x i32> @llvm.dx.resource.getdimensions.xy.raw(target("dx.RawBuffer", i8, 0, 0))
 declare <2 x i32> @llvm.dx.resource.getdimensions.xy.f32(target("dx.TypedBuffer", float, 0, 0, 1))
 declare { <3 x i32>, i1 } @llvm.dx.resource.load.typedbuffer.i3(target("dx.TypedBuffer", <3 x i32>, 1, 0, 1), i32)

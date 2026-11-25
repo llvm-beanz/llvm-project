@@ -473,6 +473,24 @@ This is native CPU metadata evidence, not new FXC-profile/external corpus,
 external CTS, adapter-matrix or owned-device closure; see the
 [typed-buffer dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-typed-buffer-dimensions-vm-2026-11-24).
 
+Native byte-address dimensions follow-up (2026-11-24): opcode-72
+field-zero queries now raise/lower through the existing raw helper with
+stride one/prefix zero, returning bytes, not DWORDs or structured elements.
+Structured/xy queries, mixed/aggregate uses and meaningful mips remain
+unsupported. Extended portable fixtures check raw SRV/UAV handles,
+indices, rejection and idempotence. Native SDK DXC SM6.6/SM6.0 queries
+execute in waves 4/8, reference and ARM64 AOT with eight cases each
+repeated twice. Counts 20/28/4/88, namespaces, divergence, output query/
+store coexistence, all words, guards and sentinels pass: exactly 140 bytes.
+The affected 32-step ARM64 build passes; 28 focused LIT pass in 7.07
+seconds and seven runtime dimension units pass in 1.329 seconds, with
+zero failures. One native LIT fixture and two runtime cases are added;
+two portable fixtures are extended. Runtime/SPIR-V code, load/store/
+status/atomic policy, advertisements, ABI 8 and argument layouts remain.
+This is native CPU metadata evidence, not new FXC-profile/external corpus,
+external CTS, adapter-matrix or owned-device closure; see the
+[byte-address dimension evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-byte-address-buffer-dimensions-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

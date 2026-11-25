@@ -1845,17 +1845,22 @@ bool raiseTextureStore(CallInst &CI) {
 /// also covered field 1); fields 0 and/or 1 together raise to the
 /// `<2 x i32>`-returning `_xy` overload instead, with each surviving
 /// `extractvalue` rewritten to the matching `extractelement`.
-/// Typed buffers support only field 0 (element count), with an unused or
-/// zero mip operand; raw/structured buffer queries remain unraised.
+/// Typed and byte-address buffers support only field 0 (element/byte count),
+/// with an unused or zero mip operand; structured queries remain unraised.
 bool raiseGetDimensions(CallInst &CI) {
   if (CI.arg_size() != 3) // opcode, Handle, MipLevel
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
-  if (!Handle || !isa<dxil::TextureExtType, dxil::MSTextureExtType,
-                      dxil::TypedBufferExtType>(Handle->getType()))
+  if (!Handle)
     return false;
-  bool IsTypedBuffer = isa<dxil::TypedBufferExtType>(Handle->getType());
-  if (IsTypedBuffer) {
+  auto *RawType = dyn_cast<dxil::RawBufferExtType>(Handle->getType());
+  bool IsByteAddress = RawType && RawType->getTypeParameter(0)->isIntegerTy(8);
+  bool IsBuffer =
+      IsByteAddress || isa<dxil::TypedBufferExtType>(Handle->getType());
+  if (!IsBuffer &&
+      !isa<dxil::TextureExtType, dxil::MSTextureExtType>(Handle->getType()))
+    return false;
+  if (IsBuffer) {
     Value *Mip = CI.getArgOperand(2);
     auto *ConstantMip = dyn_cast<ConstantInt>(Mip);
     if (!isa<UndefValue>(Mip) && (!ConstantMip || !ConstantMip->isZero()))
@@ -1869,7 +1874,7 @@ bool raiseGetDimensions(CallInst &CI) {
     if (!EV || EV->getNumIndices() != 1)
       return false;
     uint64_t Field = EV->getIndices()[0];
-    if (Field > 1 || (IsTypedBuffer && Field != 0))
+    if (Field > 1 || (IsBuffer && Field != 0))
       return false;
     NeedsHeight |= (Field == 1);
     Extracts.push_back(EV);

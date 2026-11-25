@@ -2950,6 +2950,25 @@ the first shader-facing milestone rather than alongside it.
    descriptor materialization, ABI 8 and argument layouts remain unchanged.
    Raw/structured DXIL dimensions, broader format, full-suite, external CTS,
    adapter-matrix and owned-device/W2/W3 closure remain open.
+   Native byte-address dimensions follow-up (2026-11-24): opcode-72
+   field-zero `ByteAddressBuffer`/`RWByteAddressBuffer` queries now raise/
+   lower to the existing raw helper with stride one/prefix zero, returning
+   bytes rather than DWORDs or structured elements. Structured/xy queries,
+   mixed/aggregate uses and meaningful mips remain unsupported. Portable
+   fixtures check raw SRV/UAV handles, indices, rejection and idempotence.
+   Native SDK DXC SM6.6/SM6.0 queries execute in waves 4/8, reference
+   and ARM64 AOT with eight cases each repeated twice. Exact counts
+   20/28/4/88, namespaces, divergence, output query/store coexistence,
+   all words, guards and sentinels pass: exactly 140 bytes per case.
+   The affected 32-step ARM64 build passes; 28 focused LIT pass in
+   7.07 seconds and seven dimension units pass in 1.329 seconds, with
+   zero failures. One native LIT fixture and two runtime cases are added;
+   two portable fixtures are extended. Odd-byte metadata counts,
+   unreadable-pointer bounds and prefix/stride behavior are checked.
+   Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+   descriptor materialization, ABI 8 and argument layouts remain unchanged.
+   Structured DXIL count/stride, broader format/full-suite, external CTS,
+   adapter-matrix and owned-device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

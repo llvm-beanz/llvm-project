@@ -174,9 +174,14 @@ bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
     if (!CI)
       return false;
     Intrinsic::ID ID = getIntrinsicID(CI);
-    if (Kind == Family::Typed && ID == Intrinsic::dx_resource_getdimensions_x) {
+    if (ID == Intrinsic::dx_resource_getdimensions_x) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
+      if (Kind == Family::Raw) {
+        auto *RawType = dyn_cast<dxil::RawBufferExtType>(Handle.getType());
+        if (!RawType || !RawType->getTypeParameter(0)->isIntegerTy(8))
+          return false;
+      }
       continue;
     }
     if (ID == StoreID) {
@@ -542,8 +547,13 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
     IRBuilder<> Builder(Access);
     Intrinsic::ID ID = getIntrinsicID(Access);
     if (ID == Intrinsic::dx_resource_getdimensions_x) {
-      Value *Dimensions = createGetDimensionsTyped(
-          Builder, Env, DescriptorIndex, Mask, Access->getName());
+      Value *Dimensions =
+          Info.Kind == Family::Typed
+              ? createGetDimensionsTyped(Builder, Env, DescriptorIndex, Mask,
+                                         Access->getName())
+              : createGetDimensionsRaw(Builder, Env, DescriptorIndex,
+                                       Builder.getInt64(1), Builder.getInt64(0),
+                                       Mask, Access->getName());
       Access->replaceAllUsesWith(Dimensions);
       Access->eraseFromParent();
       continue;

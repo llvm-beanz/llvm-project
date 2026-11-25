@@ -153,6 +153,8 @@ protected:
   // vector-ABI question: it is already plain scalars throughout, safe to
   // resolve and call directly.
   using GetDimensionsFn = uint32_t (*)(void *, uint32_t, uint32_t, bool);
+  using RawGetDimensionsFn = uint32_t (*)(void *, uint32_t, uint32_t, uint64_t,
+                                          uint64_t, bool);
 
   /// MCJIT compiles the whole module the first time any function's address
   /// is resolved, so a test needing more than one wrapper (see
@@ -173,6 +175,13 @@ protected:
     Function *Target = getRuntimeFunction(*M, Callee);
     assert(Target && "runtime function not found in libFeMeRuntimeCPU bitcode");
     return resolve<GetDimensionsFn>(Target);
+  }
+
+  RawGetDimensionsFn getRawGetDimensionsFn() {
+    Function *Target =
+        getRuntimeFunction(*M, "feme.cpu.resource.getdimensions.raw.i32");
+    assert(Target && "runtime function not found in libFeMeRuntimeCPU bitcode");
+    return resolve<RawGetDimensionsFn>(Target);
   }
 };
 
@@ -1072,6 +1081,30 @@ TEST_F(RuntimeCPUTest, TypedStoreV2I32DroppedWithoutUavFlag) {
   int32_t ToStore[2] = {9, 9};
   Store(Heap, 1, 0, 0, ToStore, true);
   EXPECT_EQ(Storage[0], 3);
+}
+
+TEST_F(RuntimeCPUTest, GetDimensionsRawByteCountIsMetadataOnly) {
+  RawGetDimensionsFn GetDimensions = getRawGetDimensionsFn();
+  ASSERT_TRUE(GetDimensions);
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = reinterpret_cast<void *>(uintptr_t{1});
+  Heap[0].SizeInBytes = 17;
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 1, 0, true), 17u);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 1, 0, false), 0u);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 4, 1, true), 4u);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 0, 0, true), 0u);
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 1, 18, true), 0u);
+  Heap[0].Data = nullptr;
+  EXPECT_EQ(GetDimensions(Heap, 1, 0, 1, 0, true), 0u);
+}
+
+TEST_F(RuntimeCPUTest, GetDimensionsRawByteCountBoundsDoNotTouchHeap) {
+  RawGetDimensionsFn GetDimensions = getRawGetDimensionsFn();
+  ASSERT_TRUE(GetDimensions);
+  EXPECT_EQ(GetDimensions(nullptr, 0, 0, 1, 0, true), 0u);
+  EXPECT_EQ(GetDimensions(nullptr, 1, 1, 1, 0, true), 0u);
+  EXPECT_EQ(GetDimensions(nullptr, 1, 0xffffffffu, 1, 0, true), 0u);
 }
 
 TEST_F(RuntimeCPUTest, GetDimensionsTypedReturnsElementCount) {

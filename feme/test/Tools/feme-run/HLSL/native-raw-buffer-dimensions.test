@@ -1,0 +1,120 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/heap.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/legacy.o | FileCheck %s
+#
+# Byte counts, not DWORD counts or structured element counts. Different
+# sizes at the same SRV/UAV register prove namespace separation. The
+# output handle is both queried and stored through. Divergence preserves
+# a sentinel; every input/output word, guard and repeat is checked.
+# Native CPU metadata evidence, not owned D3D12 or structured dimensions.
+# RAISE-COUNT-4: call i32 @llvm.dx.resource.getdimensions.x{{.*}}(target("dx.RawBuffer", i8,
+# RAISE-NOT: call {{.*}} @dx.op.getDimensions
+# CHECK: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42 42 42 42 42]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U:42 42 42 42 42 42 42]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[T:42]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[OUT:42 20 28 4 88 20 42 4 88 20 28 4 88 20 28 4 88 20 28 4 88 42]]{{$}}
+# CHECK-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[T]]{{$}}
+# CHECK-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[OUT]]{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+#ifndef HEAP
+ByteAddressBuffer input : register(t0);
+RWByteAddressBuffer readWrite : register(u0);
+ByteAddressBuffer tiny : register(t1);
+RWByteAddressBuffer output : register(u1);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  ByteAddressBuffer input = ResourceDescriptorHeap[0];
+  RWByteAddressBuffer readWrite = ResourceDescriptorHeap[1];
+  ByteAddressBuffer tiny = ResourceDescriptorHeap[2];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[3];
+#endif
+  uint base = 4 + tid.x * 16;
+  uint bytes;
+  input.GetDimensions(bytes);
+  output.Store(base, bytes);
+  if (tid.x != 1) {
+    readWrite.GetDimensions(bytes);
+    output.Store(base + 4, bytes);
+  }
+  tiny.GetDimensions(bytes);
+  output.Store(base + 8, bytes);
+  output.GetDimensions(bytes);
+  output.Store(base + 12, bytes);
+}
+#--- heap.yaml
+resource-heap:
+  - index: 0
+    size: 20
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42]
+  - index: 1
+    size: 28
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 4
+    kind: raw-buffer
+    data: [42]
+  - index: 3
+    size: 88
+    kind: raw-buffer
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 20
+        kind: raw-buffer
+        data: [42, 42, 42, 42, 42]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 28
+        kind: raw-buffer
+        data: [42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 4
+        kind: raw-buffer
+        data: [42]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 88
+        kind: raw-buffer
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]

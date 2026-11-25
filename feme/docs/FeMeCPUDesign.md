@@ -2375,13 +2375,26 @@ element-index operand: it counts complete physical texels from descriptor
 byte size/format, without reading texel data. Inactive/unbound/invalid
 descriptors still return zero. Only unused/zero mip operands and field-zero
 extracts are raised; mixed fields, aggregate uses, meaningful mips and
-raw/structured DXIL queries remain outside this path. Queries and loads
+structured DXIL queries remain outside this path. Queries and loads
 through the same typed handle lower together without changing the ABI.
 Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32
 and mixed R32/RG32/RGBA32 layouts in normal waves 4/8, reference and
 ARM64 AOT. Partial/too-short views, namespaces, divergence, guards and
 repeats pass. Runtime/SPIR-V code, ABI 8 and argument layouts remain;
 no stores, format advertisements or owned-device closure are added.
+
+Byte-address field-zero queries now also raise to the scalar dimension
+intrinsic and lower to `feme.cpu.resource.getdimensions.raw.i32` with
+literal stride one and prefix zero. This returns declared bytes, not
+DWORDs or structured elements. Only canonical i8 raw handles are admitted
+by this path; structured count/stride and buffer xy queries remain
+unsupported. The existing helper reads metadata, not data: an odd 17-byte
+range returns 17, while inactive/unbound/invalid descriptors return zero.
+Prefix/stride helper behavior and SPIR-V array-length controls remain
+unchanged. Native SDK DXC SM6.6/SM6.0 SRV/UAV queries pass namespace
+separation, divergence, output query/store coexistence, guards and repeats
+in waves 4/8, reference and ARM64 AOT. No runtime/SPIR-V code, ABI 8,
+argument layout, advertisement or descriptor-materialization changes.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

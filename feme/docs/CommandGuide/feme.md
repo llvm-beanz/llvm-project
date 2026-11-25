@@ -148,12 +148,22 @@ Typed-buffer `GetDimensions` now raises opcode-72 field-zero queries to
 element-count helper. Complete physical texels are counted from descriptor
 byte size/format, not shader width. Only unused/zero mip operands and
 field-zero extracts are supported; mixed fields, aggregate uses, meaningful
-mips and raw/structured DXIL queries remain unraised. Native SDK DXC
+mips and structured DXIL queries remain unraised. Native SDK DXC
 SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32 and mixed
 R32/RG32/RGBA32 layouts across the same CPU modes, including partial/
 too-short views, namespaces, divergence, guards and repeats. Runtime/
 SPIR-V code, ABI 8 and argument layouts remain unchanged; no stores,
 advertisements or owned-device closure are added.
+
+`ByteAddressBuffer`/`RWByteAddressBuffer.GetDimensions` now also raises
+field-zero queries and lowers to the existing raw metadata helper with
+stride one/prefix zero. The result is bytes, not DWORDs or structured
+elements. Native SDK DXC SM6.6/SM6.0 SRV/UAV queries pass across the
+same CPU modes, with namespace separation, divergence, output query/store
+coexistence, guards and repeats. Runtime tests cover odd-byte counts,
+metadata-only reads and inactive/unbound/bounds zeros. Structured queries,
+buffer xy fields and meaningful mips remain unsupported; runtime/
+SPIR-V code, ABI 8 and argument layouts are unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

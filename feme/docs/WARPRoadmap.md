@@ -2763,6 +2763,50 @@ support, a full suite, external CTS, adapter-matrix and owned D3D12/
 conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native byte-address buffer dimensions (2026-11-24).**
+
+The native reproduction left `ByteAddressBuffer`/`RWByteAddressBuffer`
+opcode-72 queries unraised. Field-zero byte-count queries now raise to
+`llvm.dx.resource.getdimensions.x` and lower to the existing
+`feme.cpu.resource.getdimensions.raw.i32` helper with literal stride one
+and prefix zero. This returns bytes, never DWORDs or structured elements.
+Only canonical i8 byte-address handles, field-zero extracts and unused/
+zero mip operands are admitted; structured handles, buffer xy fields,
+mixed extracts, aggregate uses and meaningful mips remain unsupported.
+Typed and texture dimension behavior is preserved.
+
+The existing portable dimension fixtures now check raw SRV/UAV raising,
+descriptor indices, byte-count helper arguments, structured/xy rejection,
+mixed-field/nonzero-mip rejection and idempotence. The new
+[`native-raw-buffer-dimensions.test`](../test/Tools/feme-run/HLSL/native-raw-buffer-dimensions.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound SRV/UAV queries in normal
+waves 4/8, reference and ARM64 AOT. Eight execution cases each repeat
+twice. Sizes 20/28/4/88 return those byte counts, not 5/7/1/22 DWORDs.
+Different counts at the same logical SRV/UAV register prove namespace
+separation; legacy AOT uses space/register/namespace-ordered physical
+heaps. The output handle is both queried and stored through. Divergence,
+every input/output word, guards, sentinels and repeats pass: 52 input
+bytes plus a guarded 88-byte output, exactly 140 bytes per case.
+
+Two new runtime cases verify an odd 17-byte range returns 17 without
+dereferencing an unreadable data pointer; inactive/unbound and invalid
+descriptor indices return zero. Existing prefix/stride behavior is also
+checked, including zero stride and prefix beyond the range. The affected
+assertions-enabled, PCH-disabled, sccache ARM64 `-j2` build passes 32
+steps. Twenty-eight focused native raw/typed-resource, namespace,
+raising/round-trip, CPU/SPIR-V lowering, texture-dimension and array-length
+LIT pass with zero failures in 7.07 seconds. Seven typed/raw dimension
+runtime units pass in 1.329 seconds. One native fixture adds one LIT test;
+two portable fixtures are extended and two runtime cases added.
+
+This adds byte-count raising/CPU lowering and native metadata evidence
+only. Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+Structured DXIL count/stride dimensions, broader format support, a full
+suite, external CTS, adapter-matrix and owned D3D12/conformance closure
+remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

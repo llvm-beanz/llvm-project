@@ -36,8 +36,8 @@
 //    Full inter-procedural threading -- a resource access reached through a
 //    helper function the entry point calls -- is deferred; a function is
 //    rewritten only if every resource access it performs is local to it.
-//  - Typed-buffer `getdimensions.x` lowers to the existing metadata-only
-//    element-count helper. Raw/structured and typed `getdimensions.xy`
+//  - Typed/byte-address `getdimensions.x` lowers to existing metadata-only
+//    element/byte-count helpers. Structured and buffer `getdimensions.xy`
 //    queries remain outside this buffer path's scope.
 //
 // Image follow-up: ordinary 2D/array/cube sampling/loading and heap-backed

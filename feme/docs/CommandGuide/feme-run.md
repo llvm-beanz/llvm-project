@@ -134,7 +134,7 @@ Native typed-buffer `GetDimensions` now executes SDK DXC SM6.6/SM6.0
 SINT/UINT/FP32 SRV/UAV queries on RGB32 and mixed R32/RG32/RGBA32
 layouts across the same CPU modes. Field-zero queries with unused/zero
 mip operands raise/lower to the existing typed element-count helper;
-other fields, aggregate uses, meaningful mips and raw/structured DXIL
+other fields, aggregate uses, meaningful mips and structured DXIL
 queries remain outside this path. Physical format/byte size determine
 complete-element counts, including partial/too-short views. Namespace
 separation, divergence, all input/output words, guards and repeats pass:
@@ -142,6 +142,17 @@ separation, divergence, all input/output words, guards and repeats pass:
 Legacy AOT uses physical heaps, not logical binding YAML. Runtime/SPIR-V
 code, ABI 8 and argument layouts remain unchanged; this is CPU evidence,
 not new stores, advertisements or owned-device closure.
+
+Native `ByteAddressBuffer`/`RWByteAddressBuffer.GetDimensions` now
+executes SDK DXC SM6.6/SM6.0 SRV/UAV queries across the same CPU modes.
+Field-zero queries with unused/zero mip operands raise/lower to the raw
+metadata helper using stride one/prefix zero. Sizes 20/28/4/88 return
+those byte counts, not 5/7/1/22 DWORD counts. Namespace separation,
+divergence, query/store use of the output handle, every word, guards and
+repeats pass: 52 input bytes plus a guarded 88-byte output, exactly 140
+bytes per case. Heap YAML uses `kind: raw-buffer`; legacy AOT uses physical
+heaps. Structured queries and buffer xy fields remain unsupported.
+Runtime/SPIR-V code, ABI 8 and argument layouts remain unchanged.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

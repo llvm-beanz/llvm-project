@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native byte-address dimension scope (2026-11-24)
+
+The [byte-address dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-byte-address-buffer-dimensions-vm-2026-11-24)
+adds opcode-72 field-zero raising and CPU lowering through the existing
+raw metadata helper with stride one/prefix zero. Byte counts are not
+DWORD counts or structured element counts. Structured/xy queries,
+mixed/aggregate uses and meaningful mips remain unsupported; portable
+raw SRV/UAV, descriptor-index, rejection and idempotence controls pass.
+
+SDK DXC SM6.6/SM6.0 queries execute in waves 4/8, reference and ARM64
+AOT, with eight cases each repeated twice. Exact counts 20/28/4/88,
+namespace separation, divergence, output query/store coexistence, all words,
+guards and sentinels pass: exactly 140 compared bytes per case.
+The affected 32-step ARM64 build passes; 28 focused native raw/typed,
+namespace, raising/lowering, texture-dimension and SPIR-V array-length
+LIT pass in 7.07 seconds, with zero failures. Seven dimension units pass
+in 1.329 seconds, including two new raw metadata/bounds cases. One new
+native LIT fixture and two extended portable fixtures provide this evidence.
+
+Runtime/SPIR-V code, load/store/status/atomic policy, advertisements,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+This is native CPU byte-count evidence, not structured DXIL dimensions,
+broader format/full-suite, external CTS, adapter-matrix or owned D3D12/
+conformance closure. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native typed-buffer dimension scope (2026-11-24)
 
 The [native typed-buffer dimension follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-typed-buffer-dimensions-vm-2026-11-24)
