@@ -3108,6 +3108,17 @@ This is narrow shared CPU load/bounds evidence, not draw, general typed
 or owned-device closure; admission, status, runtime/SPIR-V code and ABI
 are unchanged.
 
+Three-component typed i32/FP32 CPU loads now reuse vector-four helpers
+and select XYZ via shared texel-result narrowing, rather than calling
+nonexistent `v3` helpers. Physical descriptor formats retain stride and
+complete-texel bounds. Portable i32/FP32 tests and native SM6.6/SM6.0
+FP32 SRV/UAV RGB32/RGBA32 cases cover XYZ order, 12-byte stride, W
+discard, incomplete/invalid all-zero loads, exact bits, namespace separation,
+valid-end accesses, divergence, guards and two repeats. Existing image,
+raw/non-32-bit, raising, store, status, runtime/SPIR-V and ABI behavior
+is unchanged. This is CPU evidence, not draw, native three-component
+integer, general typed-format or owned-device closure.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into

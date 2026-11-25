@@ -1,0 +1,181 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb.yaml %t/heap.dxil | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgba.yaml %t/heap.dxil | FileCheck %s --check-prefixes=RGBA,CHECK
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgba.yaml %t/heap.dxil | FileCheck %s --check-prefixes=RGBA,CHECK
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgba.yaml %t/heap.dxil | FileCheck %s --check-prefixes=RGBA,CHECK
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/heap.o | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --object --repeat=2 --heap=%t/rgba.yaml %t/heap.o | FileCheck %s --check-prefixes=RGBA,CHECK
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings-rgb.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings-rgb.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings-rgb.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings-rgba.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=RGBA,CHECK
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings-rgba.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=RGBA,CHECK
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings-rgba.yaml %t/legacy.dxil | FileCheck %s --check-prefixes=RGBA,CHECK
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/legacy.o | FileCheck %s --check-prefixes=RGB,CHECK
+# RUN: feme-run --object --repeat=2 --heap=%t/rgba.yaml %t/legacy.o | FileCheck %s --check-prefixes=RGBA,CHECK
+#
+# Native CPU evidence, not owned D3D12. Float3 handles use existing v4f32
+# helpers followed by XYZ selection. Both 12-byte RGB and 16-byte RGBA
+# descriptor strides execute. Complete RGBA texels discard distinct W
+# values; an incomplete texel missing W reads all zero even though XYZ
+# would fit. RGB's incomplete final texel lacks Z and also reads all zero.
+# Five lanes cover three complete texels, partial/upper indices and
+# divergence. Lane zero reads 0xffffffff from both views. Distinct SRV/UAV
+# data at register zero proves namespace separation; AOT uses physical
+# heaps. Exact special FP32 bits, input/texel guards, the complete guarded
+# 152-byte output, inactive-store sentinels and both repeats are checked.
+# RAISE-DAG: call { <3 x float>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <3 x float>, 0, 0, 1) {{%.*}}, i32 {{.*}})
+# RAISE-DAG: call { <3 x float>, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", <3 x float>, 1, 0, 1) {{%.*}}, i32 {{.*}})
+# RAISE-NOT: call {{.*}} @dx.op.{{(bufferLoad|rawBufferStore)}}
+# RGB: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42 42 42 2147483648 1 2139095040 2143363909 4290917462 1065353217 3196059648 1056964608 4286578688 91 92]]{{$}}
+# RGB-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U:42 42 42 4286578688 2139095040 2147483649 3212836865 2147483648 2143363909 3222274048 1075838976 4290917462 101 102]]{{$}}
+# RGBA: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42 42 42 42 2147483648 1 2139095040 17 2143363909 4290917462 1065353217 18 3196059648 1056964608 4286578688 19 91 92 93]]{{$}}
+# RGBA-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U:42 42 42 42 4286578688 2139095040 2147483649 27 3212836865 2147483648 2143363909 28 3222274048 1075838976 4290917462 29 101 102 103]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[uav:0:1\]\[0\])}}: [[OUT:42 2147483648 1 2139095040 4286578688 2139095040 2147483649 2143363909 4290917462 1065353217 3212836865 2147483648 2143363909 3196059648 1056964608 4286578688 42 42 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 42]]{{$}}
+# RGB-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# RGB-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U]]{{$}}
+# RGBA-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# RGBA-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[U]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[uav:0:1\]\[0\])}}: [[OUT]]{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+#ifndef HEAP
+Buffer<float3> inputSRV : register(t0);
+RWBuffer<float3> inputUAV : register(u0);
+RWByteAddressBuffer output : register(u1);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  Buffer<float3> inputSRV = ResourceDescriptorHeap[0];
+  RWBuffer<float3> inputUAV = ResourceDescriptorHeap[1];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[2];
+#endif
+  uint i = tid.x;
+  uint base = 4 + i * 24;
+  output.Store3(base, asuint(inputSRV[i + 1]));
+  if (i != 2)
+    output.Store3(base + 12, asuint(inputUAV[i + 1]));
+  if (i == 0) {
+    output.Store3(124, asuint(inputSRV[0xffffffffu]));
+    output.Store3(136, asuint(inputUAV[0xffffffffu]));
+  }
+}
+#--- rgb.yaml
+resource-heap:
+  - index: 0
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42, 42, 2147483648, 1, 2139095040, 2143363909,
+           4290917462, 1065353217, 3196059648, 1056964608, 4286578688, 91, 92]
+  - index: 1
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42, 42, 4286578688, 2139095040, 2147483649, 3212836865,
+           2147483648, 2143363909, 3222274048, 1075838976, 4290917462, 101, 102]
+  - index: 2
+    size: 152
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42]
+#--- rgba.yaml
+resource-heap:
+  - index: 0
+    size: 76
+    kind: typed-buffer
+    format: r32g32b32a32_float
+    data: [42, 42, 42, 42, 2147483648, 1, 2139095040, 17, 2143363909,
+           4290917462, 1065353217, 18, 3196059648, 1056964608, 4286578688,
+           19, 91, 92, 93]
+  - index: 1
+    size: 76
+    kind: typed-buffer
+    format: r32g32b32a32_float
+    data: [42, 42, 42, 42, 4286578688, 2139095040, 2147483649, 27, 3212836865,
+           2147483648, 2143363909, 28, 3222274048, 1075838976, 4290917462,
+           29, 101, 102, 103]
+  - index: 2
+    size: 152
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42]
+#--- bindings-rgb.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42, 42, 2147483648, 1, 2139095040, 2143363909,
+               4290917462, 1065353217, 3196059648, 1056964608, 4286578688, 91, 92]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42, 42, 4286578688, 2139095040, 2147483649, 3212836865,
+               2147483648, 2143363909, 3222274048, 1075838976, 4290917462, 101, 102]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 152
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42]
+#--- bindings-rgba.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 76
+        kind: typed-buffer
+        format: r32g32b32a32_float
+        data: [42, 42, 42, 42, 2147483648, 1, 2139095040, 17, 2143363909,
+               4290917462, 1065353217, 18, 3196059648, 1056964608, 4286578688,
+               19, 91, 92, 93]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 76
+        kind: typed-buffer
+        format: r32g32b32a32_float
+        data: [42, 42, 42, 42, 4286578688, 2139095040, 2147483649, 27, 3212836865,
+               2147483648, 2143363909, 28, 3222274048, 1075838976, 4290917462,
+               29, 101, 102, 103]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 152
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42]

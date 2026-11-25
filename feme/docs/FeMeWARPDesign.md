@@ -164,6 +164,16 @@ The original compute-only baseline is no longer current:
   ordered physical heaps. This adds narrow CPU evidence, not D3D12 view
   construction or general typed/owned-device closure; admission, status,
   runtime/SPIR-V code and ABI remain unchanged.
+  Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
+  and select XYZ via shared texel-result narrowing, avoiding nonexistent
+  `v3` helpers while retaining physical stride/complete-texel bounds.
+  Portable i32/FP32 regressions and native SM6.6/SM6.0 FP32 SRV/UAV
+  RGB32/RGBA32 cases check XYZ order, 12-byte stride, W discard,
+  incomplete/invalid all-zero reads, exact bits, namespace separation,
+  valid-end accesses, divergence, guards and two repeats. Image/raw/non-
+  32-bit paths, raising, stores, status, runtime/SPIR-V code and ABI are
+  unchanged. Native three-component integer, broader format and owned-
+  device closure are not established.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

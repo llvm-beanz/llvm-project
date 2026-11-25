@@ -342,6 +342,18 @@ void replaceLoadResultUses(CallInst &Access, Value *Loaded) {
   }
 }
 
+Value *narrowTexelResult(IRBuilder<> &Builder, Value *Loaded, Type *ResultTy) {
+  if (Loaded->getType() == ResultTy)
+    return Loaded;
+  if (auto *VecTy = dyn_cast<FixedVectorType>(ResultTy)) {
+    SmallVector<int, 4> Components;
+    for (unsigned I = 0; I < VecTy->getNumElements(); ++I)
+      Components.push_back(I);
+    return Builder.CreateShuffleVector(Loaded, Components);
+  }
+  return Builder.CreateExtractElement(Loaded, uint64_t{0});
+}
+
 /// Builds the canonical `feme.cpu.resource.atomic.*` call matching \p Op,
 /// dispatching to the `Raw` or `Typed` builder pair (roadmap H8x/H8w
 /// respectively) based on \p Kind -- every `createAtomicXxxRaw`/
@@ -581,12 +593,22 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
     }
 
     Type *ElemTy = cast<StructType>(Access->getType())->getElementType(0);
-    CallInst *Loaded =
-        Info.Kind == Family::Typed
-            ? createTypedLoad(Builder, Env, DescriptorIndex, Offset, Mask,
-                              ElemTy, Access->getName())
-            : createRawLoad(Builder, Env, DescriptorIndex, Offset, Mask, ElemTy,
-                            Access->getName());
+    Type *LoadTy = ElemTy;
+    if (Info.Kind == Family::Typed) {
+      auto *VecTy = dyn_cast<FixedVectorType>(ElemTy);
+      if (VecTy && VecTy->getNumElements() == 3 &&
+          (VecTy->getElementType()->isIntegerTy(32) ||
+           VecTy->getElementType()->isFloatTy()))
+        LoadTy = FixedVectorType::get(VecTy->getElementType(), 4);
+    }
+    // Vector-four helpers use the physical format's texel size and bounds.
+    // Three-component shader results keep XYZ after that complete load.
+    Value *Loaded = Info.Kind == Family::Typed
+                        ? createTypedLoad(Builder, Env, DescriptorIndex, Offset,
+                                          Mask, LoadTy, Access->getName())
+                        : createRawLoad(Builder, Env, DescriptorIndex, Offset,
+                                        Mask, ElemTy, Access->getName());
+    Loaded = narrowTexelResult(Builder, Loaded, ElemTy);
     replaceLoadResultUses(*Access, Loaded);
     Access->eraseFromParent();
   }
@@ -674,18 +696,6 @@ unsigned getTexelWidth(Type *Ty, Type *ScalarTy) {
                  VecTy->getNumElements() <= 4
              ? VecTy->getNumElements()
              : 0;
-}
-
-Value *narrowImageResult(IRBuilder<> &Builder, Value *Loaded, Type *ResultTy) {
-  if (Loaded->getType() == ResultTy)
-    return Loaded;
-  if (auto *VecTy = dyn_cast<FixedVectorType>(ResultTy)) {
-    SmallVector<int, 4> Components;
-    for (unsigned I = 0; I < VecTy->getNumElements(); ++I)
-      Components.push_back(I);
-    return Builder.CreateShuffleVector(Loaded, Components);
-  }
-  return Builder.CreateExtractElement(Loaded, uint64_t{0});
 }
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
@@ -792,7 +802,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                                       Builder.getTrue(), CI->getName());
         }
       }
-      CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
+      CI->replaceAllUsesWith(narrowTexelResult(Builder, Loaded, CI->getType()));
       CI->eraseFromParent();
       SampleHandles.insert(Image);
       Changed = true;
@@ -933,7 +943,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
               Builder.getTrue(), CI->getName());
         }
       }
-      CI->replaceAllUsesWith(narrowImageResult(Builder, Loaded, CI->getType()));
+      CI->replaceAllUsesWith(narrowTexelResult(Builder, Loaded, CI->getType()));
       CI->eraseFromParent();
       SampleHandles.insert(Image);
       SampleHandles.insert(Sampler);

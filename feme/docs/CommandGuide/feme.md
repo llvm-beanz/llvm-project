@@ -140,6 +140,16 @@ explicit space/register/namespace-ordered heaps. This is narrow CPU
 evidence, not new admission, status, runtime/SPIR-V, ABI or general typed/
 owned-device closure.
 
+Three-component typed i32/FP32 loads now lower through existing vector-four
+helpers followed by XYZ selection; physical descriptor stride/bounds are
+unchanged. Portable i32/FP32 regressions and native SM6.6/SM6.0 FP32
+SRV/UAV RGB32/RGBA32 cases check 12-byte stride, W discard, incomplete/
+invalid all-zero reads, exact bits, namespace separation, valid-end loads,
+divergence, guards and two repeats across the same CPU modes. This
+replaces nonexistent typed `v3` calls without new runtime/SPIR-V, store,
+status, ABI or owned-device behavior; native three-component integer and
+general format closure are not claimed.
+
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
 `feme` reuses rather than reimplementing -- has no patterns for SPIR-V image

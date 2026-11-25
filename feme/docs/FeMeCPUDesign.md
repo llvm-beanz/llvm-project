@@ -2365,6 +2365,21 @@ every input/output word, guards and two repeats pass. This adds narrow
 native CPU bounds evidence, not D3D12 view construction or general typed
 closure; admission, status, runtime/SPIR-V code and ABI remain unchanged.
 
+Three-component i32/FP32 typed loads now use existing vector-four helpers,
+then select XYZ through the shared texel-result narrowing helper. This
+avoids nonexistent typed `v3` entry points; physical descriptor formats
+still determine stride and complete-texel bounds, so RGB32 loads remain
+12-byte accesses. Portable FP32/signed/unsigned i32 tests check XYZ order,
+zero-extension, cleanup and idempotence with unchanged raw/half controls.
+Native SM6.6/SM6.0 FP32 SRV/UAV loads execute RGB32/RGBA32 across the
+same CPU modes. Complete RGBA32 W is discarded, but missing W makes
+the entire CPU texel invalid even when XYZ fits; missing RGB32 Z and
+upper/negative indices likewise return all zero. Namespace separation,
+exact bits, valid-end accesses, divergence, every input/output word, guards
+and two repeats pass. Native three-component integer/general format
+closure is not established; raising, stores, status, runtime/SPIR-V code
+and ABI remain unchanged.
+
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded
   `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the

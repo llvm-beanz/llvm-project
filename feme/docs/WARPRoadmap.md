@@ -2515,6 +2515,53 @@ materialization, runtime/SPIR-V code, ABI 8 and argument layouts are
 unchanged. Bound/static D3D12 descriptors and broader conformance remain
 open; `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W2(b) three-component typed-load lowering (2026-11-24):
+`ResourceLoweringPass` now routes three-component i32/FP32 typed loads
+through the existing format-aware vector-four helpers, then selects XYZ.
+Previously it emitted calls to nonexistent `v3` typed-load helpers.
+Physical descriptor formats still determine texel stride and bounds;
+widening the runtime result does not force a 16-byte physical access.
+The existing image-result narrowing helper is shared with this buffer
+path, preserving image behavior without another helper or runtime ABI.
+Raw three-component loads and non-32-bit lowering keep their existing
+paths; stores, raising, status and handle widths are unchanged.
+
+The new portable
+[`resource-lowering-v3-typed-loads.ll`](../test/Transforms/CPU/resource-lowering-v3-typed-loads.ll)
+first reproduced the missing-helper path and now checks FP32, signed/
+unsigned i32 handles, vector-four helper selection, ordered XYZ shuffles,
+element-index zero-extension (including 0xffffffff), cleanup and
+idempotence. Raw vector-three and half-vector-three controls retain their
+previous lowering; this adds no non-32-bit runtime support.
+
+The new [`native-float3-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-float3-typed-buffer-loads.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound FP32 `Buffer<float3>`/
+`RWBuffer<float3>` on RGB32 and RGBA32 descriptors, in normal waves 4/8,
+reference and ARM64 AOT modes. Native raising retains three-component
+handles and SRV/UAV classes. Distinct data at identical logical registers
+proves namespace separation; legacy AOT supplies physical heaps.
+RGB32 uses a real 12-byte stride; complete RGBA32 texels discard distinct
+W values, while a final texel missing W reads all zero even though XYZ
+would fit. An incomplete RGB32 texel missing Z likewise reads all zero.
+Upper/negative-bit-pattern indices, valid-end loads, divergence, negative
+zero, signed subnormals, infinities, quiet-NaN payloads and adjacent FP32
+bits pass without arithmetic. Every input word, texel/output guard,
+inactive-store sentinel and both repeats are checked: 264 bytes per RGB
+case, 304 per RGBA case, including the guarded 152-byte output.
+
+The assertions-enabled, PCH-disabled, sccache ARM64 `-j2` affected-tool/
+CPU-unit build passes 25 steps. Nine focused tests pass in 7.91 seconds;
+the resource-lowering/CPU-unit regression selection, including those
+tests and raw/non-32-bit controls, passes 244 with zero failures in 31.12
+seconds. Two fixtures add two tests. This is portable i32/FP32 lowering
+and native FP32 CPU evidence, not native three-component integer,
+RGB32-integer/other-format/non-32-bit closure, a broader/full-suite,
+external CTS, adapter-matrix or owned D3D12 view/conformance result.
+Descriptor materialization, runtime/SPIR-V code, ABI 8 and argument
+layouts are unchanged. Bound/static D3D12 descriptors and broader
+conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

@@ -1411,6 +1411,19 @@ it now covers the two largest opcode families:
   narrow native CPU evidence, not new admission, status, runtime/SPIR-V,
   ABI, three-component/other-format/non-32-bit or owned-device closure.
 
+- Three-component typed loads: CPU lowering uses existing vector-four
+  i32/FP32 helpers, then selects XYZ, replacing nonexistent typed `v3`
+  calls. Descriptor formats retain physical stride/bounds; the existing
+  image-result narrowing helper is shared without changing image behavior.
+  Portable FP32/signed/unsigned i32 regressions check helper width, XYZ,
+  index extension, cleanup and idempotence; raw/non-32-bit controls retain
+  old paths. Native SM6.6/SM6.0 FP32 SRV/UAV shaders pass RGB32/RGBA32
+  across the same CPU modes, checking 12-byte stride, W discard, all-zero
+  incomplete/invalid texels, namespace separation, exact bits, valid-end
+  loads, divergence, guards and two repeats. This adds native FP32, not
+  native three-component integer or general format evidence. Raising,
+  stores, status, runtime/SPIR-V code and ABI 8 remain unchanged.
+
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard
 32-bit-per-component row shape is covered as of roadmap step R12

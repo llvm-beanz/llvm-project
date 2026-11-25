@@ -122,6 +122,17 @@ explicit space/register/namespace-ordered physical heaps. This adds narrow
 CPU evidence, not new admission, status, runtime/SPIR-V, ABI or general
 typed/owned-device closure.
 
+Three-component typed i32/FP32 loads now lower through existing vector-four
+helpers followed by XYZ selection. Physical formats retain stride and
+complete-texel bounds: RGB32 uses 12 bytes; an RGBA32 texel missing W
+is invalid even when XYZ fits. Portable i32/FP32 regressions and native
+SM6.6/SM6.0 FP32 SRV/UAV RGB32/RGBA32 cases check W discard,
+incomplete/invalid all-zero reads, exact bits, namespace separation, valid-
+end loads, divergence, guards and two repeats across the same CPU modes.
+This replaces nonexistent typed `v3` calls without runtime/SPIR-V, store,
+status, ABI or owned-device changes; native three-component integer and
+general format closure are not claimed.
+
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.
 

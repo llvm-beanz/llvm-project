@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) three-component typed-load lowering (VM, 2026-11-24)
+
+CPU lowering now sends three-component i32/FP32 typed loads through
+existing vector-four helpers, then selects XYZ with the shared texel-
+result narrowing helper. This replaces calls to nonexistent typed `v3`
+helpers without changing runtime code or ABI. The physical descriptor
+format controls stride/bounds; a vector-four result is not a forced
+16-byte memory access. Raw/non-32-bit paths retain existing behavior.
+
+[`resource-lowering-v3-typed-loads.ll`](../test/Transforms/CPU/resource-lowering-v3-typed-loads.ll)
+reproduced the old path and now checks FP32/signed/unsigned i32 helper
+selection, XYZ order, zero-extended indices, cleanup and idempotence,
+with raw/half-vector-three controls. Native
+[`native-float3-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-float3-typed-buffer-loads.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound FP32 SRV/UAV loads on
+RGB32/RGBA32 in normal waves 4/8, reference and ARM64 AOT modes.
+Three-component handles/access classes survive raising. Distinct inputs
+at register zero prove namespace separation; AOT supplies physical heaps.
+RGB32's stride is 12 bytes; complete RGBA32 texels discard distinct W,
+but missing W makes the whole CPU texel invalid even when XYZ would fit.
+Missing RGB32 Z and upper/negative indices also read all zero. Exact
+special FP32 bits, valid-end loads, divergence, every input/output word,
+guards, inactive sentinels and two repeats pass: 264 RGB-layout bytes or
+304 RGBA-layout bytes, including a guarded 152-byte output.
+
+The affected ARM64 build passes 25 steps. Nine focused tests pass in
+7.91 seconds; resource-lowering/CPU-unit regressions including those tests
+pass 244 with zero failures in 31.12 seconds. Two fixtures add two tests.
+This is portable i32/FP32 lowering and native FP32 CPU evidence, not native
+three-component integer, RGB32-integer/other-format/non-32-bit closure,
+a broader/full-suite, external CTS, adapter-matrix or owned D3D12 view/
+conformance result. Raising, stores, status, descriptor materialization,
+runtime/SPIR-V code, ABI 8 and argument layouts are unchanged. Bound/
+static D3D12 descriptors and broader conformance remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native scalar/two-component typed-buffer loads (VM, 2026-11-24)
 
 [`native-narrow-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-narrow-typed-buffer-loads.test)

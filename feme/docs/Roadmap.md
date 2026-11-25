@@ -2844,6 +2844,24 @@ the first shader-facing milestone rather than alongside it.
    adapter-matrix or owned D3D12 view construction/W2/W3 closure.
    Admission, status, atomics, descriptor materialization, runtime/SPIR-V
    code and ABI 8 remain unchanged.
+   Three-component typed-load follow-up (2026-11-24): CPU lowering replaces
+   nonexistent typed `v3` calls with existing vector-four i32/FP32 helpers
+   and shared XYZ narrowing. Physical descriptor formats retain stride/
+   complete-texel bounds; image/raw/non-32-bit behavior is unchanged.
+   Portable FP32/signed/unsigned i32 regressions check helper width/order,
+   zero-extended indices, cleanup and idempotence with raw/half controls.
+   Native SDK DXC SM6.6/SM6.0 FP32 SRV/UAV RGB32/RGBA32 loads
+   execute normal waves 4/8, reference and ARM64 AOT, checking 12-byte
+   stride, W discard, incomplete/invalid all-zero reads, exact bits,
+   namespace separation, valid-end loads, divergence, guards and two
+   repeats: 264 RGB or 304 RGBA bytes per case. The affected ARM64 build
+   passes 25 steps; resource-lowering/CPU-unit regressions pass 244 with
+   zero failures in 31.12 seconds, including nine focused tests. Two
+   fixtures add two tests. Native three-component integer, RGB32-integer/
+   other-format/non-32-bit closure, a broader/full-suite, external CTS,
+   adapter-matrix or owned-device/W2/W3 closure is not claimed. Raising,
+   stores, status, descriptor materialization, runtime/SPIR-V code,
+   ABI 8 and argument layouts remain unchanged.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

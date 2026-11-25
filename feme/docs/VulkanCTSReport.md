@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) three-component typed-load scope (2026-11-24)
+
+The [three-component follow-up](W0WindowsIntegrationProbe.md#w2aw2b-three-component-typed-load-lowering-vm-2026-11-24)
+replaces nonexistent typed `v3` runtime calls with existing vector-four
+i32/FP32 helpers followed by XYZ selection. Physical formats still control
+stride/bounds; raw/non-32-bit paths keep their existing behavior. Portable
+regressions cover FP32/signed/unsigned i32, index extension, XYZ order,
+cleanup, idempotence and raw/half-vector-three controls. Native SDK DXC
+SM6.6/SM6.0 FP32 SRV/UAV loads execute RGB32/RGBA32 on normal waves
+4/8, reference and ARM64 AOT. Three-component handles survive raising.
+RGB32's 12-byte stride and complete RGBA32 W discard are checked; missing
+Z/W and upper/negative indices return all zero. Namespace separation,
+exact bits, valid-end loads, divergence, all input/output words, guards
+and two repeats pass, comparing 264 RGB or 304 RGBA bytes per case.
+
+The affected ARM64 build passes 25 steps; resource-lowering/CPU-unit
+regressions pass 244 with zero failures in 31.12 seconds, including the
+nine focused tests. Two fixtures add two tests. Vulkan advertisements,
+raising, stores, status, descriptor materialization, runtime/SPIR-V code,
+ABI 8 and argument layouts are unchanged. This is portable i32/FP32 and
+native FP32 CPU evidence, not native three-component integer, RGB32-
+integer/other-format/non-32-bit closure, a broader/full-suite, external CTS,
+adapter-matrix or owned D3D12 view/conformance result. Bound/static D3D12
+descriptors and broader conformance remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native scalar/two-component typed-buffer load scope (2026-11-24)
 
 The [narrow typed-load follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-scalartwo-component-typed-buffer-loads-vm-2026-11-24)

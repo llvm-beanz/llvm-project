@@ -376,6 +376,21 @@ not a new FXC-profile/external corpus, D3D12 view construction or general
 typed/owned-device closure; see the
 [narrow typed-load evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-scalartwo-component-typed-buffer-loads-vm-2026-11-24).
 
+Three-component typed-load follow-up (2026-11-24): CPU lowering replaces
+nonexistent typed `v3` calls with existing vector-four i32/FP32 helpers
+and XYZ selection, retaining physical stride/complete-texel bounds.
+Portable i32/FP32 regressions and native SDK DXC SM6.6/SM6.0 FP32
+SRV/UAV RGB32/RGBA32 cases check 12-byte stride, W discard, incomplete/
+invalid all-zero reads, exact bits, namespace separation, valid-end loads,
+divergence, guards and two repeats across normal waves 4/8, reference
+and ARM64 AOT. The affected ARM64 build passes 25 steps; resource-
+lowering/CPU-unit regressions pass 244 with zero failures in 31.12
+seconds, including nine focused tests. Two fixtures add two tests. This
+is portable i32/FP32 and native FP32 CPU evidence, not native three-
+component integer, new FXC-profile/external corpus, general typed-format
+or owned-device proof; see the
+[three-component evidence](W0WindowsIntegrationProbe.md#w2aw2b-three-component-typed-load-lowering-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)
