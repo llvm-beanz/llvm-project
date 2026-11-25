@@ -3100,9 +3100,11 @@ SPIR-V code and ABI are unchanged.
 
 Native scalar/vector-two typed loads additionally execute SDK DXC
 SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32
-formats across the same CPU modes. Narrow handles/helpers preserve exact
-bits; incomplete RG32 elements return both components zero, and upper/
-negative indices return zero at both widths. Namespace separation,
+formats and wider RGB32 descriptors at both widths across the same CPU
+modes. Narrow handles/helpers preserve exact bits and RGB32's physical
+12-byte stride. Incomplete RG32/RGB32 elements return zero; missing RGB32
+Z invalidates the whole texel even when R/G fit. Upper/negative indices
+return zero at both widths. Namespace separation,
 valid-end accesses, divergence, all input/output words, guards and two
 repeats pass; AOT uses explicit space/register/namespace-ordered heaps.
 This is narrow shared CPU load/bounds evidence, not draw, general typed

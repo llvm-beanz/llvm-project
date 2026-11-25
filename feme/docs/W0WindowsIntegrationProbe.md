@@ -27,6 +27,37 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native narrow RGB32 typed loads (VM, 2026-11-24)
+
+[`native-narrow-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-narrow-typed-buffer-loads.test)
+adds SDK DXC SM6.6 heap and SM6.0 bound scalar/vector-two SINT/UINT/
+FP32 SRV/UAV loads on wider RGB32 descriptors alongside matched R32/
+RG32 controls. Sixteen execution cases cover both widths and encodings
+in normal waves 4/8, reference and ARM64 AOT, each repeated twice.
+Modern properties/legacy uses retain narrow handles, signedness and access
+class; legacy AOT uses space/register/namespace-ordered physical heaps.
+
+Both widths use physical 12-byte RGB32 texels, select R/RG without
+copying distinct Z, and reject a final texel missing Z even when R/G fit.
+Upper/negative-bit-pattern indices return zero. Exact signed/high/
+non-FP32-exact integers, negative zero, subnormal, infinities and signed
+quiet-NaN payloads survive without arithmetic. Namespace separation,
+valid-end loads, divergence, all input/output words, guards, inactive-store
+sentinels and repeats pass. Shared layouts compare six 56-byte inputs
+plus a guarded 296-byte raw output: exactly 632 bytes at either width.
+The scalar's entire 37-word trailing sentinel region remains 42.
+
+Nineteen focused native typed-resource, namespace, raising/round-trip and
+lowering LIT pass with zero failures in 8.12 seconds. The existing fixture
+is extended without a new LIT test, implementation changes or rebuild.
+This is narrow native CPU read/bounds evidence, not new stores or Vulkan
+advertisements, general/non-32-bit formats, a broader/full-suite, external
+CTS, adapter-matrix or owned D3D12/conformance closure. Raising/lowering
+policy, runtime/SPIR-V code, status, atomics, raw/structured behavior,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+Bound/static descriptors remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native RGB32 four-component load defaults (VM, 2026-11-24)
 
 [`native-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-loads.test)

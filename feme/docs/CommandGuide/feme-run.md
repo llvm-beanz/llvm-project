@@ -115,13 +115,20 @@ behavior.
 
 Native scalar/vector-two typed loads now cover SDK DXC SM6.6/SM6.0
 SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32 formats across the
-same CPU modes. Narrow handles/helpers preserve exact bits; incomplete
-RG32 elements return both components zero, with upper/negative indices
-zero at both widths. Namespace separation, valid-end accesses, divergence,
+same CPU modes, now also on wider RGB32 descriptors at both widths.
+Narrow handles/helpers preserve exact bits and RGB32's physical 12-byte
+stride. Incomplete RG32/RGB32 elements return zero; RGB32 missing Z is
+invalid even when R/G fit. Upper/negative indices return zero at both
+widths. Namespace separation, valid-end accesses, divergence,
 all input/output words, guards and two repeats pass. Legacy AOT uses
 explicit space/register/namespace-ordered physical heaps. This adds narrow
 CPU evidence, not new admission, status, runtime/SPIR-V, ABI or general
 typed/owned-device closure.
+
+The shared RGB32 scalar/vector-two layouts compare six 56-byte inputs and
+a guarded 296-byte raw output, exactly 632 bytes per case. Scalar execution
+also checks its 37-word trailing sentinel region remains 42; vector-two
+execution checks the complete output. Both repeats are checked.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

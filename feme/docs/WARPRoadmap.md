@@ -2672,6 +2672,45 @@ materialization, ABI 8 and argument layouts remain unchanged.
 Bound/static descriptors remain open; `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native narrow RGB32 typed loads (2026-11-24).**
+
+The existing
+[`native-narrow-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-narrow-typed-buffer-loads.test)
+now executes SDK DXC SM6.6 heap and SM6.0 bound scalar/vector-two
+SINT/UINT/FP32 SRV/UAV loads on wider RGB32 descriptors, alongside
+matched R32/RG32 controls. Sixteen added execution cases cover both
+widths and encodings in normal waves 4/8, reference and ARM64 AOT,
+each repeated twice. Modern properties/legacy result uses still recover
+narrow handles, signedness and access class.
+
+Both narrow widths retain RGB32's physical 12-byte stride and require
+a complete texel. A final texel containing R/G but missing Z returns
+zero even though every requested component fits. Valid loads select R
+or RG without copying distinct Z values; upper indices and negative-bit-
+pattern index 0xffffffff return zero. Exact signed/high/non-FP32-exact
+integers, negative zero, subnormal, infinities and signed quiet-NaN
+payloads survive without arithmetic. Namespace separation, valid-end
+loads, divergent signed UAV copies, every input/output word, guards,
+inactive-store sentinels and both repeats pass. Legacy AOT uses physical
+space/register/namespace-ordered heaps.
+
+Shared RGB layouts compare six 56-byte input views and a guarded
+296-byte raw output, exactly 632 bytes per case at either width. Scalar
+execution also checks its entire 37-word trailing sentinel region remains
+42; vector-two execution checks the complete output. Nineteen focused
+native typed-resource, namespace, raising/round-trip and typed/scalar/
+vector-two lowering LIT pass with zero failures in 8.12 seconds.
+One existing fixture gains RGB layouts/checks, not a new LIT test;
+no implementation changes or rebuild were needed.
+
+This adds native narrow RGB32 read/bounds evidence, not new stores,
+Vulkan advertisements, general/non-32-bit format closure, a broader/
+full-suite, external CTS, adapter-matrix or owned D3D12/conformance result.
+Raising/lowering policy, runtime/SPIR-V code, status, atomics, raw/
+structured behavior, descriptor materialization, ABI 8 and argument layouts
+remain unchanged. Bound/static descriptors remain open; `CreateDevice`
+remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

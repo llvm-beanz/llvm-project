@@ -1402,11 +1402,13 @@ it now covers the two largest opcode families:
 
 - Native narrow typed loads: SDK DXC SM6.6/SM6.0 scalar R32 and
   two-component RG32 SINT/UINT/FP32 SRV/UAV loads pass the same CPU
-  modes. Modern properties and legacy result uses reconstruct matched
-  scalar/vector-two handles, preserving signedness and access class.
-  Existing narrow helpers preserve exact bits; incomplete RG32 elements
-  return both components zero, with upper/negative indices zero at both
-  widths. Distinct inputs prove namespace separation; AOT uses explicit
+  modes, now also on wider RGB32 descriptors at both shader widths.
+  Modern properties and legacy result uses reconstruct scalar/vector-two
+  handles, preserving signedness and access class. Existing narrow helpers
+  preserve exact bits; RGB32 uses a physical 12-byte stride. Incomplete
+  RG32/RGB32 elements return zero, even when RGB32 R/G fit but Z is missing;
+  upper/negative indices return zero at both widths. Distinct inputs prove
+  namespace separation; AOT uses explicit
   space/register/namespace-ordered heaps. Valid-end accesses, divergent
   copies, every input/output word, guards and two repeats pass. This adds
   narrow native CPU evidence, not new admission, status, runtime/SPIR-V,

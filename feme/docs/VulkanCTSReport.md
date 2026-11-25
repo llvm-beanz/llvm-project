@@ -1,5 +1,27 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native narrow RGB32 load scope (2026-11-24)
+
+The [native narrow RGB32 follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-narrow-rgb32-typed-loads-vm-2026-11-24)
+executes SDK DXC SM6.6/SM6.0 scalar/vector-two SINT/UINT/FP32 SRV/
+UAV loads on wider RGB32 descriptors in normal waves 4/8, reference and
+ARM64 AOT. Sixteen added execution cases each repeat twice. Both widths
+retain physical 12-byte stride and reject missing-Z texels even when R/G
+fit. Exact R/RG bits, upper/negative zeros, namespaces, divergence, every
+input/output word, guards and sentinels pass: six 56-byte inputs plus a
+guarded 296-byte raw output, exactly 632 bytes per case. The scalar's
+37-word trailing sentinel region remains 42.
+
+Nineteen focused typed-resource/namespace/raising/lowering LIT pass with
+zero failures in 8.12 seconds. One existing fixture is extended without a
+new LIT test, implementation changes or rebuild. This is native CPU
+read/bounds evidence, not new stores/advertisements, general format,
+broader/full-suite, external CTS, adapter-matrix or owned D3D12/conformance
+closure. Raising/lowering policy, runtime/SPIR-V code, status, atomics,
+descriptor materialization, ABI 8 and argument layouts remain unchanged.
+Bound/static descriptors remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native RGB32 four-component defaults (2026-11-24)
 
 The [native RGB32 default-channel follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-rgb32-four-component-load-defaults-vm-2026-11-24)

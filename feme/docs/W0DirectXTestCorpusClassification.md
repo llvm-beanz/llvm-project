@@ -439,6 +439,22 @@ general format, new FXC-profile/external corpus, external CTS, adapter-
 matrix or owned-device closure; see the
 [native RGB32 defaults evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-rgb32-four-component-load-defaults-vm-2026-11-24).
 
+Native narrow RGB32 follow-up (2026-11-24): the existing narrow typed-load
+fixture adds SDK DXC SM6.6/SM6.0 scalar/vector-two SINT/UINT/FP32
+SRV/UAV loads on wider RGB32 descriptors in normal waves 4/8, reference
+and ARM64 AOT. Sixteen execution cases each repeat twice. Real 12-byte
+stride, missing-Z zero reads even when R/G fit, exact bits, namespaces,
+divergence, all input/output words, guards and sentinels pass: exactly
+632 compared bytes per case, including a guarded 296-byte output and
+the scalar's 37-word trailing sentinel region. Nineteen focused LIT pass
+with zero failures in 8.12 seconds. The existing fixture is extended
+without a new LIT test, implementation changes or rebuild. No stores,
+advertisements, raising/lowering policy, runtime/SPIR-V code, ABI 8 or
+argument layouts change. This is CPU evidence, not general format,
+new FXC-profile/external corpus, external CTS, adapter-matrix or owned-
+device closure; see the
+[native narrow RGB32 evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-narrow-rgb32-typed-loads-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

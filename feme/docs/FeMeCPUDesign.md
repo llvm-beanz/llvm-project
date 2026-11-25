@@ -2356,10 +2356,12 @@ remain unchanged.
 
 Native scalar/vector-two typed-load coverage now exercises SDK DXC
 SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32
-formats across the same CPU modes. Modern properties and legacy uses
-recover narrow handles; existing scalar/vector-two helpers retain exact
-bits and physical element stride. Both components of an incomplete RG32
-element return zero; upper/negative indices return zero at both widths.
+formats and wider RGB32 descriptors at both widths across the same CPU
+modes. Modern properties and legacy uses recover narrow handles; existing
+scalar/vector-two helpers retain exact bits and physical element stride.
+RGB32 remains a 12-byte texel. Incomplete RG32/RGB32 elements return zero;
+missing RGB32 Z invalidates the whole texel even when R/G fit. Upper/
+negative indices return zero at both widths.
 Distinct inputs prove namespace separation; AOT uses space/register/
 namespace-ordered physical heaps. Valid-end accesses, divergent copies,
 every input/output word, guards and two repeats pass. This adds narrow

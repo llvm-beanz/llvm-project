@@ -10,6 +10,10 @@
 # RUN: feme-run --reference --repeat=2 --heap=%t/scalar.yaml %t/scalar.dxil | FileCheck %s --check-prefix=SCALAR
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/scalar.dxil -o %t/scalar.o
 # RUN: feme-run --object --repeat=2 --heap=%t/scalar.yaml %t/scalar.o | FileCheck %s --check-prefix=SCALAR
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb.yaml %t/scalar.dxil | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb.yaml %t/scalar.dxil | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb.yaml %t/scalar.dxil | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/scalar.o | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
 # RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/scalar-legacy.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/scalar-legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,SCALAR-RAISE
 # RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/scalar-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefix=SCALAR
@@ -17,6 +21,10 @@
 # RUN: feme-run --reference --repeat=2 --heap=%t/scalar-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefix=SCALAR
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/scalar-legacy.dxil -o %t/scalar-legacy.o
 # RUN: feme-run --object --repeat=2 --heap=%t/scalar.yaml %t/scalar-legacy.o | FileCheck %s --check-prefix=SCALAR
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb-bindings.yaml %t/scalar-legacy.dxil | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/scalar-legacy.o | FileCheck %s --check-prefixes=RGB,RGB-SCALAR
 # RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /D TWO /Fo %t/two.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/two.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,TWO-RAISE
 # RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/two.yaml %t/two.dxil | FileCheck %s --check-prefix=TWO
@@ -24,6 +32,10 @@
 # RUN: feme-run --reference --repeat=2 --heap=%t/two.yaml %t/two.dxil | FileCheck %s --check-prefix=TWO
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/two.dxil -o %t/two.o
 # RUN: feme-run --object --repeat=2 --heap=%t/two.yaml %t/two.o | FileCheck %s --check-prefix=TWO
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb.yaml %t/two.dxil | FileCheck %s --check-prefixes=RGB,RGB-TWO
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb.yaml %t/two.dxil | FileCheck %s --check-prefixes=RGB,RGB-TWO
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb.yaml %t/two.dxil | FileCheck %s --check-prefixes=RGB,RGB-TWO
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/two.o | FileCheck %s --check-prefixes=RGB,RGB-TWO
 # RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /D TWO /Fo %t/two-legacy.dxil %t/shader.hlsl
 # RUN: feme-translate --import-dxil %t/two-legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,TWO-RAISE
 # RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/two-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefix=TWO
@@ -31,6 +43,10 @@
 # RUN: feme-run --reference --repeat=2 --heap=%t/two-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefix=TWO
 # RUN: feme --wave-size=4 --target=%feme_host_triple %t/two-legacy.dxil -o %t/two-legacy.o
 # RUN: feme-run --object --repeat=2 --heap=%t/two.yaml %t/two-legacy.o | FileCheck %s --check-prefix=TWO
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/rgb-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefixes=RGB,RGB-TWO
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/rgb-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefixes=RGB,RGB-TWO
+# RUN: feme-run --reference --repeat=2 --heap=%t/rgb-bindings.yaml %t/two-legacy.dxil | FileCheck %s --check-prefixes=RGB,RGB-TWO
+# RUN: feme-run --object --repeat=2 --heap=%t/rgb.yaml %t/two-legacy.o | FileCheck %s --check-prefixes=RGB,RGB-TWO
 #
 # Native CPU evidence, not owned D3D12. Scalar and two-component shader
 # types match R32/RG32 descriptors. Modern properties and legacy result
@@ -42,6 +58,10 @@
 # Lane zero also reads 0xffffffff from every input. A divergent signed
 # UAV copy retains the 42 sentinels. No arithmetic alters special FP32
 # bits. All inputs, complete guarded outputs and both repeats are checked.
+# Shared RGB32 layouts additionally require complete 12-byte texels at
+# both shader widths: a final texel with R/G but no B returns zero even
+# though the requested components fit. Both use a 296-byte raw output;
+# the scalar's unused tail stays 42. Distinct B values are never copied.
 # SCALAR-RAISE-DAG: call { i32, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 0, 0, 1) {{%.*}}, i32 {{.*}})
 # SCALAR-RAISE-DAG: call { i32, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 1, 0, 1) {{%.*}}, i32 {{.*}})
 # SCALAR-RAISE-DAG: call { i32, i1 } @llvm.dx.resource.load.typedbuffer{{.*}}(target("dx.TypedBuffer", i32, 0, 0, 0) {{%.*}}, i32 {{.*}})
@@ -85,6 +105,22 @@
 # TWO-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF]]{{$}}
 # TWO-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT]]{{$}}
 # TWO-NOT: {{(heap|binding)\[}}
+# RGB: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S:42 42 42 2147483649 2147483650 2147483651 4294967295 2147483647 17 2147483653 2147483654 2147483655 91 92]]{{$}}
+# RGB-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS:42 42 42 2147483665 2147483666 2147483667 2147483647 4294967295 27 2147483669 2147483670 2147483671 121 122]]{{$}}
+# RGB-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U:42 42 42 16777217 16777218 16777219 4294967295 2147483648 37 16777221 16777222 16777223 101 102]]{{$}}
+# RGB-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU:42 42 42 16777233 16777234 16777235 2147483648 4294967295 47 16777237 16777238 16777239 131 132]]{{$}}
+# RGB-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F:42 42 42 2147483648 1 2139095040 1 4290917462 4286578688 2143363909 1056964608 1061158912 111 112]]{{$}}
+# RGB-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF:42 42 42 4286578688 2139095040 2147483649 2139095040 3212836865 1065353217 4290917462 1080033280 1081081856 141 142]]{{$}}
+# RGB-SCALAR-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT:42 2147483649 2147483665 16777217 16777233 2147483648 4286578688 4294967295 42 4294967295 2147483648 1 2139095040 2147483653 2147483669 16777221 16777237 2143363909 4290917462( 0){18}( 42){37}]]{{$}}
+# RGB-TWO-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT:42 2147483649 2147483650 2147483665 2147483666 16777217 16777218 16777233 16777234 2147483648 1 4286578688 2139095040 4294967295 2147483647 42 42 4294967295 2147483648 2147483648 4294967295 1 4290917462 2139095040 3212836865 2147483653 2147483654 2147483669 2147483670 16777221 16777222 16777237 16777238 2143363909 1056964608 4290917462 1080033280( 0){36} 42]]{{$}}
+# RGB-NEXT: {{(heap\[0\]|binding\[srv:0:0\]\[0\])}}: [[S]]{{$}}
+# RGB-NEXT: {{(heap\[1\]|binding\[uav:0:0\]\[0\])}}: [[WS]]{{$}}
+# RGB-NEXT: {{(heap\[2\]|binding\[srv:0:1\]\[0\])}}: [[U]]{{$}}
+# RGB-NEXT: {{(heap\[3\]|binding\[uav:0:1\]\[0\])}}: [[WU]]{{$}}
+# RGB-NEXT: {{(heap\[4\]|binding\[srv:0:2\]\[0\])}}: [[F]]{{$}}
+# RGB-NEXT: {{(heap\[5\]|binding\[uav:0:2\]\[0\])}}: [[WF]]{{$}}
+# RGB-NEXT: {{(heap\[6\]|binding\[uav:0:3\]\[0\])}}: [[OUT]]{{$}}
+# RGB-NOT: {{(heap|binding)\[}}
 #--- shader.hlsl
 #ifdef TWO
 typedef int2 IntElement;
@@ -223,6 +259,134 @@ resource-heap:
            42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
            42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
            42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- rgb.yaml
+resource-heap:
+  - index: 0
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_sint
+    data: [42, 42, 42, 2147483649, 2147483650, 2147483651,
+           4294967295, 2147483647, 17, 2147483653, 2147483654, 2147483655,
+           91, 92]
+  - index: 1
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_sint
+    data: [42, 42, 42, 2147483665, 2147483666, 2147483667,
+           2147483647, 4294967295, 27, 2147483669, 2147483670, 2147483671,
+           121, 122]
+  - index: 2
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_uint
+    data: [42, 42, 42, 16777217, 16777218, 16777219,
+           4294967295, 2147483648, 37, 16777221, 16777222, 16777223, 101, 102]
+  - index: 3
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_uint
+    data: [42, 42, 42, 16777233, 16777234, 16777235,
+           2147483648, 4294967295, 47, 16777237, 16777238, 16777239, 131, 132]
+  - index: 4
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42, 42, 2147483648, 1, 2139095040,
+           1, 4290917462, 4286578688, 2143363909, 1056964608, 1061158912,
+           111, 112]
+  - index: 5
+    size: 56
+    kind: typed-buffer
+    format: r32g32b32_float
+    data: [42, 42, 42, 4286578688, 2139095040, 2147483649,
+           2139095040, 3212836865, 1065353217, 4290917462, 1080033280,
+           1081081856, 141, 142]
+  - index: 6
+    size: 296
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
+#--- rgb-bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_sint
+        data: [42, 42, 42, 2147483649, 2147483650, 2147483651,
+               4294967295, 2147483647, 17, 2147483653, 2147483654, 2147483655,
+               91, 92]
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_sint
+        data: [42, 42, 42, 2147483665, 2147483666, 2147483667,
+               2147483647, 4294967295, 27, 2147483669, 2147483670, 2147483671,
+               121, 122]
+  - space: 0
+    register: 1
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_uint
+        data: [42, 42, 42, 16777217, 16777218, 16777219,
+               4294967295, 2147483648, 37, 16777221, 16777222, 16777223,
+               101, 102]
+  - space: 0
+    register: 1
+    register-class: uav
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_uint
+        data: [42, 42, 42, 16777233, 16777234, 16777235,
+               2147483648, 4294967295, 47, 16777237, 16777238, 16777239,
+               131, 132]
+  - space: 0
+    register: 2
+    register-class: srv
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42, 42, 2147483648, 1, 2139095040,
+               1, 4290917462, 4286578688, 2143363909, 1056964608, 1061158912,
+               111, 112]
+  - space: 0
+    register: 2
+    register-class: uav
+    entries:
+      - index: 0
+        size: 56
+        kind: typed-buffer
+        format: r32g32b32_float
+        data: [42, 42, 42, 4286578688, 2139095040, 2147483649,
+               2139095040, 3212836865, 1065353217, 4290917462, 1080033280,
+               1081081856, 141, 142]
+  - space: 0
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        size: 296
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42]
 #--- scalar-bindings.yaml
 bindings:
   - space: 0

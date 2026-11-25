@@ -133,9 +133,11 @@ ABI or owned-device behavior.
 
 Native scalar/vector-two typed loads now cover SDK DXC SM6.6/SM6.0
 SINT/UINT/FP32 SRV/UAV shaders on matched R32/RG32 formats across the
-same CPU modes. Narrow handles/helpers preserve exact bits; incomplete
-RG32 elements return both components zero, with upper/negative indices
-zero at both widths. Namespace separation, valid-end accesses, divergence,
+same CPU modes, now also on wider RGB32 descriptors at both widths.
+Narrow handles/helpers preserve exact bits and RGB32's physical 12-byte
+stride. Incomplete RG32/RGB32 elements return zero; RGB32 missing Z is
+invalid even when R/G fit. Upper/negative indices return zero at both
+widths. Namespace separation, valid-end accesses, divergence,
 all input/output words, guards and two repeats pass. Legacy AOT uses
 explicit space/register/namespace-ordered heaps. This is narrow CPU
 evidence, not new admission, status, runtime/SPIR-V, ABI or general typed/
