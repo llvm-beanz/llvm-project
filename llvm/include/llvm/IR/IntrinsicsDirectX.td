@@ -139,12 +139,19 @@ let TargetPrefix = "dx" in {
   def int_dx_resource_getdimensions_xy
       : DefaultAttrsIntrinsic<[llvm_v2i32_ty], [llvm_any_ty], [IntrReadMem]>;
 
+  def int_dx_resource_getdimensions_xyz
+      : DefaultAttrsIntrinsic<[llvm_v3i32_ty], [llvm_any_ty], [IntrReadMem]>;
+
   def int_dx_resource_getdimensions_levels_x
       : DefaultAttrsIntrinsic<[llvm_v2i32_ty], [llvm_any_ty, llvm_i32_ty],
                               [IntrReadMem]>;
 
   def int_dx_resource_getdimensions_levels_xy
       : DefaultAttrsIntrinsic<[llvm_v3i32_ty], [llvm_any_ty, llvm_i32_ty],
+                              [IntrReadMem]>;
+
+  def int_dx_resource_getdimensions_levels_xyz
+      : DefaultAttrsIntrinsic<[llvm_v4i32_ty], [llvm_any_ty, llvm_i32_ty],
                               [IntrReadMem]>;
 
   def int_dx_resource_sample

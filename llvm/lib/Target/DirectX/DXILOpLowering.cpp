@@ -1037,13 +1037,12 @@ public:
           OpCode::GetDimensions, {Handle, Mip}, CI->getName(), Int32Ty);
       if (Error E = OpCall.takeError())
         return E;
-      Value *Width = IRB.CreateExtractValue(*OpCall, 0);
-      Value *Height =
-          NumDimensions == 2 ? IRB.CreateExtractValue(*OpCall, 1) : nullptr;
-      Value *Dim = IRB.CreateInsertElement(UndefValue::get(CI->getType()),
-                                           Width, IRB.getInt32(0));
-      if (Height)
-        Dim = IRB.CreateInsertElement(Dim, Height, IRB.getInt32(1));
+      SmallVector<Value *, 3> Sizes;
+      for (unsigned I = 0; I < NumDimensions; ++I)
+        Sizes.push_back(IRB.CreateExtractValue(*OpCall, I));
+      Value *Dim = UndefValue::get(CI->getType());
+      for (unsigned I = 0; I < NumDimensions; ++I)
+        Dim = IRB.CreateInsertElement(Dim, Sizes[I], IRB.getInt32(I));
       if (WithLevels)
         Dim = IRB.CreateInsertElement(Dim, IRB.CreateExtractValue(*OpCall, 3),
                                       IRB.getInt32(NumDimensions));
@@ -1562,11 +1561,17 @@ public:
       case Intrinsic::dx_resource_getdimensions_xy:
         HasErrors |= lowerGetDimensionsVector(F, 2, /*WithLevels=*/false);
         break;
+      case Intrinsic::dx_resource_getdimensions_xyz:
+        HasErrors |= lowerGetDimensionsVector(F, 3, /*WithLevels=*/false);
+        break;
       case Intrinsic::dx_resource_getdimensions_levels_x:
         HasErrors |= lowerGetDimensionsVector(F, 1, /*WithLevels=*/true);
         break;
       case Intrinsic::dx_resource_getdimensions_levels_xy:
         HasErrors |= lowerGetDimensionsVector(F, 2, /*WithLevels=*/true);
+        break;
+      case Intrinsic::dx_resource_getdimensions_levels_xyz:
+        HasErrors |= lowerGetDimensionsVector(F, 3, /*WithLevels=*/true);
         break;
       case Intrinsic::ctpop:
         HasErrors |= lowerCtpopToCountBits(F);
