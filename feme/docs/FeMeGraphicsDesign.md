@@ -3067,6 +3067,17 @@ This is shared CPU buffer evidence, not draw, contention, memory-order/
 barrier conformance, typed/image/int64 atomic breadth or owned-device proof;
 runtime/SPIR-V code, descriptor materialization and ABI are unchanged.
 
+Native typed R32_SINT/R32_UINT atomics also check all nine binary operations
+across the two formats, successful/failed compare-exchange, exact old
+values, wraparound, divergent increments and element-index bounds in the
+same CPU modes. Modern scalar/legacy atomic-only four-component fallback
+handles preserve signedness; atomic exchange initializes independent lane
+state. Guarded 28-byte state buffers/464-byte output pass twice. SM6.6
+mask-15 scalar typed stores remain unraised because of the mask/handle
+width mismatch; ordinary typed-load/store admission is not added. This is
+CPU atomic evidence, not draw, contention/order/barrier, other-format/
+image/int64 atomic, owned-device, runtime/SPIR-V or ABI proof.
+
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 `dx.Texture`/`dx.Sampler` handle pair's sample/load into

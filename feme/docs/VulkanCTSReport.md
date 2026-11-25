@@ -1,5 +1,34 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native R32 typed-buffer atomic scope (2026-11-24)
+
+The [typed-atomic follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-r32_sintr32_uint-typed-buffer-atomics-vm-2026-11-24)
+adds SDK DXC SM6.6 heap and SM6.0 bound R32_SINT/R32_UINT atomics in
+normal waves 4/8, reference and ARM64 AOT modes. All nine binary operations
+are checked across the two formats, plus compare-exchange success/failure.
+Modern scalar and legacy atomic-only four-component fallback handles
+preserve signedness; existing typed CPU helpers use element-index bounds.
+Five lanes own atomically initialized state on each repeat. Exact old
+values, high bits, extrema, UINT_MAX + 1 wraparound, divergent increments,
+invalid-index zero/no-op behavior and all words of two guarded 28-byte
+state buffers/464-byte output pass twice. Legacy AOT uses a physical heap.
+
+SM6.6 mask-15 broadcast scalar typed stores remain unraised because the
+store raiser requires mask width to match the scalar handle width.
+Atomic exchange initialization avoids claiming new ordinary typed-load/
+store admission or legacy width inference.
+
+Focused native/Clang resource-atomic, DXIL raising and CPU atomic LIT
+passes sixteen tests with zero failures in 2.98 seconds; one fixture adds
+one test without implementation changes or a rebuild. Vulkan
+advertisements, descriptor materialization, raw/structured behavior,
+status, images/sampling, runtime/SPIR-V code, ABI 8 and argument layouts
+are unchanged. No broader/full-suite, contention, memory-order/barrier,
+other-format/image/int64 atomic, external CTS, adapter-matrix or owned-
+device result is claimed. Bound/static D3D12 descriptors and broader
+conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native raw/structured i32 buffer atomic scope (2026-11-24)
 
 The [native buffer-atomic follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-rawstructured-i32-buffer-atomics-vm-2026-11-24)

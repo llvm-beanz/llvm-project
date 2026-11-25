@@ -101,6 +101,17 @@ zero/no-op behavior and guards twice. Legacy AOT uses a physical heap.
 No contention/memory-order/barrier conformance, typed/image/int64 breadth,
 new implementation, descriptor materialization or ABI change is implied.
 
+Native R32_SINT/R32_UINT typed atomics also check all nine binary operations
+across the two formats, successful/failed compare-exchange, exact old
+values, wraparound, divergent increments and element-index bounds across
+the same CPU modes. Modern scalar and legacy atomic-only four-component
+fallback handles retain signedness. Atomic exchange initializes lane-owned
+elements; guarded 28-byte state/464-byte output words pass twice.
+Ordinary SM6.6 mask-15 broadcast scalar typed stores remain unraised due
+to the mask/handle width mismatch. No ordinary typed-load/store admission,
+legacy width inference, contention/order/barrier, other-format/image/int64
+atomic or implementation/ABI change is implied.
+
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
 `feme` reuses rather than reimplementing -- has no patterns for SPIR-V image

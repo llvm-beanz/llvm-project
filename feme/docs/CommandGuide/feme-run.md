@@ -78,6 +78,18 @@ This is not contention/memory-order/barrier conformance, typed/image/int64
 atomic breadth, new descriptor materialization or an implementation/ABI
 change.
 
+Native typed R32_SINT/R32_UINT atomics additionally check all nine binary
+operations across the two formats, successful/failed compare-exchange,
+exact old values, wraparound, divergent increments and element-index
+bounds across the same CPU modes. Modern scalar and legacy atomic-only
+four-component fallback handles retain signedness. Atomic exchange
+initializes five lane-owned element pairs; all words of two guarded
+28-byte state buffers and a guarded 464-byte output pass twice.
+Ordinary SM6.6 mask-15 broadcast scalar typed stores remain unraised due
+to the mask/handle width mismatch. This does not establish new ordinary
+typed-load/store admission, legacy width inference, contention/order/
+barrier, other-format/image/int64 atomic or implementation/ABI changes.
+
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.
 

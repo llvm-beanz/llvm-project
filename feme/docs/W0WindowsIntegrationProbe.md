@@ -27,6 +27,42 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native R32_SINT/R32_UINT typed-buffer atomics (VM, 2026-11-24)
+
+The new [`native-typed-buffer-atomics.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-atomics.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound typed atomics in normal
+waves 4/8, reference and ARM64 AOT modes. All nine opcode-78 operations
+are checked across R32_SINT/R32_UINT descriptors, plus opcode-79
+successful/failed compare-exchange. Signedness survives modern scalar
+and legacy atomic-only four-component fallback handles. Existing typed
+CPU helpers use descriptor formats and element indices. Legacy AOT uses
+a physical heap, not object binding YAML.
+
+Five lanes initialize their own signed/unsigned elements with atomic
+exchange on every repeat. Exact old values, high-bit/adjacent non-FP32-
+exact integers, signed/unsigned extrema, UINT_MAX + 1 wraparound and
+divergent increments are scheduling-independent. Upper index 7 and
+negative-bit-pattern index 0xffffffff return zero for add/compare-exchange
+on both formats without modifying valid state or guards. All words of
+two 28-byte state buffers and a guarded 464-byte output pass twice per
+mode.
+
+Ordinary scalar typed-store initialization exposed an open SM6.6 gap:
+DXC emits mask-15 broadcast stores but the raiser requires mask width
+to match the scalar handle width. Those calls remain unraised. Atomic
+exchange initialization establishes atomic evidence only, not new
+ordinary typed-load/store admission or legacy width inference.
+
+Focused native/Clang resource-atomic, DXIL raising and CPU atomic LIT
+passes sixteen tests with zero failures in 2.98 seconds; one fixture
+adds one test without implementation changes or a rebuild. No broader/
+full-suite, contention, memory-order/barrier, other-format/image/int64
+atomic, external CTS, adapter-matrix or owned-device result is claimed.
+Descriptor materialization, raw/structured behavior, status, images/
+sampling, runtime/SPIR-V code, ABI 8 and argument layouts are unchanged.
+Bound/static D3D12 descriptors and broader conformance remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native raw/structured i32 buffer atomics (VM, 2026-11-24)
 
 The new [`native-buffer-atomics.test`](../test/Tools/feme-run/HLSL/native-buffer-atomics.test)

@@ -2768,6 +2768,26 @@ the first shader-facing milestone rather than alongside it.
    breadth, external CTS, adapter-matrix or owned-device/W2/W3 closure.
    Descriptor materialization, legacy load limits, status, images/sampling,
    runtime/SPIR-V code, ABI 8 and argument layouts remain unchanged.
+   Native R32_SINT/R32_UINT typed-buffer atomic follow-up (2026-11-24):
+   SDK DXC SM6.6 heap and SM6.0 bound shaders check all nine binary
+   operations across the two formats and successful/failed compare-
+   exchange in normal waves 4/8, reference and ARM64 AOT. Modern scalar
+   and legacy atomic-only four-component fallback handles preserve
+   signedness; existing typed helpers use R32 element-index bounds.
+   Five lanes atomically initialize their own state each repeat. Exact
+   old values, high bits, extrema, UINT_MAX + 1 wraparound, divergent
+   increments, invalid-index zero/no-op behavior and all guarded
+   28-byte state/464-byte output words pass twice per mode. Legacy AOT
+   uses a physical heap. Focused native/Clang resource-atomic, DXIL raising
+   and CPU atomic LIT passes sixteen tests with zero failures in 2.98
+   seconds; one fixture adds one test without implementation changes or
+   a rebuild. Initial ordinary-store initialization found an open SM6.6
+   mask-15 broadcast scalar typed-store/handle-width mismatch; those
+   stores remain unraised. Atomic initialization adds no ordinary typed-
+   load/store admission or legacy width inference. No broader/full-suite,
+   contention/order/barrier, other-format/image/int64 atomic, external
+   CTS, adapter-matrix, owned-device or W2/W3 closure is claimed;
+   descriptor materialization, runtime/SPIR-V code and ABI 8 are unchanged.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

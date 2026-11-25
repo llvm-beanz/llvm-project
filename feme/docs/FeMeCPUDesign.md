@@ -2314,6 +2314,19 @@ zero/no-op behavior and all state/output guards pass twice. This is
 native i32 buffer evidence, not new runtime code, contention/memory-order/
 barrier conformance, typed/image/int64 breadth or ABI changes.
 
+Native R32_SINT/R32_UINT typed-buffer atomics additionally check all nine
+binary operations across the two formats, compare-exchange success/failure,
+exact old values, high bits, UINT_MAX + 1 wraparound, divergent increments
+and element-index zero/no-op bounds across the same CPU modes. Modern
+scalar and legacy atomic-only four-component fallback handles retain
+signedness; existing typed helpers use R32 descriptor formats. Atomic
+exchange initializes each lane's elements on each repeat; all guarded
+28-byte state/464-byte output words pass twice. Ordinary SM6.6 mask-15
+broadcast scalar typed stores still fail the raiser's width-equality
+check. This fixture does not change that admission, legacy width inference,
+runtime code, contention/order/barrier policy, other-format/image/int64
+atomic breadth or ABI.
+
 - `llvm.dx.resource.handlefromheap(index)` (and its SPIR-V equivalent)
   remains an explicit heap index rather than becoming a loaded
   `FemeDescriptor`. A non-uniform index is spelled upstream by wrapping the

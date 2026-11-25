@@ -311,6 +311,23 @@ contention/memory-order/barrier, typed/image/int64 atomic or owned-device
 result; see the
 [native atomic evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-rawstructured-i32-buffer-atomics-vm-2026-11-24).
 
+Native typed-atomic follow-up (2026-11-24): SDK DXC SM6.6 heap and SM6.0
+bound R32_SINT/R32_UINT shaders check all nine binary operations across
+the two formats, successful/failed compare-exchange, exact old values,
+wraparound, divergent increments, element-index bounds and guards twice
+in normal waves 4/8, reference and ARM64 AOT. Modern scalar and legacy
+atomic-only four-component fallback handles retain signedness; atomic
+exchange initializes lane-owned state. All guarded 28-byte state/464-byte
+output words are checked. Focused native/Clang resource-atomic, DXIL
+raising and CPU atomic LIT passes sixteen tests with zero failures in
+2.98 seconds; one fixture adds one test without implementation changes
+or a rebuild. SM6.6 mask-15 broadcast scalar typed stores remain unraised
+due to their mask/handle width mismatch. This is not ordinary typed-load/
+store admission, legacy width inference, a new FXC-profile/external
+corpus, contention/order/barrier, other-format/image/int64 atomic or
+owned-device proof; see the
+[typed atomic evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-r32_sintr32_uint-typed-buffer-atomics-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

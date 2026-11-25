@@ -1,0 +1,173 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /D HEAP /Fo %t/heap.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/heap.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,HEAP
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/heap.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/heap.dxil -o %t/heap.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/heap.o | FileCheck %s
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/legacy.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/legacy.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefixes=RAISE,LEGACY
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/bindings.yaml %t/legacy.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/legacy.dxil -o %t/legacy.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/legacy.o | FileCheck %s
+#
+# Native CPU R32_SINT/R32_UINT atomics, not owned D3D12 or contention proof.
+# Each lane initializes and owns one signed and one unsigned element per
+# repeat. Indexing starts after a guard and ends before another guard.
+# All nine binary operations, compare-exchange success/failure, exact old
+# values, wraparound, divergent increments and invalid indices are checked.
+# Atomic exchange initializes state; ordinary DXC mask-15 scalar typed
+# stores remain outside this fixture's scope.
+# HEAP-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.TypedBuffer", i32, 1, 0, 1) {{%.*}}, i32 {{.*}})
+# HEAP-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.TypedBuffer", i32, 1, 0, 0) {{%.*}}, i32 {{.*}})
+# LEGACY-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.TypedBuffer", <4 x i32>, 1, 0, 1) {{%.*}}, i32 {{.*}})
+# LEGACY-DAG: call ptr @llvm.dx.resource.getpointer{{.*}}(target("dx.TypedBuffer", <4 x i32>, 1, 0, 0) {{%.*}}, i32 {{.*}})
+# RAISE-DAG: atomicrmw add ptr {{%.*}}, i32 3 monotonic
+# RAISE-DAG: atomicrmw and ptr {{%.*}}, i32 2147483647 monotonic
+# RAISE-DAG: atomicrmw or ptr {{%.*}}, i32 16 monotonic
+# RAISE-DAG: atomicrmw xor ptr {{%.*}}, i32 3 monotonic
+# RAISE-DAG: atomicrmw min ptr {{%.*}}, i32 -7 monotonic
+# RAISE-DAG: atomicrmw max ptr {{%.*}}, i32 -4 monotonic
+# RAISE-DAG: atomicrmw umin ptr {{%.*}}, i32 7 monotonic
+# RAISE-DAG: atomicrmw umax ptr {{%.*}}, i32 -2147483646 monotonic
+# RAISE-DAG: atomicrmw xchg ptr {{%.*}}, i32 -2147483647 monotonic
+# RAISE-DAG: cmpxchg ptr {{%.*}}, i32 -2147483647, i32 {{.*}} monotonic monotonic
+# RAISE-NOT: call {{.*}} @dx.op.{{(atomicBinOp|atomicCompareExchange)}}
+# CHECK: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[SIGNED:42 16777217 16777218 16777219 16777220 16777221 42]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[UNSIGNED:42 0 4294967295 0 4294967295 0 42]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[OLD:42 2147483653 2147483656 8 24 27 4294967289 4294967292 2147483649 16777217 2147483653 7 2147483650 2147483649 4294967295 0 0 0 0 0 0 0 0 42 2147483654 2147483657 9 25 26 4294967289 4294967292 2147483649 16777218 2147483654 7 2147483650 2147483649 42 0 0 0 0 0 0 0 0 42 2147483655 2147483658 10 26 25 4294967289 4294967292 2147483649 16777219 2147483655 7 2147483650 2147483649 4294967295 0 0 0 0 0 0 0 0 42 2147483656 2147483659 11 27 24 4294967289 4294967292 2147483649 16777220 2147483656 7 2147483650 2147483649 42 0 0 0 0 0 0 0 0 42 2147483657 2147483660 12 28 31 4294967289 4294967292 2147483649 16777221 2147483657 7 2147483650 2147483649 4294967295 0 0 0 0 0 0 0 0 42]]{{$}}
+# CHECK-NEXT: {{(heap\[0\]|binding\[0:0\]\[0\])}}: [[SIGNED]]{{$}}
+# CHECK-NEXT: {{(heap\[1\]|binding\[0:1\]\[0\])}}: [[UNSIGNED]]{{$}}
+# CHECK-NEXT: {{(heap\[2\]|binding\[0:2\]\[0\])}}: [[OLD]]{{$}}
+# CHECK-NOT: {{(heap|binding)\[}}
+#--- shader.hlsl
+#ifndef HEAP
+RWBuffer<int> signedState : register(u0);
+RWBuffer<uint> unsignedState : register(u1);
+RWByteAddressBuffer output : register(u2);
+#else
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)")]
+#endif
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+#ifdef HEAP
+  RWBuffer<int> signedState = ResourceDescriptorHeap[0];
+  RWBuffer<uint> unsignedState = ResourceDescriptorHeap[1];
+  RWByteAddressBuffer output = ResourceDescriptorHeap[2];
+#endif
+  uint i = tid.x;
+  uint index = i + 1;
+  uint base = 4 + i * 92;
+  uint init = 0x80000005u + i;
+  int old;
+  uint previous;
+  InterlockedExchange(signedState[index], asint(init), old);
+  InterlockedExchange(unsignedState[index], init, previous);
+  InterlockedAdd(signedState[index], 3, old);
+  output.Store(base, asuint(old));
+  InterlockedAnd(signedState[index], 0x7fffffff, old);
+  output.Store(base + 4, asuint(old));
+  InterlockedOr(signedState[index], 16, old);
+  output.Store(base + 8, asuint(old));
+  InterlockedXor(signedState[index], 3, old);
+  output.Store(base + 12, asuint(old));
+  InterlockedMin(signedState[index], -7, old);
+  output.Store(base + 16, asuint(old));
+  InterlockedMax(signedState[index], -4, old);
+  output.Store(base + 20, asuint(old));
+  InterlockedExchange(signedState[index], asint(0x80000001u), old);
+  output.Store(base + 24, asuint(old));
+  InterlockedCompareExchange(signedState[index], asint(0x80000001u),
+                             asint(0x01000001u + i), old);
+  output.Store(base + 28, asuint(old));
+  InterlockedCompareExchange(signedState[index], asint(0x80000001u), 123, old);
+  output.Store(base + 32, asuint(old));
+  InterlockedMin(unsignedState[index], 7u, previous);
+  output.Store(base + 36, previous);
+  InterlockedMax(unsignedState[index], 0x80000002u, previous);
+  output.Store(base + 40, previous);
+  InterlockedAdd(unsignedState[index], 0xffffffffu, previous);
+  output.Store(base + 44, previous);
+  InterlockedExchange(unsignedState[index], 0xffffffffu, previous);
+  output.Store(base + 48, previous);
+  previous = 42;
+  if ((i & 1) == 0)
+    InterlockedAdd(unsignedState[index], 1u, previous);
+  output.Store(base + 52, previous);
+  InterlockedAdd(signedState[7], 55, old);
+  output.Store(base + 56, asuint(old));
+  InterlockedCompareExchange(signedState[7], 0, 77, old);
+  output.Store(base + 60, asuint(old));
+  InterlockedAdd(signedState[0xffffffffu], 66, old);
+  output.Store(base + 64, asuint(old));
+  InterlockedCompareExchange(signedState[0xffffffffu], 0, 88, old);
+  output.Store(base + 68, asuint(old));
+  InterlockedAdd(unsignedState[7], 55u, previous);
+  output.Store(base + 72, previous);
+  InterlockedCompareExchange(unsignedState[7], 0u, 77u, previous);
+  output.Store(base + 76, previous);
+  InterlockedAdd(unsignedState[0xffffffffu], 66u, previous);
+  output.Store(base + 80, previous);
+  InterlockedCompareExchange(unsignedState[0xffffffffu], 0u, 88u, previous);
+  output.Store(base + 84, previous);
+}
+#--- heap.yaml
+resource-heap:
+  - index: 0
+    size: 28
+    kind: typed-buffer
+    format: r32_sint
+    data: [42, 42, 42, 42, 42, 42, 42]
+  - index: 1
+    size: 28
+    kind: typed-buffer
+    format: r32_uint
+    data: [42, 42, 42, 42, 42, 42, 42]
+  - index: 2
+    size: 464
+    data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+           42, 42, 42, 42]
+#--- bindings.yaml
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 28
+        kind: typed-buffer
+        format: r32_sint
+        data: [42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 1
+    entries:
+      - index: 0
+        size: 28
+        kind: typed-buffer
+        format: r32_uint
+        data: [42, 42, 42, 42, 42, 42, 42]
+  - space: 0
+    register: 2
+    entries:
+      - index: 0
+        size: 464
+        data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+               42, 42, 42, 42]

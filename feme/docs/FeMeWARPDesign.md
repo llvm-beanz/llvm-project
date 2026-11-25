@@ -124,6 +124,17 @@ The original compute-only baseline is no longer current:
   buffer evidence, not contention/memory-order/barrier conformance,
   typed/image/int64 atomic breadth, owned-device support or new descriptor
   materialization. Runtime/SPIR-V code and ABI remain unchanged.
+  Native typed R32_SINT/R32_UINT atomics additionally check all nine
+  binary operations across the two formats, successful/failed compare-
+  exchange, exact old values, wraparound, divergent increments and
+  element-index bounds across the same CPU modes. Modern scalar/legacy
+  atomic-only four-component fallback handles retain signedness; atomic
+  exchange initializes lane-owned state. Guarded 28-byte state/464-byte
+  output words pass twice. SM6.6 mask-15 broadcast scalar typed stores
+  remain unraised due to the mask/handle width mismatch; ordinary typed
+  admission and legacy width inference are not advanced. This is not
+  contention/order/barrier, other-format/image/int64 atomic or owned-
+  device closure; runtime/SPIR-V code and ABI remain unchanged.
   Visible static samplers must match the declared default/comparison mode:
   minimum/maximum filters remain default, not comparison filters.
   Descriptor-table and native-heap sampler contents are not validated.

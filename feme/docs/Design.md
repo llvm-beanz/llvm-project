@@ -1362,6 +1362,16 @@ it now covers the two largest opcode families:
   Legacy AOT uses a physical heap. This adds native i32 buffer evidence,
   not implementation changes, contention/memory-order/barrier conformance,
   typed/image/int64 breadth, new descriptor materialization or ABI changes.
+  Native R32_SINT/R32_UINT typed-buffer follow-up also checks all nine
+  binary operations across the two formats, compare-exchange success/
+  failure, old values, wraparound, divergent increments and element-index
+  bounds across the same CPU modes. Modern scalar and legacy atomic-only
+  four-component fallback handles preserve signedness; typed helpers use
+  R32 descriptor formats. Atomic exchange initializes lane-owned state,
+  checking every word of guarded 28-byte state buffers/464-byte output
+  twice. SM6.6 mask-15 broadcast scalar typed stores remain unraised:
+  their mask width does not match the scalar handle width. Ordinary
+  typed-load/store admission and legacy width inference are not advanced.
 
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard

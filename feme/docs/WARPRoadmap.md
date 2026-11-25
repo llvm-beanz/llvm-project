@@ -2363,6 +2363,44 @@ runtime/SPIR-V code, ABI 8 and argument layouts are unchanged.
 Bound/static D3D12 descriptors and broader conformance remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W2(b) native R32_SINT/R32_UINT typed-buffer atomics (2026-11-24):
+the new [`native-typed-buffer-atomics.test`](../test/Tools/feme-run/HLSL/native-typed-buffer-atomics.test)
+executes actual SDK DXC SM6.6 heap and SM6.0 bound typed resource atomics
+through normal waves 4/8, reference and ARM64 AOT-object paths. All nine
+opcode-78 operations are checked across the signed/unsigned descriptors,
+along with opcode-79 compare-exchange success/failure. Native raising
+preserves signedness in modern scalar handles and legacy atomic-only
+four-component fallback handles; existing typed CPU helpers use R32
+descriptor formats and element indices, not raw byte offsets.
+
+Five lanes initialize their own signed/unsigned elements using atomic
+exchange on every repeat. Exact old values, high-bit/non-FP32-exact
+integers, signed/unsigned extrema, UINT_MAX + 1 wraparound and divergent
+increments pass independently of scheduling order. Upper index 7 and
+negative-bit-pattern index 0xffffffff return zero for add/compare-exchange
+on both formats without modifying valid state. Every word of two guarded
+28-byte state buffers and a guarded 464-byte old-value output is checked
+twice per mode. Legacy AOT supplies a physical heap, not object binding
+YAML.
+
+The initial ordinary-store initialization exposed a separate open gap:
+SDK DXC SM6.6 emits mask-15 broadcast scalar typed stores, but the typed
+store raiser requires its mask width to match the scalar handle width.
+Those calls remain explicitly unraised. Atomic exchange initialization
+keeps this fixture scoped to atomics; native scalar typed-store admission
+and general typed-load/store breadth are not claimed.
+
+Focused native/Clang resource-atomic, DXIL raising and CPU atomic LIT
+passes sixteen tests with zero failures in 2.98 seconds; one fixture adds
+one test. No implementation changed, so no rebuild or broader/full-suite
+run was needed. This is native R32 i32 atomic evidence, not contention,
+memory-order/barrier conformance, other-format/image/int64 atomic breadth,
+external CTS, an adapter-matrix or owned D3D12. Descriptor materialization,
+legacy width inference, raw/structured behavior, status, images/sampling,
+runtime/SPIR-V code, ABI 8 and argument layouts remain unchanged.
+Bound/static D3D12 descriptors and broader conformance remain open;
+`CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.
