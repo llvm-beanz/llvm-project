@@ -27,6 +27,45 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native 2DMS/array dimensions (VM, 2026-11-25)
+
+The native reproduction confirmed DXIL field 3 is sample count for both
+2DMS shapes; array field 2 is fixed layers. New samples.xy/xyz intrinsic
+forms and symmetric LLVM forward lowering/FeMe raising preserve
+width/height, optional layers and sample count without a mip operand.
+Count-unused queries use x/xy/xyz. Shared CPU admission/lowering accepts
+heap-backed sampled FP32/i32 2DMS/array queries, reusing existing size/
+sample-count metadata helpers without sampler/derivatives in any stage.
+Writable/non-heap/non-32-bit, wrong result forms, samples-on-non-MS and
+levels-on-MS queries reject early. Nonzero native mips and unsupported
+field/aggregate uses remain unraised.
+
+[`native-texturems-dimensions.test`](../test/Tools/feme-run/HLSL/native-texturems-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 3x2 with four samples and SINT
+2x1/layers three with two samples distinguish extents, fixed layers and
+sample counts from single-mip metadata. Query-derived last-X/Y/layer and
+sample indices load exact FP32/high-bit SINT values. Divergence/unbound
+zeros, skipped stores, every word, guards and repeats pass: 144 image
+bytes plus a guarded 188-byte output, exactly 332 compared bytes.
+
+The intrinsic-triggered ARM64 rebuild passes; the final build reports no
+work. Sixty-eight focused LLVM/FeMe LIT pass in 34.58 seconds and
+eighteen dimension runtime units in 3.114 seconds, zero failures. Four
+LIT fixtures and one runtime case are added; the LLVM forward fixture is
+extended. Portable checks cover scalar/pair narrowing, fragment layer-/
+sample-only queries, exact field mappings, round trips, idempotence and
+nonzero native mip/invalid field preservation. An unreadable-data metadata
+unit varies sample counts 1/2/4/8 independently of extents/layers/mips and
+checks inactive/unbound/bounds zeros.
+
+Runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and layouts remain
+unchanged. Bound/static images, non-32-bit/general format and resolve
+behavior, full-suite, external CTS, adapter-matrix and owned D3D12/
+conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native cube-array dimensions (VM, 2026-11-25)
 
 FeMe raising and shared CPU dimension admission/lowering now accept

@@ -81,6 +81,8 @@
 // through the 3D size helper instead of preserving array layers.
 // Sampled cube arrays use the cube-array size helper, returning cube
 // element counts rather than physical face counts.
+// Sampled 2DMS/array base queries use existing size helpers at mip zero;
+// samples.xy/xyz appends the runtime sample count without a mip operand.
 //
 //===----------------------------------------------------------------------===//
 
@@ -97,7 +99,7 @@ namespace feme::cpu {
 
 /// Tests heap-backed FP32/i32 1D/array or plain 2D mip-zero scalar/pair
 /// dimension queries in any stage. Sampled and writable textures share the same
-/// metadata helpers; plain 1D accepts only scalar width. MS is not included.
+/// metadata helpers; plain 1D accepts only scalar width.
 /// Sampled 1D/array and plain 2D additionally
 /// accept explicit, defined i32 mip queries returning width, optional
 /// layers-or-height, and total mip count.
@@ -108,6 +110,8 @@ namespace feme::cpu {
 /// 3D textures accept the same forms with shrinking width/height/depth.
 /// Sampled cube arrays accept those forms with fixed cube element counts;
 /// writable cube arrays are not included.
+/// Sampled 2DMS accepts x/xy/samples.xy; sampled 2DMS-array accepts
+/// x/xy/xyz/samples.xyz, with sample count distinct from total mip count.
 bool isSupportedDXILGetDimensions(const llvm::CallInst &CI);
 
 /// Tests heap-backed FP32/i32 1D/2D (including array) or 3D loading in any

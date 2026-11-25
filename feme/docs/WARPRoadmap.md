@@ -3300,6 +3300,56 @@ MS dimensions, bound/static images, full-suite, external CTS, adapter-
 matrix and owned D3D12/conformance closure remain open. `CreateDevice`
 remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+**W2(a)/W2(b) native 2DMS/array dimensions (2026-11-25).**
+
+The native SDK DXC reproduction confirmed DXIL field 3 is sample count
+for both 2DMS shapes; array field 2 is fixed layers. New
+`getdimensions.samples.xy`/`getdimensions.samples.xyz` intrinsic forms
+return width/height, optional layers and sample count without a mip
+operand. Symmetric LLVM forward lowering and FeMe raising preserve those
+fields separately from the existing explicit-mip/total-level forms.
+Count-unused queries retain x/xy/xyz; nonzero native mips and unsupported
+field/aggregate uses remain unraised.
+
+The shared CPU admission/lowering predicate now accepts heap-backed
+sampled FP32/i32 2DMS x/xy/samples.xy and 2DMS-array
+x/xy/xyz/samples.xyz queries. Existing 2D size, array size-at-LOD (at zero)
+and sample-count metadata helpers require no sampler/derivatives in any
+stage. Writable/non-heap/non-32-bit and wrong result forms reject early
+in normal/reference/AOT paths. Samples-on-non-MS and levels-on-MS are
+explicitly rejected rather than conflating sample counts with total mips.
+
+[`native-texturems-dimensions.test`](../test/Tools/feme-run/HLSL/native-texturems-dimensions.test)
+executes SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
+four cases each repeated twice. FP32 3x2 with four samples and SINT
+2x1/layers three with two samples distinguish extents, fixed layers and
+sample counts from single-mip metadata. Queried dimensions select the
+last X/Y/layer and queried counts select two valid samples, returning
+exact FP32 and high-bit/non-FP32-exact SINT values. Divergent indices make
+both SRVs unbound in lane four; lane one skips a sample-count store.
+Every word, guard and repeat passes: 144 image bytes plus a guarded
+188-byte output, exactly 332 compared bytes per case.
+
+The intrinsic-triggered assertions-enabled, PCH-disabled, sccache ARM64
+`-j2` rebuild passes, including `opt`, `llvm-as`, FeMe tools and runtime
+tests; the final build reports no work. Sixty-eight focused LLVM forward,
+FeMe round-trip/raising, dimension, 1D/2D/3D/cube/MS sampling/loading,
+namespace, typed-load and CPU/SPIR-V LIT pass in 34.58 seconds. Eighteen
+dimension runtime units pass in 3.114 seconds, zero failures. Four LIT
+fixtures and one runtime case are added; the LLVM forward fixture is
+extended. Portable checks cover scalar/pair narrowing, fragment layer-/
+sample-only queries, exact field mappings, round trips, idempotence and
+nonzero native mip/invalid field preservation. An unreadable-data metadata
+unit varies sample counts 1/2/4/8 independently of extents/layers/mips and
+checks inactive/unbound/bounds zeros.
+
+Runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and argument layouts
+remain unchanged. Bound/static images, non-32-bit/general format and
+resolve behavior, full-suite, external CTS, adapter-matrix and owned D3D12/
+conformance closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

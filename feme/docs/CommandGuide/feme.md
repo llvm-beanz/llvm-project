@@ -183,7 +183,7 @@ paired outputs pass SDK DXC SM6.6 in waves 4/8, reference and ARM64 AOT,
 including a three-mip base extent, divergent/unbound indices, query/load
 coexistence, all words, guards and repeats. Admission and lowering share
 the same predicate. Sampled plain 2D explicit mips/counts use the separate
-path below. MS shapes, non-32-bit declarations,
+path below. Non-32-bit declarations,
 aggregate uses and bound/static images remain unsupported by
 this path. Runtime/SPIR-V code, buffer dimensions, ABI 8 and argument
 layouts remain unchanged; no owned-device closure is established.
@@ -260,8 +260,8 @@ without sampler/derivatives in any stage. Native SM6.6 passes waves 4/8,
 reference and ARM64 AOT for base/explicit sampled and base writable
 queries, exact query-derived SINT loads, divergence/unbound zeros, skipped
 stores, all words, guards and repeats. Writable explicit, undefined-mip
-and mismatched-shape canonical queries reject; MS dimensions
-remain unsupported. Only valid native mips are measured. Helper clamping,
+and mismatched-shape canonical queries reject; MS dimensions use the path
+below. Only valid native mips are measured. Helper clamping,
 runtime/SPIR-V code, ABI 8 and owned-device boundaries remain unchanged.
 
 Heap-backed `Texture3D`/`RWTexture3D.GetDimensions` accepts FP32/i32 base
@@ -288,6 +288,19 @@ skipped stores and guards. Queried counts select the last cube and reverse
 two real mips. Writable cube arrays, undefined mips and wrong result forms
 reject. Only valid native mips are measured; runtime/SPIR-V code, helper
 clamping, ABI 8 and owned-device boundaries remain unchanged.
+
+Heap-backed sampled FP32/i32 `Texture2DMS.GetDimensions(width, height,
+samples)` and `Texture2DMSArray.GetDimensions(width, height, layers,
+samples)` use new `getdimensions.samples.xy/xyz` forms without a mip
+operand. DXIL field 3 is sample count, not total mip count; field 2 is
+array layers only. Existing CPU size/sample-count metadata helpers need
+no sampler/derivatives in any stage. Native SM6.6 passes waves 4/8,
+reference and ARM64 AOT, each repeated twice, checking all 332 bytes,
+query-derived FP32/exact SINT sample loads, divergence/unbound zeros,
+skipped stores and guards. Writable/non-heap/non-32-bit, wrong result
+forms, samples-on-non-MS and levels-on-MS queries reject. Runtime/
+SPIR-V code, existing load/store/status/atomic policy, ABI 8 and owned-
+device boundaries remain unchanged; this adds no resolve behavior.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection; physical descriptor stride/bounds are

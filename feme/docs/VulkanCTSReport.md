@@ -1,5 +1,31 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native 2DMS/array dimension scope (2026-11-25)
+
+The [2DMS/array follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-2dmsarray-dimensions-vm-2026-11-25)
+adds samples.xy/xyz intrinsic forms with symmetric LLVM forward lowering
+and FeMe raising. DXIL field 3 is sample count rather than total mips;
+array field 2 is fixed layers. Heap-backed sampled FP32/i32 CPU queries
+reuse existing size/sample-count metadata helpers without mip operands,
+samplers or derivatives in any stage. Writable/non-heap/non-32-bit,
+wrong result forms, samples-on-non-MS and levels-on-MS queries reject.
+
+SDK DXC SM6.6 passes waves 4/8, reference and ARM64 AOT, four cases
+each repeated twice. FP32 3x2 with four samples and SINT 2x1/layers
+three with two samples distinguish extents/layers/counts from single-mip
+metadata. Query-derived last-X/Y/layer/sample exact loads, divergence/
+unbound zeros, skipped stores, every word, guards and repeats pass:
+exactly 332 compared bytes per case. The intrinsic-triggered ARM64
+rebuild passes; sixty-eight focused LLVM/FeMe LIT pass in 34.58 seconds
+and eighteen dimension units in 3.114 seconds, zero failures.
+
+Runtime/SPIR-V code, existing load/store/status/atomic policy,
+advertisements, descriptor materialization, ABI 8 and layouts remain
+unchanged. Bound/static images, non-32-bit/general format and resolve
+behavior, full-suite, new CTS, adapter-matrix and owned D3D12/conformance
+closure remain open. `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) native cube-array dimension scope (2026-11-25)
 
 The [cube-array follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-cube-array-dimensions-vm-2026-11-25)

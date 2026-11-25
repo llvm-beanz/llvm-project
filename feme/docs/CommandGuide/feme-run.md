@@ -175,8 +175,8 @@ Width-only, height-only and paired outputs distinguish extents 5x3, 3x2
 and 2x4. The full image has three mips and still reports its base extent;
 the same handle also loads a texel. Divergent unbound indices return zeros;
 sentinels, every word, guards and repeats pass: 128 input bytes plus a
-guarded 108-byte output, exactly 236 bytes per case. MS
-shapes, non-32-bit declarations, aggregate uses and bound/static
+guarded 108-byte output, exactly 236 bytes per case. Non-32-bit
+declarations, aggregate uses and bound/static
 images remain outside this CPU path. Sampled plain 2D explicit mips/counts
 use the separate path below; unsupported canonical query shapes
 fail early normal/reference/AOT admission. Runtime/SPIR-V code, buffer
@@ -275,7 +275,7 @@ last-X/Y/layer exact SINT loads, divergent/unbound indices, skipped-store
 sentinels, every word, guards and repeats pass: 376 image bytes plus a
 guarded 308-byte output, exactly 684 compared bytes per case. Writable
 explicit, undefined-mip and mismatched-shape canonical queries reject;
-MS dimensions remain unsupported. Only valid native mips
+MS dimensions use the separate path below. Only valid native mips
 are measured. Helper clamping, runtime/SPIR-V code, ABI 8, layouts and
 owned-device/conformance boundaries remain unchanged.
 
@@ -310,6 +310,22 @@ and repeats pass: 408 image bytes plus a guarded 248-byte output, exactly
 736 bytes per case. Writable cube arrays, undefined mips and wrong result
 forms reject. Only valid native mips are measured; runtime/SPIR-V code,
 helper clamping, ABI 8 and owned-device boundaries remain unchanged.
+
+Native heap-backed sampled FP32/i32 `Texture2DMS`/`Texture2DMSArray`
+dimensions return width/height, optional fixed layers and sample count,
+without a mip operand, sampler or derivatives. YAML uses `dimension:
+2d-ms`/`2d-ms-array`, two-component `extent`, `sample-count` and physical
+`array-layers` for arrays; MS images retain one mip. Sample values are
+contiguous per texel and layers are contiguous. Native SM6.6 passes waves
+4/8, reference and ARM64 AOT, each repeated twice. FP32 3x2 with four
+samples and SINT 2x1/layers three with two samples distinguish extents,
+layers and sample counts. Query-derived last-X/Y/layer and sample indices
+load exact FP32/SINT values. Divergence/unbound zeros, skipped stores,
+every word, guards and repeats pass: 144 image bytes plus a guarded
+188-byte output, exactly 332 compared bytes per case. Writable/non-heap/
+non-32-bit, wrong result forms, samples-on-non-MS and levels-on-MS queries
+reject. Runtime/SPIR-V code, existing load/store/status/atomic policy,
+ABI 8 and owned-device boundaries remain unchanged; resolve is not added.
 
 Three-component typed i32/FP32 loads now lower through existing vector-four
 helpers followed by XYZ selection. Physical formats retain stride and

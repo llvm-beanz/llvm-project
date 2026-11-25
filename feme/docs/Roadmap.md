@@ -3161,6 +3161,24 @@ the first shader-facing milestone rather than alongside it.
    materialization, ABI 8 and layouts remain unchanged. MS dimensions,
    bound/static images, full-suite, external CTS, adapter-matrix and
    owned-device/W2/W3 closure remain open.
+   Native 2DMS/array dimensions follow-up (2026-11-25): new samples.xy/
+   xyz intrinsic forms and symmetric forward/reverse mapping preserve
+   width/height, optional fixed layers and sample count without a mip
+   operand. DXIL field 3 is sample count, not total mips. Shared CPU
+   admission/lowering accepts heap-backed sampled FP32/i32 queries through
+   existing size/sample-count metadata helpers, without sampler/
+   derivatives in any stage. Native SM6.6 passes waves 4/8, reference and
+   ARM64 AOT, four cases repeated twice, checking all 332 bytes, query-
+   derived exact FP32/SINT sample loads, divergence/unbound zeros, skipped
+   stores and guards. The intrinsic-triggered ARM64 rebuild passes;
+   sixty-eight focused LLVM/FeMe LIT pass in 34.58 seconds and eighteen
+   dimension units in 3.114 seconds, zero failures. Writable/non-heap/
+   non-32-bit, wrong result forms, samples-on-non-MS and levels-on-MS
+   queries reject. Runtime/SPIR-V code, existing load/store/status/atomic
+   policy, advertisements, descriptor materialization, ABI 8 and layouts
+   remain unchanged. Bound/static images, non-32-bit/general format and
+   resolve behavior, full-suite, external CTS, adapter-matrix and owned-
+   device/W2/W3 closure remain open.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

@@ -203,7 +203,7 @@ The original compute-only baseline is no longer current:
   height-only and paired results, a three-mip base extent, divergent/
   unbound indices, query/load coexistence, all words, guards and repeats.
   Sampled plain 2D explicit mips/counts use the separate path below.
-  MS shapes, non-32-bit declarations, aggregate
+  Non-32-bit declarations, aggregate
   uses and bound/static images remain outside this CPU path.
   Runtime/SPIR-V code, ABI 8 and layouts remain unchanged; this adds no
   descriptor materialization, advertisements or owned-device closure.
@@ -274,7 +274,7 @@ The original compute-only baseline is no longer current:
   sampled and base writable queries, exact query-derived SINT loads,
   divergence/unbound zeros, skipped stores, all words, guards and repeats.
   Writable explicit, undefined-mip and mismatched-shape canonical queries
-  reject; MS dimensions remain unsupported. Only valid native
+  reject; MS dimensions use the separate path below. Only valid native
   mips are measured; helper clamping, runtime/SPIR-V code, ABI 8, layouts
   and advertisements are unchanged. No owned-device closure is established.
   Heap-backed FP32/i32 3D dimensions accept base x/xy/xyz SRV/UAV queries
@@ -300,6 +300,19 @@ The original compute-only baseline is no longer current:
   reject. Only valid native mips are measured; runtime/SPIR-V code, helper
   clamping, ABI 8, advertisements and layouts remain unchanged. This adds
   no owned-device/conformance closure.
+  Heap-backed sampled FP32/i32 2DMS/array dimensions use new samples.xy/
+  xyz forms without a mip operand for width/height, optional fixed layers
+  and sample count. DXIL field 3 maps to sample count, not total mip count,
+  through symmetric LLVM forward lowering and FeMe raising. Count-unused
+  queries use x/xy/xyz. Existing size/sample-count metadata helpers need
+  no sampler/derivatives in any stage. Native SM6.6 passes waves 4/8,
+  reference and ARM64 AOT, each repeated twice, checking all 332 bytes,
+  query-derived FP32/exact SINT sample loads, divergence/unbound zeros,
+  skipped stores and guards. Writable/non-heap/non-32-bit, wrong result
+  forms, samples-on-non-MS and levels-on-MS queries reject. Runtime/
+  SPIR-V code, existing load/store/status/atomic policy, ABI 8, layouts
+  and advertisements remain unchanged. This adds no resolve or owned-
+  device/conformance closure.
   Three-component i32/FP32 typed CPU loads now reuse vector-four helpers
   and select XYZ via shared texel-result narrowing, avoiding nonexistent
   `v3` helpers while retaining physical stride/complete-texel bounds.

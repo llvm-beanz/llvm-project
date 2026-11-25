@@ -63,6 +63,8 @@ Error checkSupportedRaisedOps(const Module &M) {
     case Intrinsic::dx_resource_getdimensions_levels_x:
     case Intrinsic::dx_resource_getdimensions_levels_xy:
     case Intrinsic::dx_resource_getdimensions_levels_xyz:
+    case Intrinsic::dx_resource_getdimensions_samples_xy:
+    case Intrinsic::dx_resource_getdimensions_samples_xyz:
       for (const User *U : F.users()) {
         const auto *CI = dyn_cast<CallInst>(U);
         if ((F.getIntrinsicID() == Intrinsic::dx_resource_getdimensions_x ||
@@ -79,7 +81,8 @@ Error checkSupportedRaisedOps(const Module &M) {
               "queries, sampled cube dimensions, or sampled 1D/array or "
               "plain 2D explicit-mip/count queries, or 2D-array base/sampled "
               "explicit-mip/count queries, or 3D base/sampled "
-              "explicit-mip/count queries, or sampled cube-array dimensions",
+              "explicit-mip/count queries, sampled cube-array dimensions, "
+              "or sampled 2DMS/array dimensions/sample counts",
               F.getName().str().c_str());
       }
       continue;

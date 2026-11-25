@@ -1001,6 +1001,67 @@ TEST_F(ImageSamplingTest, GetDimensions3DShrinksDepthAndChecksBounds) {
   }
 }
 
+TEST_F(ImageSamplingTest, GetDimensionsMultisampleCountsAreMetadataOnly) {
+  using GetDimensionsFn =
+      void (*)(const FemeImageDescriptor *, uint32_t, uint32_t, bool, void *);
+  using GetArrayDimensionsFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                        uint32_t, int32_t, bool, void *);
+  using QuerySamplesFn =
+      int32_t (*)(const FemeImageDescriptor *, uint32_t, uint32_t);
+  Function *SizeWrapper =
+      addWrapper("dimensions", "feme.cpu.image.getdimensions.2d.v2i32");
+  Function *ArrayWrapper = addWrapper(
+      "array_dimensions", "feme.cpu.image.getdimensions.lod.2darray.v3i32");
+  Function *SamplesFunction =
+      getRuntimeFunction(*M, "feme.cpu.image.querysamples.i32");
+  ASSERT_TRUE(SamplesFunction);
+  keepForJIT(SamplesFunction);
+  GetDimensionsFn Size = resolve<GetDimensionsFn>(SizeWrapper);
+  GetArrayDimensionsFn Array = resolve<GetArrayDimensionsFn>(ArrayWrapper);
+  QuerySamplesFn Samples = resolve<QuerySamplesFn>(SamplesFunction);
+  ASSERT_TRUE(Size);
+  ASSERT_TRUE(Array);
+  ASSERT_TRUE(Samples);
+  FemeImageDescriptor Img{};
+  Img.Data = reinterpret_cast<void *>(uintptr_t{1});
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2DMS);
+  Img.Width = 3;
+  Img.Height = 2;
+  Img.ArrayLayers = 3;
+  Img.MipLevels = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  alignas(16) uint32_t Out[4] = {};
+  for (uint32_t Count : {1u, 2u, 4u, 8u}) {
+    Img.SampleCount = Count;
+    Size(&Img, 1, 0, true, Out);
+    EXPECT_EQ(Out[0], 3u);
+    EXPECT_EQ(Out[1], 2u);
+    EXPECT_EQ(Samples(&Img, 1, 0), static_cast<int32_t>(Count));
+  }
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2DMSArray);
+  Img.SampleCount = 2;
+  Array(&Img, 1, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 3u);
+  EXPECT_EQ(Out[1], 2u);
+  EXPECT_EQ(Out[2], 3u);
+  EXPECT_EQ(Samples(&Img, 1, 0), 2);
+  Array(&Img, 1, 0, 0, false, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  Img.Data = nullptr;
+  Array(&Img, 1, 0, 0, true, Out);
+  for (unsigned I = 0; I < 3; ++I)
+    EXPECT_EQ(Out[I], 0u);
+  EXPECT_EQ(Samples(&Img, 1, 0), 0);
+  EXPECT_EQ(Samples(nullptr, 0, 0), 0);
+  for (uint32_t Index : {1u, 0xffffffffu}) {
+    Array(nullptr, 1, Index, 0, true, Out);
+    for (unsigned I = 0; I < 3; ++I)
+      EXPECT_EQ(Out[I], 0u);
+    EXPECT_EQ(Samples(nullptr, 1, Index), 0);
+  }
+}
+
 TEST_F(ImageSamplingTest, GetDimensions2DTotalLevelsIsMetadataOnly) {
   using QueryLevelsFn =
       int32_t (*)(const FemeImageDescriptor *, uint32_t, uint32_t);

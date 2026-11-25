@@ -2420,7 +2420,7 @@ component selection. Scalar/vector FP32/i32 declarations up to four
 components, sampled or writable, share an admission/lowering predicate.
 No sampler, derivatives or texel data are needed. Queries and loads through
 the same handle lower together, unused handles are removed and repeated
-lowering is idempotent. Non-heap, MS shapes and non-32-bit
+lowering is idempotent. Non-heap and non-32-bit
 declarations remain unsupported with explicit normal/reference/AOT
 admission diagnostics. Base scalar/pair intrinsics carry no mip; sampled
 1D-array/plain 2D explicit mips/counts use the separate paths below. Other texture
@@ -2546,8 +2546,8 @@ skipped stores, all words, guards and repeats pass. Portable fragment
 layer-/count-only projections and idempotence pass. A metadata-only unit
 checks fixed layers, sampled/storage queries and inactive/unbound/bounds
 zeros using unreadable data. Writable explicit, undefined-mip and
-mismatched-shape canonical forms reject; MS dimensions
-remain unsupported. Only valid native mips are measured. Helper clamping,
+mismatched-shape canonical forms reject; MS dimensions use the path below.
+Only valid native mips are measured. Helper clamping,
 runtime/SPIR-V code, ABI 8, layouts and owned-device boundaries are unchanged.
 
 Heap-backed FP32/i32 3D dimensions accept base x/xy/xyz SRV/UAV queries
@@ -2583,6 +2583,24 @@ distinct total levels and inactive/unbound/zero-mip/bounds zeros.
 Writable cube arrays, undefined mips and wrong result forms reject.
 Only valid native mips are measured; runtime/SPIR-V code, helper clamping,
 ABI 8 and layouts remain unchanged.
+
+Heap-backed sampled FP32/i32 2DMS accepts x/xy/samples.xy; 2DMS-array
+accepts x/xy/xyz/samples.xyz. New samples forms return width/height,
+optional fixed layers and sample count without a mip operand. Symmetric
+LLVM forward lowering and FeMe raising preserve DXIL field 3 as sample
+count rather than total mip count; field 2 is array layers only. CPU
+lowering reuses `getdimensions.2d.v2i32`, the array size-at-LOD helper at
+zero and `querysamples.i32`, without sampler/derivatives in any stage.
+Native SM6.6 passes waves 4/8, reference and ARM64 AOT, each repeated
+twice, checking all 332 bytes, query-derived FP32/exact SINT sample loads,
+divergence/unbound zeros, skipped stores and guards. Portable checks cover
+scalar/pair narrowing, fragment layer-/sample-only queries, field mappings,
+round trips, idempotence and nonzero native mip/invalid field preservation.
+An unreadable-data metadata unit varies sample counts independently of
+extents, layers and mip metadata, checking inactive/unbound/bounds zeros.
+Writable/non-heap/non-32-bit, wrong result forms, samples-on-non-MS and
+levels-on-MS queries reject. Runtime/SPIR-V code, load/store/status/atomic
+policy, ABI 8 and layouts remain unchanged; resolve is outside this slice.
 
 Three-component i32/FP32 typed loads now use existing vector-four helpers,
 then select XYZ through the shared texel-result narrowing helper. This

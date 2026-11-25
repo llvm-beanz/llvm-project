@@ -1,0 +1,96 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# RUN: split-file %s %t
+# RUN: not feme-run %t/writable.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/writable.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/writable.ll -o %t/writable.bc
+# RUN: not feme --target=%feme_host_triple %t/writable.bc -o %t/writable.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/shape.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/shape.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/shape.ll -o %t/shape.bc
+# RUN: not feme --target=%feme_host_triple %t/shape.bc -o %t/shape.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/nonms.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/nonms.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/nonms.ll -o %t/nonms.bc
+# RUN: not feme --target=%feme_host_triple %t/nonms.bc -o %t/nonms.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/levels.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/levels.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/levels.ll -o %t/levels.bc
+# RUN: not feme --target=%feme_host_triple %t/levels.bc -o %t/levels.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/half.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/half.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/half.ll -o %t/half.bc
+# RUN: not feme --target=%feme_host_triple %t/half.bc -o %t/half.o 2>&1 | FileCheck %s
+# RUN: not feme-run %t/nonheap.ll 2>&1 | FileCheck %s
+# RUN: not feme-run --reference %t/nonheap.ll 2>&1 | FileCheck %s
+# RUN: llvm-as %t/nonheap.ll -o %t/nonheap.bc
+# RUN: not feme --target=%feme_host_triple %t/nonheap.bc -o %t/nonheap.o 2>&1 | FileCheck %s
+# CHECK: requires heap-backed FP32/i32 1D/array or plain 2D mip-zero texture dimension queries
+# CHECK-SAME: sampled 2DMS/array dimensions/sample counts
+#--- writable.ll
+define void @main() #0 {
+  %t = call target("dx.MSTexture", float, 1, 4, 0, 3) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.MSTexture", float, 1, 4, 0, 3) %t)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.MSTexture", float, 1, 4, 0, 3) @llvm.dx.resource.handlefromheap(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.MSTexture", float, 1, 4, 0, 3))
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- shape.ll
+define void @main() #0 {
+  %t = call target("dx.MSTexture", float, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <4 x i32> @llvm.dx.resource.getdimensions.samples.xyz(target("dx.MSTexture", float, 0, 4, 0, 3) %t)
+  call void @consume(<4 x i32> %d)
+  ret void
+}
+declare target("dx.MSTexture", float, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap(i32)
+declare <4 x i32> @llvm.dx.resource.getdimensions.samples.xyz(target("dx.MSTexture", float, 0, 4, 0, 3))
+declare void @consume(<4 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- nonms.ll
+define void @main() #0 {
+  %t = call target("dx.Texture", float, 0, 0, 0, 2) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.Texture", float, 0, 0, 0, 2) %t)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.Texture", float, 0, 0, 0, 2) @llvm.dx.resource.handlefromheap(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.Texture", float, 0, 0, 0, 2))
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- levels.ll
+define void @main() #0 {
+  %t = call target("dx.MSTexture", float, 0, 4, 0, 8) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz(target("dx.MSTexture", float, 0, 4, 0, 8) %t, i32 0)
+  call void @consume(<4 x i32> %d)
+  ret void
+}
+declare target("dx.MSTexture", float, 0, 4, 0, 8) @llvm.dx.resource.handlefromheap(i32)
+declare <4 x i32> @llvm.dx.resource.getdimensions.levels.xyz(target("dx.MSTexture", float, 0, 4, 0, 8), i32)
+declare void @consume(<4 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- half.ll
+define void @main() #0 {
+  %t = call target("dx.MSTexture", half, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap(i32 0)
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.MSTexture", half, 0, 4, 0, 3) %t)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.MSTexture", half, 0, 4, 0, 3) @llvm.dx.resource.handlefromheap(i32)
+declare <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.MSTexture", half, 0, 4, 0, 3))
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }
+#--- nonheap.ll
+define void @main() #0 {
+  %t = call target("dx.MSTexture", float, 0, 4, 0, 3) @other_handle()
+  %d = call <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.MSTexture", float, 0, 4, 0, 3) %t)
+  call void @consume(<3 x i32> %d)
+  ret void
+}
+declare target("dx.MSTexture", float, 0, 4, 0, 3) @other_handle()
+declare <3 x i32> @llvm.dx.resource.getdimensions.samples.xy(target("dx.MSTexture", float, 0, 4, 0, 3))
+declare void @consume(<3 x i32>)
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="5,1,1" }

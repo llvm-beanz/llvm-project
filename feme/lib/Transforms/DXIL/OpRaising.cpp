@@ -1836,6 +1836,8 @@ bool raiseTextureStore(CallInst &CI) {
 /// mip or field-3 count use
 /// `getdimensions.levels.x/xy/xyz`,
 /// mapping field 3 after the dimensions. Aggregate uses remain unsupported.
+/// 2DMS/array queries use samples.xy/xyz for field-3 sample counts, without
+/// a mip operand; field 2 is supported only for array layers.
 /// Other shapes require an unused/zero mip; buffers accept only field 0 (DXC
 /// supplies a structured buffer's HLSL stride as a constant).
 bool raiseGetDimensions(CallInst &CI) {
@@ -1854,12 +1856,17 @@ bool raiseGetDimensions(CallInst &CI) {
   bool NeedsLevels =
       !isa<UndefValue>(Mip) && (!ConstantMip || !ConstantMip->isZero());
   auto *TextureTy = dyn_cast<dxil::TextureExtType>(Handle->getType());
+  auto *MSTy = dyn_cast<dxil::MSTextureExtType>(Handle->getType());
+  bool IsMS =
+      MSTy && (MSTy->getDimension() == dxil::ResourceKind::Texture2DMS ||
+               MSTy->getDimension() == dxil::ResourceKind::Texture2DMSArray);
   bool Is1D =
       TextureTy && TextureTy->getDimension() == dxil::ResourceKind::Texture1D;
   bool Is2DArray = TextureTy && TextureTy->getDimension() ==
                                     dxil::ResourceKind::Texture2DArray;
   bool HasThirdDimension =
       Is2DArray ||
+      (IsMS && MSTy->getDimension() == dxil::ResourceKind::Texture2DMSArray) ||
       (TextureTy &&
        (TextureTy->getDimension() == dxil::ResourceKind::Texture3D ||
         TextureTy->getDimension() == dxil::ResourceKind::TextureCubeArray));
@@ -1875,18 +1882,20 @@ bool raiseGetDimensions(CallInst &CI) {
   SmallVector<ExtractValueInst *, 2> Extracts;
   bool NeedsHeight = false;
   bool NeedsThirdDimension = false;
+  bool NeedsSamples = false;
   for (User *U : CI.users()) {
     auto *EV = dyn_cast<ExtractValueInst>(U);
     if (!EV || EV->getNumIndices() != 1)
       return false;
     uint64_t Field = EV->getIndices()[0];
     if (Field > 3 || (Field == 2 && !HasThirdDimension) ||
-        (Field == 3 && !CanQueryLevels) || (IsBuffer && Field != 0) ||
+        (Field == 3 && !CanQueryLevels && !IsMS) || (IsBuffer && Field != 0) ||
         (Is1D && Field == 1))
       return false;
     NeedsHeight |= (Field == 1);
     NeedsThirdDimension |= (Field == 2);
-    NeedsLevels |= (Field == 3);
+    NeedsLevels |= (Field == 3 && !IsMS);
+    NeedsSamples |= (Field == 3 && IsMS);
     Extracts.push_back(EV);
   }
   if (Extracts.empty())
@@ -1901,7 +1910,14 @@ bool raiseGetDimensions(CallInst &CI) {
 
   IRBuilder<> Builder(&CI);
   Value *Dimensions;
-  if (NeedsLevels) {
+  if (NeedsSamples) {
+    Function *GetDimensionsSamplesFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(),
+        HasThirdDimension ? Intrinsic::dx_resource_getdimensions_samples_xyz
+                          : Intrinsic::dx_resource_getdimensions_samples_xy,
+        {Handle->getType()});
+    Dimensions = Builder.CreateCall(GetDimensionsSamplesFn, {Handle});
+  } else if (NeedsLevels) {
     Function *GetDimensionsLevelsFn = Intrinsic::getOrInsertDeclaration(
         CI.getModule(),
         Is1D                ? Intrinsic::dx_resource_getdimensions_levels_x
@@ -1929,7 +1945,7 @@ bool raiseGetDimensions(CallInst &CI) {
 
   for (ExtractValueInst *EV : Extracts) {
     Value *Replacement =
-        NeedsHeight || NeedsThirdDimension || NeedsLevels
+        NeedsHeight || NeedsThirdDimension || NeedsLevels || NeedsSamples
             ? Builder.CreateExtractElement(
                   Dimensions, Builder.getInt32(EV->getIndices()[0] == 3
                                                    ? (Is1D                ? 1
