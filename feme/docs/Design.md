@@ -1420,9 +1420,19 @@ it now covers the two largest opcode families:
   old paths. Native SM6.6/SM6.0 FP32 SRV/UAV shaders pass RGB32/RGBA32
   across the same CPU modes, checking 12-byte stride, W discard, all-zero
   incomplete/invalid texels, namespace separation, exact bits, valid-end
-  loads, divergence, guards and two repeats. This adds native FP32, not
-  native three-component integer or general format evidence. Raising,
+  loads, divergence, guards and two repeats. This adds native FP32 evidence;
+  general format closure is not established. Raising,
   stores, status, runtime/SPIR-V code and ABI 8 remain unchanged.
+
+- Native integer-three typed loads now execute SDK DXC SM6.6/SM6.0
+  `int3`/`uint3` SRV/UAV shaders on RGBA32_SINT/RGBA32_UINT across
+  the same CPU modes. Existing vector-four helpers/XYZ selection preserve
+  exact high/non-FP32-exact bits and discard distinct W values. Missing-W/
+  upper/negative-index loads read all zero. Namespace separation, valid-end
+  loads, divergence, every input/output word, guards and two repeats pass.
+  This closes native integer-three evidence on RGBA32, not RGB32-integer/
+  other-format/non-32-bit or owned-device closure; implementation and ABI
+  are unchanged.
 
 Additional resource-op coverage and remaining limits are detailed in the
 status notes below (`TextureLoad`, `Sample*`, ...). `CBufferLoadLegacy`'s standard

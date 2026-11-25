@@ -3116,8 +3116,16 @@ FP32 SRV/UAV RGB32/RGBA32 cases cover XYZ order, 12-byte stride, W
 discard, incomplete/invalid all-zero loads, exact bits, namespace separation,
 valid-end accesses, divergence, guards and two repeats. Existing image,
 raw/non-32-bit, raising, store, status, runtime/SPIR-V and ABI behavior
-is unchanged. This is CPU evidence, not draw, native three-component
-integer, general typed-format or owned-device closure.
+is unchanged. This is CPU evidence, not draw, general typed-format or
+owned-device closure.
+
+Native integer-three typed loads now execute SDK DXC SM6.6/SM6.0 `int3`/
+`uint3` SRV/UAV shaders on RGBA32 SINT/UINT across the same CPU modes.
+Exact high/non-FP32-exact bits, XYZ order, distinct-W discard, all-zero
+incomplete/invalid loads, namespace separation, valid-end accesses,
+divergence, complete input/output words, guards and two repeats pass.
+This is shared native CPU evidence, not draw, RGB32-integer/general
+typed-format or owned-device closure; implementation and ABI are unchanged.
 
 `feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
 ResourceLowering.cpp) is the CPU target's consumer, converting a 2D

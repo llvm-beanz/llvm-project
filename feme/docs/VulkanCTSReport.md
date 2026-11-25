@@ -1,5 +1,30 @@
 # Vulkan CTS status
 
+## W2(a)/W2(b) native integer-three typed-load scope (2026-11-24)
+
+The [native integer-three follow-up](W0WindowsIntegrationProbe.md#w2aw2b-native-three-component-integer-typed-loads-vm-2026-11-24)
+executes SDK DXC SM6.6/SM6.0 `int3`/`uint3` SRV/UAV loads on RGBA32
+SINT/UINT in normal waves 4/8, reference and ARM64 AOT. Three-component
+handles, signedness/access class and exact integer bits survive existing
+raising/vector-four helpers/XYZ selection. Distinct inputs at identical
+logical registers prove namespace separation; AOT uses explicit physical
+heaps. Complete texels discard distinct W; missing W and upper/negative
+indices return all zero. Valid-end loads, divergent use, every input/output
+word, guards and two repeats pass: 600 bytes per mode, including a guarded
+296-byte output.
+
+Nineteen focused native typed-resource, namespace, raising/round-trip and
+typed/scalar/vector-two lowering tests pass with zero failures in 6.19
+seconds; one fixture adds one test without code changes or a rebuild.
+Vulkan advertisements, raising/lowering policy, stores, status, atomics,
+raw/structured behavior, descriptor materialization, runtime/SPIR-V code,
+ABI 8 and argument layouts remain unchanged. Native RGBA32 integer-three
+CPU evidence is not RGB32-integer/other-format/non-32-bit closure,
+a broader/full-suite, external CTS, adapter-matrix or owned D3D12 view/
+conformance result. Bound/static D3D12 descriptors and broader conformance
+remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) three-component typed-load scope (2026-11-24)
 
 The [three-component follow-up](W0WindowsIntegrationProbe.md#w2aw2b-three-component-typed-load-lowering-vm-2026-11-24)

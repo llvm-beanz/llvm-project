@@ -391,6 +391,21 @@ component integer, new FXC-profile/external corpus, general typed-format
 or owned-device proof; see the
 [three-component evidence](W0WindowsIntegrationProbe.md#w2aw2b-three-component-typed-load-lowering-vm-2026-11-24).
 
+Native integer-three typed-load follow-up (2026-11-24): SDK DXC SM6.6/
+SM6.0 `int3`/`uint3` SRV/UAV shaders execute RGBA32 SINT/UINT across
+normal waves 4/8, reference and ARM64 AOT. Existing three-component
+handles/vector-four helpers/XYZ selection preserve access class,
+signedness and exact bits. Distinct-W discard, missing-W/upper/negative
+all-zero reads, namespace separation, valid-end loads, divergence, all
+input/output words, guards and two repeats pass: 600 compared bytes.
+AOT uses explicit physical heaps. Nineteen focused typed-resource/
+namespace/raising/lowering tests pass with zero failures in 6.19 seconds;
+one fixture adds one test without implementation changes or a rebuild.
+This is native RGBA32 integer-three CPU evidence, not RGB32-integer/
+general format closure, a new FXC-profile/external corpus or owned-device
+proof; see the
+[native integer-three evidence](W0WindowsIntegrationProbe.md#w2aw2b-native-three-component-integer-typed-loads-vm-2026-11-24).
+
 The original FXC shader now exports successfully as DXIL for both legacy
 profiles. The new
 [`feme-fxc-dxbc-to-dxil.test`](../test/Tools/feme/feme-fxc-dxbc-to-dxil.test)

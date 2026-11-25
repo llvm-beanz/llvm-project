@@ -130,8 +130,16 @@ SM6.6/SM6.0 FP32 SRV/UAV RGB32/RGBA32 cases check W discard,
 incomplete/invalid all-zero reads, exact bits, namespace separation, valid-
 end loads, divergence, guards and two repeats across the same CPU modes.
 This replaces nonexistent typed `v3` calls without runtime/SPIR-V, store,
-status, ABI or owned-device changes; native three-component integer and
-general format closure are not claimed.
+status, ABI or owned-device changes; general format closure is not claimed.
+
+Native integer-three typed loads now execute SDK DXC SM6.6/SM6.0 `int3`/
+`uint3` SRV/UAV shaders on RGBA32 SINT/UINT across the same CPU modes.
+Exact high/non-FP32-exact bits, XYZ order, distinct-W discard, all-zero
+incomplete/invalid loads, namespace separation, valid-end accesses,
+divergence, complete input/output words, guards and two repeats pass.
+Legacy AOT uses space/register/namespace-ordered physical heaps. This adds
+native RGBA32 integer-three evidence, not RGB32-integer/general typed-format
+or owned-device closure; implementation and ABI are unchanged.
 
 Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 `llvm::cl::opt` freely.

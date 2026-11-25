@@ -2862,6 +2862,23 @@ the first shader-facing milestone rather than alongside it.
    adapter-matrix or owned-device/W2/W3 closure is not claimed. Raising,
    stores, status, descriptor materialization, runtime/SPIR-V code,
    ABI 8 and argument layouts remain unchanged.
+   Native integer-three typed-load follow-up (2026-11-24): SDK DXC SM6.6
+   heap and SM6.0 bound `int3`/`uint3` SRV/UAV shaders execute RGBA32
+   SINT/UINT on normal waves 4/8, reference and ARM64 AOT. Existing
+   three-component handles, vector-four helpers and XYZ selection preserve
+   signedness/access class, exact high/non-FP32-exact bits and component
+   order while discarding distinct W. Missing-W/upper/negative accesses
+   read all zero. Namespace separation, valid-end loads, divergence, every
+   input/output word, guards and two repeats pass: 600 compared bytes,
+   including a guarded 296-byte output. AOT uses explicit space/register/
+   namespace-ordered physical heaps. Nineteen focused native typed-resource,
+   namespace, raising/round-trip and typed/scalar/vector-two lowering tests
+   pass with zero failures in 6.19 seconds; one fixture adds one test
+   without code changes or a rebuild. This closes native RGBA32 integer-
+   three evidence, not RGB32-integer/other-format/non-32-bit closure,
+   a broader/full-suite, external CTS, adapter-matrix or owned-device/W2/
+   W3 closure. Raising/lowering policy, stores, status, descriptor
+   materialization, runtime/SPIR-V code, ABI 8 and argument layouts remain.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

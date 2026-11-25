@@ -2562,6 +2562,41 @@ layouts are unchanged. Bound/static D3D12 descriptors and broader
 conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
 W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W2(b) native three-component integer typed loads (2026-11-24):
+the new [`native-int3-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-int3-typed-buffer-loads.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound `int3`/`uint3` SRV/UAV
+loads on RGBA32_SINT/RGBA32_UINT descriptors in normal waves 4/8,
+reference and ARM64 AOT-object modes. Modern properties and legacy result
+uses retain three-component handles, signedness and access class. Existing
+vector-four integer helpers and XYZ selection now have native execution
+evidence, not only the preceding portable i32 lowering tests.
+
+Distinct SRV/UAV data at identical logical registers proves namespace
+separation; legacy AOT uses space/register/namespace-ordered physical
+heaps. Five lanes cover three complete elements after a prefix texel,
+a final texel missing W, upper indices and divergent signed UAV copies.
+Complete texels discard distinct W values while preserving XYZ order.
+The missing-W texel reads all zero even though XYZ fits. Negative-bit-
+pattern index 0xffffffff returns zero from all four views. Signed/high-bit,
+signed/unsigned extrema and adjacent non-FP32-exact integers survive
+without floating conversion. Every word of four 76-byte input views and
+the guarded 296-byte output passes twice per mode: 600 compared bytes,
+including prefix/texel/output guards and inactive-store sentinels.
+
+Focused native typed loads/stores/atomics, Clang typed-buffer execution,
+buffer namespace/kind, DXIL resource raising/round-trip, CPU typed
+lowering/normalization and scalar/vector-two SPIR-V texel-buffer lowering
+LIT pass nineteen tests with zero failures in 6.19 seconds. One fixture
+adds one test without implementation changes or a rebuild. This closes
+the preceding native three-component integer evidence gap on RGBA32,
+not RGB32-integer decoding, other-format/non-32-bit typed closure,
+a broader/full-suite, external CTS, adapter-matrix or owned D3D12
+view/conformance result. Raising/lowering policy, stores, status, atomics,
+raw/structured behavior, descriptor materialization, runtime/SPIR-V code,
+ABI 8 and argument layouts remain unchanged. Bound/static D3D12
+descriptors and broader conformance remain open; `CreateDevice` remains
+`E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

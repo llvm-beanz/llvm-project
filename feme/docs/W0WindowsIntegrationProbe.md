@@ -27,6 +27,39 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W2(b) native three-component integer typed loads (VM, 2026-11-24)
+
+[`native-int3-typed-buffer-loads.test`](../test/Tools/feme-run/HLSL/native-int3-typed-buffer-loads.test)
+executes SDK DXC SM6.6 heap and SM6.0 bound `int3`/`uint3` SRV/UAV
+loads on RGBA32_SINT/RGBA32_UINT in normal waves 4/8, reference and
+ARM64 AOT modes. Modern properties/legacy uses preserve three-component
+handles, signedness and access class; existing vector-four integer helpers
+and XYZ selection execute without implementation changes.
+
+Distinct inputs at identical SRV/UAV registers prove namespace separation;
+legacy AOT supplies space/register/namespace-ordered physical heaps.
+Five lanes read three complete elements after a prefix texel, then
+partial/upper indices. Complete texels discard distinct W while preserving
+XYZ; missing W returns all zero even when XYZ fits. Index 0xffffffff
+also returns zero from all four views. Exact signed/high bits, extrema
+and adjacent non-FP32-exact integers survive without floating conversion.
+Divergent signed UAV copies retain sentinels. Every word of four 76-byte
+inputs and a guarded 296-byte output passes twice: 600 compared bytes
+per mode, including all texel/output guards.
+
+Focused native typed resources, Clang typed-buffer execution, namespace/
+kind, DXIL raising/round-trip and CPU typed/scalar/vector-two lowering/
+normalization LIT pass nineteen tests with zero failures in 6.19 seconds;
+one fixture adds one test without implementation changes or a rebuild.
+This establishes native RGBA32 integer-three CPU evidence, not RGB32-
+integer decoding, other-format/non-32-bit closure, a broader/full-suite,
+external CTS, adapter-matrix or owned D3D12 view/conformance result.
+Raising/lowering policy, stores, status, atomics, raw/structured behavior,
+descriptor materialization, runtime/SPIR-V code, ABI 8 and argument
+layouts remain unchanged. Bound/static D3D12 descriptors and broader
+conformance remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W2(b) three-component typed-load lowering (VM, 2026-11-24)
 
 CPU lowering now sends three-component i32/FP32 typed loads through
