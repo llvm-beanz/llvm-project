@@ -3432,8 +3432,15 @@ documented reason rather than an oversight:
   floors 0.5/1.5 check exact FP32-bit half-mip blends. Independent plain-
   gradient samples check sampler clamps at mip 1, with signed/omitted
   offsets, fixed layers, shrinking depth, components, five lanes, guards
-  and repeat 2. Native 1D/cube gradient execution is not added by these
-  fixtures. 1D gradients/offsets are scalar;
+  and repeat 2. Native 1D/plain-array and cube/plain-array gradient
+  shaders also execute three real mips through the same CPU paths.
+  Scalar 1D gradients/offsets and negative U/dY check mips 0/1/2 and
+  RGBA components/layers. Scalar cube texels/results check all faces/
+  elements and face-local tangent projection on both screen axes;
+  joint direction/gradient scaling by one/two preserves LOD. Exact-bit
+  shader half-mip blends and sampler clamps at mip 1 pass with five/
+  thirteen lanes, guards and repeat 2. Native gradient execution
+  evidence now spans all seven raised shapes. 1D gradients/offsets are scalar;
   3D coordinates, gradients and offsets have three U/V/W components.
   All seven raised gradient shapes have bounded CPU execution; malformed
   or non-heap calls remain explicitly rejected. No descriptor

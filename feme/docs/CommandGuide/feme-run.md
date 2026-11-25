@@ -417,8 +417,15 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   MinLod floors 0.5/1.5 check exact FP32-bit half-mip blends; independent
   plain-gradient samples check sampler MinLod=MaxLod=1, with signed/
   omitted offsets, fixed layers, shrinking depth, components, five
-  lanes, guards and repeat 2. Native 1D/cube gradient execution is not
-  added by these fixtures. All seven raised
+  lanes, guards and repeat 2. Native 1D/plain-array and cube/plain-array
+  gradient shaders also execute three real mips through the same CPU
+  paths. Scalar 1D gradients/offsets, negative U/dY, scalar cube texels/
+  results, all faces/elements and face-local tangent projection on both
+  screen axes are checked. Joint cube direction/gradient scaling by
+  one/two preserves LOD; exact-bit shader half-mip blends and sampler
+  clamps at mip 1 pass with five/thirteen lanes, guards and repeat 2.
+  Native gradient execution evidence now spans all seven raised shapes.
+  All seven raised
   shapes have bounded CPU execution; dynamic or partially undefined 3D
   offsets remain rejected in normal/reference/AOT admission. No descriptor
   materialization or owned-device execution is enabled.

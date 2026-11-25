@@ -27,6 +27,40 @@ user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
 invoke private WARP APIs, install an adapter, or execute FeMe shaders.
 
+## W2(a)/W3(b) native FP32 1D/array and cube/array explicit-gradient sampling (VM, 2026-11-24)
+
+Actual SDK DXC SM6.6 heap-backed 1D/plain-array and cube/plain-array
+shaders execute plain/shader-clamped `SampleGrad` against three real
+mips. 1D widths 4/2/1 retain two fixed layers; scalar U/dX and negative
+U/dY distinguish mips 0/1/2 with signed/omitted scalar offsets and
+distinct RGBA components. Scalar FP32 cube texels use square face
+extents 4x4, 2x2 and 1x1 with six/twelve physical faces.
+
+Cube face-local tangent gradients distinguish mips 0/1/2 on both
+screen axes across all six faces and both array elements. Directions
+and gradients scale together by one/two, preserving the projected
+footprint and checking raw-major-axis handling. Shader MinLod floors
+0.5/1.5 produce exact FP32-bit half-mip blends; independent plain-
+gradient samples check sampler MinLod=MaxLod=1.
+
+Native import/raising checks scalar/shape-matched gradients/results
+and clamp/offset forwarding, retaining unused scalar cube offsets.
+Normal waves 4/8, reference and ARM64 AOT-object execution pass with
+five/thirteen lanes, output guards and repeat 2. Together with the
+prior spatial fixtures, native gradient execution evidence spans all
+seven ordinary raised texture shapes.
+
+Focused gradient LIT passes twelve tests with zero failures in 21.35
+seconds; two new fixtures add two tests. Retained native spatial,
+import, canonical and transform regressions pass. No compiler/runtime
+implementation changed, so no rebuild or broader/full-suite run was
+needed. Implicit sampling, artifact ABI 8 and argument layouts are
+unchanged. This is bounded native CPU execution evidence, not owned
+D3D12 execution, an adapter-matrix or external Vulkan CTS result.
+Broader conformance, MS sampling, bound/static D3D12 descriptors and
+owned-device execution remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native FP32 2D/array and 3D explicit-gradient sampling (VM, 2026-11-24)
 
 Actual SDK DXC SM6.6 heap-backed 2D/plain-array and 3D shaders now execute

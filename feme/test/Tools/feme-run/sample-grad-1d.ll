@@ -9,7 +9,8 @@
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 ; Five lanes cover plain/clamped 1D/array forms, signed scalar gradients/offsets,
 ; divergent layers/clamps, scalar/vector results, partial waves and repeats.
-; Compiled-stage tests cover multi-mip LOD; runner YAML prepares one mip only.
+; This canonical fixture uses one mip; native heap-sample-grad-1d.test also
+; executes three real mips with scalar gradients and shader/sampler clamps.
 ; CHECK: heap[2]: 42 12 2 11 1 12 2 6 16 12 2 11 1 12 2 6 16 12 2 11 1 42
 ;--- shader.ll
 define void @main() #0 {

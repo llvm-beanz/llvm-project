@@ -1951,8 +1951,15 @@ negative V/dY and 3D W/dX distinguish gradient-derived mips 0/1/2.
 Shader MinLod floors 0.5/1.5 check exact FP32-bit half-mip blends;
 independent plain-gradient samples check sampler clamps at mip 1.
 Signed/omitted offsets, fixed array layers, shrinking depth, components,
-five lanes, guards and repeat 2 are covered. Native 1D/cube gradient
-execution is not added by these fixtures. All seven raised shapes now
+five lanes, guards and repeat 2 are covered. Native 1D/plain-array and
+cube/plain-array gradient shaders also execute three real mips with
+scalar 1D gradients/offsets, signed U/dY, scalar cube texels/results,
+all faces/elements and face-local tangent projection on both screen
+axes. Joint cube direction/gradient scaling by one/two preserves LOD;
+exact-bit shader half-mip blends and sampler clamps at mip 1 pass with
+five/thirteen lanes, guards and repeat 2 through the same CPU paths.
+Native gradient execution evidence now spans all seven raised shapes.
+All seven raised shapes now
 have bounded heap-backed CPU execution; malformed or non-heap calls remain
 explicitly rejected. This does not materialize descriptors or establish
 owned D3D12 execution.

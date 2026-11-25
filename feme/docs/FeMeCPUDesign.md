@@ -3226,8 +3226,15 @@ reference and ARM64 AOT-object paths. Live U/dX, negative V/dY and
 samples check sampler MinLod=MaxLod=1. Signed/omitted XY/XYZ offsets,
 fixed array layers, shrinking depth, distinct components, five lanes,
 guards and repeat 2 are covered. Native import/raising checks plain/
-clamped calls and offset/clamp forwarding; native 1D/cube gradient
-execution is not added by these fixtures.
+clamped calls and offset/clamp forwarding. Native 1D/plain-array and
+cube/plain-array gradient shaders also execute three real mips through
+the same CPU paths. Scalar 1D gradients/offsets and negative U/dY
+distinguish mips 0/1/2 and RGBA components/layers. Scalar cube texels/
+results check all faces/elements and face-local tangent projection on
+both screen axes; joint direction/gradient scaling by one/two preserves
+the projected footprint. Exact-bit shader half-mip blends and sampler
+clamps at mip 1 pass with five/thirteen lanes, guards and repeat 2.
+Native gradient execution evidence now spans all seven raised shapes.
 All seven raised shapes now have bounded CPU execution; malformed or non-heap gradient calls remain explicitly
 rejected. Existing biased/comparison execution and SPIR-V gradient handling
 are unchanged. No descriptor materialization or owned-device execution is added.

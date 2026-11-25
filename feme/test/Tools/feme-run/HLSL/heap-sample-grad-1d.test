@@ -1,0 +1,82 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_6 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-translate --import-dxil %t/shader.dxil | feme-opt --llvm -passes=feme-dxil-raise-ops,verify -S | FileCheck %s --check-prefix=RAISE
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --wave-size=8 --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme-run --reference --repeat=2 --heap=%t/heap.yaml %t/shader.dxil | FileCheck %s
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/heap.yaml %t/shader.o | FileCheck %s
+# Scalar U/dX and negative U/dY select three real mips of widths 4/2/1.
+# Shader floors 0.5/1.5 check exact FP32-bit half-mip blends; an independent
+# sampler clamps plain gradients to mip 1. Signed/omitted scalar offsets,
+# two fixed layers, five lanes, guards and repeats; native CPU, not owned D3D12.
+# RAISE: call <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32
+# RAISE-SAME: i32 1, float
+# RAISE: call <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32
+# RAISE-SAME: i32 -1, float
+# RAISE: call <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32
+# RAISE-SAME: i32 1, float
+# RAISE: call <4 x float> @llvm.dx.resource.samplegrad.clamp.v4f32
+# RAISE-SAME: i32 -1, float
+# RAISE: call <4 x float> @llvm.dx.resource.samplegrad.v4f32
+# RAISE-SAME: i32 0)
+# CHECK: heap[2]: 42 1094713344 1073741824 1093664768 1065353216 1099431936 1108082688 1103101952 1099956224 1111228416 1109655552 1099431936 1110179840 1105199104 1104150528 1112276992 1111752704 1099431936 1108082688 1099956224 1092616192 1108606976 1105723392 1099431936 1110179840 1104150528 1102053376 1110704128 1109655552 1099431936 1108082688 42
+#--- shader.hlsl
+[RootSignature("RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED)")]
+[numthreads(5, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  Texture1D<float4> t = ResourceDescriptorHeap[0];
+  Texture1DArray<float4> a = ResourceDescriptorHeap[1];
+  SamplerState s = SamplerDescriptorHeap[0];
+  SamplerState limited = SamplerDescriptorHeap[1];
+  RWByteAddressBuffer outBuffer = ResourceDescriptorHeap[2];
+  float2 coord = float2(0.375, tid.x & 1);
+  float dx = (tid.x == 1) ? 0.0 : (tid.x == 2) ? 1.0 : 0.25;
+  float dy = (tid.x == 1) ? -0.5 : 0.0;
+  float minLod = (tid.x == 3) ? 0.5 : (tid.x == 4) ? 1.5 : 0.0;
+  float4 p = t.SampleGrad(s, 0.375, dx, dy, 1, minLod);
+  float4 n = t.SampleGrad(s, 0.375, dx, dy, -1, minLod);
+  float4 ap = a.SampleGrad(s, coord, dx, dy, 1, minLod);
+  float4 an = a.SampleGrad(s, coord, dx, dy, -1, minLod);
+  float4 c = t.SampleGrad(limited, 0.375, dx, dy);
+  float4 ca = a.SampleGrad(limited, coord, dx, dy);
+  outBuffer.Store(4 + tid.x * 24, asuint(p.a));
+  outBuffer.Store(8 + tid.x * 24, asuint(n.g));
+  outBuffer.Store(12 + tid.x * 24, asuint(ap.b));
+  outBuffer.Store(16 + tid.x * 24, asuint(an.r));
+  outBuffer.Store(20 + tid.x * 24, asuint(c.r));
+  outBuffer.Store(24 + tid.x * 24, asuint(ca.b));
+}
+#--- heap.yaml
+resource-heap:
+  - {index: 2, size: 128, data: [42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42]}
+images:
+  - index: 0
+    dimension: 1d
+    extent: [4]
+    mip-levels: 3
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040,
+           1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648,
+           1099431936, 1099956224, 1100480512, 1101004800, 1101529088, 1102053376, 1102577664, 1103101952,
+           1103626240, 1104150528, 1104674816, 1105199104, 1105723392, 1106247680]
+  - index: 1
+    dimension: 1d-array
+    array-layers: 2
+    extent: [4]
+    mip-levels: 3
+    format: r32g32b32a32_float
+    data: [1065353216, 1073741824, 1077936128, 1082130432, 1084227584, 1086324736, 1088421888, 1090519040,
+           1091567616, 1092616192, 1093664768, 1094713344, 1095761920, 1096810496, 1097859072, 1098907648,
+           1099431936, 1099956224, 1100480512, 1101004800, 1101529088, 1102053376, 1102577664, 1103101952,
+           1103626240, 1104150528, 1104674816, 1105199104, 1105723392, 1106247680, 1106771968, 1107296256,
+           1107558400, 1107820544, 1108082688, 1108344832, 1108606976, 1108869120, 1109131264, 1109393408,
+           1109655552, 1109917696, 1110179840, 1110441984, 1110704128, 1110966272, 1111228416, 1111490560,
+           1111752704, 1112014848, 1112276992, 1112539136, 1112801280, 1113063424, 1113325568, 1113587712]
+samplers:
+  - {index: 0, mip-filter: linear, address-u: clamp-to-edge}
+  - {index: 1, mip-filter: linear, address-u: clamp-to-edge, min-lod: 1.0, max-lod: 1.0}

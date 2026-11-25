@@ -2660,6 +2660,21 @@ the first shader-facing milestone rather than alongside it.
    or rebuild was needed. Implicit sampling and ABI 8 are unchanged;
    native 1D/cube gradient execution and owned-device/conformance
    closure are not added.
+   Native 1D/cube `SampleGrad` follow-up (2026-11-24): actual SDK DXC
+   SM6.6 1D/plain-array and cube/plain-array shaders execute three real
+   mips through normal waves 4/8, reference and ARM64 AOT-object paths.
+   Scalar 1D gradients/offsets, negative U/dY, distinct RGBA components/
+   layers and scalar cube texels/results are checked. Cube face-local
+   tangent projection distinguishes mips 0/1/2 on both screen axes,
+   all faces and both elements; joint direction/gradient scaling by
+   one/two preserves LOD. Exact-bit shader half-mip blends and sampler
+   clamps at mip 1 pass with five/thirteen lanes, guards and repeat 2.
+   Native gradient execution evidence now spans all seven ordinary
+   raised texture shapes. Focused gradient LIT passes twelve tests with
+   zero failures in 21.35 seconds; two new fixtures add two tests.
+   No compiler/runtime change or rebuild was needed. Implicit sampling,
+   ABI 8 and argument layouts are unchanged; no owned-device,
+   adapter-matrix, external CTS or W2/W3/conformance closure is claimed.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing

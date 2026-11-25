@@ -2150,6 +2150,39 @@ execution is not added here. Broader sampling conformance, MS sampling,
 bound/static D3D12 descriptors and owned-device execution remain open;
 `CreateDevice` remains `E_NOTIMPL`; W2(a)/W2(b)/W3(b) are not closed.
 
+W2(a)/W3(b) native FP32 1D/array and cube/array explicit-gradient sampling
+progress (2026-11-24): actual SDK DXC SM6.6 heap-backed plain/shader-clamped
+`SampleGrad` now executes three real mips through normal waves 4/8,
+reference and ARM64 AOT-object paths. Together with the preceding spatial
+fixtures, native gradient execution evidence spans all seven ordinary
+raised texture shapes.
+
+1D/plain-array widths 4/2/1 retain two fixed layers. Scalar U/dX and
+negative U/dY distinguish mips 0/1/2, with signed/omitted scalar offsets
+and distinct RGBA components. Scalar FP32 cube/plain-array texels use
+square face extents 4x4, 2x2 and 1x1 with six/twelve physical faces.
+Face-local tangent gradients on both screen axes distinguish mips
+0/1/2 across all six faces and both array elements. Scaling directions
+and gradients together by one/two preserves the projected footprint,
+checking raw-major-axis handling rather than an LOD-zero approximation.
+
+Shader MinLod floors 0.5/1.5 check exact FP32-bit half-mip blends;
+independent plain-gradient samples check sampler MinLod=MaxLod=1.
+Native import/raising checks scalar/shape-matched gradients/results
+and clamp/offset forwarding, preserving unused scalar cube offsets.
+Five/thirteen lanes, output guards and repeat 2 are covered.
+
+Focused gradient LIT passes twelve tests with zero failures in 21.35
+seconds. Two new native fixtures add two tests; retained native spatial,
+import, canonical and transform regressions pass. No compiler/runtime
+implementation changed, so no rebuild or broader/full-suite run was
+needed. Implicit sampling, artifact ABI 8 and argument layouts are
+unchanged. This is bounded native CPU execution evidence, not external
+Vulkan CTS, adapter-matrix or owned D3D12 execution. Broader conformance,
+MS sampling, bound/static D3D12 descriptors and owned-device execution
+remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ### W3: Conventional graphics on the existing executor
 
 Depends on W2; reuses `FeMeGraphics` rather than implementing a D3D rasterizer.

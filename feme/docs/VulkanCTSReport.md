@@ -1,5 +1,32 @@
 # Vulkan CTS status
 
+## W2(a)/W3(b) native FP32 1D/array and cube/array explicit-gradient sampling scope (2026-11-24)
+
+The [native gradient breadth follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-fp32-1darray-and-cubearray-explicit-gradient-sampling-vm-2026-11-24)
+adds actual SDK DXC SM6.6 plain/shader-clamped `SampleGrad` CPU execution
+for heap-backed 1D/plain-array and cube/plain-array textures with three
+real mips. Scalar 1D U/dX and negative U/dY check mips 0/1/2, signed/
+omitted offsets, RGBA components and fixed layers. Scalar FP32 cube
+texels check all six faces and both array elements; face-local tangent
+gradients select mips 0/1/2 on both screen axes. Joint direction/
+gradient scaling by one/two preserves the projected footprint.
+
+Shader MinLod floors 0.5/1.5 check exact FP32-bit half-mip blends;
+independent plain-gradient samples check sampler clamps at mip 1.
+Import/raising, normal waves 4/8, reference and ARM64 AOT-object paths
+pass with five/thirteen lanes, guards and repeat 2. Native gradient
+execution evidence now spans all seven ordinary raised texture shapes.
+
+Focused gradient LIT passes twelve tests with zero failures in 21.35
+seconds; two new fixtures add two tests. No compiler/runtime
+implementation changed, so no rebuild or broader/full-suite run was
+needed. Vulkan advertisements are unchanged; this is not an external
+CTS, adapter-matrix or owned-device result. Implicit sampling, artifact
+ABI 8 and argument layouts are unchanged. Broader conformance, MS
+sampling, bound/static D3D12 descriptors and owned-device execution
+remain open; `CreateDevice` remains `E_NOTIMPL`;
+W2(a)/W2(b)/W3(b) are not closed.
+
 ## W2(a)/W3(b) native FP32 2D/array and 3D explicit-gradient sampling scope (2026-11-24)
 
 The [native spatial-gradient follow-up](W0WindowsIntegrationProbe.md#w2aw3b-native-fp32-2darray-and-3d-explicit-gradient-sampling-vm-2026-11-24)

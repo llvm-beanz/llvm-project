@@ -8,8 +8,9 @@
 ; See https://llvm.org/LICENSE.txt for license information.
 ; SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 ; All faces, both cube-array elements, divergent gradients/clamps, scalar/vector
-; results, partial waves and guarded repeats. Compiled-stage tests cover
-; multi-mip LOD; runner image YAML prepares only one mip.
+; results, partial waves and guarded repeats. This canonical fixture uses
+; one mip; native heap-sample-grad-cube.test also executes three real mips
+; with direction projection, scaled directions and shader/sampler clamps.
 ; CHECK: heap[2]: 42 1 0 1 1 2 0 2 2 3 0 3 3 4 0 4 4 5 0 5 5 6 0 6 6
 ; CHECK-SAME: 1 0 6 6 2 0 5 5 3 0 4 4 4 0 3 3 5 0 2 2 6 0 1 1 1 0 1 1 42
 ;--- shader.ll

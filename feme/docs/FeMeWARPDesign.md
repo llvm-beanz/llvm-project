@@ -472,7 +472,14 @@ The original compute-only baseline is no longer current:
   check exact FP32-bit half-mip blends. Independent plain-gradient
   samples check sampler clamps at mip 1, with signed/omitted offsets,
   fixed layers, shrinking depth, components, five lanes, guards and
-  repeat 2. Native 1D/cube gradient execution is not added by these fixtures.
+  repeat 2. Native 1D/plain-array and cube/plain-array gradient shaders
+  also execute three real mips through the same CPU paths. Scalar 1D
+  gradients/offsets, negative U/dY, scalar cube texels/results, all
+  faces/elements and face-local tangent projection on both screen axes
+  are checked. Joint cube direction/gradient scaling by one/two
+  preserves LOD; exact-bit shader half-mip blends and sampler clamps
+  at mip 1 pass with five/thirteen lanes, guards and repeat 2.
+  Native gradient execution evidence now spans all seven raised shapes.
   All seven raised gradient shapes have bounded CPU execution; malformed
   or non-heap calls remain explicitly rejected. This does not
   materialize descriptors or establish owned D3D12 execution.
