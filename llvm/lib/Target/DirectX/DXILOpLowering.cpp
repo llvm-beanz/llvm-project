@@ -1021,7 +1021,9 @@ public:
     });
   }
 
-  [[nodiscard]] bool lowerGetDimensionsXY(Function &F, bool WithLevels) {
+  [[nodiscard]] bool lowerGetDimensionsVector(Function &F,
+                                              unsigned NumDimensions,
+                                              bool WithLevels) {
     IRBuilder<> &IRB = OpBuilder.getIRB();
     Type *Int32Ty = IRB.getInt32Ty();
 
@@ -1036,13 +1038,15 @@ public:
       if (Error E = OpCall.takeError())
         return E;
       Value *Width = IRB.CreateExtractValue(*OpCall, 0);
-      Value *Height = IRB.CreateExtractValue(*OpCall, 1);
+      Value *Height =
+          NumDimensions == 2 ? IRB.CreateExtractValue(*OpCall, 1) : nullptr;
       Value *Dim = IRB.CreateInsertElement(UndefValue::get(CI->getType()),
                                            Width, IRB.getInt32(0));
-      Dim = IRB.CreateInsertElement(Dim, Height, IRB.getInt32(1));
+      if (Height)
+        Dim = IRB.CreateInsertElement(Dim, Height, IRB.getInt32(1));
       if (WithLevels)
         Dim = IRB.CreateInsertElement(Dim, IRB.CreateExtractValue(*OpCall, 3),
-                                      IRB.getInt32(2));
+                                      IRB.getInt32(NumDimensions));
 
       CI->replaceAllUsesWith(Dim);
       CI->eraseFromParent();
@@ -1556,10 +1560,13 @@ public:
         HasErrors |= lowerGetDimensionsX(F);
         break;
       case Intrinsic::dx_resource_getdimensions_xy:
-        HasErrors |= lowerGetDimensionsXY(F, /*WithLevels=*/false);
+        HasErrors |= lowerGetDimensionsVector(F, 2, /*WithLevels=*/false);
+        break;
+      case Intrinsic::dx_resource_getdimensions_levels_x:
+        HasErrors |= lowerGetDimensionsVector(F, 1, /*WithLevels=*/true);
         break;
       case Intrinsic::dx_resource_getdimensions_levels_xy:
-        HasErrors |= lowerGetDimensionsXY(F, /*WithLevels=*/true);
+        HasErrors |= lowerGetDimensionsVector(F, 2, /*WithLevels=*/true);
         break;
       case Intrinsic::ctpop:
         HasErrors |= lowerCtpopToCountBits(F);
