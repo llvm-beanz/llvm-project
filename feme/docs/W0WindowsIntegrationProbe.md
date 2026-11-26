@@ -3815,6 +3815,17 @@ This session added deterministic SDK discovery by scanning `10.0.*` directories
 under both standard Windows Kits locations and preferring the newest directory
 containing `d3d12umddi.h`.
 
+The same 0022/0072/0110 matrix was then rebuilt and run natively with the
+ARM64 MSVC toolchain. It passed all 18 LIT matrix and negative-control tests,
+matching the earlier x64-toolchain run on the ARM64 host.
+
+A broader boundary rerun added `0010`, `0070`, and `0071`. Native ARM64 and
+x64-toolchain builds both passed all 28 strict matrix/negative-control LIT
+tests. `0010`, `0022`, `0072`, and `0110` reached `CreateDevice`; `0070` and
+`0071` remained expected rejections before device-size calculation and
+`CreateDevice`. This is repeatable public negotiation evidence, not real
+device, allocation, residency, or resource-path closure.
+
 The matrix was rebuilt for public versions `0022`, `0072`, and `0110` with
 SDK/WDK 10.0.26100.0 on Windows 11 Enterprise build 26300 ARM64. The first
 run's `0072` expectation was invalid: `_0072` reached `CreateDevice`,
