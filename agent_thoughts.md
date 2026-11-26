@@ -136441,3 +136441,89 @@ no FeMe/LLVM library dependency), and documentation changed. No `feme/lib`,
    CTS and adapter-matrix validation open. Recheck the FeMe Vulkan identity
    before any future Vulkan execution; do not repair host registration
    without explicit authorization.
+
+# Session: W0(g) SDK discovery and 0022/0072/0110 DDI matrix
+
+## Task and constraints
+
+The branch prompt and `feme/.instructions.md` requested work on the WARP
+roadmap. The mandatory Vulkan identity check was run first. It did not find a
+`FeMe CPU Vulkan Device`; the Vulkan loader reported missing registry
+manifests and the DZN process failed initialization, so no Vulkan execution,
+CTS run, or Vulkan capability claim was made.
+
+I narrowed this session to the remaining W0(g) public-DDI infrastructure
+because the roadmap already requires Windows-VM proof and explicitly excludes
+private ABI or a real device until implementation gates are met. I did not
+modify `CreateDevice`, allocation, residency, or kernel callback behavior.
+
+## What changed
+
+- Added Windows SDK header discovery to
+  `feme/utils/windows-warp-interposition/CMakeLists.txt`.
+- The standalone project now scans both standard Windows Kits locations,
+  selects the newest installed `10.0.*` directory containing
+  `d3d12umddi.h`, and adds its `um` and `shared` directories as system
+  include directories.
+- This removes stale-shell/installed-SDK dependence for the standalone
+  matrix project. It also replaces the earlier brittle per-command include
+  attempts that were split on spaces in `C:\Program Files (x86)`.
+- Added an SDK-discovery and 2026-11-26 matrix result section to
+  `W0WindowsIntegrationProbe.md`.
+- Added the same reproducibility rule to `feme/.instructions.md`.
+
+## Validation
+
+Configured and built the matrix-only project with MSVC 19.44.35230.0,
+SDK/WDK 10.0.26100.0, CMake 3.31.6, and Ninja 1.12.1. The matrix targeted
+public versions `D3D12DDI_SUPPORTED_0022`, `_0072`, and `_0110`.
+
+The host was Windows 11 Enterprise ARM64 build 26300. The stock runtime loaded
+the Microsoft Basic Render Driver with WARP identity
+`vendor=1414`, `device=008c`, `flags=2`.
+
+The initial `_0072` expectation was incorrect: `_0072` reached
+`CreateDevice` and `CalcPrivateDeviceSize`, matching the audit stub's
+deliberate `E_NOTIMPL` rejection. After correcting that expectation, the
+standalone LIT target passed all 18 matrix and negative-control tests:
+
+- `_0022`: `CreateDevice` reached
+- `_0072`: `CreateDevice` reached
+- `_0110`: `CreateDevice` reached
+- Paired wrong-stage and disabled-probe controls passed
+
+No real device or resource lifecycle was created. These results are
+bounded DDI negotiation evidence only.
+
+## Lessons
+
+- Standalone Windows probe projects need to discover SDK headers
+  independently of the VS developer environment.
+- Matrix tests are registered as LIT tests by
+  `windows-probe-tests/WindowsProbeTests.cmake`, not CTest tests.
+- A D3D12 audit result must not call `_0072` unsupported until the
+  harness proves `CreateDevice` was or was not reached.
+- The existing public matrix documentation already records a broader
+  29-version WDK result and the 0070/0071 narrow rejection. This session
+  narrowed a local infrastructure gap; it did not change that finding.
+
+## Commits
+
+Separate commits will contain:
+
+1. Windows SDK discovery for the standalone W0(g) probe project.
+2. W0(g) matrix documentation and instruction updates.
+3. This agent-thoughts entry.
+
+## Suggested next steps
+
+1. Run the 0022/0072/0110 matrix as native ARM64 and x64 if both
+   configurations are available, preserving SDK/runtime versions.
+2. Reconcile the broader WDK matrix against the exact local runtime and
+   publish a fresh named difference, rather than inferring all builds from
+   historical results.
+3. Keep W0(g) open until owned DDI device services, kernel-routed resource
+   callbacks and a real device/resource lifecycle are proved. `E_NOTIMPL`
+   and the public callback audit are not device closure.
+4. Leave Vulkan CTS and `check-feme` blocked until the required
+   `FeMe CPU Vulkan Device` identity is available.
