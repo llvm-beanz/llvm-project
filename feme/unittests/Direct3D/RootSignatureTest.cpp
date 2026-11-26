@@ -8,6 +8,7 @@
 #include "feme/Direct3D/RootSignature.h"
 #include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
+#include "feme/Direct3D/PipelinePlan.h"
 #include "feme/Direct3D/ResourcePlan.h"
 
 #include "gtest/gtest.h"
@@ -202,6 +203,41 @@ TEST(BarrierPlanTest, RejectsUAVBarrierChangingState) {
        ResourceState::ShaderResource, SubresourceRange{0, 1, 0, 1}},
   };
   llvm::Error Err = validateBarrierPlan(Barriers);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(PipelinePlanTest, AcceptsConventionalTrianglePipeline) {
+  PipelinePlan Plan;
+  Plan.Primitive = PrimitiveTopology::TriangleList;
+  Plan.Rasterizer.Cull = CullMode::Back;
+  Plan.DepthStencil.DepthEnable = true;
+  Plan.DepthStencil.DepthWriteEnable = true;
+  llvm::Error Err = validatePipelinePlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(PipelinePlanTest, RejectsUndefinedTopologyAndTooManyTargets) {
+  PipelinePlan Plan;
+  Plan.Primitive = PrimitiveTopology::Undefined;
+  llvm::Error Err = validatePipelinePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Plan = PipelinePlan{};
+  Plan.RenderTargets.NumRenderTargets = 9;
+  Err = validatePipelinePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(PipelinePlanTest, RejectsDepthOnlyPipelineWithNoDepthTarget) {
+  PipelinePlan Plan;
+  Plan.RenderTargets.NumRenderTargets = 0;
+  Plan.DepthStencil.DepthEnable = true;
+  llvm::Error Err = validatePipelinePlan(Plan);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
