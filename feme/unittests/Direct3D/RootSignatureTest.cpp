@@ -10,6 +10,7 @@
 #include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/PipelinePlan.h"
+#include "feme/Direct3D/PresentationPlan.h"
 #include "feme/Direct3D/RayTracingPlan.h"
 #include "feme/Direct3D/ResourcePlan.h"
 
@@ -302,6 +303,29 @@ TEST(RayTracingPlanTest, RejectsOversizedPayloadAndZeroRecursion) {
 
   RayTracingPlan Recursion{1024, 32, 0, 1, 1};
   Err = validateRayTracingPlan(Recursion);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(PresentationPlanTest, AcceptsRotationAndHDRSharedInterop) {
+  PresentationPlan Plan{1920, 1080, DisplayRotation::Rotate90, false, true,
+                        true, true};
+  llvm::Error Err = validatePresentationPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(PresentationPlanTest, RejectsInvalidPresentationContracts) {
+  PresentationPlan Zero{0,     1080, DisplayRotation::Identity, false, false,
+                        false, false};
+  llvm::Error Err = validatePresentationPlan(Zero);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  PresentationPlan HDR{1920,  1080, DisplayRotation::Identity, false, true,
+                       false, false};
+  Err = validatePresentationPlan(HDR);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
