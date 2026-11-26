@@ -10,6 +10,7 @@
 #include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/PipelinePlan.h"
+#include "feme/Direct3D/RayTracingPlan.h"
 #include "feme/Direct3D/ResourcePlan.h"
 
 #include "gtest/gtest.h"
@@ -281,6 +282,26 @@ TEST(AdvancedGraphicsPlanTest, RejectsOversizedMeshOutput) {
   AdvancedGraphicsPlan Plan;
   Plan.Mesh.MaxPayloadBytes = 32768;
   llvm::Error Err = validateAdvancedGraphicsPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(RayTracingPlanTest, AcceptsDXR11Bounds) {
+  RayTracingPlan Plan{1024, 32, 31, 65536, 65536};
+  llvm::Error Err = validateRayTracingPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(RayTracingPlanTest, RejectsOversizedPayloadAndZeroRecursion) {
+  RayTracingPlan Payload{8192, 32, 31, 1, 1};
+  llvm::Error Err = validateRayTracingPlan(Payload);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  RayTracingPlan Recursion{1024, 32, 0, 1, 1};
+  Err = validateRayTracingPlan(Recursion);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
