@@ -1,4 +1,5 @@
 add_feme_library(FeMeDirect3D
+  AdvancedGraphicsPlan.cpp
   BarrierPlan.cpp
   DescriptorHeap.cpp
   ResourcePlan.cpp

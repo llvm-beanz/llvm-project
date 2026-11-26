@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Direct3D/RootSignature.h"
+#include "feme/Direct3D/AdvancedGraphicsPlan.h"
 #include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/PipelinePlan.h"
@@ -259,6 +260,27 @@ TEST(PipelinePlanTest, RejectsDifferentMRTBlendWithoutIndependentBlend) {
   Plan.RenderTargets.NumRenderTargets = 2;
   Plan.Blend.Attachments[1].BlendEnable = true;
   llvm::Error Err = validatePipelinePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(AdvancedGraphicsPlanTest, AcceptsFL122AdvancedLimits) {
+  AdvancedGraphicsPlan Plan;
+  Plan.Vrs = VrsTier::Tier2;
+  Plan.SamplerFeedback = true;
+  Plan.ConservativeRaster = true;
+  Plan.TiledResources = true;
+  Plan.DepthBounds = true;
+  llvm::Error Err = validateAdvancedGraphicsPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(AdvancedGraphicsPlanTest, RejectsOversizedMeshOutput) {
+  AdvancedGraphicsPlan Plan;
+  Plan.Mesh.MaxPayloadBytes = 32768;
+  llvm::Error Err = validateAdvancedGraphicsPlan(Plan);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
