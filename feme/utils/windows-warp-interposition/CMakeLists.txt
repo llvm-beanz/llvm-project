@@ -69,6 +69,37 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+set(FEME_WINDOWS_SDK_ROOT "")
+foreach(CANDIDATE
+    "C:/Program Files (x86)/Windows Kits/10/Include"
+    "C:/Program Files/Windows Kits/10/Include")
+  if(EXISTS "${CANDIDATE}")
+    set(FEME_WINDOWS_SDK_ROOT "${CANDIDATE}")
+    break()
+  endif()
+endforeach()
+set(FEME_WINDOWS_SDK_VERSION "")
+file(GLOB FEME_SDK_VERSION_DIRS
+  LIST_DIRECTORIES true
+  "${FEME_WINDOWS_SDK_ROOT}/10.0.*")
+list(REVERSE FEME_SDK_VERSION_DIRS)
+foreach(VERSION_DIR IN LISTS FEME_SDK_VERSION_DIRS)
+  if(EXISTS "${VERSION_DIR}/um/d3d12umddi.h")
+    get_filename_component(FEME_WINDOWS_SDK_VERSION
+      "${VERSION_DIR}" NAME)
+    break()
+  endif()
+endforeach()
+if(NOT FEME_WINDOWS_SDK_VERSION)
+  message(FATAL_ERROR
+    "The Windows SDK DDI headers were not found under "
+    "${FEME_WINDOWS_SDK_ROOT}")
+endif()
+set(FEME_WINDOWS_SDK_INCLUDE
+  "${FEME_WINDOWS_SDK_ROOT}/${FEME_WINDOWS_SDK_VERSION}/um"
+  "${FEME_WINDOWS_SDK_ROOT}/${FEME_WINDOWS_SDK_VERSION}/shared")
+include_directories(SYSTEM ${FEME_WINDOWS_SDK_INCLUDE})
+
 # PE forwarding preserves the reference functions' ABI without guessing private
 # signatures or importing Microsoft's implementation into this project.
 include(../windows-probe-tests/WindowsProbeTests.cmake)
