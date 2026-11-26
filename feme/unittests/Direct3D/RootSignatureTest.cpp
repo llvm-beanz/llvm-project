@@ -242,4 +242,25 @@ TEST(PipelinePlanTest, RejectsDepthOnlyPipelineWithNoDepthTarget) {
   llvm::consumeError(std::move(Err));
 }
 
+TEST(PipelinePlanTest, AcceptsMRTIndependentBlend) {
+  PipelinePlan Plan;
+  Plan.RenderTargets.NumRenderTargets = 2;
+  Plan.RenderTargets.IndependentBlendEnable = true;
+  Plan.Blend.Attachments[1].BlendEnable = true;
+  Plan.Blend.Attachments[1].SrcColor = BlendFactor::SrcAlpha;
+  llvm::Error Err = validatePipelinePlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(PipelinePlanTest, RejectsDifferentMRTBlendWithoutIndependentBlend) {
+  PipelinePlan Plan;
+  Plan.RenderTargets.NumRenderTargets = 2;
+  Plan.Blend.Attachments[1].BlendEnable = true;
+  llvm::Error Err = validatePipelinePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
 } // namespace

@@ -35,6 +35,62 @@ enum class CullMode : uint32_t {
   Back = 2,
 };
 
+enum class CompareOp : uint32_t {
+  Never = 0,
+  Less = 1,
+  Equal = 2,
+  LessEqual = 3,
+  Greater = 4,
+  NotEqual = 5,
+  GreaterEqual = 6,
+  Always = 7,
+};
+
+enum class BlendFactor : uint32_t {
+  Zero = 0,
+  One = 1,
+  SrcColor = 2,
+  InvSrcColor = 3,
+  SrcAlpha = 4,
+  InvSrcAlpha = 5,
+  DstColor = 6,
+  InvDstColor = 7,
+  DstAlpha = 8,
+  InvDstAlpha = 9,
+};
+
+enum class BlendOp : uint32_t {
+  Add = 0,
+  Subtract = 1,
+  ReverseSubtract = 2,
+  Min = 3,
+  Max = 4,
+};
+
+enum class StencilOp : uint32_t {
+  Keep = 0,
+  Zero = 1,
+  Replace = 2,
+  IncrementClamp = 3,
+  DecrementClamp = 4,
+  Invert = 5,
+};
+
+struct BlendAttachmentPlan {
+  bool BlendEnable = false;
+  BlendFactor SrcColor = BlendFactor::One;
+  BlendFactor DstColor = BlendFactor::Zero;
+  BlendOp ColorOp = BlendOp::Add;
+  BlendFactor SrcAlpha = BlendFactor::One;
+  BlendFactor DstAlpha = BlendFactor::Zero;
+  BlendOp AlphaOp = BlendOp::Add;
+};
+
+struct BlendPlan {
+  bool AlphaToCoverage = false;
+  BlendAttachmentPlan Attachments[8];
+};
+
 struct RasterizerPlan {
   FillMode Fill = FillMode::Solid;
   CullMode Cull = CullMode::Back;
@@ -46,6 +102,7 @@ struct RasterizerPlan {
 struct DepthStencilPlan {
   bool DepthEnable = true;
   bool DepthWriteEnable = true;
+  CompareOp DepthCompare = CompareOp::Less;
   bool StencilEnable = false;
 };
 
@@ -59,6 +116,7 @@ struct PipelinePlan {
   RasterizerPlan Rasterizer;
   DepthStencilPlan DepthStencil;
   RenderTargetPlan RenderTargets;
+  BlendPlan Blend;
 };
 
 llvm::Error validatePipelinePlan(const PipelinePlan &Plan);

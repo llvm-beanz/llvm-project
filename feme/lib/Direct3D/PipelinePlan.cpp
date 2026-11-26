@@ -26,6 +26,26 @@ llvm::Error validatePipelinePlan(const PipelinePlan &Plan) {
     return llvm::createStringError(
         llvm::errc::invalid_argument,
         "depth/stencil-only pipeline with no DSV is unsupported");
+  if (!Plan.RenderTargets.IndependentBlendEnable) {
+    for (uint32_t I = 1; I < Plan.RenderTargets.NumRenderTargets; ++I) {
+      if (Plan.Blend.Attachments[I].BlendEnable ||
+          Plan.Blend.Attachments[I].SrcColor !=
+              Plan.Blend.Attachments[0].SrcColor ||
+          Plan.Blend.Attachments[I].DstColor !=
+              Plan.Blend.Attachments[0].DstColor ||
+          Plan.Blend.Attachments[I].ColorOp !=
+              Plan.Blend.Attachments[0].ColorOp ||
+          Plan.Blend.Attachments[I].SrcAlpha !=
+              Plan.Blend.Attachments[0].SrcAlpha ||
+          Plan.Blend.Attachments[I].DstAlpha !=
+              Plan.Blend.Attachments[0].DstAlpha ||
+          Plan.Blend.Attachments[I].AlphaOp !=
+              Plan.Blend.Attachments[0].AlphaOp)
+        return llvm::createStringError(
+            llvm::errc::invalid_argument,
+            "MRT blend states differ while independent blend is disabled");
+    }
+  }
   return llvm::Error::success();
 }
 
