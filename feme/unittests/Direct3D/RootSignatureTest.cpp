@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Direct3D/RootSignature.h"
+#include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/ResourcePlan.h"
 
@@ -162,6 +163,47 @@ TEST(ResourcePlanTest, ResolvesArrayAnd3DSubresources) {
   EXPECT_EQ(resolveSubresourceIndex(Volume, 1, 0, 4), std::nullopt);
   EXPECT_EQ(resolveSubresourceIndex(Volume, 2, 0, 1),
             std::optional<uint64_t>(13));
+}
+
+TEST(BarrierPlanTest, AcceptsOrderedTransitionAndUAVBarriers) {
+  std::vector<BarrierPlan> Barriers{
+      {BarrierKind::Transition, ResourceState::CopyDestination,
+       ResourceState::ShaderResource, SubresourceRange{0, 4, 0, 2}},
+      {BarrierKind::UAV, ResourceState::UnorderedAccess,
+       ResourceState::UnorderedAccess, SubresourceRange{0, 1, 0, 1}},
+  };
+  llvm::Error Err = validateBarrierPlan(Barriers);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(BarrierPlanTest, RejectsEmptyRangeAndNoStateTransition) {
+  std::vector<BarrierPlan> EmptyRange{
+      {BarrierKind::Transition, ResourceState::Common,
+       ResourceState::ShaderResource, SubresourceRange{0, 0, 0, 1}},
+  };
+  llvm::Error Err = validateBarrierPlan(EmptyRange);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  std::vector<BarrierPlan> NoTransition{
+      {BarrierKind::Transition, ResourceState::Common, ResourceState::Common,
+       SubresourceRange{0, 1, 0, 1}},
+  };
+  Err = validateBarrierPlan(NoTransition);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(BarrierPlanTest, RejectsUAVBarrierChangingState) {
+  std::vector<BarrierPlan> Barriers{
+      {BarrierKind::UAV, ResourceState::UnorderedAccess,
+       ResourceState::ShaderResource, SubresourceRange{0, 1, 0, 1}},
+  };
+  llvm::Error Err = validateBarrierPlan(Barriers);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
 }
 
 } // namespace
