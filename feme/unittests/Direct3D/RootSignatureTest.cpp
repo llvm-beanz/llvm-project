@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Direct3D/RootSignature.h"
+#include "feme/Direct3D/DescriptorHeap.h"
 
 #include "gtest/gtest.h"
 
@@ -86,6 +87,35 @@ TEST(RootSignatureTest, RejectsDuplicateStaticSamplers) {
   Plan.StaticSamplers.push_back(StaticSampler{1, 2, ShaderVisibility::Pixel});
 
   llvm::Error Err = validateRootSignaturePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(DescriptorHeapTest, AcceptsHeapRangesWithinCapacity) {
+  DescriptorHeapPlan Plan{
+      DescriptorHeapType::CBV_SRV_UAV, 32, {{0, 8}, {24, 8}}};
+  llvm::Error Err = validateDescriptorHeapPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(DescriptorHeapTest, RejectsAllocationPastHeapCapacity) {
+  DescriptorHeapPlan Plan{DescriptorHeapType::Sampler, 16, {{8, 9}}};
+  llvm::Error Err = validateDescriptorHeapPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(DescriptorHeapTest, RejectsTypeMismatchAndOutOfBoundsCopy) {
+  DescriptorHeapPlan Source{DescriptorHeapType::CBV_SRV_UAV, 16, {}};
+  DescriptorHeapPlan Destination{DescriptorHeapType::Sampler, 16, {}};
+  llvm::Error Err = validateDescriptorCopy(Source, 0, Destination, 0, 1);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Destination.Type = DescriptorHeapType::CBV_SRV_UAV;
+  Err = validateDescriptorCopy(Source, 15, Destination, 15, 2);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
