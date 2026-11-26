@@ -8,6 +8,7 @@
 #include "feme/Direct3D/RootSignature.h"
 #include "feme/Direct3D/AdvancedGraphicsPlan.h"
 #include "feme/Direct3D/BarrierPlan.h"
+#include "feme/Direct3D/CapabilityInventory.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/PipelinePlan.h"
 #include "feme/Direct3D/PresentationPlan.h"
@@ -328,6 +329,29 @@ TEST(PresentationPlanTest, RejectsInvalidPresentationContracts) {
   Err = validatePresentationPlan(HDR);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
+}
+
+TEST(CapabilityInventoryTest, RejectsMissingNegotiatedDDI) {
+  CapabilityInventory Inventory;
+  Inventory.Compute = true;
+  llvm::Error Err = validateCapabilityInventory(Inventory);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(CapabilityInventoryTest, RejectsIncompleteFL122Claim) {
+  CapabilityInventory Inventory{1, true, true, false, true, true, true};
+  llvm::Error Err = validateCapabilityInventory(Inventory);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(CapabilityInventoryTest, AcceptsCompleteFL122Evidence) {
+  CapabilityInventory Inventory{1, true, true, true, true, true, true};
+  llvm::Error Err = validateCapabilityInventory(Inventory);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
 }
 
 } // namespace
