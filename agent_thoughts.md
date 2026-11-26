@@ -136527,3 +136527,65 @@ Separate commits will contain:
    and the public callback audit are not device closure.
 4. Leave Vulkan CTS and `check-feme` blocked until the required
    `FeMe CPU Vulkan Device` identity is available.
+
+# Session continuation: 29-version W0(g) matrix and W1 boundary
+
+## What shipped
+
+The standalone W0(g) probe now builds and runs natively on both ARM64 MSVC
+and x64 MSVC configurations on the Windows 11 ARM64 host. A 29-version
+public DDI matrix from `_0010` through `_0110` passed 166/166 strict LIT
+cases. The matrix confirms the existing narrow 0070/0071 rejection and that
+0072 and later tested public builds reach `CreateDevice` before the audit
+stub deliberately returns `E_NOTIMPL`.
+
+The matrix-only CMake project also has deterministic Windows SDK DDI-header
+discovery, no PCH, and no dependency on the pinned reference WARP DLL.
+
+## Validation
+
+- Native ARM64 29-version matrix: 166/166 tests passed.
+- Native ARM64 0010/0022/0070/0071/0072/0110 matrix: 28/28 passed.
+- x64-toolchain 0010/0022/0070/0071/0072/0110 matrix: 28/28 passed.
+- The public DDI matrix was built with assertions/SDK discovery enabled and
+  PCH disabled.
+- An in-tree FeMe build was configured successfully with assertions and PCH
+  disabled and discovered Vulkan 1.4.357, but no FeMe Vulkan identity was
+  present for execution. The first `check-feme` warm-up started 7168 targets
+  and was stopped after sustained compilation without a failure result.
+
+## Genuinely blocked implementation boundary
+
+W1 cannot be completed as a normal source milestone from this checkout:
+
+1. There is no `FeMeDirect3D` UMD library or W1 object model in the source tree.
+2. Public stock WARP routing reaches an audit callback table only. It does not
+   establish a real `CreateDevice`, heap/resource, queue, PSO, or CPU execute
+   contract for FeMe.
+3. Implementing W1(a)/W1(b) would require an owned D3D12 DDI contract and
+   kernel-routed allocation/residency callbacks, which the roadmap explicitly
+   excludes until W0(b) and a real WARP-kernel integration gate are resolved.
+4. The environment lacks a real FeMe Vulkan ICD, so Vulkan CTS/check-feme
+   execution cannot validate shared-core progress.
+
+Continuing to write a fake `CreateDevice` or claiming it as real W1 would
+violate the roadmap and this repository's existing W0 evidence discipline.
+
+## Commits
+
+- SDK discovery implementation: `f1422e3696fa`
+- W0 documentation and instructions: `7c294439f091`
+- Initial agent thoughts: `a5229ce17d54`
+- Boundary matrix documentation: `0956565195d9`
+- Full ARM64 matrix documentation will be committed with this thoughts entry.
+
+## Next steps
+
+1. Supply a Windows VM with a working public D3D12 UMD/resource integration
+   and the unmodified WARP kernel-mode driver, or explicitly extend W0(g)
+   approval to private DDI/kernel work.
+2. Only then implement W1(a)'s Windows export, device/queue/heaps/fences/PSO
+   skeleton and W1(b)'s resource-free DXIL dispatch.
+3. Complete W2, W3, W4, W5, W6, and W7 against the owned device gate:
+   root signatures/descriptors/barriers, graphics, advanced graphics, ray
+   tracing, presentation/profiles, and conformance evidence.
