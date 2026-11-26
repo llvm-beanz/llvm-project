@@ -316,6 +316,21 @@ follow-up adds the byte-exact buffer-copy/readback oracle described above. It ca
 yet verify a real FeMe module/device pairing; the selected WARP-compatible
 path is no longer blocked on a product-choice gate.
 
+### Direct3D shared-plan implementation progress (2026-11-26)
+
+The portable `FeMeDirect3D` library now contains checked plans for root
+signatures, descriptor heaps, texture/buffer resource layouts, legacy and UAV
+barriers, graphics PSO/raster/OM state, Feature Level 12_2 advanced options,
+DXR 1.1 bounds, presentation/shared-fence contracts, and FL 12_2 capability
+gating. These plans compile in the in-tree Windows build and are covered by
+28 passing `FeMeDirect3DTests` unit cases.
+
+This is implementation progress, not milestone closure: it does not create a
+D3D12 device, heap/resource, command queue, PSO, renderer, ray dispatcher,
+swap chain, or conformance result. W1 remains blocked on a real owned D3D12
+UMD/device contract and W3-W7 remain blocked on their API/device and execution
+frontends. The existing public-D3D matrix remains audit evidence only.
+
 ### W1: Objects and first headless compute
 
 Depends on the selected W0 integration proof (W0(a)/W0(g)) and WS2; reuses
