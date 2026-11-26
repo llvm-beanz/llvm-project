@@ -3826,6 +3826,11 @@ tests. `0010`, `0022`, `0072`, and `0110` reached `CreateDevice`; `0070` and
 `CreateDevice`. This is repeatable public negotiation evidence, not real
 device, allocation, residency, or resource-path closure.
 
+The complete 29-version native ARM64 matrix listed in this section also passed
+166 strict LIT cases with the same 0070/0071 rejection expectation: every
+version had a successful matrix build and a pass/fail stage assertion
+appropriate to its observed public runtime behavior.
+
 The matrix was rebuilt for public versions `0022`, `0072`, and `0110` with
 SDK/WDK 10.0.26100.0 on Windows 11 Enterprise build 26300 ARM64. The first
 run's `0072` expectation was invalid: `_0072` reached `CreateDevice`,
