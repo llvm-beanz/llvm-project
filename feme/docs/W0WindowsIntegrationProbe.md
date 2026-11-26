@@ -3807,6 +3807,23 @@ observed device-removal result.
 
 ### W0(g) public DDI-version matrix (VM measurements)
 
+#### W0(g) 0022/0072/0110 SDK-discovery follow-up (2026-11-26)
+
+The standalone matrix project initially used only MSVC discovery and did not
+add the installed Windows SDK `um`/`shared` include directories explicitly.
+This session added deterministic SDK discovery by scanning `10.0.*` directories
+under both standard Windows Kits locations and preferring the newest directory
+containing `d3d12umddi.h`.
+
+The matrix was rebuilt for public versions `0022`, `0072`, and `0110` with
+SDK/WDK 10.0.26100.0 on Windows 11 Enterprise build 26300 ARM64. The first
+run's `0072` expectation was invalid: `_0072` reached `CreateDevice`,
+`CalcPrivateDeviceSize`, and the stub callback tables; the harness's only
+result was the deliberate `E_NOTIMPL` device rejection. With the
+expectations corrected, all 18 matrix and negative-control LIT tests passed.
+The measured boundary is recorded but remains an audit result: no real
+device, allocation, residency, or working resource contract was created.
+
 The application-local probe project
 [`windows-warp-interposition`](../utils/windows-warp-interposition/CMakeLists.txt)
 now accepts a semicolon-separated list of public
