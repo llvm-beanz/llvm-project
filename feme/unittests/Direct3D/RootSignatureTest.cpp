@@ -7,6 +7,7 @@
 
 #include "feme/Direct3D/RootSignature.h"
 #include "feme/Direct3D/DescriptorHeap.h"
+#include "feme/Direct3D/ResourcePlan.h"
 
 #include "gtest/gtest.h"
 
@@ -118,6 +119,49 @@ TEST(DescriptorHeapTest, RejectsTypeMismatchAndOutOfBoundsCopy) {
   Err = validateDescriptorCopy(Source, 15, Destination, 15, 2);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
+}
+
+TEST(ResourcePlanTest, AcceptsBufferAndArrayResources) {
+  ResourcePlan Buffer{ResourceDimension::Buffer, 4096, 1, 1, 1, 1, 1};
+  llvm::Error Err = validateResourcePlan(Buffer);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+
+  ResourcePlan Array{ResourceDimension::Texture2D, 16, 8, 1, 3, 3, 4};
+  Err = validateResourcePlan(Array);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(ResourcePlanTest, RejectsInvalidTextureState) {
+  ResourcePlan Plan{ResourceDimension::Texture1D, 0, 1, 1, 1, 1, 1};
+  llvm::Error Err = validateResourcePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Plan = ResourcePlan{ResourceDimension::Texture2D, 16, 8, 2, 1, 1, 3};
+  Err = validateResourcePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ResourcePlanTest, ResolvesArrayAnd3DSubresources) {
+  ResourcePlan Array{ResourceDimension::Texture2D, 8, 8, 1, 3, 3, 1};
+  EXPECT_EQ(resolveSubresourceIndex(Array, 0, 0), std::optional<uint64_t>(0));
+  EXPECT_EQ(resolveSubresourceIndex(Array, 0, 2), std::optional<uint64_t>(2));
+  EXPECT_EQ(resolveSubresourceIndex(Array, 1, 1), std::optional<uint64_t>(4));
+  EXPECT_EQ(resolveSubresourceIndex(Array, 3, 0), std::nullopt);
+
+  ResourcePlan Volume{ResourceDimension::Texture3D, 8, 8, 8, 1, 3, 1};
+  EXPECT_EQ(resolveSubresourceIndex(Volume, 0, 0, 7),
+            std::optional<uint64_t>(7));
+  EXPECT_EQ(resolveSubresourceIndex(Volume, 1, 0, 3),
+            std::optional<uint64_t>(11));
+  EXPECT_EQ(resolveSubresourceIndex(Volume, 1, 0, 4), std::nullopt);
+  EXPECT_EQ(resolveSubresourceIndex(Volume, 2, 0, 1),
+            std::optional<uint64_t>(13));
 }
 
 } // namespace
