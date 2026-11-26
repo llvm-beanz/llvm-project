@@ -136589,3 +136589,68 @@ violate the roadmap and this repository's existing W0 evidence discipline.
 3. Complete W2, W3, W4, W5, W6, and W7 against the owned device gate:
    root signatures/descriptors/barriers, graphics, advanced graphics, ray
    tracing, presentation/profiles, and conformance evidence.
+
+# Session continuation: direct shared W2-W7 plan implementation
+
+## What was implemented
+
+This continuation added a real `FeMeDirect3D` C++ library and unit target,
+rather than stopping at audit/documentation work:
+
+- W2(a): root constants, root descriptors, descriptor tables and static
+  samplers; 5 tests.
+- W2(b): CBV/SRV/UAV and sampler heap ranges and checked descriptor copies.
+- W2(c): buffer/1D/2D/3D resource plans and array/3D subresource resolution.
+- W2(d): transition, aliasing and UAV barrier plans.
+- W3(a/b): primitive/raster/depth/independent-MRT blend pipeline plans.
+- W4: Feature Level 12_2 mesh, VRS, sampler feedback, tiled and depth-bounds
+  capability plans.
+- W5: bounded DXR 1.1 payload, attribute, recursion, instance and geometry
+  plans.
+- W6: presentation size/rotation, tearing, HDR, shared-fence/shared-resource
+  contracts.
+- W7: negotiated-DDI and complete-FL-12_2 capability inventory gating.
+
+The combined `FeMeDirect3DTests` executable passes 28 tests. The library
+was built in the assertions-enabled, PCH-disabled in-tree Windows build.
+
+## Commits
+
+- `6b1c334d7d53`: root-signature plans
+- `a4ae72a19a9a`: descriptor-heaps
+- `df6184ecebb2`: resource/subresource plans
+- `789203c1efa5`: barriers
+- `9b0c27242670`: pipeline and W3(b) state
+- `20005fe3257e`: W4 advanced-graphics plans
+- `bef83bd43606`: W5 DXR plans
+- `d997ba1dc2f6`: W6 presentation plans
+- `2a8fd334959f`: W7 capability inventory gate
+
+## Scope boundary
+
+These milestones are API-neutral state/planning implementation, not a
+working D3D12 adapter. They do not claim:
+
+- owned D3D12 device/queue/fence creation,
+- heap/resource residency or GPU-VA management,
+- real PSO compilation or raster/OM execution,
+- mesh/amplification dispatch,
+- BVH build/traversal or DXR shader execution,
+- swap-chain/presentation interop,
+- conformance or HLK qualification.
+
+The remaining implementation requires the real owned D3D12 UMD/resource
+gate identified above. Do not replace D3D12DDI callbacks, add private
+ordinals, or replace system WARP binaries to bypass it.
+
+## Next steps
+
+1. Add Windows-only D3D12 DDI object implementations that retain
+   `CompiledStage` and `PreparedDispatch` and require real callback-backed
+   storage.
+2. Add a resource-free DXIL dispatch harness, then raw/structured buffer
+   copy/readback/fence coverage.
+3. Normalize `GraphicsPipeline`/`PreparedDraw` through the new plans and
+   execute an off-screen triangle.
+4. Continue mesh, ray tracing, presentation and conformance as independent
+   owned-device gates.
