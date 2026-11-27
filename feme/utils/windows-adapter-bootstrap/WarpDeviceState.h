@@ -15,6 +15,8 @@
 
 #include <d3d12umddi.h>
 
+#include <atomic>
+
 namespace feme {
 namespace probe {
 
@@ -43,6 +45,9 @@ struct WarpDeviceState {
   bool DmaLocked = false;
   D3DKMT_HANDLE DmaFence = 0;
   volatile UINT64 *DmaFenceValue = nullptr;
+  std::atomic<SIZE_T> LiveHeaps{0};
+  std::atomic<SIZE_T> LiveResources{0};
+  std::atomic<HRESULT> HeapCleanupResult{S_OK};
 };
 
 static_assert(alignof(WarpDeviceState) <= MEMORY_ALLOCATION_ALIGNMENT);

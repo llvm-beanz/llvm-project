@@ -1,0 +1,498 @@
+//===- WarpHeap.cpp - Owned buffer heap DDIs
+//-------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "WarpHeap.h"
+
+#include "WarpAllocationInfo.h"
+
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <new>
+
+namespace feme {
+namespace probe {
+namespace {
+constexpr UINT32 BufferAlignment = 64 * 1024;
+
+struct HeapState {
+  WarpDeviceState *Owner;
+  HANDLE RTResource;
+  SIZE_T ByteSize;
+  D3D12DDI_CPU_PAGE_PROPERTY CPUPageProperty;
+  D3DKMT_HANDLE Allocation = 0;
+  void *Memory = nullptr;
+  bool Locked = false;
+  SRWLOCK MapLock = SRWLOCK_INIT;
+  SIZE_T MapCount = 0;
+  SIZE_T ResourceCount = 0;
+};
+
+struct ResourceState {
+  WarpDeviceState *Owner;
+  HeapState *Heap;
+  D3D12DDIARG_CREATERESOURCE_0003 Desc;
+};
+
+WarpDeviceState *deviceState(D3D12DDI_HDEVICE Device) {
+  return static_cast<WarpDeviceState *>(Device.pDrvPrivate);
+}
+
+void reportError(WarpDeviceState *State, HRESULT Result) {
+  if (State && State->RTDevice && State->UMCallbacks &&
+      State->UMCallbacks->pfnSetErrorCb) {
+    D3D12DDI_HRTDEVICE RTDevice{};
+    RTDevice.handle = State->RTDevice;
+    State->UMCallbacks->pfnSetErrorCb(RTDevice, Result);
+    return;
+  }
+  OutputDebugStringA(
+      "FeMe WARP heap DDI failed without a runtime error callback.\n");
+}
+
+HRESULT validateResource(const D3D12DDIARG_CREATERESOURCE_0003 *Args,
+                         UINT64 &Size) {
+  if (!Args)
+    return E_INVALIDARG;
+  if (Args->ResourceType != D3D12DDI_RT_BUFFER ||
+      Args->Layout != D3D12DDI_TL_ROW_MAJOR || Args->pRowMajorLayout ||
+      Args->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate ||
+      Args->ReuseBufferGPUVA.BaseAddress.UMD.Offset)
+    return E_NOTIMPL;
+  constexpr UINT AllowedFlags =
+      D3D12DDI_RESOURCE_FLAG_0003_SHADER_RESOURCE |
+      D3D12DDI_RESOURCE_FLAG_0003_SIMULTANEOUS_ACCESS |
+      D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS;
+  if (static_cast<UINT>(Args->Flags) & ~AllowedFlags)
+    return E_NOTIMPL;
+  if (!Args->Width || Args->Height != 1 || Args->DepthOrArraySize != 1 ||
+      Args->MipLevels != 1 || Args->Format != DXGI_FORMAT_UNKNOWN ||
+      Args->SampleDesc.Count != 1 || Args->SampleDesc.Quality ||
+      Args->Width > std::numeric_limits<SIZE_T>::max() - BufferAlignment + 1)
+    return E_INVALIDARG;
+  if (Args->Width > std::numeric_limits<UINT32>::max())
+    return E_NOTIMPL;
+  Size = (Args->Width + BufferAlignment - 1) & ~UINT64(BufferAlignment - 1);
+  return S_OK;
+}
+
+HRESULT validateHeap(const D3D12DDIARG_CREATEHEAP_0001 *Args) {
+  if (!Args)
+    return E_NOTIMPL;
+  constexpr UINT AllowedFlags = D3D12DDI_HEAP_FLAG_BUFFERS;
+  if (Args->MemoryPool != D3D12DDI_MEMORY_POOL_L0 ||
+      (static_cast<UINT>(Args->Flags) & ~AllowedFlags))
+    return E_NOTIMPL;
+  if (!Args->ByteSize || Args->ByteSize > std::numeric_limits<SIZE_T>::max() ||
+      Args->ByteSize % BufferAlignment ||
+      (Args->Alignment && Args->Alignment != BufferAlignment) ||
+      Args->CreationNodeMask != 1 || Args->VisibleNodeMask != 1 ||
+      (Args->CPUPageProperty != D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE &&
+       Args->CPUPageProperty != D3D12DDI_CPU_PAGE_PROPERTY_WRITE_COMBINE &&
+       Args->CPUPageProperty != D3D12DDI_CPU_PAGE_PROPERTY_WRITE_BACK))
+    return E_INVALIDARG;
+  if (Args->ByteSize > std::numeric_limits<UINT32>::max())
+    return E_NOTIMPL;
+  return S_OK;
+}
+
+HRESULT validateCreation(const D3D12DDIARG_CREATEHEAP_0001 *Heap,
+                         const D3D12DDIARG_CREATERESOURCE_0003 *Resource,
+                         D3D12DDI_HPROTECTEDRESOURCESESSION_0030 Protected) {
+  if (Protected.pDrvPrivate)
+    return E_NOTIMPL;
+  HRESULT Result = validateHeap(Heap);
+  if (FAILED(Result))
+    return Result;
+  if (Resource) {
+    UINT64 Size = 0;
+    Result = validateResource(Resource, Size);
+    if (FAILED(Result))
+      return Result;
+    if (Size > Heap->ByteSize)
+      return E_INVALIDARG;
+  }
+  return S_OK;
+}
+
+D3D12DDI_HEAP_AND_RESOURCE_SIZES APIENTRY calcPrivateSizes(
+    D3D12DDI_HDEVICE Device, const D3D12DDIARG_CREATEHEAP_0001 *Heap,
+    const D3D12DDIARG_CREATERESOURCE_0003 *Resource,
+    D3D12DDI_HPROTECTEDRESOURCESESSION_0030 Protected) {
+  HRESULT Result = validateCreation(Heap, Resource, Protected);
+  if (FAILED(Result)) {
+    reportError(deviceState(Device), Result);
+    return {};
+  }
+  return {sizeof(HeapState), Resource ? sizeof(ResourceState) : 0};
+}
+
+HRESULT releaseAllocation(HeapState *State) {
+  auto *Owner = State->Owner;
+  HRESULT Result = S_OK;
+  if (State->Locked) {
+    D3DDDICB_UNLOCK Unlock{};
+    Unlock.NumAllocations = 1;
+    Unlock.phAllocations = &State->Allocation;
+    Result = Owner->KTCallbacks->pfnUnlockCb(Owner->RTDevice, &Unlock);
+    if (Result == S_OK)
+      State->Locked = false;
+    else if (SUCCEEDED(Result))
+      Result = E_UNEXPECTED;
+  }
+  if (State->Allocation) {
+    D3D12DDICB_DEALLOCATE_0022 Deallocate{};
+    if (State->RTResource)
+      Deallocate.hResource = State->RTResource;
+    else {
+      Deallocate.NumAllocations = 1;
+      Deallocate.HandleList = &State->Allocation;
+    }
+    Deallocate.Flags = D3D12DDI_DEALLOCATE_FLAGS_0022_SYNCHRONOUS_DESTROY;
+    D3D12DDI_HRTDEVICE Device{};
+    Device.handle = Owner->RTDevice;
+    HRESULT Released = Owner->UMCallbacks->pfnDeallocateCb(Device, &Deallocate);
+    if (Released == S_OK) {
+      State->Allocation = 0;
+      State->Memory = nullptr;
+      State->Locked = false;
+    }
+    if (Result == S_OK && Released != S_OK)
+      Result = FAILED(Released) ? Released : E_UNEXPECTED;
+  }
+  return Result;
+}
+
+HRESULT allocateHeap(HeapState *State,
+                     const D3D12DDIARG_CREATERESOURCE_0003 *Resource) {
+  WarpKmdAllocationInfo PrivateInfo{};
+  PrivateInfo.ResourceDimension = D3D10DDIRESOURCE_BUFFER;
+  PrivateInfo.Width = Resource ? static_cast<UINT32>(Resource->Width)
+                               : static_cast<UINT32>(State->ByteSize);
+  PrivateInfo.Height = 1;
+  PrivateInfo.Depth = 1;
+  PrivateInfo.Pitch = Resource ? PrivateInfo.Width : 0;
+  PrivateInfo.TotalSize = static_cast<UINT32>(State->ByteSize);
+  PrivateInfo.ArraySize = 1;
+  PrivateInfo.MipLevels = 1;
+  PrivateInfo.SampleDesc.Count = 1;
+  if (Resource)
+    PrivateInfo.BindFlags =
+        D3D10_DDI_BIND_SHADER_RESOURCE | D3D11_DDI_BIND_UNORDERED_ACCESS;
+  // This DDI does not expose the application's sharing choice.
+  PrivateInfo.Flags = WarpAllocationFlagInAperture | WarpAllocationFlagShared;
+  if (!Resource)
+    PrivateInfo.Flags |= WarpAllocationFlagTilePool;
+  if (State->CPUPageProperty != D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
+    PrivateInfo.Flags |= WarpAllocationFlagCpuVisible;
+  if (State->CPUPageProperty == D3D12DDI_CPU_PAGE_PROPERTY_WRITE_COMBINE)
+    PrivateInfo.Flags |= WarpAllocationFlagWriteCombine;
+  D3D12DDI_ALLOCATION_INFO_0022 Info{};
+  Info.pPrivateDriverData = &PrivateInfo;
+  Info.PrivateDriverDataSize = sizeof(PrivateInfo);
+  D3D12DDICB_ALLOCATE_0022 Allocate{};
+  Allocate.hResource = State->RTResource;
+  Allocate.NumAllocations = 1;
+  Allocate.pAllocationInfo = &Info;
+  D3D12DDI_HRTDEVICE Device{};
+  Device.handle = State->Owner->RTDevice;
+  HRESULT Result = State->Owner->UMCallbacks->pfnAllocateCb(Device, &Allocate);
+  if (Result != S_OK)
+    return FAILED(Result) ? Result : E_UNEXPECTED;
+  State->Allocation = Info.hAllocation;
+  if (!State->Allocation)
+    return E_UNEXPECTED;
+  D3DDDICB_LOCK Lock{};
+  Lock.hAllocation = State->Allocation;
+  Lock.Flags.IgnoreSync = 1;
+  Lock.Flags.DonotWait = 1;
+  Result = State->Owner->KTCallbacks->pfnLockCb(State->Owner->RTDevice, &Lock);
+  if (Result != S_OK)
+    return FAILED(Result) ? Result : E_UNEXPECTED;
+  State->Locked = true;
+  State->Memory = Lock.pData;
+  if (!State->Memory)
+    return E_UNEXPECTED;
+  std::memset(State->Memory, 0, State->ByteSize);
+  return S_OK;
+}
+
+HRESULT APIENTRY createHeapAndResource(
+    D3D12DDI_HDEVICE Device, const D3D12DDIARG_CREATEHEAP_0001 *HeapArgs,
+    D3D12DDI_HHEAP Heap, D3D12DDI_HRTRESOURCE RTResource,
+    const D3D12DDIARG_CREATERESOURCE_0003 *ResourceArgs,
+    const D3D12DDI_CLEAR_VALUES *ClearValues,
+    D3D12DDI_HPROTECTEDRESOURCESESSION_0030 Protected,
+    D3D12DDI_HRESOURCE Resource) {
+  auto *Owner = deviceState(Device);
+  if (!Owner || !Heap.pDrvPrivate || (ResourceArgs && !Resource.pDrvPrivate) ||
+      (!ResourceArgs && Resource.pDrvPrivate) || ClearValues)
+    return E_INVALIDARG;
+  if (!Owner->RTDevice || !Owner->KTCallbacks ||
+      !Owner->KTCallbacks->pfnLockCb || !Owner->KTCallbacks->pfnUnlockCb ||
+      !Owner->UMCallbacks || !Owner->UMCallbacks->pfnAllocateCb ||
+      !Owner->UMCallbacks->pfnDeallocateCb)
+    return E_NOINTERFACE;
+  HRESULT Result = validateCreation(HeapArgs, ResourceArgs, Protected);
+  if (FAILED(Result))
+    return Result;
+  auto *State = ::new (Heap.pDrvPrivate) HeapState{
+      Owner, RTResource.handle, static_cast<SIZE_T>(HeapArgs->ByteSize),
+      HeapArgs->CPUPageProperty};
+  Result = allocateHeap(State, ResourceArgs);
+  if (FAILED(Result)) {
+    HRESULT Cleanup = releaseAllocation(State);
+    Owner->HeapCleanupResult = Cleanup;
+    if (FAILED(Cleanup))
+      reportError(Owner, Cleanup);
+    State->~HeapState();
+    return Result;
+  }
+  ++Owner->LiveHeaps;
+  if (ResourceArgs) {
+    ::new (Resource.pDrvPrivate) ResourceState{Owner, State, *ResourceArgs};
+    ++State->ResourceCount;
+    ++Owner->LiveResources;
+  }
+  return S_OK;
+}
+
+void APIENTRY destroyHeapAndResource(D3D12DDI_HDEVICE Device,
+                                     D3D12DDI_HHEAP Heap,
+                                     D3D12DDI_HRESOURCE Resource) {
+  auto *Owner = deviceState(Device);
+  auto *State = static_cast<HeapState *>(Heap.pDrvPrivate);
+  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
+  if (!Owner || (!State && !Buffer) || (State && State->Owner != Owner) ||
+      (Buffer &&
+       (Buffer->Owner != Owner || (State && Buffer->Heap != State))) ||
+      (State && State->ResourceCount != (Buffer ? 1u : 0u))) {
+    reportError(Owner, E_INVALIDARG);
+    return;
+  }
+  if (Buffer) {
+    --Buffer->Heap->ResourceCount;
+    --Owner->LiveResources;
+    Buffer->~ResourceState();
+  }
+  if (State) {
+    HRESULT Result = releaseAllocation(State);
+    Owner->HeapCleanupResult = Result;
+    if (FAILED(Result))
+      reportError(Owner, Result);
+    if (State->Allocation)
+      return;
+    --Owner->LiveHeaps;
+    State->~HeapState();
+  }
+}
+
+HRESULT APIENTRY mapHeap(D3D12DDI_HDEVICE Device, D3D12DDI_HHEAP Heap,
+                         void **Data) {
+  auto *State = static_cast<HeapState *>(Heap.pDrvPrivate);
+  if (!State || !Data || State->Owner != deviceState(Device) ||
+      State->CPUPageProperty == D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
+    return E_INVALIDARG;
+  AcquireSRWLockExclusive(&State->MapLock);
+  if (State->MapCount == std::numeric_limits<SIZE_T>::max()) {
+    ReleaseSRWLockExclusive(&State->MapLock);
+    return E_UNEXPECTED;
+  }
+  ++State->MapCount;
+  *Data = State->Memory;
+  ReleaseSRWLockExclusive(&State->MapLock);
+  return S_OK;
+}
+
+void APIENTRY unmapHeap(D3D12DDI_HDEVICE Device, D3D12DDI_HHEAP Heap) {
+  auto *State = static_cast<HeapState *>(Heap.pDrvPrivate);
+  if (!State || State->Owner != deviceState(Device)) {
+    reportError(deviceState(Device), E_INVALIDARG);
+    return;
+  }
+  AcquireSRWLockExclusive(&State->MapLock);
+  if (!State->MapCount) {
+    ReleaseSRWLockExclusive(&State->MapLock);
+    reportError(deviceState(Device), E_INVALIDARG);
+    return;
+  }
+  --State->MapCount;
+  ReleaseSRWLockExclusive(&State->MapLock);
+}
+
+void APIENTRY checkAllocationInfo(
+    D3D12DDI_HDEVICE Device, const D3D12DDIARG_CREATERESOURCE_0003 *Args,
+    D3D12DDI_RESOURCE_OPTIMIZATION_FLAGS Flags, UINT32 Alignment,
+    UINT VisibleNodeMask, D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 *Info) {
+  UINT64 Size = 0;
+  HRESULT Result = validateResource(Args, Size);
+  if (SUCCEEDED(Result) && (!Info || VisibleNodeMask != 1 ||
+                            (Alignment && Alignment != BufferAlignment)))
+    Result = E_INVALIDARG;
+  constexpr UINT AllowedFlags =
+      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_SHADER_RESOURCE |
+      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_UNORDERED_ACCESS;
+  if (SUCCEEDED(Result) && (static_cast<UINT>(Flags) & ~AllowedFlags))
+    Result = E_NOTIMPL;
+  if (FAILED(Result)) {
+    reportError(deviceState(Device), Result);
+    return;
+  }
+  *Info = {};
+  Info->ResourceDataSize = Size;
+  Info->ResourceDataAlignment = BufferAlignment;
+  Info->AdditionalDataHeaderAlignment = 1;
+  Info->AdditionalDataAlignment = 1;
+  Info->Layout = D3D12DDI_TL_ROW_MAJOR;
+}
+
+void APIENTRY checkExistingAllocationInfo(
+    D3D12DDI_HDEVICE Device, D3D12DDI_HRESOURCE Resource,
+    D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 *Info) {
+  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
+  if (!Buffer || Buffer->Owner != deviceState(Device)) {
+    reportError(deviceState(Device), E_INVALIDARG);
+    return;
+  }
+  checkAllocationInfo(Device, &Buffer->Desc,
+                      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, Info);
+}
+
+D3D12DDI_GPU_VIRTUAL_ADDRESS APIENTRY
+checkVirtualAddress(D3D12DDI_HDEVICE Device, D3D12DDI_HRESOURCE Resource) {
+  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
+  if (!Buffer || Buffer->Owner != deviceState(Device)) {
+    reportError(deviceState(Device), E_INVALIDARG);
+    return 0;
+  }
+  return reinterpret_cast<ULONG_PTR>(Buffer->Heap->Memory);
+}
+
+D3DKMT_HANDLE APIENTRY checkAllocationHandle(D3D12DDI_HDEVICE Device,
+                                             D3D10DDI_HRESOURCE Resource) {
+  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
+  if (!Buffer || Buffer->Owner != deviceState(Device)) {
+    reportError(deviceState(Device), E_INVALIDARG);
+    return 0;
+  }
+  return Buffer->Heap->Allocation;
+}
+
+void APIENTRY checkSubresourceInfo(D3D12DDI_HDEVICE Device,
+                                   D3D12DDI_HRESOURCE Resource,
+                                   UINT Subresource,
+                                   D3D12DDI_SUBRESOURCE_INFO *Info) {
+  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
+  if (!Buffer || Buffer->Owner != deviceState(Device) || Subresource || !Info) {
+    reportError(deviceState(Device), E_INVALIDARG);
+    return;
+  }
+  *Info = {};
+  Info->RowStride = Buffer->Desc.Width;
+  Info->DepthStride = Buffer->Desc.Width;
+}
+
+HRESULT validateObjects(WarpDeviceState *Owner, UINT Count,
+                        const D3D12DDI_HANDLE_AND_TYPE *Objects) {
+  if (!Owner || (Count && !Objects))
+    return E_INVALIDARG;
+  for (UINT I = 0; I < Count; ++I) {
+    if (Objects[I].Type != D3D12DDI_HT_HEAP)
+      return E_NOTIMPL;
+    auto *Heap = static_cast<HeapState *>(Objects[I].Handle);
+    if (!Heap || Heap->Owner != Owner)
+      return E_INVALIDARG;
+  }
+  return S_OK;
+}
+
+HRESULT APIENTRY makeResident(D3D12DDI_HDEVICE Device,
+                              D3D12DDIARG_MAKERESIDENT_0001 *Args) {
+  if (!Args || Args->NumAdapters != 1 || !Args->pRTPagingQueue ||
+      !Args->pPagingFenceValue)
+    return E_INVALIDARG;
+  auto *Owner = deviceState(Device);
+  HRESULT Result = validateObjects(Owner, Args->NumObjects, Args->pObjects);
+  if (FAILED(Result))
+    return Result;
+  if (!Args->NumObjects) {
+    Args->WaitMask = 0;
+    Args->pPagingFenceValue[0] = 0;
+    return S_OK;
+  }
+  if (!Owner->UMCallbacks || !Owner->UMCallbacks->pfnMakeResidentCb)
+    return E_NOINTERFACE;
+  std::unique_ptr<D3DKMT_HANDLE[]> Handles(new (std::nothrow)
+                                               D3DKMT_HANDLE[Args->NumObjects]);
+  if (!Handles)
+    return E_OUTOFMEMORY;
+  for (UINT I = 0; I < Args->NumObjects; ++I)
+    Handles[I] = static_cast<HeapState *>(Args->pObjects[I].Handle)->Allocation;
+  D3DDDI_MAKERESIDENT Resident{};
+  Resident.NumAllocations = Args->NumObjects;
+  Resident.AllocationList = Handles.get();
+  Resident.Flags = Args->Flags;
+  D3D12DDI_HRTDEVICE RTDevice{};
+  RTDevice.handle = Owner->RTDevice;
+  Result = Owner->UMCallbacks->pfnMakeResidentCb(
+      RTDevice, Args->pRTPagingQueue[0], &Resident);
+  if (Result == E_PENDING && !Resident.PagingFenceValue)
+    return E_UNEXPECTED;
+  if (Result == S_OK || Result == E_PENDING) {
+    Args->WaitMask = Result == E_PENDING ? 1 : 0;
+    Args->pPagingFenceValue[0] = Resident.PagingFenceValue;
+    return Result;
+  }
+  return FAILED(Result) ? Result : E_UNEXPECTED;
+}
+
+HRESULT APIENTRY evict(D3D12DDI_HDEVICE Device, const D3D12DDIARG_EVICT *Args) {
+  if (!Args)
+    return E_INVALIDARG;
+  auto *Owner = deviceState(Device);
+  HRESULT Result = validateObjects(Owner, Args->NumObjects, Args->pObjects);
+  if (FAILED(Result))
+    return Result;
+  if (!Args->NumObjects)
+    return S_OK;
+  if (!Owner->UMCallbacks || !Owner->UMCallbacks->pfnEvictCb)
+    return E_NOINTERFACE;
+  std::unique_ptr<D3DKMT_HANDLE[]> Handles(new (std::nothrow)
+                                               D3DKMT_HANDLE[Args->NumObjects]);
+  if (!Handles)
+    return E_OUTOFMEMORY;
+  for (UINT I = 0; I < Args->NumObjects; ++I)
+    Handles[I] = static_cast<HeapState *>(Args->pObjects[I].Handle)->Allocation;
+  D3DDDICB_EVICT Evict{};
+  Evict.NumAllocations = Args->NumObjects;
+  Evict.AllocationList = Handles.get();
+  Evict.Flags = Args->Flags;
+  D3D12DDI_HRTDEVICE RTDevice{};
+  RTDevice.handle = Owner->RTDevice;
+  Result = Owner->UMCallbacks->pfnEvictCb(RTDevice, &Evict);
+  return Result == S_OK || FAILED(Result) ? Result : E_UNEXPECTED;
+}
+} // namespace
+
+void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table) {
+  Table.pfnCalcPrivateHeapAndResourceSizes = calcPrivateSizes;
+  Table.pfnCreateHeapAndResource = createHeapAndResource;
+  Table.pfnDestroyHeapAndResource = destroyHeapAndResource;
+  Table.pfnMapHeap = mapHeap;
+  Table.pfnUnmapHeap = unmapHeap;
+  Table.pfnCheckResourceAllocationInfo = checkAllocationInfo;
+  Table.pfnCheckExistingResourceAllocationInfo = checkExistingAllocationInfo;
+  Table.pfnCheckResourceVirtualAddress = checkVirtualAddress;
+  Table.pfnCheckResourceAllocationHandle = checkAllocationHandle;
+  Table.pfnCheckSubresourceInfo = checkSubresourceInfo;
+  Table.pfnMakeResident = makeResident;
+  Table.pfnEvict = evict;
+}
+} // namespace probe
+} // namespace feme
