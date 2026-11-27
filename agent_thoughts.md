@@ -137113,3 +137113,55 @@ Continue device/object DDIs as the runtime requires them, then demonstrate
 application-owned buffer allocation/map/residency/teardown with real runtime
 paging queues and complete the device/build provenance gate. The diagnostic
 tables, null-stage objects and internal KMD buffer round trip do not close W0.
+
+# W0 closure: compiler-backed stock-runtime device (2026-11-27)
+
+Closed W0 feasibility using the user-approved WARP identity/ABI and unchanged
+kernel services. No Microsoft implementation, executable fixture, private
+ordinal forwarding, system replacement, new driver or COM runtime was added.
+The native ARM64 VM uses OS 10.0.26300, standalone SDK/DDI 10.0.26100.0 and
+inbox D3D12/D3D12Core/reference WARP 10.0.26100.9818.
+
+Small implementation commits:
+- a3900564eab6: normalize undef/poison ignored DXIL graphics vertex indices;
+  generated vertex DXBC exposed the shared canonicalization bug.
+- f343efcf55e4: owned raw-DXBC C ABI compiler bridge, native JIT artifact and
+  retained compute/vertex pipeline lifetimes, generated LLVM-owned fixtures.
+- a4ea2e67d5cd: accept deterministic buffer-allocation queries while preserving
+  the existing fixed row-major footprint.
+- 3ce0fc58b2b1: compiler-backed 0072 device/initialization objects, truthful
+  narrow metadata, real application buffer lifecycle and strict provenance.
+
+DXSA import/translation and DXIL raising feed shared CompiledStage ABI 8.
+The runtime requires VS 4.0 (15 tokens) and CS 5.0 (8 tokens) even before
+application device creation; publishing tables without compiling these was
+not sufficient. Bridge-owned stages and pipelines avoid Debug/main-build
+cross-CRT ownership and keep native JIT code alive after shader DDI destruction.
+Vertex-only initialization uses the actual shared GraphicsPipeline. Immutable
+blend/depth/raster descriptors and resettable command pools are owned objects,
+not successful no-op DDIs.
+
+Final committed-build evidence: all sixteen caps and five table publications
+succeed; D3D12CreateDevice(11_0) and application CreateCommittedResource(upload)
+succeed. A 4097-byte buffer maps/remaps with retained bytes/nonzero VA, evicts,
+becomes resident and cleans up with no removal. Application-only HRTRESOURCE
+audit: heap 1/1, maps 2/2, residency 2 (initial plus explicit), eviction 1,
+genuine runtime paging queue. Native shaders and shared pipelines are 2/2;
+all remaining private/KMD objects are cleaned up.
+
+Validation: full check-feme 4397 passed, 15 skipped, 10 unsupported, with
+assertions/caching/PCH-disabled build and independently verified FeMe CPU
+Vulkan Device. Standalone callback tests 64/64; final OS LIT tests 37/37,
+including independent reference and earlier shader-rejection controls.
+Direct final positive harness reports source revision
+3ce0fc58b2b14c433ed1b109d7bc3a282ed38234 and successful owned provenance;
+packaged and main-build compiler DLL SHA256 hashes match. Documentation
+marks W0 complete and distinguishes historical rejection/container/Agility
+results from this native successful-device evidence.
+
+W1-W7 remain open. No D3D12 queue/command execution, application dispatch/draw,
+general roots/descriptors/textures, DXR, presentation or FL compliance was
+implemented or claimed. Next implement real queue/list/fence and dispatch
+execution over the shared executor; do not extend the boundary with successful
+no-op DDIs. Retain the independent positive/reference/negative gates and
+the explicit runtime-specific residency/capability observations.
