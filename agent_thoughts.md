@@ -137004,3 +137004,64 @@ reproduced the unchanged device-creation error. The remaining work is to
 identify why the runtime rejects the created device before table fill, prove
 an application resource lifecycle, and explain the 0070/0071 version
 rejection. Do not close W0 based on these internal initialization results.
+
+# Session continuation: WARP core-table negotiation and kernel buffer heaps
+
+W0 remains open. The previously unexplained post-create runtime failure is
+resolved, and the probe now reaches the owned 0072 core-table callback.
+The callback still explicitly returns E_NOTIMPL rather than publishing an
+empty or success-shaped device implementation.
+
+The shader-cap fix in `4ba58328a937` supplies valid wave-lane limits even
+with WaveOps disabled. `acef80456df2` adds validated two-pass enumeration
+of the diagnostic SM 5.1 input profile and checks the newly reached table
+boundary. These are negotiation results, not shader execution claims.
+
+`00b02614929f` closes the measured 0070/0071 rejection question. The
+authorized reference sources construct candidate versions from an
+exact-match interface/build map. A native debugger confirmed all 79 map
+entries in inbox D3D12Core 10.0.26100.9818: R7 builds 0/1 are absent, while
+build 2 (0072) is present. This conclusion is scoped to that runtime; SDK
+constants alone do not establish runtime acceptance.
+
+`73795ba33521` extracts the existing owned device state. `4ab211b195db`
+implements twelve typed buffer heap/resource callbacks with KMD allocation
+metadata, lock/unlock, retained descriptions, balanced concurrent maps,
+allocation information, actual VA/KMT handles, residency and teardown.
+The reference's D3D12 heap initialization always takes the kernel-backed
+path because the UMD does not receive the application's sharing choice.
+Consequently these callbacks use WARP's aperture/shared/CPU-visible/
+write-combine ABI flags, not an unregistered private VirtualAlloc fallback.
+No Microsoft implementation was copied.
+
+The callback fixtures use owned Windows memory behind simulated kernel
+callbacks to verify allocation ownership, associated-resource versus
+handle-list deallocation, failed-lock rollback, upload flags, concurrent
+maps, and synchronous/pending/failed paging responses. They are not live
+application resource or KMD residency evidence.
+
+`8ebf7db62302` additionally wires an internal buffer round trip into the
+OS-routed owned context probe. Real stock-runtime callbacks allocate and
+lock a 64-KiB buffer heap. Mapping, writing the first and last logical byte
+of its 4097-byte buffer, unmapping/remapping, VA/handle checks and synchronous
+unlock/deallocation succeed. The KMD lock address need not be 64-KiB
+aligned; preserve it rather than confusing heap-placement alignment with
+absolute CPU-map alignment. This is still an internal resource: the
+runtime has not constructed an application-facing D3D12 device.
+
+Validation: 62/62 standalone bootstrap/callback tests and 31/31 OS-routed
+tests pass. The final targeted live buffer/device-context run also passes
+and reports Create/Map/Destroy S_OK, retained data, a real KMT handle, and
+the expected final D3D12CreateDevice E_NOTIMPL at the core table. The full
+check-feme run passed 4395 tests, with 15 skipped and 10 unsupported.
+Vulkan tests used the application-local ICD after verifying
+FeMe CPU Vulkan Device. Assertions and object caching remained enabled,
+PCH remained disabled, and no system binary/driver/registry was modified.
+
+Next steps: complete the genuine core/queue/command-list table contract
+and remaining mandatory runtime capabilities, then prove stock-runtime
+device creation and application resource/map/residency/teardown. KMD
+residency callbacks require the real runtime paging-queue handles supplied
+to resource DDIs; a KT-created kernel paging-queue handle is not a substitute.
+Finish the runner's owned-UMD/device provenance gate only after that path
+works. Do not close W0 from the internal heap round trip or callback fixtures.
