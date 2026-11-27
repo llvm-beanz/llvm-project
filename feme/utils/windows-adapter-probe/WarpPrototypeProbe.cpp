@@ -87,27 +87,28 @@ HRESULT exerciseBuffer(ID3D12Device *Device) {
   return report("GetDeviceRemovedReason", Device->GetDeviceRemovedReason());
 }
 
-HRESULT exerciseCommands(ID3D12Device *Device) {
+HRESULT createComputePipeline(ID3D12Device *Device, const char *Source,
+                              SIZE_T SourceSize,
+                              const D3D12_ROOT_SIGNATURE_DESC &RootDesc,
+                              ComPtr<ID3D12RootSignature> &Root,
+                              ComPtr<ID3D12PipelineState> &Pipeline) {
   ComPtr<ID3DBlob> Shader, Errors, RootBlob;
-  constexpr char Source[] = "[numthreads(1,1,1)] void main() {}";
-  HRESULT Result = report("Compile application compute shader",
-                          D3DCompile(Source, sizeof(Source) - 1,
-                                     "FeMe command test", nullptr, nullptr,
-                                     "main", "cs_5_0", 0, 0, &Shader, &Errors));
+  HRESULT Result =
+      report("Compile application compute shader",
+             D3DCompile(Source, SourceSize, "FeMe command test", nullptr,
+                        nullptr, "main", "cs_5_0", 0, 0, &Shader, &Errors));
   if (FAILED(Result)) {
     if (Errors)
       std::fprintf(stderr, "%.*s\n", static_cast<int>(Errors->GetBufferSize()),
                    static_cast<const char *>(Errors->GetBufferPointer()));
     return Result;
   }
-  D3D12_ROOT_SIGNATURE_DESC RootDesc{};
   Result =
-      report("Serialize empty root",
+      report("Serialize application root",
              D3D12SerializeRootSignature(
                  &RootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &RootBlob, &Errors));
   if (FAILED(Result))
     return Result;
-  ComPtr<ID3D12RootSignature> Root;
   Result = report("Create application root",
                   Device->CreateRootSignature(0, RootBlob->GetBufferPointer(),
                                               RootBlob->GetBufferSize(),
@@ -117,10 +118,19 @@ HRESULT exerciseCommands(ID3D12Device *Device) {
   D3D12_COMPUTE_PIPELINE_STATE_DESC PipelineDesc{};
   PipelineDesc.pRootSignature = Root.Get();
   PipelineDesc.CS = {Shader->GetBufferPointer(), Shader->GetBufferSize()};
-  ComPtr<ID3D12PipelineState> Pipeline;
   Result = report("Create application compute pipeline",
                   Device->CreateComputePipelineState(&PipelineDesc,
                                                      IID_PPV_ARGS(&Pipeline)));
+  return Result;
+}
+
+HRESULT exerciseCommands(ID3D12Device *Device) {
+  constexpr char Source[] = "[numthreads(1,1,1)] void main() {}";
+  D3D12_ROOT_SIGNATURE_DESC RootDesc{};
+  ComPtr<ID3D12RootSignature> Root;
+  ComPtr<ID3D12PipelineState> Pipeline;
+  HRESULT Result = createComputePipeline(Device, Source, sizeof(Source) - 1,
+                                         RootDesc, Root, Pipeline);
   if (FAILED(Result))
     return Result;
   for (auto Type :
@@ -170,6 +180,167 @@ HRESULT exerciseCommands(ID3D12Device *Device) {
         if (FAILED(Result))
           return Result;
       }
+    }
+  }
+  return S_OK;
+}
+
+HRESULT exerciseBufferCommands(ID3D12Device *Device) {
+  constexpr char Source[] =
+      "RWByteAddressBuffer output : register(u3);\n"
+      "groupshared uint sharedValues[30];\n"
+      "[numthreads(5,3,2)] void main(uint3 id : SV_DispatchThreadID,\n"
+      "uint3 local : SV_GroupThreadID) {\n"
+      "uint index = id.x + 15 * (id.y + 6 * id.z);\n"
+      "uint slot = local.x + 5 * (local.y + 3 * local.z);\n"
+      "sharedValues[slot] = index;\n"
+      "GroupMemoryBarrierWithGroupSync();\n"
+      "uint peer = sharedValues[slot == 29 ? 0 : slot + 1];\n"
+      "output.Store(index * 4, output.Load(index * 4) + peer + 23);\n"
+      "}\n";
+  D3D12_ROOT_PARAMETER Parameter{};
+  Parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  Parameter.Descriptor.ShaderRegister = 3;
+  Parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  D3D12_ROOT_SIGNATURE_DESC RootDesc{};
+  RootDesc.NumParameters = 1;
+  RootDesc.pParameters = &Parameter;
+  ComPtr<ID3D12RootSignature> Root;
+  ComPtr<ID3D12PipelineState> Pipeline;
+  HRESULT Result = createComputePipeline(Device, Source, sizeof(Source) - 1,
+                                         RootDesc, Root, Pipeline);
+  if (FAILED(Result))
+    return Result;
+  constexpr UINT Threads = 180, Words = Threads + 16;
+  constexpr UINT Bytes = Words * sizeof(UINT);
+  D3D12_HEAP_PROPERTIES Heap{};
+  Heap.CreationNodeMask = Heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC Desc{};
+  Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  Desc.Width = Bytes;
+  Desc.Height = Desc.DepthOrArraySize = Desc.MipLevels = 1;
+  Desc.SampleDesc.Count = 1;
+  Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ComPtr<ID3D12Resource> Upload, Output, Readback;
+  Heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  Result =
+      report("Create command upload",
+             Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                             D3D12_RESOURCE_STATE_GENERIC_READ,
+                                             nullptr, IID_PPV_ARGS(&Upload)));
+  if (FAILED(Result))
+    return Result;
+  Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  Result =
+      report("Create command UAV",
+             Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST,
+                                             nullptr, IID_PPV_ARGS(&Output)));
+  if (FAILED(Result))
+    return Result;
+  Heap.Type = D3D12_HEAP_TYPE_READBACK;
+  Desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  Result =
+      report("Create command readback",
+             Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST,
+                                             nullptr, IID_PPV_ARGS(&Readback)));
+  if (FAILED(Result))
+    return Result;
+  void *Memory = nullptr;
+  D3D12_RANGE NoRead{0, 0}, Full{0, Bytes};
+  Result = report("Map command upload", Upload->Map(0, &NoRead, &Memory));
+  if (FAILED(Result))
+    return Result;
+  if (!Memory) {
+    Upload->Unmap(0, &NoRead);
+    return report("Missing command upload memory", E_FAIL);
+  }
+  for (UINT I = 0; I < Words; ++I)
+    static_cast<UINT *>(Memory)[I] = I * 7 + 5;
+  Upload->Unmap(0, &Full);
+  D3D12_COMMAND_QUEUE_DESC QueueDesc{};
+  QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  ComPtr<ID3D12CommandQueue> Queue;
+  ComPtr<ID3D12CommandAllocator> Allocator;
+  ComPtr<ID3D12GraphicsCommandList> List;
+  Result = report("Create buffer command queue",
+                  Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
+  if (FAILED(Result))
+    return Result;
+  Result = report(
+      "Create buffer command allocator",
+      Device->CreateCommandAllocator(QueueDesc.Type, IID_PPV_ARGS(&Allocator)));
+  if (FAILED(Result))
+    return Result;
+  Result =
+      report("Create buffer command list",
+             Device->CreateCommandList(0, QueueDesc.Type, Allocator.Get(),
+                                       Pipeline.Get(), IID_PPV_ARGS(&List)));
+  if (FAILED(Result))
+    return Result;
+  for (UINT Repeat = 0; Repeat < 3; ++Repeat) {
+    if (!Repeat)
+      List->CopyBufferRegion(Output.Get(), 0, Upload.Get(), 0, Bytes);
+    D3D12_RESOURCE_BARRIER Barrier{};
+    Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    Barrier.Transition.pResource = Output.Get();
+    Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    Barrier.Transition.StateBefore = Repeat ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                                            : D3D12_RESOURCE_STATE_COPY_DEST;
+    Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    List->ResourceBarrier(1, &Barrier);
+    List->SetComputeRootSignature(Root.Get());
+    List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress());
+    List->SetComputeRootSignature(Root.Get());
+    List->Dispatch(3, 2, 1);
+    List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress() +
+                                                   16);
+    Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    List->ResourceBarrier(1, &Barrier);
+    List->CopyBufferRegion(Readback.Get(), 0, Output.Get(), 0, Bytes);
+    Result = report("Close buffer command list", List->Close());
+    if (FAILED(Result))
+      return Result;
+    ID3D12CommandList *Commands[] = {List.Get()};
+    Queue->ExecuteCommandLists(1, Commands);
+    Result = report("Buffer execution removal status",
+                    Device->GetDeviceRemovedReason());
+    if (FAILED(Result))
+      return Result;
+    Result = report("Map command readback", Readback->Map(0, &Full, &Memory));
+    if (FAILED(Result))
+      return Result;
+    bool Valid = Memory != nullptr;
+    for (UINT I = 0; Valid && I < Words; ++I) {
+      UINT Expected = I * 7 + 5;
+      if (I < Threads) {
+        UINT X = I % 15, Y = I / 15 % 6, Z = I / 90;
+        UINT Peer = (X % 5 + 5 * (Y % 3 + 3 * Z) + 1) % 30;
+        UINT PeerGlobal = X / 5 * 5 + Peer % 5 +
+                          15 * (Y / 3 * 3 + Peer / 5 % 3 + 6 * (Peer / 15));
+        Expected += (Repeat + 1) * (PeerGlobal + 23);
+      }
+      Valid = static_cast<const UINT *>(Memory)[I] == Expected;
+      if (!Valid)
+        std::fprintf(stderr, "Buffer result %u: got %u expected %u\n", I,
+                     static_cast<const UINT *>(Memory)[I], Expected);
+    }
+    Readback->Unmap(0, &NoRead);
+    if (!Valid)
+      return report("Owned grouped compute/readback mismatch", E_FAIL);
+    std::printf("Owned grouped buffer oracle: repeat=%u values=%u guards=%u\n",
+                Repeat + 1, Threads, Words - Threads);
+    if (Repeat != 2) {
+      Result = report("Reset buffer command allocator", Allocator->Reset());
+      if (FAILED(Result))
+        return Result;
+      Result = report("Reset buffer command list",
+                      List->Reset(Allocator.Get(), Pipeline.Get()));
+      if (FAILED(Result))
+        return Result;
     }
   }
   return S_OK;
@@ -242,13 +413,16 @@ bool printCaps(HMODULE Module, bool OwnedDevice) {
 
 int wmain(int Argc, wchar_t **Argv) {
   bool Reference = Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0;
-  bool Commands = Argc == 2 && std::wcscmp(Argv[1], L"--commands") == 0;
+  bool BufferCommands =
+      Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0;
+  bool Commands =
+      BufferCommands || (Argc == 2 && std::wcscmp(Argv[1], L"--commands") == 0);
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
   if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands) {
-    std::fprintf(stderr,
-                 "Usage: warp-prototype-harness "
-                 "[--reference|--expect-shader-rejection|--commands]\n");
+    std::fprintf(stderr, "Usage: warp-prototype-harness "
+                         "[--reference|--expect-shader-rejection|--commands|"
+                         "--buffer-commands]\n");
     return 1;
   }
   wchar_t Path[32768];
@@ -314,6 +488,8 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseBuffer(Device.Get());
   if (SUCCEEDED(Result) && Commands)
     Result = exerciseCommands(Device.Get());
+  if (SUCCEEDED(Result) && BufferCommands)
+    Result = exerciseBufferCommands(Device.Get());
   bool ValidOwned = !Reference && !ExpectShaderRejection &&
                     DeviceResult == S_OK && SUCCEEDED(Result);
   if (ValidOwned) {
@@ -406,17 +582,15 @@ int wmain(int Argc, wchar_t **Argv) {
           Audit.CoreTables == 1 && Audit.QueueTables == 1 &&
           Audit.CommandListTables == 2 && Audit.ExtendedTables == 1 &&
           Audit.ExecutableShaderQueries == 1 && Audit.UnsupportedCalls == 0;
+      UINT ExpectedShaders = BufferCommands ? 4 : Commands ? 3 : 2;
       ValidOwned &=
           Audit.CoreTables == 1 && Audit.QueueTables == 1 &&
           Audit.CommandListTables == 2 && Audit.ExtendedTables == 1 &&
-          (Commands ? Audit.ExecutableShaderQueries >= 2
-                    : Audit.ExecutableShaderQueries == 2) &&
+          Audit.ExecutableShaderQueries == ExpectedShaders &&
           Audit.UnsupportedCalls == 0 &&
-          (Commands ? Audit.CompiledShadersCreated >= 2
-                    : Audit.CompiledShadersCreated == 2) &&
+          Audit.CompiledShadersCreated == ExpectedShaders &&
           Audit.CompiledShadersCreated == Audit.CompiledShadersDestroyed &&
-          (Commands ? Audit.PipelinesCreated >= 2
-                    : Audit.PipelinesCreated == 2) &&
+          Audit.PipelinesCreated == ExpectedShaders &&
           Audit.PipelinesCreated == Audit.PipelinesDestroyed;
     } else {
       ValidRejection = false;
@@ -470,9 +644,11 @@ int wmain(int Argc, wchar_t **Argv) {
                   Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
                   Data.MakeResidentCallbacks, Data.EvictCallbacks,
                   Data.HasRuntimePagingQueue);
-      ValidOwned &= Data.Created == 1 && Data.Destroyed == 1 && Data.Maps > 0 &&
+      UINT ExpectedHeaps = BufferCommands ? 4 : 1;
+      ValidOwned &= Data.Created == ExpectedHeaps &&
+                    Data.Destroyed == ExpectedHeaps && Data.Maps > 0 &&
                     Data.Maps == Data.Unmaps &&
-                    Data.MakeResidentCallbacks == 2 &&
+                    Data.MakeResidentCallbacks == (BufferCommands ? 5u : 2u) &&
                     Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
@@ -485,7 +661,8 @@ int wmain(int Argc, wchar_t **Argv) {
         Audit(&Dispatches, &Copies);
       std::printf("Native command execution: dispatches=%u copies=%u\n",
                   Dispatches, Copies);
-      ValidOwned &= Audit && Dispatches == 6 && Copies == 0;
+      ValidOwned &= Audit && Dispatches == (BufferCommands ? 9u : 6u) &&
+                    Copies == (BufferCommands ? 4u : 0u);
     }
   }
   if (!FreeLibrary(Module)) {

@@ -294,6 +294,25 @@ bool lifecycle() {
       check(ThreadValid[0] && ThreadValid[1] && Bytes[8] == 1 && Bytes[9] == 2,
             "parallel maps retain balanced ownership");
   UINT64 Address = F.Table.pfnCheckResourceVirtualAddress(F.Device, F.Resource);
+  UINT64 Extent = 0;
+  void *Borrowed = nullptr;
+  Valid &= check(feme::probe::getWarpBufferAddress(&F.State, Address + 4096,
+                                                   Borrowed, Extent) == S_OK &&
+                     Borrowed == Bytes + 4096 && Extent == 1,
+                 "root buffer lookup respects the logical resource extent");
+  feme::probe::WarpDeviceState Other;
+  Valid &= check(feme::probe::getWarpBufferAddress(
+                     &F.State, Address, Borrowed, Extent, true) == E_INVALIDARG,
+                 "root UAV lookup rejects a buffer without UAV permission");
+  Valid &= check(feme::probe::getWarpBufferAddress(&Other, Address, Borrowed,
+                                                   Extent) == E_INVALIDARG &&
+                     !Borrowed && !Extent,
+                 "root buffer lookup rejects another device's VA");
+  Valid &=
+      check(feme::probe::getWarpBufferAddress(
+                &F.State, Address + 4097, Borrowed, Extent) == E_INVALIDARG &&
+                !Borrowed && !Extent,
+            "root buffer lookup rejects the backing allocation padding");
   Valid &= check(Address == reinterpret_cast<ULONG_PTR>(Data),
                  "GPU VA preserves the actual KMD lock address");
   D3D12DDI_SUBRESOURCE_INFO Info{};
@@ -305,6 +324,10 @@ bool lifecycle() {
   Valid &= check(Bytes[0] == 0x42 && Bytes[4096] == 0x93,
                  "unmap preserves data in remaining mapping");
   F.destroy();
+  Valid &= check(feme::probe::getWarpBufferAddress(&F.State, Address, Borrowed,
+                                                   Extent) == E_INVALIDARG &&
+                     !Borrowed && !Extent,
+                 "root buffer lookup rejects destroyed resource storage");
   MEMORY_BASIC_INFORMATION Memory{};
   Valid &= check(VirtualQuery(Data, &Memory, sizeof(Memory)) &&
                      Memory.State == MEM_FREE && F.State.LiveHeaps == 0 &&

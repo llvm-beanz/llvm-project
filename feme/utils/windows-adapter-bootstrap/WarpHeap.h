@@ -25,6 +25,9 @@ void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table);
 /// Borrow a checked, persistently locked buffer extent for CPU commands.
 HRESULT getWarpBufferRange(WarpDeviceState *Owner, D3D12DDI_HRESOURCE Resource,
                            UINT64 Offset, UINT64 Size, void *&Data);
+HRESULT getWarpBufferAddress(WarpDeviceState *Owner, UINT64 Address,
+                             void *&Data, UINT64 &Size,
+                             bool UnorderedAccess = false);
 
 } // namespace probe
 } // namespace feme

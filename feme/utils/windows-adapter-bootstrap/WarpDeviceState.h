@@ -56,6 +56,8 @@ struct WarpDeviceState {
   volatile UINT64 *DmaFenceValue = nullptr;
   std::atomic<SIZE_T> LiveHeaps{0};
   std::atomic<SIZE_T> LiveResources{0};
+  SRWLOCK ResourceLock = SRWLOCK_INIT;
+  void *ResourceList = nullptr;
   std::atomic<SIZE_T> LiveRootSignatures{0};
   std::atomic<SIZE_T> LiveNullShaders{0};
   std::atomic<SIZE_T> LiveCompiledShaders{0};

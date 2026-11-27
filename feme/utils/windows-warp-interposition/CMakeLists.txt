@@ -507,6 +507,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-commands
     COMMAND warp-compiler-harness --commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-buffer-commands
+    COMMAND warp-compiler-harness --buffer-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-reference-buffer
     COMMAND warp-compiler-harness --reference)
   feme_add_probe_test(NAME os-routed-warp-compiler-not-shader-rejection

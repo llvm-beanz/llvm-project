@@ -16,9 +16,11 @@
 #include "WarpShaderCompilerABI.h"
 #endif
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <new>
 #include <type_traits>
@@ -141,9 +143,18 @@ void APIENTRY checkMultisample(D3D12DDI_HDEVICE Device, DXGI_FORMAT, UINT,
   *QualityLevels = 0;
 }
 
-struct EmptyRootSignature {
+constexpr UINT MaxBufferRootParameters = 32;
+struct BufferRootParameter {
+  UINT Namespace = 0;
+  UINT Space = 0;
+  UINT Register = 0;
+};
+
+struct RootSignature {
   feme::probe::WarpDeviceState *Owner;
   D3D12DDI_ROOT_SIGNATURE_FLAGS Flags;
+  UINT Count = 0;
+  std::array<BufferRootParameter, MaxBufferRootParameters> Parameters{};
 };
 
 template <typename Descriptor, typename Handle> struct ImmutableState {
@@ -203,37 +214,76 @@ using DepthState = ImmutableState<D3D12DDI_DEPTH_STENCIL_DESC_0025,
 using RasterState =
     ImmutableState<D3D12DDI_RASTERIZER_DESC_0010, D3D12DDI_HRASTERIZERSTATE>;
 
-HRESULT validateEmptyRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
+HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
   if (!Args || !Args->pRootSignature_1_1 || Args->NodeMask != 1)
     return E_INVALIDARG;
   if (Args->Version != D3D12DDI_ROOT_SIGNATURE_VERSION_1_1 ||
-      Args->pRootSignature_1_1->NumParameters ||
       Args->pRootSignature_1_1->NumStaticSamplers)
     return E_NOTIMPL;
+  const auto &Root = *Args->pRootSignature_1_1;
+#ifndef FEME_BOOTSTRAP_WARP_COMPILER
+  if (Root.NumParameters)
+    return E_NOTIMPL;
+#else
+  if (Root.NumParameters > MaxBufferRootParameters ||
+      (Root.NumParameters && !Root.pRootParameters))
+    return E_INVALIDARG;
+  for (UINT I = 0; I < Root.NumParameters; ++I) {
+    const auto &Parameter = Root.pRootParameters[I];
+    if ((Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_SRV &&
+         Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_UAV) ||
+        Parameter.ShaderVisibility != D3D12DDI_SHADER_VISIBILITY_ALL)
+      return E_NOTIMPL;
+    auto Flags = Parameter.Descriptor.Flags;
+    if (Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_NONE &&
+        Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_VOLATILE &&
+        Flags !=
+            D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_STATIC_WHILE_SET_AT_EXECUTE &&
+        Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_STATIC)
+      return E_INVALIDARG;
+    for (UINT J = 0; J < I; ++J) {
+      const auto &Other = Root.pRootParameters[J];
+      if (Parameter.ParameterType == Other.ParameterType &&
+          Parameter.Descriptor.RegisterSpace ==
+              Other.Descriptor.RegisterSpace &&
+          Parameter.Descriptor.ShaderRegister ==
+              Other.Descriptor.ShaderRegister)
+        return E_INVALIDARG;
+    }
+  }
+#endif
   return S_OK;
 }
 
 SIZE_T APIENTRY rootSize(D3D12DDI_HDEVICE Device,
                          const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
-  HRESULT Result = validateEmptyRoot(Args);
+  HRESULT Result = validateRoot(Args);
   if (FAILED(Result)) {
     reportError(Device, Result);
     return 0;
   }
-  return sizeof(EmptyRootSignature);
+  return sizeof(RootSignature);
 }
 
 HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
                             const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args,
                             D3D12DDI_HROOTSIGNATURE Root) {
-  HRESULT Result = validateEmptyRoot(Args);
+  HRESULT Result = validateRoot(Args);
   if (FAILED(Result))
     return Result;
   auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
   if (!Owner || !Root.pDrvPrivate)
     return E_INVALIDARG;
-  new (Root.pDrvPrivate)
-      EmptyRootSignature{Owner, Args->pRootSignature_1_1->Flags};
+  auto *State = new (Root.pDrvPrivate)
+      RootSignature{Owner, Args->pRootSignature_1_1->Flags};
+  State->Count = Args->pRootSignature_1_1->NumParameters;
+  for (UINT I = 0; I < State->Count; ++I) {
+    const auto &Parameter = Args->pRootSignature_1_1->pRootParameters[I];
+    State->Parameters[I] = {
+        Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_SRV ? 1u : 2u,
+        Parameter.Descriptor.RegisterSpace,
+        Parameter.Descriptor.ShaderRegister};
+  }
   ++Owner->LiveRootSignatures;
   return S_OK;
 }
@@ -241,12 +291,12 @@ HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
 void APIENTRY destroyRoot(D3D12DDI_HDEVICE Device,
                           D3D12DDI_HROOTSIGNATURE Root) {
   auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
-  auto *State = static_cast<EmptyRootSignature *>(Root.pDrvPrivate);
+  auto *State = static_cast<RootSignature *>(Root.pDrvPrivate);
   if (!Owner || !State || State->Owner != Owner) {
     reportError(Device, E_INVALIDARG);
     return;
   }
-  State->~EmptyRootSignature();
+  State->~RootSignature();
   --Owner->LiveRootSignatures;
 }
 
@@ -465,8 +515,7 @@ HRESULT pipelineDesc(D3D12DDI_HDEVICE Device,
       Args->SampleDesc.Quality || Args->ViewInstancingDesc.ViewInstanceCount ||
       Args->hElementLayout.pDrvPrivate)
     return E_NOTIMPL;
-  auto *Root =
-      static_cast<EmptyRootSignature *>(Args->hRootSignature.pDrvPrivate);
+  auto *Root = static_cast<RootSignature *>(Args->hRootSignature.pDrvPrivate);
   if (!Root || Root->Owner != Owner)
     return E_INVALIDARG;
   auto *ComputeShader =
@@ -624,13 +673,15 @@ struct CommandRecorder {
 };
 
 struct RecordedCommand {
-  enum class Kind { Dispatch, Copy } Type = Kind::Dispatch;
+  enum class Kind { Dispatch, Copy, Barrier } Type = Kind::Dispatch;
   RecordedCommand *Next = nullptr;
   void *Pipeline = nullptr;
   FeMeWarpDispatchDesc Dispatch;
+  std::array<FeMeWarpBufferBinding, MaxBufferRootParameters> Buffers{};
   D3D12DDIARG_BUFFER_PLACEMENT Destination{};
   D3D12DDIARG_BUFFER_PLACEMENT Source{};
   UINT64 Bytes = 0;
+  D3D12DDI_HRESOURCE BarrierResource{};
 
   ~RecordedCommand() {
     if (Pipeline)
@@ -646,6 +697,10 @@ struct CommandList {
   UINT64 Generation = 0;
   bool Open = false;
   void *Pipeline = nullptr;
+  const void *RootIdentity = nullptr;
+  UINT RootCount = 0;
+  std::array<BufferRootParameter, MaxBufferRootParameters> RootParameters{};
+  std::array<UINT64, MaxBufferRootParameters> RootAddresses{};
   UINT64 Marker = 0;
   RecordedCommand *First = nullptr;
   RecordedCommand *Last = nullptr;
@@ -913,6 +968,9 @@ void APIENTRY resetList(D3D12DDI_HCOMMANDLIST List,
   Recorder->InUse = true;
   ++State->Epoch->Recording;
   State->Open = true;
+  State->RootIdentity = nullptr;
+  State->RootCount = 0;
+  State->RootAddresses.fill(0);
 }
 
 void APIENTRY closeList(D3D12DDI_HCOMMANDLIST List) {
@@ -967,9 +1025,45 @@ void APIENTRY setComputeRoot(D3D12DDI_HCOMMANDLIST List,
   auto *State = recordingList(List);
   if (!State)
     return;
-  auto *Signature = static_cast<EmptyRootSignature *>(Root.pDrvPrivate);
-  if (Signature && Signature->Owner != State->Owner)
+  auto *Signature = static_cast<RootSignature *>(Root.pDrvPrivate);
+  if (Signature && Signature->Owner != State->Owner) {
     reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  if (State->RootIdentity == Signature)
+    return;
+  State->RootIdentity = Signature;
+  State->RootCount = Signature ? Signature->Count : 0;
+  if (Signature)
+    State->RootParameters = Signature->Parameters;
+  State->RootAddresses.fill(0);
+}
+
+void setRootBuffer(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT64 Address,
+                   UINT Namespace) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  void *Data = nullptr;
+  UINT64 Size = 0;
+  HRESULT Result = feme::probe::getWarpBufferAddress(
+      State->Owner, Address, Data, Size, Namespace == 2);
+  if (Index >= State->RootCount || Address % 16 ||
+      State->RootParameters[Index].Namespace != Namespace || FAILED(Result)) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  State->RootAddresses[Index] = Address;
+}
+
+void APIENTRY setRootUAV(D3D12DDI_HCOMMANDLIST List, UINT Index,
+                         D3D12DDI_GPU_VIRTUAL_ADDRESS Address) {
+  setRootBuffer(List, Index, Address, 2);
+}
+
+void APIENTRY setRootSRV(D3D12DDI_HCOMMANDLIST List, UINT Index,
+                         D3D12DDI_GPU_VIRTUAL_ADDRESS Address) {
+  setRootBuffer(List, Index, Address, 1);
 }
 
 void APIENTRY dispatch(D3D12DDI_HCOMMANDLIST List, UINT X, UINT Y, UINT Z) {
@@ -995,6 +1089,21 @@ void APIENTRY dispatch(D3D12DDI_HCOMMANDLIST List, UINT X, UINT Y, UINT Z) {
   Command->Dispatch.GroupCount[0] = X;
   Command->Dispatch.GroupCount[1] = Y;
   Command->Dispatch.GroupCount[2] = Z;
+  Command->Dispatch.BufferCount = State->RootCount;
+  Command->Dispatch.Buffers = Command->Buffers.data();
+  for (UINT I = 0; I < State->RootCount; ++I) {
+    auto &Buffer = Command->Buffers[I];
+    Result = feme::probe::getWarpBufferAddress(
+        State->Owner, State->RootAddresses[I], Buffer.Data, Buffer.SizeInBytes,
+        State->RootParameters[I].Namespace == 2);
+    if (FAILED(Result)) {
+      reportObjectError(List, Result);
+      return;
+    }
+    Buffer.Namespace = State->RootParameters[I].Namespace;
+    Buffer.Space = State->RootParameters[I].Space;
+    Buffer.Register = State->RootParameters[I].Register;
+  }
   State->append(Command.release());
 }
 
@@ -1028,14 +1137,66 @@ void APIENTRY copyBuffer(D3D12DDI_HCOMMANDLIST List,
   State->append(Command);
 }
 
+void APIENTRY
+resourceBarrier(D3D12DDI_HCOMMANDLIST List, UINT Count,
+                const D3D12DDIARG_RESOURCE_BARRIER_0022 *Barriers) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  if (Count && !Barriers) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  for (UINT I = 0; I < Count; ++I) {
+    const auto &Barrier = Barriers[I];
+    D3D12DDI_HRESOURCE Resource{};
+    if (Barrier.Flags != D3D12DDI_RESOURCE_BARRIER_FLAG_NONE) {
+      reportObjectError(List, E_NOTIMPL);
+      return;
+    }
+    if (Barrier.Type == D3D12DDI_RESOURCE_BARRIER_TYPE_TRANSITION) {
+      if (!Barrier.Transition.hResource.pDrvPrivate ||
+          (Barrier.Transition.Subresource != 0 &&
+           Barrier.Transition.Subresource !=
+               std::numeric_limits<UINT>::max())) {
+        reportObjectError(List, E_INVALIDARG);
+        return;
+      }
+      Resource = Barrier.Transition.hResource;
+    } else if (Barrier.Type == D3D12DDI_RESOURCE_BARRIER_TYPE_UAV)
+      Resource = Barrier.UAV.hResource;
+    else {
+      reportObjectError(List, E_NOTIMPL);
+      return;
+    }
+    void *Data = nullptr;
+    if (Resource.pDrvPrivate) {
+      HRESULT Result =
+          feme::probe::getWarpBufferRange(State->Owner, Resource, 0, 0, Data);
+      if (FAILED(Result)) {
+        reportObjectError(List, Result);
+        return;
+      }
+    }
+    auto *Command = new (std::nothrow) RecordedCommand;
+    if (!Command) {
+      reportObjectError(List, E_OUTOFMEMORY);
+      return;
+    }
+    Command->Type = RecordedCommand::Kind::Barrier;
+    Command->BarrierResource = Resource;
+    State->append(Command);
+  }
+}
+
 void APIENTRY setMarker(D3D12DDI_HCOMMANDLIST List, UINT64 Marker) {
   if (auto *State = recordingList(List))
     State->Marker = Marker;
 }
 
 void APIENTRY clearRootArguments(D3D12DDI_HCOMMANDLIST List) {
-  // Empty root signatures have no argument storage to clear.
-  recordingList(List);
+  if (auto *State = recordingList(List))
+    State->RootAddresses.fill(0);
 }
 
 // Direct-list initialization clears graphics bindings even for compute-only
@@ -1138,8 +1299,30 @@ void APIENTRY executeLists(D3D12DDI_HCOMMANDQUEUE Queue, UINT Count,
     for (auto *Command =
              static_cast<CommandList *>(Lists[I].pDrvPrivate)->First;
          Command && SUCCEEDED(Result); Command = Command->Next) {
+      if (Command->Type == RecordedCommand::Kind::Barrier) {
+        void *Data = nullptr;
+        if (Command->BarrierResource.pDrvPrivate)
+          Result = feme::probe::getWarpBufferRange(
+              State->Owner, Command->BarrierResource, 0, 0, Data);
+        if (SUCCEEDED(Result))
+          std::atomic_thread_fence(std::memory_order_seq_cst);
+        continue;
+      }
       if (Command->Type == RecordedCommand::Kind::Dispatch) {
-        Result = FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);
+        for (UINT J = 0; J < Command->Dispatch.BufferCount && SUCCEEDED(Result);
+             ++J) {
+          const auto &Buffer = Command->Buffers[J];
+          void *Data = nullptr;
+          UINT64 Size = 0;
+          Result = feme::probe::getWarpBufferAddress(
+              State->Owner, reinterpret_cast<UINT64>(Buffer.Data), Data, Size,
+              Buffer.Namespace == 2);
+          if (SUCCEEDED(Result) && Size != Buffer.SizeInBytes)
+            Result = E_INVALIDARG;
+        }
+        if (SUCCEEDED(Result))
+          Result =
+              FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);
         if (SUCCEEDED(Result))
           ++DispatchesExecuted;
         continue;
@@ -1298,8 +1481,11 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnResetCommandList = resetList;
     Table.pfnSetPipelineState = setPipeline;
     Table.pfnSetComputeRootSignature = setComputeRoot;
+    Table.pfnSetComputeRootUnorderedAccessView = setRootUAV;
+    Table.pfnSetComputeRootShaderResourceView = setRootSRV;
     Table.pfnDispatch = dispatch;
     Table.pfnCopyBufferRegion = copyBuffer;
+    Table.pfnResourceBarrier = resourceBarrier;
     Table.pfnSetMarker = setMarker;
     Table.pfnClearRootArguments = clearRootArguments;
     Table.pfnIaSetTopology = setTopology;

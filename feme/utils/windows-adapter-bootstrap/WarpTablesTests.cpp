@@ -88,11 +88,15 @@ int main() {
   RootArgs.Version = D3D12DDI_ROOT_SIGNATURE_VERSION_1_1;
   RootArgs.pRootSignature_1_1 = &RootDesc;
   RootArgs.NodeMask = 1;
-  alignas(MEMORY_ALLOCATION_ALIGNMENT) unsigned char RootStorage[64];
+  SIZE_T RootSize = Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs);
+  if (!RootSize)
+    return 1;
+  auto *RootStorage =
+      static_cast<unsigned char *>(HeapAlloc(GetProcessHeap(), 0, RootSize));
+  if (!RootStorage)
+    return 1;
   D3D12DDI_HROOTSIGNATURE Root{};
   Root.pDrvPrivate = RootStorage;
-  SIZE_T RootSize = Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs);
-  Valid &= RootSize > 0 && RootSize <= sizeof(RootStorage);
   Valid &= Core.pfnCreateRootSignature(Device, &RootArgs, Root) == S_OK &&
            State.LiveRootSignatures == 1;
   feme::probe::WarpDeviceState OtherState;
@@ -102,12 +106,13 @@ int main() {
   Valid &= State.LiveRootSignatures == 1;
   Core.pfnDestroyRootSignature(Device, Root);
   Valid &= State.LiveRootSignatures == 0;
-  std::memset(RootStorage, 0x5a, sizeof(RootStorage));
+  std::memset(RootStorage, 0x5a, RootSize);
   RootDesc.NumParameters = 1;
   Valid &= Core.pfnCreateRootSignature(Device, &RootArgs, Root) == E_NOTIMPL &&
            State.LiveRootSignatures == 0;
-  for (unsigned char Byte : RootStorage)
-    Valid &= Byte == 0x5a;
+  for (SIZE_T I = 0; I < RootSize; ++I)
+    Valid &= RootStorage[I] == 0x5a;
+  Valid &= HeapFree(GetProcessHeap(), 0, RootStorage) != FALSE;
 
   D3D12DDIARG_CREATE_SHADER_0026 ShaderArgs{};
   D3D12DDI_HSHADER Shader{};

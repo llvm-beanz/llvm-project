@@ -277,6 +277,26 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Good &= LastError == E_INVALIDARG && Owner.LiveCommandPools == 1;
   Core.pfnDestroyCommandPool(Device, Pool);
   Good &= Owner.LiveCommandPools == 0;
+  D3D12DDI_ROOT_PARAMETER_0013 Parameters[2] = {};
+  for (auto &Parameter : Parameters) {
+    Parameter.ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_UAV;
+    Parameter.ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_ALL;
+    Parameter.Descriptor.ShaderRegister = 3;
+  }
+  RootDesc.NumParameters = 33;
+  RootDesc.pRootParameters = Parameters;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
+  RootDesc.NumParameters = 2;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
+  Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_SRV;
+  Storage BufferRootStorage(
+      Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs));
+  D3D12DDI_HROOTSIGNATURE BufferRoot{BufferRootStorage.data()};
+  Good &= Core.pfnCreateRootSignature(Device, &RootArgs, BufferRoot) == S_OK;
+  Core.pfnDestroyRootSignature(OtherDevice, BufferRoot);
+  Good &= LastError == E_INVALIDARG && Owner.LiveRootSignatures == 1;
+  Core.pfnDestroyRootSignature(Device, BufferRoot);
+  Good &= Owner.LiveRootSignatures == 0;
   std::puts(Good ? "compiled DDI ownership PASS"
                  : "compiled DDI ownership FAIL");
   return Good;
