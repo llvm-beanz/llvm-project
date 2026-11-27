@@ -11,6 +11,7 @@
 #include "feme/Direct3D/CapabilityInventory.h"
 #include "feme/Direct3D/ComputePlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
+#include "feme/Direct3D/DrawPlan.h"
 #include "feme/Direct3D/ExecutionPlan.h"
 #include "feme/Direct3D/ObjectModel.h"
 #include "feme/Direct3D/PipelinePlan.h"
@@ -538,6 +539,40 @@ TEST(ResidencyPlanTest, EnforcesResidencyBudgetAndCount) {
   EXPECT_FALSE(static_cast<bool>(Err));
   if (Err)
     llvm::consumeError(std::move(Err));
+}
+
+TEST(DrawPlanTest, AcceptsIndexedAndInstancedDraw) {
+  DrawPlan Indexed{0, 0, 4, 2, true, 12, 3, -4, 1024, 20, false};
+  llvm::Error Err = validateDrawPlan(Indexed);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+
+  DrawPlan NonIndexed{36, 10, 3, 1, false, 0, 0, 0, UINT64_MAX, 0, true};
+  Err = validateDrawPlan(NonIndexed);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(DrawPlanTest, RejectsEmptyAndOverflowingDraws) {
+  DrawPlan Empty{0, 0, 1, 0, false, 0, 0, 0, UINT64_MAX, 0, false};
+  llvm::Error Err = validateDrawPlan(Empty);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  DrawPlan Overflow{0, UINT32_MAX, 1, 0, false, 0, 0, 0, UINT64_MAX, 0, false};
+  Overflow.VertexCount = 2;
+  Err = validateDrawPlan(Overflow);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(DrawPlanTest, RequiresPositiveIndirectArgumentSize) {
+  DrawPlan Plan{36, 0, 1, 0, false, 0, 0, 0, 128, 0, false};
+  llvm::Error Err = validateDrawPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
 }
 
 } // namespace
