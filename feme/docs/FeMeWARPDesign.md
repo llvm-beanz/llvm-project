@@ -61,9 +61,10 @@ Direct3D mapping and Windows deployment.
 
 ### Implementation baseline (2026-11-05)
 
-The local Direct3D source evaluation and the executable sequencing plan are
-recorded in [WARPRoadmap.md](WARPRoadmap.md). That roadmap refines W0-W7
-below; it does not mark any Direct3D implementation milestone complete.
+The local Direct3D source evaluation and concise W0-W7 status are recorded in
+[WARPRoadmap.md](WARPRoadmap.md); detailed progress and evidence are in
+[WARPImplementationLog.md](WARPImplementationLog.md). No Direct3D
+implementation milestone is complete.
 The original compute-only baseline is no longer current:
 
 - `feme::cpu::CompiledStage` supports compute, vertex, fragment, hull,
@@ -1603,9 +1604,11 @@ identity matching, and an option to disable loading it entirely.
 
 ## Implementation Milestones
 
-[WARPRoadmap.md](WARPRoadmap.md) is the dependency and acceptance checklist
-for these product milestones. Items below that already exist in the shared
-core require reuse and Direct3D validation, not a second implementation.
+[WARPRoadmap.md](WARPRoadmap.md) summarizes status, dependencies, and exit
+criteria for these product milestones; detailed implementation evidence is in
+[WARPImplementationLog.md](WARPImplementationLog.md). Items below that
+already exist in the shared core require reuse and Direct3D validation, not a
+second implementation.
 
 ### W0: Integration feasibility prototype
 

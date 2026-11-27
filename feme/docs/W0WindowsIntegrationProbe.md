@@ -18,9 +18,11 @@ The [VM paging-queue follow-up](#w0g-public-kernel-paging-queue-lifecycle-vm)
 now demonstrates a public kernel-service callback create/destroy round trip;
 it still creates no working D3D12 device or buffer/texture allocation.
 
-This report preserves historical host/container evidence for
-[WARPRoadmap.md](WARPRoadmap.md), collected on 2026-11-06. Development and
-validation now continue in a full-featured Windows VM, per the
+This report preserves historical host/container evidence summarized in
+[WARPRoadmap.md](WARPRoadmap.md) and detailed in
+[WARPImplementationLog.md](WARPImplementationLog.md), collected on
+2026-11-06. Development and validation now continue in a full-featured
+Windows VM, per the
 2026-11-17 workflow change. The user selected stock-runtime
 user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 [standalone probe](../utils/windows-adapter-probe/CMakeLists.txt) uses public

@@ -1642,8 +1642,10 @@ being about versions two releases old.
 ### 1.10 Direct3D software adapter
 
 Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md), with the source-based
-implementation checklist in [WARPRoadmap.md](WARPRoadmap.md). No Direct3D
-frontend exists; the shared CPU/image/raster/tessellation/mesh machinery does.
+status and dependencies in [WARPRoadmap.md](WARPRoadmap.md), and detailed
+implementation evidence in [WARPImplementationLog.md](WARPImplementationLog.md).
+No Direct3D frontend exists; the shared CPU/image/raster/tessellation/mesh
+machinery does.
 
 | Gap | Owner section | Priority |
 |---|---|---|
@@ -2605,7 +2607,7 @@ the first shader-facing milestone rather than alongside it.
    waves, guards and repeats. Counts describe CPU storage, not D3D12
    MSAA-quality/support; MS images retain one mip. See
    [the runner schema](CommandGuide/feme-run.md) and
-   [the WARP progress evidence](WARPRoadmap.md).
+   [the WARP implementation log](WARPImplementationLog.md).
    Runner mip-chain follow-up (2026-11-24): non-MS images also accept
    `mip-levels`, default 1, in [1, 32], with checked mip-major storage.
    Spatial extents and 3D depth halve/clamp; physical array/cube layers
@@ -3189,7 +3191,8 @@ the first shader-facing milestone rather than alongside it.
    forward fixture passes separately in 0.98 seconds and 19 dimension
    units in 4.974 seconds. No production/ABI/advertisement changes,
    full-suite/Vulkan/CTS result or owned-device/W2/W3 closure is claimed.
-   See [WARPRoadmap.md](WARPRoadmap.md) for measured scope and remaining work.
+   See [WARPImplementationLog.md](WARPImplementationLog.md) for measured
+   scope and remaining work.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
    dispatches a compute shader. It is specified in Design.md's "Testing
@@ -3382,9 +3385,9 @@ and with §3.2 once their prerequisites land.
 | W7 | Exact-profile runtime conformance, applicable HLK and project evidence; qualification/signing recorded separately | W0–W5, W6 presentation and any selected optional profiles |
 
 WS0–WS3 and the single-letter W-step breakdowns are defined in
-[WARPRoadmap.md](WARPRoadmap.md). These rows now match FeMeWARPDesign's
-W0–W7 meanings; the older texture/basic-graphics split was inconsistent with
-that design and omitted W7.
+[WARPImplementationLog.md](WARPImplementationLog.md). These rows now match
+FeMeWARPDesign's W0–W7 meanings; the older texture/basic-graphics split was
+inconsistent with that design and omitted W7.
 
 The Vulkan conformance steps C1–C10 (§1.9.1) are not a milestone row in
 this table. They cut across V4–V7 rather than following them, they are
