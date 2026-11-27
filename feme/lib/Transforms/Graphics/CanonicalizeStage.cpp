@@ -157,7 +157,10 @@ bool canonicalizeDXILStage(Function &F, const EntrySignature &Sig) {
     IRBuilder<> B(&CI);
     Value *Row = toI32(B, CI.getArgOperand(2));
     Value *Col = toI32(B, CI.getArgOperand(3));
-    Value *Vertex = toI32(B, CI.getArgOperand(4));
+    // DXIL leaves this ignored VS/PS operand undefined; our stage ABI uses 0.
+    Value *Vertex = isa<UndefValue>(CI.getArgOperand(4))
+                        ? B.getInt32(0)
+                        : toI32(B, CI.getArgOperand(4));
     CallInst *New = createStageInputLoad(B, CI.getType(), *ElementID, Row, Col,
                                          Vertex, CI.getName());
     CI.replaceAllUsesWith(New);

@@ -26,6 +26,12 @@ define void @main() {
   ; CHECK: [[V:%.*]] = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
   %v = call float @dx.op.loadInput.f32(i32 4, i32 0, i32 0, i8 2, i32 0)
 
+  ; The ignored DXIL VS/PS vertex index is commonly undef in raw DXBC imports.
+  ; CHECK: call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+  %undefined = call float @dx.op.loadInput.f32(i32 4, i32 0, i32 0, i8 1, i32 undef)
+  ; CHECK: call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+  %poison = call float @dx.op.loadInput.f32(i32 4, i32 0, i32 0, i8 0, i32 poison)
+
   ; CHECK: call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float [[V]], i32 0)
   call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %v)
 
