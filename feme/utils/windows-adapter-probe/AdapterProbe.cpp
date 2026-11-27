@@ -12,9 +12,12 @@
 #include "ComputeShaderValidation.h"
 #include "PartialWaveValidation.h"
 
-#include <d3d12.h>
-#include <dxgi1_6.h>
 #include <windows.h>
+#include <winternl.h>
+
+#include <d3d12.h>
+#include <d3d12umddi.h>
+#include <dxgi1_6.h>
 #include <wrl/client.h>
 
 #include <cstdio>
@@ -678,8 +681,9 @@ int wmain(int Argc, wchar_t **Argv) {
   using GetBootstrapCalls = void(APIENTRY *)(
       LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *, LONG *);
   using GetAuditCapacity = UINT32(APIENTRY *)();
-  using GetAudit = void(APIENTRY *)(LONG *, LONG *, UINT *, UINT *, LONG *,
-                                    LONG *, LONG *, LONG *, LONG *);
+  using GetAudit =
+      void(APIENTRY *)(LONG *, LONG *, UINT32 *, LONG *, UINT *, UINT *, LONG *,
+                       LONG *, LONG *, LONG *, LONG *);
   using GetCallbackProbe = void(APIENTRY *)(LONG *, LONG *, LONG *, DWORD *);
   using GetContractAudit =
       void(APIENTRY *)(feme::probe::BootstrapContractAudit *);
@@ -894,13 +898,16 @@ int wmain(int Argc, wchar_t **Argv) {
   if (ReadAudit) {
     UINT32 Capacity = ReadAuditCapacity();
     std::vector<LONG> CapsTypes(Capacity);
+    std::vector<UINT32> CapsDataSizes(Capacity);
+    std::vector<LONG> CapsResults(Capacity);
     LONG CapsTypeCount = 0;
     UINT CreateInterface = 0, CreateVersion = 0;
     LONG CreateHasKTCallbacks = 0, CreateHasUMCallbacks = 0;
     LONG CreateHasKTAllocateCb = 0, CreateHasKTDeallocateCb = 0,
          CreateHasUMSetErrorCb = 0;
-    ReadAudit(&CapsTypeCount, CapsTypes.data(), &CreateInterface,
-              &CreateVersion, &CreateHasKTCallbacks, &CreateHasUMCallbacks,
+    ReadAudit(&CapsTypeCount, CapsTypes.data(), CapsDataSizes.data(),
+              CapsResults.data(), &CreateInterface, &CreateVersion,
+              &CreateHasKTCallbacks, &CreateHasUMCallbacks,
               &CreateHasKTAllocateCb, &CreateHasKTDeallocateCb,
               &CreateHasUMSetErrorCb);
     std::wprintf(L"GetCaps Type values queried (%ld total):", CapsTypeCount);
@@ -912,6 +919,39 @@ int wmain(int Argc, wchar_t **Argv) {
     for (UINT32 I = 0; I < Logged; ++I)
       std::wprintf(L" %ld", CapsTypes[I]);
     std::wprintf(L"\n");
+    std::wprintf(L"GetCaps results:");
+    for (UINT32 I = 0; I < Logged; ++I)
+      std::wprintf(L" %ld:size=%u:hr=0x%08lx", CapsTypes[I], CapsDataSizes[I],
+                   static_cast<ULONG>(CapsResults[I]));
+    std::wprintf(L"\n");
+    if (ExpectWarpDeviceContext) {
+      bool SawOptions = false;
+      bool SawShader = false;
+      bool SawPipelineSupport = false;
+      bool CapsSucceeded = true;
+      for (UINT32 I = 0; I < Logged; ++I) {
+        switch (CapsTypes[I]) {
+        case D3D12DDICAPS_TYPE_D3D12_OPTIONS:
+          SawOptions = true;
+          CapsSucceeded &= CapsResults[I] == S_OK;
+          break;
+        case D3D12DDICAPS_TYPE_SHADER:
+          SawShader = true;
+          CapsSucceeded &= CapsResults[I] == S_OK;
+          break;
+        case D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1:
+          SawPipelineSupport = true;
+          CapsSucceeded &= CapsResults[I] == S_OK;
+          break;
+        default:
+          break;
+        }
+      }
+      if (!SawOptions || !SawShader || !SawPipelineSupport || !CapsSucceeded) {
+        report(L"Expected successful pre-device capability responses", E_FAIL);
+        ExpectedDDICalls = false;
+      }
+    }
     std::wprintf(L"CreateDevice args: Interface=%u Version=%u "
                  L"pKTCallbacks=%ls p12UMCallbacks=%ls\n",
                  CreateInterface, CreateVersion,

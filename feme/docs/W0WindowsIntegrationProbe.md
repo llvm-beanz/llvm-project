@@ -5486,15 +5486,30 @@ instead of being hardcoded. Both escape callbacks, paging-queue creation, and
 context creation return `S_OK`, but adding the version query does not move the
 runtime past the pre-table `DXGI_ERROR_DRIVER_INTERNAL_ERROR`.
 
+### W0(g) follow-up: KMD device initialization and cap negotiation
+
 This is not a successful D3D12 device and does not close W0. The probe now
 allocates and locks the 4096-byte DMA buffer through the runtime's D3D12
 core-layer callback, creates and destroys a monitored fence, and sends the
 WARP `InitDevice` escape; all these operations and their teardown return
 `S_OK`. It also answers the observed D3D12-options query with baseline tiers
 and the shader-caps query with no optional caps. The direct harness observes
-caps 1074, 1006, and 1004, but still returns
+caps 1074, 1006, 1004, and 1012, but still returns
 `DXGI_ERROR_DRIVER_INTERNAL_ERROR` after `CreateDevice` and before
 `FillDDITable`. The probe demonstrates an internal DMA-allocation and KMD
 object lifecycle only—not an application-owned D3D12 resource, residency,
-mapping, command execution, or usable device. The reason for the post-create
-runtime rejection remains unknown.
+mapping, command execution, or usable device.
+
+A native ARM64 CDB run localized the earlier failure to
+`VersionedDeviceData::GetShaderCaps`: zero wave-lane limits are invalid even
+when `WaveOps` is false. The probe now provides valid four-lane limits while
+keeping optional shader features disabled. The direct regression covers
+modern and legacy shader-cap layouts, rejects truncated/null outputs, and
+checks the output boundary. All 58 standalone bootstrap tests and 31
+OS-routing tests pass with assertions, object caching, and PCH disabled.
+
+The next observed failure is `VersionedDeviceData::GetD3D12ShaderModel`.
+Cap type 1012 (`D3D12DDICAPS_TYPE_0011_SHADER_MODELS`, 16-byte query) returns
+`E_NOTIMPL`; the pipeline, options, and shader-cap queries return `S_OK`
+with data sizes 8, 92, and 44 bytes respectively. DDI tables are still not
+loaded, so W0 remains open.

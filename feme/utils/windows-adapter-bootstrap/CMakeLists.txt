@@ -26,6 +26,9 @@ include(../windows-probe-tests/WindowsProbeTests.cmake)
 feme_initialize_probe_tests()
 feme_add_probe_test(NAME direct-openadapter12 COMMAND feme-windows-adapter-direct-harness
   $<TARGET_FILE:feme-adapter-bootstrap-stub>)
+feme_add_probe_test(NAME shader-capability-contract
+  COMMAND feme-windows-adapter-direct-harness
+    $<TARGET_FILE:feme-adapter-bootstrap-stub> --shader-caps)
 
 if(MSVC)
   add_executable(feme-monitored-fence-tests BootstrapStub.cpp MonitoredFenceTests.cpp)

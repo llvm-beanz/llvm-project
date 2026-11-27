@@ -95,6 +95,8 @@ HANDLE GWarpRuntimeAdapter = nullptr;
 // implement any capability or device contract.
 constexpr UINT32 MaxCapsTypeLog = 32;
 LONG GCapsTypeLog[MaxCapsTypeLog] = {};
+UINT32 GCapsDataSizeLog[MaxCapsTypeLog] = {};
+LONG GCapsResultLog[MaxCapsTypeLog] = {};
 LONG GCapsTypeLogCount = 0; // Total GetCaps calls observed, unclamped.
 
 struct CreateDeviceAudit {
@@ -1201,9 +1203,16 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
   LONG Index = InterlockedIncrement(&GCapsTypeLogCount) - 1;
   if (Args && Index >= 0 && static_cast<UINT32>(Index) < MaxCapsTypeLog)
     GCapsTypeLog[Index] = static_cast<LONG>(Args->Type);
+  auto RecordResult = [Index, Args](HRESULT Result) {
+    if (Index >= 0 && static_cast<UINT32>(Index) < MaxCapsTypeLog) {
+      GCapsDataSizeLog[Index] = Args ? Args->DataSize : 0;
+      GCapsResultLog[Index] = Result;
+    }
+    return Result;
+  };
 
   if (!Args)
-    return E_NOTIMPL;
+    return RecordResult(E_NOTIMPL);
 
   // Keep the observed pre-device capability queries to baseline values so the
   // probe can determine whether the runtime proceeds to the next DDI stage.
@@ -1219,12 +1228,31 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
     Options->CrossNodeSharingTier =
         D3D12DDI_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED;
     Options->ResourceHeapTier = D3D12DDI_RESOURCE_HEAP_TIER_1;
-    return S_OK;
+    return RecordResult(S_OK);
   }
-  if (Args->Type == D3D12DDICAPS_TYPE_SHADER && Args->pData &&
-      Args->DataSize >= sizeof(D3D12DDI_SHADER_CAPS_0003)) {
+  if (Args->Type == D3D12DDICAPS_TYPE_SHADER) {
+    if (!Args->pData)
+      return RecordResult(E_INVALIDARG);
+    switch (Args->DataSize) {
+    case sizeof(D3D12DDI_SHADER_CAPS_0003):
+    case sizeof(D3D12DDI_SHADER_CAPS_0012):
+    case sizeof(D3D12DDI_SHADER_CAPS_0015):
+    case sizeof(D3D12DDI_SHADER_CAPS_0042):
+    case sizeof(D3D12DDI_SHADER_CAPS_0082):
+    case sizeof(D3D12DDI_SHADER_CAPS_0084):
+      break;
+    default:
+      return RecordResult(E_INVALIDARG);
+    }
     std::memset(Args->pData, 0, Args->DataSize);
-    return S_OK;
+    if (Args->DataSize >= sizeof(D3D12DDI_SHADER_CAPS_0012)) {
+      // The runtime validates lane limits even with WaveOps disabled.
+      auto *Shader = static_cast<D3D12DDI_SHADER_CAPS_0012 *>(Args->pData);
+      Shader->WaveLaneCountMin = 4;
+      Shader->WaveLaneCountMax = 4;
+      Shader->TotalLaneCount = 4;
+    }
+    return RecordResult(S_OK);
   }
   if (Args->Type == D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 && Args->pData &&
       Args->DataSize >= sizeof(D3D12DDI_3DPIPELINESUPPORT1_DATA_0081)) {
@@ -1235,7 +1263,7 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
                 D3D12DDI_3DPIPELINELEVEL_11_0
             ? Data->HighestRuntimeSupportedFeatureLevel
             : D3D12DDI_3DPIPELINELEVEL_11_0;
-    return S_OK;
+    return RecordResult(S_OK);
   }
   if (Args->Type == D3D12DDICAPS_TYPE_3DPIPELINESUPPORT && Args->pData &&
       Args->DataSize >= sizeof(D3D12DDI_3DPIPELINELEVEL)) {
@@ -1243,12 +1271,12 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
     // support for higher feature levels or a complete device implementation.
     *static_cast<D3D12DDI_3DPIPELINELEVEL *>(Args->pData) =
         D3D12DDI_3DPIPELINELEVEL_11_0;
-    return S_OK;
+    return RecordResult(S_OK);
   }
 
   // No capability data is fabricated for any other cap; this remains an
   // audit, not a device.
-  return E_NOTIMPL;
+  return RecordResult(E_NOTIMPL);
 }
 
 HRESULT APIENTRY getOptionalDDITables(D3D12DDI_HADAPTER, UINT32 *EntryCount,
@@ -1410,6 +1438,8 @@ FeMeBootstrapGetWarpDeviceContextProbe(
 
 extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(
     LONG *CapsTypeCount, LONG CapsTypes[/* FeMeBootstrapGetAuditCapacity() */],
+    UINT32 CapsDataSizes[/* FeMeBootstrapGetAuditCapacity() */],
+    LONG CapsResults[/* FeMeBootstrapGetAuditCapacity() */],
     UINT *CreateDeviceInterface, UINT *CreateDeviceVersion,
     LONG *CreateDeviceHasKTCallbacks, LONG *CreateDeviceHasUMCallbacks,
     LONG *CreateDeviceHasKTAllocateCb, LONG *CreateDeviceHasKTDeallocateCb,
@@ -1422,6 +1452,10 @@ extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(
                     : MaxCapsTypeLog;
   for (UINT32 I = 0; I < Fill; ++I)
     CapsTypes[I] = GCapsTypeLog[I];
+  for (UINT32 I = 0; I < Fill; ++I) {
+    CapsDataSizes[I] = GCapsDataSizeLog[I];
+    CapsResults[I] = GCapsResultLog[I];
+  }
   *CreateDeviceInterface = GCreateDeviceAudit.Interface;
   *CreateDeviceVersion = GCreateDeviceAudit.Version;
   *CreateDeviceHasKTCallbacks =

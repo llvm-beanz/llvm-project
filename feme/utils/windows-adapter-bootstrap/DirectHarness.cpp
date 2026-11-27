@@ -31,21 +31,66 @@
 #include <dxgi.h>
 
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 
 namespace {
 HRESULT report(const wchar_t *Operation, HRESULT Result) {
-  std::wprintf(L"%ls: 0x%08lx\n", Operation, static_cast<unsigned long>(Result));
+  std::wprintf(L"%ls: 0x%08lx\n", Operation,
+               static_cast<unsigned long>(Result));
   return Result;
 }
 
 using GetCallsFn = void(APIENTRY *)(LONG *, LONG *, LONG *, LONG *, LONG *,
-                                     LONG *, LONG *, LONG *, LONG *);
+                                    LONG *, LONG *, LONG *, LONG *);
+
+bool checkShaderCaps(D3D12DDI_HADAPTER Adapter, PFND3D12DDI_GETCAPS GetCaps) {
+  struct {
+    D3D12DDI_SHADER_CAPS_0042 Caps;
+    UINT32 Guard;
+  } Data{};
+  Data.Guard = 0x12345678;
+  Data.Caps.WaveOps = TRUE;
+  D3D12DDIARG_GETCAPS Args{};
+  Args.Type = D3D12DDICAPS_TYPE_SHADER;
+  Args.pData = &Data.Caps;
+  Args.DataSize = sizeof(Data.Caps);
+  HRESULT Result = report(L"Modern shader caps", GetCaps(Adapter, &Args));
+  bool Valid = Result == S_OK && !Data.Caps.WaveOps &&
+               Data.Caps.WaveLaneCountMin >= 4 &&
+               Data.Caps.WaveLaneCountMin <= Data.Caps.WaveLaneCountMax &&
+               Data.Caps.TotalLaneCount >= Data.Caps.WaveLaneCountMax &&
+               Data.Guard == 0x12345678;
+
+  D3D12DDI_SHADER_CAPS_0003 Legacy{};
+  Legacy.Doubles = TRUE;
+  Args.pData = &Legacy;
+  Args.DataSize = sizeof(Legacy);
+  Result = report(L"Legacy shader caps", GetCaps(Adapter, &Args));
+  Valid &= Result == S_OK && !Legacy.Doubles;
+
+  const auto Original = Data;
+  Args.pData = &Data.Caps;
+  Args.DataSize = sizeof(Data.Caps) - 1;
+  Result = report(L"Truncated shader caps", GetCaps(Adapter, &Args));
+  Valid &= Result == E_INVALIDARG &&
+           std::memcmp(&Data, &Original, sizeof(Data)) == 0;
+
+  Args.pData = nullptr;
+  Args.DataSize = sizeof(Data.Caps);
+  Result = report(L"Missing shader caps output", GetCaps(Adapter, &Args));
+  Valid &= Result == E_INVALIDARG;
+  if (!Valid)
+    report(L"Shader capability contract mismatch", E_FAIL);
+  return Valid;
+}
 } // namespace
 
 int wmain(int Argc, wchar_t **Argv) {
-  if (Argc != 2) {
-    std::fwprintf(stderr, L"Usage: %ls STUB_DLL_PATH\n", Argv[0]);
+  bool ShaderCaps = Argc == 3 && std::wcscmp(Argv[2], L"--shader-caps") == 0;
+  if (Argc != 2 && !ShaderCaps) {
+    std::fwprintf(stderr, L"Usage: %ls STUB_DLL_PATH [--shader-caps]\n",
+                  Argv[0]);
     return 1;
   }
   wchar_t FullPath[32768];
@@ -59,18 +104,18 @@ int wmain(int Argc, wchar_t **Argv) {
   }
   std::wprintf(L"Requested module: %ls\n", FullPath);
   HMODULE Module = LoadLibraryExW(FullPath, nullptr,
-                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                                       LOAD_LIBRARY_SEARCH_SYSTEM32);
+                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                      LOAD_LIBRARY_SEARCH_SYSTEM32);
   if (!Module) {
     report(L"LoadLibraryExW", HRESULT_FROM_WIN32(GetLastError()));
     return 1;
   }
 
   using OpenAdapter12Fn = HRESULT(APIENTRY *)(D3D12DDIARG_OPENADAPTER *);
-  auto OpenAdapter12 =
-      reinterpret_cast<OpenAdapter12Fn>(GetProcAddress(Module, "OpenAdapter12"));
-  auto ReadCalls =
-      reinterpret_cast<GetCallsFn>(GetProcAddress(Module, "FeMeBootstrapGetCalls"));
+  auto OpenAdapter12 = reinterpret_cast<OpenAdapter12Fn>(
+      GetProcAddress(Module, "OpenAdapter12"));
+  auto ReadCalls = reinterpret_cast<GetCallsFn>(
+      GetProcAddress(Module, "FeMeBootstrapGetCalls"));
   if (!OpenAdapter12 || !ReadCalls) {
     report(L"GetProcAddress", HRESULT_FROM_WIN32(GetLastError()));
     FreeLibrary(Module);
@@ -88,14 +133,23 @@ int wmain(int Argc, wchar_t **Argv) {
 
   HRESULT Result = report(L"OpenAdapter12", OpenAdapter12(&OpenArgs));
   bool TableFilled = Funcs.pfnCalcPrivateDeviceSize && Funcs.pfnCreateDevice &&
-                      Funcs.pfnCloseAdapter && Funcs.pfnGetSupportedVersions &&
-                      Funcs.pfnGetCaps && Funcs.pfnGetOptionalDDITables &&
-                      Funcs.pfnFillDDITable && Funcs.pfnDestroyDevice;
+                     Funcs.pfnCloseAdapter && Funcs.pfnGetSupportedVersions &&
+                     Funcs.pfnGetCaps && Funcs.pfnGetOptionalDDITables &&
+                     Funcs.pfnFillDDITable && Funcs.pfnDestroyDevice;
   std::wprintf(L"Adapter function table filled: %ls\n",
                TableFilled ? L"yes" : L"no");
   if (FAILED(Result) || !TableFilled) {
     FreeLibrary(Module);
     return 1;
+  }
+  if (ShaderCaps) {
+    bool Valid = checkShaderCaps(OpenArgs.hAdapter, Funcs.pfnGetCaps);
+    Result =
+        report(L"pfnCloseAdapter", Funcs.pfnCloseAdapter(OpenArgs.hAdapter));
+    bool Released = FreeLibrary(Module) != FALSE;
+    if (!Released)
+      report(L"FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
+    return Valid && SUCCEEDED(Result) && Released ? 0 : 1;
   }
 
   UINT32 VersionCount = 0;
@@ -119,8 +173,9 @@ int wmain(int Argc, wchar_t **Argv) {
       Funcs.pfnGetOptionalDDITables(OpenArgs.hAdapter, &TableCount, nullptr));
 
   D3D12DDIARG_CREATEDEVICE_0003 DeviceArgs{};
-  HRESULT CreateResult = report(
-      L"pfnCreateDevice", Funcs.pfnCreateDevice(OpenArgs.hAdapter, &DeviceArgs));
+  HRESULT CreateResult =
+      report(L"pfnCreateDevice",
+             Funcs.pfnCreateDevice(OpenArgs.hAdapter, &DeviceArgs));
 
   HRESULT CloseResult =
       report(L"pfnCloseAdapter", Funcs.pfnCloseAdapter(OpenArgs.hAdapter));

@@ -312,13 +312,18 @@ returned 4096-byte DMA buffer through the D3D12 core-layer allocation callback,
 creates and destroys a monitored fence, and sends the `InitDevice` escape;
 each call and its teardown returns `S_OK`. It also answers the subsequently
 observed D3D12 options and shader caps with baseline/no-optional-feature
-values. The direct harness now observes cap types 1074, 1006, and 1004, but
+values. The direct harness now observes cap types 1074, 1006, 1004, and 1012, but
 still returns `DXGI_ERROR_DRIVER_INTERNAL_ERROR` after `CreateDevice` and
 before `FillDDITable`. The new `os-routed-warp-device-context` test verifies
 the KMD initialization/cleanup path and this remaining pre-table rejection.
 This advances private KMD and internal allocation lifetime evidence, not a
-D3D12 resource or usable device; the failure after `CreateDevice` remains the
-next bring-up boundary.
+D3D12 resource or usable device. A native debugger identified and verified the
+fix for invalid zero wave-lane limits in the shader-cap response, even with
+`WaveOps` disabled. Device creation now reaches shader-model enumeration
+(cap 1012), which returns `E_NOTIMPL`. Implementing that negotiation and the
+real DDI tables/resource lifecycle remain the bring-up boundary. The focused
+shader-contract regression and callback fixtures pass (58/58), as does the
+OS-routing suite (31/31); these are not a working-device claim.
 
 `W0(c)`'s test-corpus and compatibility-scope work is **complete**, recorded in
 [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md):
