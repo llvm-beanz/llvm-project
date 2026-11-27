@@ -9,6 +9,7 @@
 #include "feme/Direct3D/AdvancedGraphicsPlan.h"
 #include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/CapabilityInventory.h"
+#include "feme/Direct3D/ComputePlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/PipelinePlan.h"
 #include "feme/Direct3D/PresentationPlan.h"
@@ -352,6 +353,48 @@ TEST(CapabilityInventoryTest, AcceptsCompleteFL122Evidence) {
   EXPECT_FALSE(static_cast<bool>(Err));
   if (Err)
     llvm::consumeError(std::move(Err));
+}
+
+TEST(ComputePlanTest, AcceptsHeadlessComputeDispatch) {
+  DevicePlan Device;
+  Device.RequestedWaveSize = 8;
+  Device.RepeatDispatches = 3;
+  llvm::Error Err = validateDevicePlan(Device);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+
+  ComputeDispatchPlan Dispatch{{5, 3, 2}, {3, 2, 1}, 8, 2};
+  Err = validateComputeDispatchPlan(Dispatch);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  EXPECT_EQ(totalComputeThreads(Dispatch), std::optional<uint64_t>(360));
+  EXPECT_EQ(ceilComputeThreadsByWave(Dispatch), std::optional<uint64_t>(45));
+}
+
+TEST(ComputePlanTest, RejectsInvalidWaveAndGroupSizes) {
+  DevicePlan Device;
+  Device.RequestedWaveSize = 6;
+  llvm::Error Err = validateDevicePlan(Device);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  ComputeDispatchPlan Dispatch{{0, 3, 2}, {1, 1, 1}, 8, 1};
+  Err = validateComputeDispatchPlan(Dispatch);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ComputePlanTest, DetectsThreadTotalOverflow) {
+  ComputeDispatchPlan Dispatch{{UINT32_MAX, UINT32_MAX, UINT32_MAX},
+                               {UINT32_MAX, UINT32_MAX, UINT32_MAX},
+                               64,
+                               1};
+  llvm::Error Err = validateComputeDispatchPlan(Dispatch);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+  EXPECT_EQ(totalComputeThreads(Dispatch), std::nullopt);
 }
 
 } // namespace

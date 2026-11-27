@@ -3,6 +3,7 @@ add_feme_library(FeMeDirect3D
   RayTracingPlan.cpp
   PresentationPlan.cpp
   CapabilityInventory.cpp
+  ComputePlan.cpp
   BarrierPlan.cpp
   DescriptorHeap.cpp
   ResourcePlan.cpp
