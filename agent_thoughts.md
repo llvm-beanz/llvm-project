@@ -136880,3 +136880,34 @@ inputs or infer a private ABI requirement from the failed incomplete-table
 experiment. Next work must establish a public, valid device/resource contract
 and demonstrate creation, resource use, and teardown under the selected WARP
 identity; otherwise keep W0 explicitly open.
+
+# Session continuation: W0 scope closeout
+
+## What changed
+
+- Closed W0(c)'s test-corpus classification, redistribution review, mandatory
+  SM 5.1 input scope, and focused public-contract tests. Reclassified full
+  all-stage shader implementation as W1/W3/W4 work rather than leaving the
+  corpus-audit milestone open for downstream implementation.
+- Compared public WDK declarations for DDI 0070/0071/0072. They document the
+  Release 7 feature/build differences but do not explain why this runtime
+  rejects 0070/0071. The repeated runtime outcome is recorded as unresolved.
+- Marked owned-device, allocation-contract, and runner-provenance todos
+  blocked on the missing valid owned-device/resource path. The failed
+  incomplete-table experiment is not proof that public integration is
+  impossible and does not authorize private ABI use.
+
+## Commits and validation
+
+- `4c23547c9838`: close W0 corpus-scope documentation.
+- `git diff --check` passed; documentation changes require no build.
+- The last code validation remains the native ARM64 six-version DDI matrix:
+  28/28 LIT tests passed.
+
+## Remaining W0 gate
+
+W0 is still open pending a real owned D3D12 device and runtime-owned resource
+allocation/residency lifecycle. Do not fabricate allocation callback inputs.
+If the valid lifecycle requires a private WARP/KMD ABI, obtain separate
+explicit approval before investigating or using it. Complete the runner's
+FeMe build-provenance pairing only after a real device path exists.
