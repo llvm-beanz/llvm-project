@@ -12,6 +12,7 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
 #include "feme/Dialect/DXSA/IR/DXSA.h"
+#include "feme/Direct3D/ComputePlan.h"
 #include "feme/Graphics/Pipeline.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/DXSA/BinaryParser.h"
@@ -25,9 +26,14 @@
 #include "llvm/Support/VCSRevision.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cstring>
+#include <limits>
+#include <new>
+
 namespace {
 constexpr std::int32_t InvalidArgument = static_cast<std::int32_t>(0x80070057u);
 constexpr std::int32_t CompileFailure = static_cast<std::int32_t>(0x80004005u);
+constexpr std::int32_t OutOfMemory = static_cast<std::int32_t>(0x8007000eu);
 
 struct CompiledShader {
   std::shared_ptr<feme::cpu::CompiledStage> Stage;
@@ -188,4 +194,131 @@ std::int32_t FeMeWarpCreateComputePipeline(void *Shader, void **Pipeline) {
 
 void FeMeWarpDestroyComputePipeline(void *Pipeline) {
   delete static_cast<CompiledShader *>(Pipeline);
+}
+
+std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
+                                     const FeMeWarpDispatchDesc *Desc) {
+  if (!Pipeline || !Desc || Desc->Size != sizeof(*Desc) || Desc->Version != 1 ||
+      Desc->BufferCount > 64 || (Desc->BufferCount && !Desc->Buffers)) {
+    llvm::errs() << "FeMe WARP dispatch: invalid descriptor or ABI\n";
+    return InvalidArgument;
+  }
+  auto &Stage = *static_cast<CompiledShader *>(Pipeline)->Stage;
+  const auto &Info = Stage.getResourceInfo();
+  if (Stage.getStage() != feme::ShaderStage::Compute || Info.RootConstantSize ||
+      Info.UsesSamplerHeap || Info.ReservedImageHeapSize ||
+      Info.ReservedSamplerHeapSize) {
+    llvm::errs() << "FeMe WARP dispatch: unsupported stage or bindings\n";
+    return InvalidArgument;
+  }
+  feme::direct3d::ComputeDispatchPlan Plan;
+  Plan.GroupSize = Stage.getGroupSize();
+  Plan.GroupCount = {Desc->GroupCount[0], Desc->GroupCount[1],
+                     Desc->GroupCount[2]};
+  Plan.WaveSize = Stage.getWaveSize();
+  bool Empty = false;
+  for (auto Count : Plan.GroupCount) {
+    if (Count > 65535) {
+      llvm::errs() << "FeMe WARP dispatch: group count exceeds D3D12 limit\n";
+      return InvalidArgument;
+    }
+    Empty |= Count == 0;
+  }
+  if (!Empty)
+    if (auto Error = feme::direct3d::validateComputeDispatchPlan(Plan))
+      return report(std::move(Error));
+
+  std::array<feme::cpu::FemeDescriptor, 64> Descriptors{};
+  std::array<feme::cpu::BoundResourceBinding, 64> Bindings{};
+  for (std::uint32_t I = 0; I < Desc->BufferCount; ++I) {
+    const auto &Buffer = Desc->Buffers[I];
+    if (!Buffer.Data || !Buffer.SizeInBytes || Buffer.Kind > 1 ||
+        (Buffer.Namespace != 1 && Buffer.Namespace != 2) ||
+        (Buffer.Kind == 0 && Buffer.Stride) ||
+        (Buffer.Kind == 1 && (!Buffer.Stride || Buffer.Stride % 4 ||
+                              Buffer.SizeInBytes % Buffer.Stride))) {
+      llvm::errs() << "FeMe WARP dispatch: invalid buffer binding\n";
+      return InvalidArgument;
+    }
+    auto &Descriptor = Descriptors[I];
+    Descriptor.Data = Buffer.Data;
+    Descriptor.SizeInBytes = Buffer.SizeInBytes;
+    Descriptor.Kind = static_cast<std::uint32_t>(
+        Buffer.Kind ? feme::cpu::ResourceKind::Structured
+                    : feme::cpu::ResourceKind::Raw);
+    Descriptor.Stride = Buffer.Stride;
+    Descriptor.Flags =
+        Buffer.Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
+    Bindings[I] = {
+        Buffer.Space,
+        Buffer.Register,
+        {&Descriptor, 1},
+        static_cast<feme::cpu::BoundResourceNamespace>(Buffer.Namespace)};
+  }
+  llvm::ArrayRef<feme::cpu::BoundResourceBinding> Bound(Bindings.data(),
+                                                        Desc->BufferCount);
+  if (auto Error = feme::cpu::validateBoundResourceBindings(Info, Bound))
+    return report(std::move(Error));
+  for (const auto &Range : Info.BoundRanges) {
+    bool Found = false;
+    for (const auto &Binding : Bound)
+      Found |= Binding.Space == Range.Space &&
+               Binding.BaseRegister == Range.BaseRegister &&
+               Binding.Namespace == Range.Namespace;
+    if (Range.Class != feme::cpu::BoundResourceClass::Buffer ||
+        Range.RangeSize != 1 || !Found) {
+      llvm::errs() << "FeMe WARP dispatch: required buffer range not bound\n";
+      return InvalidArgument;
+    }
+  }
+  for (auto Index : Info.StaticHeapIndices)
+    if (Index >= Info.ReservedResourceHeapSize) {
+      llvm::errs()
+          << "FeMe WARP dispatch: dynamic descriptor heap unsupported\n";
+      return InvalidArgument;
+    }
+  if (Empty)
+    return 0;
+
+  const auto &Shared = Stage.GroupSharedReqs;
+  if (!Shared.Alignment || (Shared.Alignment & (Shared.Alignment - 1)) ||
+      Shared.Alignment > std::numeric_limits<std::size_t>::max() ||
+      Shared.Size >
+          std::numeric_limits<std::size_t>::max() - (Shared.Alignment - 1)) {
+    llvm::errs() << "FeMe WARP dispatch: invalid shared-memory extent\n";
+    return InvalidArgument;
+  }
+  std::size_t Bytes = static_cast<std::size_t>(Shared.Size);
+  std::size_t Space =
+      Bytes ? Bytes + static_cast<std::size_t>(Shared.Alignment - 1) : 0;
+  std::unique_ptr<std::uint8_t[]> Allocation;
+  void *Memory = nullptr;
+  if (Space) {
+    Allocation.reset(new (std::nothrow) std::uint8_t[Space]);
+    if (!Allocation) {
+      llvm::errs() << "FeMe WARP dispatch: shared-memory allocation failed\n";
+      return OutOfMemory;
+    }
+    Memory = Allocation.get();
+    if (!std::align(static_cast<std::size_t>(Shared.Alignment), Bytes, Memory,
+                    Space)) {
+      llvm::errs() << "FeMe WARP dispatch: shared-memory alignment failed\n";
+      return InvalidArgument;
+    }
+  }
+  feme::cpu::DispatchResources Resources;
+  Resources.BoundResources = Bound;
+  auto Prepared =
+      feme::cpu::PreparedDispatch::create(Info, Resources, Plan.GroupCount);
+  for (std::uint32_t Z = 0; Z < Plan.GroupCount[2]; ++Z)
+    for (std::uint32_t Y = 0; Y < Plan.GroupCount[1]; ++Y)
+      for (std::uint32_t X = 0; X < Plan.GroupCount[0]; ++X) {
+        if (Bytes)
+          std::memset(Memory, 0, Bytes);
+        if (auto Error =
+                Stage.invokeGroup(Prepared, {X, Y, Z},
+                                  {static_cast<std::uint8_t *>(Memory), Bytes}))
+          return report(std::move(Error));
+      }
+  return 0;
 }

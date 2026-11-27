@@ -6,7 +6,7 @@ add_feme_library(feme_warp_compiler SHARED PARTIAL_SOURCES_INTENDED
   WarpShaderCompiler.cpp
   LINK_LIBS PRIVATE
   FeMeCore FeMeTranslateDXSA FeMeTargetDXSA FeMeTargetCPU FeMeTransformsDXIL
-  FeMeGraphics)
+  FeMeGraphics FeMeDirect3D)
 target_compile_definitions(feme_warp_compiler PRIVATE FEME_WARP_COMPILER_EXPORTS)
 add_dependencies(feme_warp_compiler llvm_vcsrevision_h)
 

@@ -1,0 +1,35 @@
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// REQUIRES: feme-warp-compiler
+// RUN: dxbc-as %s -o %t.dxbc
+// RUN: feme-warp-compiler-test %t.dxbc --dispatch | FileCheck %s
+
+// Exchange the next local thread's global index through groupshared memory.
+// Six 30-thread groups exercise partial four-lane waves and a group barrier.
+cs_5_0
+dcl_uav_raw u0
+dcl_tgsm_raw g0, 120
+dcl_input vThreadID.xyz
+dcl_input vThreadIDInGroupFlattened
+dcl_temps 2
+dcl_thread_group 5, 3, 2
+imad r0.x, vThreadID.z, l(6), vThreadID.y
+imad r0.x, r0.x, l(15), vThreadID.x
+ishl r0.y, vThreadIDInGroupFlattened.x, l(2)
+store_raw g0.x, r0.y, r0.x
+sync_g_t
+iadd r1.x, vThreadIDInGroupFlattened.x, l(1)
+ult r1.y, r1.x, l(30)
+movc r1.x, r1.y, r1.x, l(0)
+ishl r1.x, r1.x, l(2)
+ld_raw_indexable(raw_buffer)(mixed,mixed,mixed,mixed) r1.x, r1.x, g0.xxxx
+ishl r0.x, r0.x, l(2)
+ld_raw_indexable(raw_buffer)(mixed,mixed,mixed,mixed) r0.y, r0.x, u0.xxxx
+iadd r1.x, r1.x, r0.y
+iadd r1.x, r1.x, l(23)
+store_raw u0.x, r0.x, r1.x
+ret
+
+// CHECK: native grouped dispatch and concurrent PSOs PASS

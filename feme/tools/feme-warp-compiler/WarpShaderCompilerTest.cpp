@@ -11,9 +11,65 @@
 
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens);
+
+static bool testDispatch(const std::vector<std::uint32_t> &Tokens) {
+  void *Shader = nullptr, *Pipeline = nullptr;
+  FeMeWarpCompiledShaderInfo Info;
+  if (FeMeWarpCompileRawDXBC(Tokens.data(),
+                             static_cast<std::uint32_t>(Tokens.size()), &Shader,
+                             &Info) ||
+      FeMeWarpCreateComputePipeline(Shader, &Pipeline))
+    return false;
+  FeMeWarpDestroyCompiledShader(Shader);
+  std::vector<std::uint32_t> Words(196, 0x5a5a5a5a);
+  for (unsigned I = 0; I != 180; ++I)
+    Words[I] = I;
+  FeMeWarpBufferBinding Buffer;
+  Buffer.Data = Words.data();
+  Buffer.SizeInBytes = 180 * sizeof(Words[0]);
+  FeMeWarpDispatchDesc Desc;
+  Desc.GroupCount[0] = 3;
+  Desc.GroupCount[1] = 2;
+  Desc.BufferCount = 1;
+  Desc.Buffers = &Buffer;
+  bool Good = true;
+  auto Bad = Desc;
+  Bad.Version = 2;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  Bad = Desc;
+  Bad.BufferCount = 0;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  Bad = Desc;
+  Bad.GroupCount[0] = 65536;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  Bad = Desc;
+  Bad.GroupCount[0] = 0;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) == 0;
+  for (unsigned I = 0; I != 180; ++I)
+    Good &= Words[I] == I;
+  for (unsigned Repeat = 1; Repeat != 4 && Good; ++Repeat) {
+    Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) == 0;
+    for (unsigned Z = 0; Z != 2; ++Z)
+      for (unsigned Y = 0; Y != 6; ++Y)
+        for (unsigned X = 0; X != 15; ++X) {
+          unsigned Index = (Z * 6 + Y) * 15 + X;
+          unsigned Local = (Z * 3 + Y % 3) * 5 + X % 5;
+          unsigned Peer = (Local + 1) % 30;
+          unsigned PeerIndex =
+              ((Peer / 15) * 6 + (Y / 3) * 3 + (Peer / 5) % 3) * 15 +
+              (X / 5) * 5 + Peer % 5;
+          Good &= Words[Index] == Index + Repeat * (PeerIndex + 23);
+        }
+    for (unsigned I = 180; I != Words.size(); ++I)
+      Good &= Words[I] == 0x5a5a5a5a;
+  }
+  FeMeWarpDestroyComputePipeline(Pipeline);
+  return Good;
+}
 
 int main(int Argc, char **Argv) {
   if (Argc < 2 || Argc > 3)
@@ -35,6 +91,17 @@ int main(int Argc, char **Argv) {
   }
   if (Argc == 3 && std::strcmp(Argv[2], "--ddi") == 0)
     return testWarpCompilerDDIs(Tokens) ? 0 : 1;
+  if (Argc == 3 && std::strcmp(Argv[2], "--dispatch") == 0) {
+    bool Good[2]{};
+    std::thread First([&] { Good[0] = testDispatch(Tokens); });
+    std::thread Second([&] { Good[1] = testDispatch(Tokens); });
+    First.join();
+    Second.join();
+    bool Passed = Good[0] && Good[1];
+    std::puts(Passed ? "native grouped dispatch and concurrent PSOs PASS"
+                     : "native grouped dispatch and concurrent PSOs FAIL");
+    return Passed ? 0 : 1;
+  }
   bool Reject = Argc == 3;
   if (Reject) {
     if (std::strcmp(Argv[2], "--bad-length") == 0)

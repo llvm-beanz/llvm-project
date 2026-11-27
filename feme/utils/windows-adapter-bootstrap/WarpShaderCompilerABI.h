@@ -40,6 +40,26 @@ struct FeMeWarpVertexPipelineDesc {
   std::uint32_t SampleMask = 0xffffffffu;
 };
 
+/// Borrowed buffer storage; namespace 1 is SRV and 2 is UAV.
+/// Kind 0 is raw and kind 1 is structured. Storage must outlive dispatch.
+struct FeMeWarpBufferBinding {
+  void *Data = nullptr;
+  std::uint64_t SizeInBytes = 0;
+  std::uint32_t Space = 0;
+  std::uint32_t Register = 0;
+  std::uint32_t Namespace = 2;
+  std::uint32_t Kind = 0;
+  std::uint32_t Stride = 0;
+};
+
+struct FeMeWarpDispatchDesc {
+  std::uint32_t Size = sizeof(FeMeWarpDispatchDesc);
+  std::uint32_t Version = 1;
+  std::uint32_t GroupCount[3] = {1, 1, 1};
+  std::uint32_t BufferCount = 0;
+  const FeMeWarpBufferBinding *Buffers = nullptr;
+};
+
 extern "C" {
 FEME_WARP_COMPILER_API const char *FeMeWarpCompilerRevision();
 FEME_WARP_COMPILER_API std::int32_t
@@ -54,6 +74,8 @@ FEME_WARP_COMPILER_API void FeMeWarpDestroyVertexPipeline(void *Pipeline);
 FEME_WARP_COMPILER_API std::int32_t
 FeMeWarpCreateComputePipeline(void *CompiledShader, void **Pipeline);
 FEME_WARP_COMPILER_API void FeMeWarpDestroyComputePipeline(void *Pipeline);
+FEME_WARP_COMPILER_API std::int32_t
+FeMeWarpDispatchCompute(void *Pipeline, const FeMeWarpDispatchDesc *Desc);
 }
 
 #undef FEME_WARP_COMPILER_API
