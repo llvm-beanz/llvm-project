@@ -5531,3 +5531,40 @@ The remaining bring-up boundary is implementing genuine device DDIs and an
 application-owned resource/allocation/residency/map lifecycle. Do not return
 success for an empty table or treat the internal DMA allocation as that
 resource evidence. W0 remains open.
+
+### W0(g) follow-up: 0070/0071 negotiation explained
+
+The narrow version rejection is resolved for the measured inbox runtime
+`10.0.26100.9818`. Public SDK constants do not imply that every intermediate
+DDI version is accepted by the runtime:
+
+| Public DDI | Interface | Build | Measured runtime map |
+|---|---|---|---|
+| 0070 | `0x000c0046` | 0 | Absent |
+| 0071 | `0x000c0046` | 1 | Absent |
+| 0072 | `0x000c0046` | 2 | Present |
+
+In the authorized Direct3D reference checkout at revision
+`919641c0bda611d47b1de0d40e6c0fe663b5fc41`,
+`src\Common\Inc\DDI12Traits.hpp:1715` defines the runtime version map and
+skips directly from 0065 to 0072. Its consumer,
+`src\D3DCore\LinkDLL\main.cpp:1167` (`FillAPIVersions`), constructs the
+runtime's candidate list from that map. Negotiation at `main.cpp:982`
+requires an exact interface/build match; it does not accept any version
+merely because its number lies between supported versions.
+
+A native ARM64 debugger confirmed the same gap in the installed runtime,
+not just in reference sources. Disambiguating the native
+`CCreateDeviceCache::FillAPIVersions` entry at module RVA `0x47760` identifies
+the map at RVA `0x4772d0`, with 32-byte entries. Reading all 79 entries
+(including the zero/none entry) shows R7 builds 2 through 6, but no build
+0 or 1. These RVAs are diagnostic evidence for this exact binary, not
+production ABI dependencies or portable debugger offsets. The public
+SDK 26100 definitions at `d3d12umddi.h:9009`, `:9172`, and `:9179` decode
+0070/0071/0072 to the tuples above.
+
+The OS-routed six-version matrix passes: 0070/0071 return
+`DXGI_ERROR_UNSUPPORTED` without size/create/table callbacks, while 0072
+reaches the owned device callback. This explains the observed rejection
+without private ordinal forwarding or a driver change. Other runtime
+versions still require their own negotiation evidence.
