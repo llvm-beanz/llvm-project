@@ -16,6 +16,7 @@
 #include "feme/Direct3D/PipelinePlan.h"
 #include "feme/Direct3D/PresentationPlan.h"
 #include "feme/Direct3D/RayTracingPlan.h"
+#include "feme/Direct3D/ResidencyPlan.h"
 #include "feme/Direct3D/ResourcePlan.h"
 
 #include "gtest/gtest.h"
@@ -491,6 +492,52 @@ TEST(ObjectModelTest, RejectsResetWithPendingWork) {
   Err = Model.reset(Allocator);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
+}
+
+TEST(ResidencyPlanTest, AcceptsAlignedHeapsAndPlacedResources) {
+  HeapPlan Heap{HeapKind::Upload, 65536, 65536, true};
+  llvm::Error Err = validateHeapPlan(Heap);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+
+  PlacedResourcePlan Placed{65536, 32768, 32768, 4096};
+  Err = validatePlacedResourcePlan(Placed);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(ResidencyPlanTest, RejectsMisalignedAndUnboundedHeaps) {
+  HeapPlan Heap{HeapKind::Default, 65537, 65536, false};
+  llvm::Error Err = validateHeapPlan(Heap);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Heap = HeapPlan{HeapKind::Readback, 65536, 65536, false};
+  Err = validateHeapPlan(Heap);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ResidencyPlanTest, RejectsPlacedResourceOutsideHeap) {
+  PlacedResourcePlan Placed{65536, 61440, 7000, 4096};
+  llvm::Error Err = validatePlacedResourcePlan(Placed);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ResidencyPlanTest, EnforcesResidencyBudgetAndCount) {
+  ResidencyPlan Plan{{4096, 8192, 16384}, 24576, 2};
+  llvm::Error Err = validateResidencyPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Plan = ResidencyPlan{{4096, 8192, 4096}, 32768, 3};
+  Err = validateResidencyPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
 }
 
 } // namespace
