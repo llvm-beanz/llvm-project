@@ -136926,3 +136926,19 @@ work must implement a valid context under the selected public contract, or
 stop at the boundary and seek separate explicit approval before any private
 WARP/KMD ABI investigation. Do not treat callback-pointer presence or the
 separate KMT control as owned resource evidence.
+
+# Session continuation: W0 gate status
+
+The concise roadmap now marks W0 **Blocked**, not merely in progress, because
+the public audit and corpus-scope work are complete but a valid owned graphics
+context/device and runtime-owned resource lifecycle are absent. Commit
+`b7ee05e4ec42` records the status. The exact 0070/0071 rejection reason also
+remains an unresolved compatibility question; it is separate from the
+verified supported-DDI versions.
+
+No code change or new runtime test was made in this turn. `git diff --check`
+passed. The last code validation remains the six-version native ARM64 DDI
+matrix (28/28 LIT tests). W0 remains open; do not imply closure or fabricate
+allocation inputs. Further work needs a valid public device-context contract,
+and any private WARP/KMD ABI investigation requires separate explicit
+approval.
