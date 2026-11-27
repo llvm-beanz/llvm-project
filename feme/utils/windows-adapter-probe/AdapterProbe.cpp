@@ -1179,6 +1179,9 @@ int wmain(int Argc, wchar_t **Argv) {
           L"CreateAttempted=%u ContextCreated=%u "
           L"CreateContextResult=0x%08lx CommandBufferAddress=0x%016llx "
           L"CommandBufferSize=%llu PrivateDataPointersIntact=%u "
+          L"InitContextEscapeAttempted=%u InitContextEscapeReturned=%u "
+          L"InitContextEscapeResult=0x%08lx KernelContextHandle=0x%016llx "
+          L"DmaBufferAddress=0x%016llx DmaBufferSize=%u "
           L"FillTableAttempted=%u FillTableType=%u FillTableSize=%llu "
           L"FillTableResult=0x%08lx PagingQueueDestroyAttempted=%u "
           L"PagingQueueDestroyReturned=%u "
@@ -1203,7 +1206,13 @@ int wmain(int Argc, wchar_t **Argv) {
           static_cast<unsigned long long>(DeviceProbe.CommandBufferAddress),
           static_cast<unsigned long long>(DeviceProbe.CommandBufferSize),
           unsigned(DeviceProbe.PrivateDataPointersIntact),
-          unsigned(DeviceProbe.FillTableAttempted), DeviceProbe.FillTableType,
+          unsigned(DeviceProbe.InitContextEscapeAttempted),
+          unsigned(DeviceProbe.InitContextEscapeReturned),
+          static_cast<unsigned long>(DeviceProbe.InitContextEscapeResult),
+          static_cast<unsigned long long>(DeviceProbe.KernelContextHandle),
+          static_cast<unsigned long long>(DeviceProbe.DmaBufferAddress),
+          DeviceProbe.DmaBufferSize, unsigned(DeviceProbe.FillTableAttempted),
+          DeviceProbe.FillTableType,
           static_cast<unsigned long long>(DeviceProbe.FillTableSize),
           static_cast<unsigned long>(DeviceProbe.FillTableResult),
           unsigned(DeviceProbe.PagingQueueDestroyAttempted),
@@ -1230,6 +1239,10 @@ int wmain(int Argc, wchar_t **Argv) {
            DeviceProbe.CreateContextResult != S_OK ||
            !DeviceProbe.CommandBufferSize ||
            !DeviceProbe.PrivateDataPointersIntact ||
+           !DeviceProbe.InitContextEscapeAttempted ||
+           !DeviceProbe.InitContextEscapeReturned ||
+           DeviceProbe.InitContextEscapeResult != S_OK ||
+           !DeviceProbe.KernelContextHandle || !DeviceProbe.DmaBufferSize ||
            DeviceProbe.FillTableAttempted ||
            !DeviceProbe.PagingQueueDestroyAttempted ||
            !DeviceProbe.PagingQueueDestroyReturned ||

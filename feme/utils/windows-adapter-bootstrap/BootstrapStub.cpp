@@ -167,6 +167,25 @@ struct WarpQueryPreferredGpuNode {
 
 static_assert(sizeof(WarpQueryPreferredGpuNode) == 4 * sizeof(UINT32));
 constexpr UINT32 WarpEscapeQueryPreferredGpuNode = 1;
+
+struct WarpInitContextVirtual2 {
+  UINT32 EscapeId;
+  union {
+    void *UMContext;
+    UINT64 KernelContextHandle;
+  };
+  void *CommandBuffer;
+  UINT32 CommandBufferSize;
+  UINT64 DmaBufferAddress;
+  UINT32 DmaBufferSize;
+};
+
+static_assert(offsetof(WarpInitContextVirtual2, UMContext) == 8);
+static_assert(offsetof(WarpInitContextVirtual2, CommandBuffer) == 16);
+static_assert(offsetof(WarpInitContextVirtual2, DmaBufferAddress) == 32);
+static_assert(offsetof(WarpInitContextVirtual2, DmaBufferSize) == 40);
+static_assert(sizeof(WarpInitContextVirtual2) == 48);
+constexpr UINT32 WarpEscapeInitContextVirtual2 = 7;
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_CONTEXT
@@ -229,6 +248,12 @@ HRESULT probeWarpContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+struct WarpUserModeContext {
+  UINT64 KernelContextHandle = 0;
+  void *CommandBuffer = nullptr;
+  UINT32 CommandBufferSize = 0;
+};
+
 struct WarpDeviceState {
   const D3DDDI_DEVICECALLBACKS *KTCallbacks = nullptr;
   HANDLE RTDevice = nullptr;
@@ -240,6 +265,7 @@ struct WarpDeviceState {
   HANDLE Context = nullptr;
   UINT64 CommandBufferAddress = 0;
   UINT64 CommandBufferSize = 0;
+  WarpUserModeContext UserModeContext;
 };
 
 static_assert(alignof(WarpDeviceState) <= MEMORY_ALLOCATION_ALIGNMENT);
@@ -393,6 +419,53 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
 
   Probe.CommandBufferAddress = State->CommandBufferAddress;
   Probe.CommandBufferSize = State->CommandBufferSize;
+  if (!State->CommandBufferAddress) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    return E_UNEXPECTED;
+  }
+  State->UserModeContext.CommandBuffer = reinterpret_cast<void *>(
+      static_cast<ULONG_PTR>(State->CommandBufferAddress));
+  State->UserModeContext.CommandBufferSize =
+      static_cast<UINT32>(State->CommandBufferSize);
+  WarpInitContextVirtual2 InitContext{};
+  InitContext.EscapeId = WarpEscapeInitContextVirtual2;
+  InitContext.UMContext = &State->UserModeContext;
+  InitContext.CommandBuffer = State->UserModeContext.CommandBuffer;
+  InitContext.CommandBufferSize = State->UserModeContext.CommandBufferSize;
+  D3DDDICB_ESCAPE InitContextEscape{};
+  InitContextEscape.hDevice = State->RTDevice;
+  InitContextEscape.hContext = State->Context;
+  InitContextEscape.pPrivateDriverData = &InitContext;
+  InitContextEscape.PrivateDriverDataSize = sizeof(InitContext);
+  Probe.InitContextEscapeAttempted = true;
+  bool InitContextEscapeReturned = false;
+  __try {
+    Probe.InitContextEscapeResult =
+        State->KTCallbacks->pfnEscapeCb(RTAdapter, &InitContextEscape);
+    InitContextEscapeReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+  }
+  Probe.InitContextEscapeReturned = InitContextEscapeReturned;
+  Probe.KernelContextHandle = InitContext.KernelContextHandle;
+  Probe.DmaBufferAddress = InitContext.DmaBufferAddress;
+  Probe.DmaBufferSize = InitContext.DmaBufferSize;
+  State->UserModeContext.KernelContextHandle = InitContext.KernelContextHandle;
+  if (!InitContextEscapeReturned) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    return E_FAIL;
+  }
+  if (FAILED(Probe.InitContextEscapeResult) || !Probe.DmaBufferSize) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    return FAILED(Probe.InitContextEscapeResult) ? Probe.InitContextEscapeResult
+                                                 : E_UNEXPECTED;
+  }
   return S_OK;
 }
 

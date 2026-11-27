@@ -79,6 +79,12 @@ struct WarpDeviceContextProbe {
   std::uint64_t CommandBufferAddress = 0;
   std::uint64_t CommandBufferSize = 0;
   bool PrivateDataPointersIntact = false;
+  bool InitContextEscapeAttempted = false;
+  bool InitContextEscapeReturned = false;
+  std::int32_t InitContextEscapeResult = 0;
+  std::uint64_t KernelContextHandle = 0;
+  std::uint64_t DmaBufferAddress = 0;
+  std::uint32_t DmaBufferSize = 0;
   bool FillTableAttempted = false;
   std::uint32_t FillTableType = 0;
   std::uint64_t FillTableSize = 0;

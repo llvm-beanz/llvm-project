@@ -5488,12 +5488,12 @@ runtime past the pre-table `DXGI_ERROR_DRIVER_INTERNAL_ERROR`.
 
 This is not a successful D3D12 device and does not close W0. In particular,
 `FillDDITable` remains uncalled, and no allocation, residency, mapping, or
-resource lifecycle has been demonstrated. Official WARP initializes its
-`UMContext` with an `InitContextVirtual2` escape, then performs an `InitDevice`
-escape after constructing the user-mode device/context. With this adapter's
-IOMMU capability bit set, WARP also initializes DMA memory and a monitored
-fence. This probe has no valid WARP `UMContext` or `UMDevice` objects to pass,
-so it deliberately does not fabricate those escape payloads. The next step is
-a valid user-mode device/context implementation, then measuring whether those
-required initialization calls advance the runtime. The current evidence does
-not establish why the runtime rejects the attempt.
+resource lifecycle has been demonstrated. The probe now creates a persistent
+user-mode context identity and sends WARP's `InitContextVirtual2` escape (ID 7)
+with the actual KMT context handle and command-buffer mapping. The KMD returns
+`S_OK`, a nonzero kernel-context handle, and a 4096-byte DMA-buffer size.
+However, the probe does not yet allocate/lock that DMA buffer, create the
+monitored fence, or send `InitDevice` with a fully initialized user-mode
+device. Those operations are still required by official WARP when the IOMMU
+capability is set. The current evidence does not establish why the runtime
+rejects the attempt.
