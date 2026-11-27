@@ -136821,3 +136821,28 @@ plan-only layer: callback-backed device/queue/heap/resource/fence/PSO objects,
 retained `CompiledStage`/`PreparedDispatch` dispatch, copy/readback, and
 off-screen triangle execution. Private ordinal forwarding or system-WARP
 replacement remains out of scope.
+
+# Session continuation: WARP roadmap and implementation log
+
+## Documentation change
+
+Split the verbose WARP roadmap into a concise `feme/docs/WARPRoadmap.md`
+status/dependency overview and `feme/docs/WARPImplementationLog.md` containing
+the prior detailed milestone breakdown and evidence. Updated the design and
+project roadmap references to point to the appropriate summary or log.
+
+The roadmap explicitly distinguishes the 65 passing portable plan tests,
+reference oracles, and integration audits from an owned D3D12 runtime. W0
+remains in progress; W1-W7 remain open.
+
+## Verification
+
+- Confirmed the implementation log preserves the full prior roadmap content
+  apart from the new title and introduction.
+- Checked local documentation links and ran `git diff --check`.
+- No code changed, so no build or runtime test was required.
+
+## Next steps
+
+Continue implementation at the owned D3D12 device/runtime boundary; do not
+count plan-library tests or reference execution as owned-device completion.
