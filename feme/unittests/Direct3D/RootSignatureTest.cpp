@@ -11,6 +11,7 @@
 #include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/CapabilityInventory.h"
 #include "feme/Direct3D/ComputePlan.h"
+#include "feme/Direct3D/ConformanceReport.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/DrawPlan.h"
 #include "feme/Direct3D/EnhancedBarrierPlan.h"
@@ -691,6 +692,30 @@ TEST(EnhancedBarrierPlanTest, RejectsEmptyRangeAndMissingSync) {
   Err = validateEnhancedBarrierPlan(Missing);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
+}
+
+TEST(ConformanceReportTest, AcceptsReadyAndRejectsPartialReports) {
+  ConformanceReport Ready{100, 100, 0, 0, 0, 0};
+  llvm::Error Err = validateConformanceReport(Ready);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  EXPECT_TRUE(isConformanceReleaseReady(Ready));
+
+  ConformanceReport Partial{100, 90, 2, 8, 0, 0};
+  Err = validateConformanceReport(Partial);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  EXPECT_FALSE(isConformanceReleaseReady(Partial));
+}
+
+TEST(ConformanceReportTest, RejectsClassifiedCountOverflow) {
+  ConformanceReport Report{10, 7, 2, 2, 0, 0};
+  llvm::Error Err = validateConformanceReport(Report);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+  EXPECT_FALSE(isConformanceReleaseReady(Report));
 }
 
 } // namespace
