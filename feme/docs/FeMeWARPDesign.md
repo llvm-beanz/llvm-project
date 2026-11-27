@@ -3,11 +3,11 @@
 ## Status
 
 The implementation now includes a portable, tested `FeMeDirect3D` plan library
-for W1-W7 state normalization. Its 62 unit cases validate root signatures,
+for W1-W7 state normalization. Its 65 unit cases validate root signatures,
 descriptor heaps, resource/subresource plans, barriers, graphics/blend/depth
 state, advanced-graphics limits, DXR bounds, presentation contracts, and FL
 12_2 capability gating, plus headless queue/wave/dispatch/copy/fence/object
-plans, heap/residency/placed-resource plans, draw/mesh dispatch,
+plans, heap/residency/placed-resource/image-copy plans, draw/mesh dispatch,
 viewport/scissor/IA layout, BLAS/TLAS
 build policy, enhanced barriers and conformance release gating. It is
 deliberately not a device implementation: real D3D12 UMD callbacks, owned

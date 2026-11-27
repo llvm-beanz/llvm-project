@@ -323,11 +323,12 @@ signatures, descriptor heaps, texture/buffer resource layouts, legacy and UAV
 barriers, graphics PSO/raster/OM state, Feature Level 12_2 advanced options,
 DXR 1.1 bounds, presentation/shared-fence contracts, and FL 12_2 capability
 gating. These plans compile in the in-tree Windows build and are covered by
-62 passing `FeMeDirect3DTests` unit cases. W1-specific progress adds checked
+65 passing `FeMeDirect3DTests` unit cases. W1-specific progress adds checked
 direct/compute/copy queue policy, requested wave-size bounds, thread-group/
 dispatch overflow arithmetic, repeated dispatch, buffer-copy ranges and
 monotonic fence targets, typed object close/reset/replay and pending-work
-rules. W2 adds heap alignment, placed-resource bounds and residency budgets;
+rules. W2 adds heap alignment, placed-resource bounds, residency budgets and image
+copy-region validation;
 W3 adds indexed/indirect draws, viewport/scissor, and IA layout validation;
 W4 adds mesh/amplification dispatch; W5 adds
 BLAS/TLAS build and compaction/update policies; W6 adds enhanced split/barrier
