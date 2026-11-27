@@ -136911,3 +136911,18 @@ allocation/residency lifecycle. Do not fabricate allocation callback inputs.
 If the valid lifecycle requires a private WARP/KMD ABI, obtain separate
 explicit approval before investigating or using it. Complete the runner's
 FeMe build-provenance pairing only after a real device path exists.
+
+# Session continuation: public CreateDevice contract
+
+Microsoft's public DDI reference describes `PFND3D12DDI_CREATEDEVICE_0003` as
+creating the graphics context used by subsequent calls. The earlier opt-in
+experiment only initialized opaque private storage and returned `S_OK`; it did
+not implement a valid graphics context. Its driver-internal error therefore
+cannot establish that a complete public DDI path is unsupported. Updated the
+W0 evidence to make this limitation explicit; commit `b31b73068cb5`.
+
+The owned-device, allocation, and provenance gates remain blocked. Further
+work must implement a valid context under the selected public contract, or
+stop at the boundary and seek separate explicit approval before any private
+WARP/KMD ABI investigation. Do not treat callback-pointer presence or the
+separate KMT control as owned resource evidence.
