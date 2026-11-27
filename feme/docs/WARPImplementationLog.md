@@ -33,13 +33,14 @@ layer-count extraction into `FeMeImage`) are both done; `WS2` (the
 original piece, command execution/CPU-draw-worker paths, was evaluated
 and found to have no portable kernel left to extract. `WS3` (shared-core
 regression gates, `WS3(a)`/`WS3(b)`) is also fully done and closed. `W0(c)`
-(classify the local Direct3D test corpus) is partially done -- its
-classification and redistribution-review pieces are recorded in
-[W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md),
-but broader legacy-shader coverage and owned-device execution still require
-compiler work and a working FeMe runner, respectively. The fixed raw-UAV
-legacy oracle and grouped SM6 reference oracle are measured coverage, not
-closure of that compatibility gate.
+(classify the local Direct3D test corpus) is complete: its classifications,
+redistribution review, SM 5.1 input obligation, and focused public-contract
+tests are recorded in
+[W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md).
+Broader legacy-shader implementation and owned-device execution remain
+separate W1-W4 and W0(a)/W0(g) gates, respectively. The fixed raw-UAV legacy
+oracle and grouped SM6 reference oracle are measured coverage, not complete
+all-stage compatibility or an owned D3D12 device.
 
 This is the implementation checklist for [FeMeWARPDesign.md](FeMeWARPDesign.md),
 not a claim that FeMe is a Direct3D adapter today. The product remains a
@@ -188,7 +189,7 @@ throwaway-capable prototype, not an adapter compliance claim.
 |---|---|
 | W0(a) | Pin OS builds, SDK/WDK, DDI, inbox/Agility runtime versions, and reference WARP binary. Prove discovery, opening, callback negotiation, and teardown for the selected WARP identity through the application-local user-mode path, with the existing WARP kernel-mode driver unmodified. W0(e) supplies host measurements; W0(f) supplies historical matching container measurements; W0(g) supplies the prototype/DDI-negotiation proof. Installed render-only/software-adapter feasibility, miniport/INF/signing/CI requirements are outside the selected deployment contract. |
 | ~~W0(b)~~ | ~~Product/compatibility decision.~~ User decision (2026-11-17): select a WARP-compatible application-local UMD drop-in using Microsoft's WARP identity/device IDs and relying on its existing, unmodified kernel-mode driver. Do not add a kernel driver, replace system WARP binaries, or build an application-local COM/DXGI runtime. "Drop-in" is limited to the selected application-local packaging/selection path; the existing probe proves routing but not a working resource/device contract or universal transparent substitution. Do not depend on private WARP ABI/ordinal 199 without a separate approval. See [decision and limits](W0WindowsIntegrationProbe.md#w0b-decision-warp-compatible-application-local-umd). |
-| W0(c) | Classify the local test corpus: public black-box tests, WARP-private/white-box tests, DXBC/DXIL inputs, optional/preview features, display/HLK dependencies. Determine required legacy shader support from the selected contract. Review source/test redistribution permissions before reuse; author LLVM-owned focused tests from public contracts. |
+| ~~W0(c)~~ | ~~Classify the local test corpus: public black-box tests, WARP-private/white-box tests, DXBC/DXIL inputs, optional/preview features, display/HLK dependencies. Determine required legacy shader support from the selected contract. Review source/test redistribution permissions before reuse; author LLVM-owned focused tests from public contracts.~~ Completed 2026-11-27: corpus categories and redistribution scope are documented, the required SM 5.1 input obligation is established, and LLVM-owned focused translation/reference tests exercise the public contract. Full implementation coverage remains in W1-W4. See [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md). |
 | W0(d) | Add an explicit selection assertion to the future runner: verify Microsoft's WARP vendor/device/software identity and independently prove that the selected application-local UMD is the FeMe build, not the system WARP module. List and execute one applicable test on reference WARP, then demonstrate selection of the prototype through the chosen boundary. Record unavailable infrastructure as blocked, not Pass. WARP-only white-box tests remain oracle tests, never generic FeMe coverage. |
 | ~~W0(e)~~ | ~~Measure the no-install host integration paths: inbox/Agility runtime and reference-WARP versions, `CreateSoftwareAdapter`, executable-local WARP substitution, and an LLVM-owned rejection stub with DDI entry-point counters. Run an applicable public-API WARP queue/fence test.~~ Completed 2026-11-06; evidence and reproduction instructions in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md). This closes measurements only, not FeMe device creation. |
 | ~~W0(f)~~ | ~~Container-first user-mode proof: build the standalone probe in the Windows container; run all four CTest cases and record OS/kit/runtime/WARP identities and exact outcomes before implementation. Verify reference WARP and the expected pre-DDI stub rejection; do not substitute host results.~~ Completed 2026-11-06; container evidence, an extended NuGet-WARP/Agility-core matrix, and reproduction instructions are in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md#container-measurements). All four CTest cases passed with no discrepancy from the host measurements. This closes the container measurement step only -- it is not FeMe DDI negotiation; `W0(g)` below carries that forward. |
@@ -277,7 +278,7 @@ route are different findings; do not classify all further research as blocked.
 Installed-path evaluation remains separate. No driver installation, signing
 changes, system-DLL replacement or reboot was performed on host or container.
 
-`W0(c)` is **partially done**, recorded in
+`W0(c)`'s test-corpus and compatibility-scope work is **complete**, recorded in
 [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md):
 the local test corpus is classified into the five named categories (public
 black-box, WARP-private/white-box, DXBC/DXIL-input, optional/preview-feature,
@@ -310,15 +311,16 @@ It fixed leaked private metadata and validator/PSV version mismatch;
 bare DXIL export is still rejected and requires public SDK validation.
 The ARM64 inbox, x64 inbox and ARM64 Agility 619 LIT matrices each pass
 40/40. Owned-DDI/PSO execution, broader bindings and all-stage coverage
-remain under the existing W1/W2/W3/W4 gates. This is not completed legacy
-compatibility or an owned FeMe device pass.
+remain under the existing W1/W2/W3/W4 gates. This closes W0(c)'s inventory,
+redistribution, scope, and focused-test acceptance; it does not claim complete
+legacy compatibility or an owned FeMe device pass.
 LLVM-owned reference tests now exist in the
 standalone probe, but owned-DDI FeMe execution tests still need the prototype/runner
 from `W0(g)`/`W1(a)`. The W0(b) product choice is closed, but these
 implementation dependencies still block execution evidence, not a
-blanket host/VM blocker. `W0(c)` is left unstruck rather than
-split into further lettered rows -- both blockers are existing upstream `W0`/
-`W1` milestones, not new work needing its own breakdown.
+blanket host/VM blocker. Device-execution and full-stage-coverage dependencies
+remain in W0/W1 and W3/W4; they do not leave W0(c)'s corpus classification or
+compatibility-scope decision open.
 
 `W0(d)`'s future-runner WARP-identity and FeMe-module-provenance assertion
 is also recorded in that document. The strict owned-shim audit now checks
@@ -438,9 +440,9 @@ cases execute raw/grouped SM5.0/5.1 originals and re-emitted DXIL at widths
 expanded LIT matrices pass 158/158; FXC-only and default configurations
 pass 103/103 and 82/82. The rebuilt full suite with FXC enabled passes
 4,010 tests with zero failures, and both capability inventories reproduce
-unchanged. This advances W0(c)'s mandatory legacy compute prerequisite,
+unchanged. This advances W1(b)'s legacy compute implementation,
 not general legacy/all-stage compatibility or owned D3D12 execution.
-W0(c), W0(g), W1(a) and W1(b) remain open.
+W0(g), W1(a) and W1(b) remain open.
 
 ### W2: Binding, resources, and synchronization
 

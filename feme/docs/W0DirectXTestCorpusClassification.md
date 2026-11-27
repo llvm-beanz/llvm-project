@@ -738,12 +738,12 @@ as passes.
 | Extend the scoped [reference compute oracle](W0WindowsIntegrationProbe.md#w1b-legacy-grouped-compute-follow-up-vm-2026-11-20) beyond fixed linear/grouped workloads. Both legacy profiles now execute as FXC DXBC and SDK-validated FeMe DXIL, including TGSM exchange and three group barriers, on reference WARP; bare DXIL export remains rejected. Nonstandard barrier modes, wave policy and lifetime coverage remain open. This is not owned-device execution or D3D12 conformance. | W0(d), W1(b) |
 | Observe the owned shader DDI inputs, wire the supported legacy import route into PSO creation, and execute/read back this shader against scalar expectations and reference WARP with device/build provenance. | W0(g), W1(a), W1(b) |
 | Exercise descriptor arrays, dynamic/non-uniform indices and root-layout binding with real SM 5.1 compiler output, beyond this one fixed raw-UAV binding. | W2(a), W2(b) |
-| Extend real-compiler coverage to all six legacy stages, signatures, stage-specific declarations and operations, then validate translated execution. Existing assembler/import tests are not end-to-end shader support. | W0(c), W3, W4 |
+| Extend real-compiler coverage to all six legacy stages, signatures, stage-specific declarations and operations, then validate translated execution. Existing assembler/import tests are not end-to-end shader support. | W1, W3, W4 |
 
-W0(c) remains partial. This establishes the SM 5.1 input obligation and
-adds real-compiler import/translation and DXIL-export evidence; it does not
-establish full legacy coverage, successful execution through an owned
-D3D12 device, or compliance.
+W0(c)'s corpus classification, redistribution review, mandatory SM 5.1 input
+scope, and LLVM-owned focused public-contract tests are complete. This does
+not establish full all-stage legacy coverage, successful execution through an
+owned D3D12 device, or compliance; those implementation gates remain in W1-W4.
 
 ### Legacy compute runtime admission follow-up (2026-11-20)
 
