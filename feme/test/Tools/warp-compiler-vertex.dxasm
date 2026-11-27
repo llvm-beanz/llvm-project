@@ -1,0 +1,17 @@
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+// REQUIRES: feme-warp-compiler
+// RUN: dxbc-as %s -o %t.dxbc
+// RUN: feme-warp-compiler-test %t.dxbc | FileCheck %s
+
+vs_4_0
+dcl_input v0.xyzw
+dcl_output_siv o0.xyzw, position
+mov o0.xyzw, v0.xyzw
+ret
+
+// CHECK: native stage=0 wave=4 artifact={{[1-9][0-9]*}}
+// CHECK-NEXT: native stage=0 wave=4 artifact={{[1-9][0-9]*}}
+// CHECK-NEXT: compiled and released twice

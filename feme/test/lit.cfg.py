@@ -156,6 +156,9 @@ tools = [
     "clang",
 ]
 
+if os.name == "nt":
+    tools.append("feme-warp-compiler-test")
+    config.available_features.add("feme-warp-compiler")
 llvm_config.add_tool_substitutions(tools, tool_dirs)
 
 # FXC supplies real tokenized SM5 bytecode, unlike DXC's SM6 DXIL output.

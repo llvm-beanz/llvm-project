@@ -47,6 +47,9 @@ if(FEME_HAVE_VULKAN_HEADERS)
   list(APPEND FEME_TEST_DEPENDS FeMeVulkanTests
     feme-vulkan-pipeline-cache-fuzzer)
 endif()
+if(WIN32)
+  list(APPEND FEME_TEST_DEPENDS feme-warp-compiler-test)
+endif()
 if(FEME_HAVE_VULKAN_LOADER)
   # The loader-smoke and two-ICD-coexistence tests load `feme_vulkan`
   # through the real Vulkan loader via its build-tree manifest rather than
