@@ -439,3 +439,32 @@ feme_add_probe_test(NAME os-routed-warp-device-context
     --warp-bootstrap-audit
     $<TARGET_FILE:${WARP_DEVICE_CONTEXT_VARIANT}-shim>
     --expect-warp-device-context)
+
+set(WARP_PROTOTYPE_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/warp-prototype")
+add_library(warp-prototype-shim SHARED
+  ../windows-adapter-bootstrap/BootstrapStub.cpp
+  ../windows-adapter-bootstrap/WarpHeap.cpp
+  ../windows-adapter-bootstrap/WarpTables.cpp)
+target_compile_definitions(warp-prototype-shim PRIVATE
+  FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0072
+  FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO=1
+  FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT=1
+  FEME_BOOTSTRAP_WARP_PROTOTYPE=1)
+set_target_properties(warp-prototype-shim PROPERTIES
+  OUTPUT_NAME d3d10warp
+  RUNTIME_OUTPUT_DIRECTORY "${WARP_PROTOTYPE_OUTPUT_DIR}"
+  ARCHIVE_OUTPUT_DIRECTORY "${WARP_PROTOTYPE_OUTPUT_DIR}")
+add_executable(warp-prototype-harness
+  ../windows-adapter-probe/WarpPrototypeProbe.cpp)
+set_target_properties(warp-prototype-harness PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${WARP_PROTOTYPE_OUTPUT_DIR}")
+target_link_libraries(warp-prototype-harness PRIVATE d3d12 dxgi)
+add_dependencies(warp-prototype-harness warp-prototype-shim)
+target_compile_options(warp-prototype-shim PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+target_compile_options(warp-prototype-harness PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+feme_add_probe_test(NAME os-routed-warp-prototype-shader-rejection
+  COMMAND warp-prototype-harness --expect-shader-rejection)
+feme_add_probe_test(NAME os-routed-warp-prototype-not-a-device
+  WILL_FAIL COMMAND warp-prototype-harness)
+feme_add_probe_test(NAME os-routed-warp-prototype-reference-buffer
+  COMMAND warp-prototype-harness --reference)
