@@ -13,6 +13,7 @@
 #include "feme/Direct3D/ComputePlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/DrawPlan.h"
+#include "feme/Direct3D/EnhancedBarrierPlan.h"
 #include "feme/Direct3D/ExecutionPlan.h"
 #include "feme/Direct3D/MeshDispatchPlan.h"
 #include "feme/Direct3D/ObjectModel.h"
@@ -650,6 +651,44 @@ TEST(AccelerationStructurePlanTest,
   AccelerationStructurePlan Combined{
       AccelerationStructureKind::BottomLevel, 4096, 0, 1, 0, true, true};
   Err = validateAccelerationStructurePlan(Combined);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(EnhancedBarrierPlanTest, AcceptsSingleAndSplitBarriers) {
+  EnhancedBarrierPlan Single{
+      BarrierPhase::Single,      BarrierSync::Copy,
+      BarrierSync::Compute,      BarrierAccess::CopyWrite,
+      BarrierAccess::ShaderRead, EnhancedBarrierRange{0, 4, 0, 2, 0, 1}};
+  llvm::Error Err = validateEnhancedBarrierPlan(Single);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+
+  EnhancedBarrierPlan Begin{
+      BarrierPhase::Begin,     BarrierSync::Draw,
+      BarrierSync::None,       BarrierAccess::RenderTarget,
+      BarrierAccess::NoAccess, EnhancedBarrierRange{0, 1, 0, 1, 0, 1}};
+  Err = validateEnhancedBarrierPlan(Begin);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(EnhancedBarrierPlanTest, RejectsEmptyRangeAndMissingSync) {
+  EnhancedBarrierPlan Empty{
+      BarrierPhase::Single,    BarrierSync::Draw,
+      BarrierSync::Copy,       BarrierAccess::RenderTarget,
+      BarrierAccess::CopyRead, EnhancedBarrierRange{0, 0, 0, 1, 0, 1}};
+  llvm::Error Err = validateEnhancedBarrierPlan(Empty);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  EnhancedBarrierPlan Missing{
+      BarrierPhase::End,       BarrierSync::Draw,
+      BarrierSync::None,       BarrierAccess::RenderTarget,
+      BarrierAccess::NoAccess, EnhancedBarrierRange{0, 1, 0, 1, 0, 1}};
+  Err = validateEnhancedBarrierPlan(Missing);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
