@@ -59,6 +59,11 @@ struct WarpContextProbe {
 /// Results of a device attempt that retains its kernel context through
 /// teardown.
 struct WarpDeviceContextProbe {
+  bool PreferredNodeEscapeAttempted = false;
+  bool PreferredNodeEscapeReturned = false;
+  std::int32_t PreferredNodeEscapeResult = 0;
+  std::uint32_t PreferredNodeOrdinal = 0;
+  std::uint32_t PreferredEngineAffinity = 0;
   bool PagingQueueCreateAttempted = false;
   bool PagingQueueCreated = false;
   std::int32_t PagingQueueCreateResult = 0;

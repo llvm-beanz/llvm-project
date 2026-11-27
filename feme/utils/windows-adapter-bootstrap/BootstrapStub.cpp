@@ -93,6 +93,7 @@ struct Counters {
   LONG DestroyDevice = 0;
 };
 Counters GCalls;
+HANDLE GWarpRuntimeAdapter = nullptr;
 
 // W0(g)'s audit evidence: which public D3D12DDICAPS_TYPE values GetCaps is
 // queried with, and whether CreateDevice's publicly documented thunk-service
@@ -139,6 +140,22 @@ struct WarpPrivateContextBuffer {
   UINT64 *BufferSize;
 };
 static_assert(sizeof(WarpPrivateContextBuffer) == 2 * sizeof(UINT64 *));
+#endif
+
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+struct WarpPreferredGpuNode {
+  UINT32 NodeType;
+  UINT32 NodeOrdinal;
+  UINT32 EngineAffinity;
+};
+
+struct WarpQueryPreferredGpuNode {
+  UINT32 EscapeId;
+  WarpPreferredGpuNode PreferredNode;
+};
+
+static_assert(sizeof(WarpQueryPreferredGpuNode) == 4 * sizeof(UINT32));
+constexpr UINT32 WarpEscapeQueryPreferredGpuNode = 1;
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_CONTEXT
@@ -204,6 +221,8 @@ HRESULT probeWarpContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
 struct WarpDeviceState {
   const D3DDDI_DEVICECALLBACKS *KTCallbacks = nullptr;
   HANDLE RTDevice = nullptr;
+  UINT32 NodeOrdinal = 0;
+  UINT32 EngineAffinity = 0;
   D3DKMT_HANDLE PagingQueue = 0;
   D3DKMT_HANDLE PagingSyncObject = 0;
   volatile UINT64 *PagingFenceValue = nullptr;
@@ -216,12 +235,14 @@ static_assert(alignof(WarpDeviceState) <= MEMORY_ALLOCATION_ALIGNMENT);
 
 void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device);
 
-HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
+HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
+                                HANDLE RTAdapter) {
   auto &Probe = GWarpDeviceContextProbe;
   Probe.CreateAttempted = true;
   if (!Args || !Args->hRTDevice.handle || !Args->hDrvDevice.pDrvPrivate)
     return E_INVALIDARG;
-  if (!Args->pKTCallbacks || !Args->pKTCallbacks->pfnCreatePagingQueueCb ||
+  if (!RTAdapter || !Args->pKTCallbacks || !Args->pKTCallbacks->pfnEscapeCb ||
+      !Args->pKTCallbacks->pfnCreatePagingQueueCb ||
       !Args->pKTCallbacks->pfnDestroyPagingQueueCb ||
       !Args->pKTCallbacks->pfnCreateContextVirtualCb ||
       !Args->pKTCallbacks->pfnDestroyContextCb)
@@ -230,10 +251,33 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
   auto *State = ::new (Args->hDrvDevice.pDrvPrivate) WarpDeviceState{};
   State->KTCallbacks = Args->pKTCallbacks;
   State->RTDevice = Args->hRTDevice.handle;
+  WarpQueryPreferredGpuNode PreferredNode{};
+  PreferredNode.EscapeId = WarpEscapeQueryPreferredGpuNode;
+  D3DDDICB_ESCAPE Escape{};
+  Escape.hDevice = State->RTDevice;
+  Escape.pPrivateDriverData = &PreferredNode;
+  Escape.PrivateDriverDataSize = sizeof(PreferredNode);
+  Probe.PreferredNodeEscapeAttempted = true;
+  DWORD ExceptionCode = 0;
+  __try {
+    Probe.PreferredNodeEscapeResult =
+        State->KTCallbacks->pfnEscapeCb(RTAdapter, &Escape);
+    Probe.PreferredNodeEscapeReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+    return E_FAIL;
+  }
+  if (Probe.PreferredNodeEscapeResult != S_OK)
+    return FAILED(Probe.PreferredNodeEscapeResult)
+               ? Probe.PreferredNodeEscapeResult
+               : E_FAIL;
+  Probe.PreferredNodeOrdinal = PreferredNode.PreferredNode.NodeOrdinal;
+  Probe.PreferredEngineAffinity = PreferredNode.PreferredNode.EngineAffinity;
+  State->NodeOrdinal = Probe.PreferredNodeOrdinal;
+  State->EngineAffinity = Probe.PreferredEngineAffinity;
 
   D3DDDICB_CREATEPAGINGQUEUE PagingQueue{};
   Probe.PagingQueueCreateAttempted = true;
-  DWORD ExceptionCode = 0;
   bool PagingQueueCallbackReturned = false;
   __try {
     Probe.PagingQueueCreateResult = State->KTCallbacks->pfnCreatePagingQueueCb(
@@ -269,7 +313,8 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
   PrivateData.Buffer = &State->CommandBufferAddress;
   PrivateData.BufferSize = &State->CommandBufferSize;
   D3DDDICB_CREATECONTEXTVIRTUAL CreateContext{};
-  CreateContext.EngineAffinity = 1;
+  CreateContext.NodeOrdinal = State->NodeOrdinal;
+  CreateContext.EngineAffinity = State->EngineAffinity;
   CreateContext.pPrivateDriverData = &PrivateData;
   CreateContext.PrivateDriverDataSize = sizeof(PrivateData);
 
@@ -715,7 +760,8 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
     return WarpContextResult;
 #endif
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
-  HRESULT DeviceContextResult = createWarpDeviceContext(Args);
+  HRESULT DeviceContextResult =
+      createWarpDeviceContext(Args, GWarpRuntimeAdapter);
   if (FAILED(DeviceContextResult))
     return DeviceContextResult;
   return S_OK;
@@ -729,6 +775,9 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
 
 HRESULT APIENTRY closeAdapter(D3D12DDI_HADAPTER) {
   InterlockedIncrement(&GCalls.CloseAdapter);
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+  GWarpRuntimeAdapter = nullptr;
+#endif
   return S_OK;
 }
 
@@ -840,6 +889,11 @@ OpenAdapter12(D3D12DDIARG_OPENADAPTER *Args) {
   if (!Args || !Args->pAdapterCallbacks || !Args->pAdapterFuncs)
     return E_INVALIDARG;
   InterlockedIncrement(&GCalls.OpenAdapter12);
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+  if (!Args->hRTAdapter.handle)
+    return E_INVALIDARG;
+  GWarpRuntimeAdapter = Args->hRTAdapter.handle;
+#endif
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO
   if (!Args->hRTAdapter.handle ||
       !Args->pAdapterCallbacks->pfnQueryAdapterInfoCb)

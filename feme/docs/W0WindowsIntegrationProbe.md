@@ -5476,6 +5476,12 @@ return `S_OK`. The new LIT case asserts this exact rejection stage and
 successful cleanup. The earlier DDI 0010 context-only experiment reached the
 same pre-table error.
 
+The device attempt also invokes WARP's private preferred-GPU-node escape
+through the adapter callback handle. Its ABI-compatible payload returns node
+ordinal `8` and engine affinity `1`; those values are used to create the
+context. The escape returns `S_OK`, but adding this initialization step does
+not move the runtime past the pre-table `DXGI_ERROR_DRIVER_INTERNAL_ERROR`.
+
 This is not a successful D3D12 device and does not close W0. In particular,
 `FillDDITable` remains uncalled, and no allocation, residency, mapping, or
 resource lifecycle has been demonstrated. The next investigation is the

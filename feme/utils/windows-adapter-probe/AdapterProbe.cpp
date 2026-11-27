@@ -1168,7 +1168,10 @@ int wmain(int Argc, wchar_t **Argv) {
       feme::probe::WarpDeviceContextProbe DeviceProbe;
       ReadWarpDeviceContextProbe(&DeviceProbe);
       std::wprintf(
-          L"WARP device context: PagingQueueCreateAttempted=%u "
+          L"WARP device context: PreferredNodeEscapeAttempted=%u "
+          L"PreferredNodeEscapeReturned=%u PreferredNodeEscapeResult=0x%08lx "
+          L"PreferredNodeOrdinal=%u PreferredEngineAffinity=%u "
+          L"PagingQueueCreateAttempted=%u "
           L"PagingQueueCreated=%u PagingQueueCreateResult=0x%08lx "
           L"PagingQueueHasSyncObject=%u PagingQueueHasFenceMapping=%u "
           L"CreateAttempted=%u ContextCreated=%u "
@@ -1179,6 +1182,10 @@ int wmain(int Argc, wchar_t **Argv) {
           L"PagingQueueDestroyReturned=%u "
           L"PagingQueueDestroyResult=0x%08lx DestroyAttempted=%u "
           L"DestroyReturned=%u DestroyResult=0x%08lx ExceptionCode=0x%08lx\n",
+          unsigned(DeviceProbe.PreferredNodeEscapeAttempted),
+          unsigned(DeviceProbe.PreferredNodeEscapeReturned),
+          static_cast<unsigned long>(DeviceProbe.PreferredNodeEscapeResult),
+          DeviceProbe.PreferredNodeOrdinal, DeviceProbe.PreferredEngineAffinity,
           unsigned(DeviceProbe.PagingQueueCreateAttempted),
           unsigned(DeviceProbe.PagingQueueCreated),
           static_cast<unsigned long>(DeviceProbe.PagingQueueCreateResult),
@@ -1201,7 +1208,10 @@ int wmain(int Argc, wchar_t **Argv) {
           static_cast<unsigned long>(DeviceProbe.DestroyResult),
           static_cast<unsigned long>(DeviceProbe.ExceptionCode));
       if (ExpectWarpDeviceContext &&
-          (!DeviceProbe.PagingQueueCreateAttempted ||
+          (!DeviceProbe.PreferredNodeEscapeAttempted ||
+           !DeviceProbe.PreferredNodeEscapeReturned ||
+           DeviceProbe.PreferredNodeEscapeResult != S_OK ||
+           !DeviceProbe.PagingQueueCreateAttempted ||
            !DeviceProbe.PagingQueueCreated ||
            DeviceProbe.PagingQueueCreateResult != S_OK ||
            !DeviceProbe.PagingQueueHasSyncObject ||
