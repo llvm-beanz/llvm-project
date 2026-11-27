@@ -1168,7 +1168,9 @@ int wmain(int Argc, wchar_t **Argv) {
       feme::probe::WarpDeviceContextProbe DeviceProbe;
       ReadWarpDeviceContextProbe(&DeviceProbe);
       std::wprintf(
-          L"WARP device context: PreferredNodeEscapeAttempted=%u "
+          L"WARP device context: VersionNumberEscapeAttempted=%u "
+          L"VersionNumberEscapeReturned=%u VersionNumberEscapeResult=0x%08lx "
+          L"BasicRenderVersion=%u PreferredNodeEscapeAttempted=%u "
           L"PreferredNodeEscapeReturned=%u PreferredNodeEscapeResult=0x%08lx "
           L"PreferredNodeOrdinal=%u PreferredEngineAffinity=%u "
           L"PagingQueueCreateAttempted=%u "
@@ -1182,6 +1184,10 @@ int wmain(int Argc, wchar_t **Argv) {
           L"PagingQueueDestroyReturned=%u "
           L"PagingQueueDestroyResult=0x%08lx DestroyAttempted=%u "
           L"DestroyReturned=%u DestroyResult=0x%08lx ExceptionCode=0x%08lx\n",
+          unsigned(DeviceProbe.VersionNumberEscapeAttempted),
+          unsigned(DeviceProbe.VersionNumberEscapeReturned),
+          static_cast<unsigned long>(DeviceProbe.VersionNumberEscapeResult),
+          DeviceProbe.BasicRenderVersion,
           unsigned(DeviceProbe.PreferredNodeEscapeAttempted),
           unsigned(DeviceProbe.PreferredNodeEscapeReturned),
           static_cast<unsigned long>(DeviceProbe.PreferredNodeEscapeResult),
@@ -1208,7 +1214,11 @@ int wmain(int Argc, wchar_t **Argv) {
           static_cast<unsigned long>(DeviceProbe.DestroyResult),
           static_cast<unsigned long>(DeviceProbe.ExceptionCode));
       if (ExpectWarpDeviceContext &&
-          (!DeviceProbe.PreferredNodeEscapeAttempted ||
+          (!DeviceProbe.VersionNumberEscapeAttempted ||
+           !DeviceProbe.VersionNumberEscapeReturned ||
+           DeviceProbe.VersionNumberEscapeResult != S_OK ||
+           DeviceProbe.BasicRenderVersion != 2 ||
+           !DeviceProbe.PreferredNodeEscapeAttempted ||
            !DeviceProbe.PreferredNodeEscapeReturned ||
            DeviceProbe.PreferredNodeEscapeResult != S_OK ||
            !DeviceProbe.PagingQueueCreateAttempted ||

@@ -59,6 +59,10 @@ struct WarpContextProbe {
 /// Results of a device attempt that retains its kernel context through
 /// teardown.
 struct WarpDeviceContextProbe {
+  bool VersionNumberEscapeAttempted = false;
+  bool VersionNumberEscapeReturned = false;
+  std::int32_t VersionNumberEscapeResult = 0;
+  std::uint32_t BasicRenderVersion = 0;
   bool PreferredNodeEscapeAttempted = false;
   bool PreferredNodeEscapeReturned = false;
   std::int32_t PreferredNodeEscapeResult = 0;

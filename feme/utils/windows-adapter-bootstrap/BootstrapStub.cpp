@@ -143,6 +143,17 @@ static_assert(sizeof(WarpPrivateContextBuffer) == 2 * sizeof(UINT64 *));
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+struct WarpQueryVersionNumber {
+  UINT32 EscapeId;
+  UINT32 Version;
+};
+
+static_assert(sizeof(WarpQueryVersionNumber) == 2 * sizeof(UINT32));
+constexpr UINT32 WarpEscapeQueryVersionNumber = 3;
+constexpr UINT32 WarpBasicRenderVersion = 2;
+constexpr UINT32 WarpDriverCapsFullWddmDevice = 1u << 3;
+constexpr UINT32 WarpDriverCapsSupportsVirtualGpu = 1u << 4;
+
 struct WarpPreferredGpuNode {
   UINT32 NodeType;
   UINT32 NodeOrdinal;
@@ -251,30 +262,60 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
   auto *State = ::new (Args->hDrvDevice.pDrvPrivate) WarpDeviceState{};
   State->KTCallbacks = Args->pKTCallbacks;
   State->RTDevice = Args->hRTDevice.handle;
-  WarpQueryPreferredGpuNode PreferredNode{};
-  PreferredNode.EscapeId = WarpEscapeQueryPreferredGpuNode;
-  D3DDDICB_ESCAPE Escape{};
-  Escape.hDevice = State->RTDevice;
-  Escape.pPrivateDriverData = &PreferredNode;
-  Escape.PrivateDriverDataSize = sizeof(PreferredNode);
-  Probe.PreferredNodeEscapeAttempted = true;
   DWORD ExceptionCode = 0;
-  __try {
-    Probe.PreferredNodeEscapeResult =
-        State->KTCallbacks->pfnEscapeCb(RTAdapter, &Escape);
-    Probe.PreferredNodeEscapeReturned = true;
-  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
-    Probe.ExceptionCode = ExceptionCode;
-    return E_FAIL;
+  UINT32 DriverCaps = GWarpPrivateAdapterInfoProbe.DriverCaps;
+  if (!(DriverCaps & WarpDriverCapsFullWddmDevice)) {
+    WarpQueryVersionNumber VersionQuery{WarpEscapeQueryVersionNumber,
+                                        WarpBasicRenderVersion};
+    D3DDDICB_ESCAPE VersionEscape{};
+    VersionEscape.hDevice = State->RTDevice;
+    VersionEscape.pPrivateDriverData = &VersionQuery;
+    VersionEscape.PrivateDriverDataSize = sizeof(VersionQuery);
+    Probe.VersionNumberEscapeAttempted = true;
+    __try {
+      Probe.VersionNumberEscapeResult =
+          State->KTCallbacks->pfnEscapeCb(RTAdapter, &VersionEscape);
+      Probe.VersionNumberEscapeReturned = true;
+    } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+      Probe.ExceptionCode = ExceptionCode;
+      return E_FAIL;
+    }
+    Probe.BasicRenderVersion = VersionQuery.Version;
+    if (Probe.VersionNumberEscapeResult != S_OK)
+      return FAILED(Probe.VersionNumberEscapeResult)
+                 ? Probe.VersionNumberEscapeResult
+                 : E_FAIL;
+    if (Probe.BasicRenderVersion != WarpBasicRenderVersion)
+      return E_OUTOFMEMORY;
   }
-  if (Probe.PreferredNodeEscapeResult != S_OK)
-    return FAILED(Probe.PreferredNodeEscapeResult)
-               ? Probe.PreferredNodeEscapeResult
-               : E_FAIL;
-  Probe.PreferredNodeOrdinal = PreferredNode.PreferredNode.NodeOrdinal;
-  Probe.PreferredEngineAffinity = PreferredNode.PreferredNode.EngineAffinity;
-  State->NodeOrdinal = Probe.PreferredNodeOrdinal;
-  State->EngineAffinity = Probe.PreferredEngineAffinity;
+
+  if (!(DriverCaps & WarpDriverCapsSupportsVirtualGpu)) {
+    WarpQueryPreferredGpuNode PreferredNode{};
+    PreferredNode.EscapeId = WarpEscapeQueryPreferredGpuNode;
+    D3DDDICB_ESCAPE Escape{};
+    Escape.hDevice = State->RTDevice;
+    Escape.pPrivateDriverData = &PreferredNode;
+    Escape.PrivateDriverDataSize = sizeof(PreferredNode);
+    Probe.PreferredNodeEscapeAttempted = true;
+    __try {
+      Probe.PreferredNodeEscapeResult =
+          State->KTCallbacks->pfnEscapeCb(RTAdapter, &Escape);
+      Probe.PreferredNodeEscapeReturned = true;
+    } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+      Probe.ExceptionCode = ExceptionCode;
+      return E_FAIL;
+    }
+    if (Probe.PreferredNodeEscapeResult != S_OK)
+      return FAILED(Probe.PreferredNodeEscapeResult)
+                 ? Probe.PreferredNodeEscapeResult
+                 : E_FAIL;
+    Probe.PreferredNodeOrdinal = PreferredNode.PreferredNode.NodeOrdinal;
+    Probe.PreferredEngineAffinity = PreferredNode.PreferredNode.EngineAffinity;
+    State->NodeOrdinal = Probe.PreferredNodeOrdinal;
+    State->EngineAffinity = Probe.PreferredEngineAffinity;
+    if (State->EngineAffinity != 1)
+      State->EngineAffinity = 1;
+  }
 
   D3DDDICB_CREATEPAGINGQUEUE PagingQueue{};
   Probe.PagingQueueCreateAttempted = true;

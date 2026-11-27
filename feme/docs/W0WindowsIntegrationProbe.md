@@ -5476,15 +5476,22 @@ return `S_OK`. The new LIT case asserts this exact rejection stage and
 successful cleanup. The earlier DDI 0010 context-only experiment reached the
 same pre-table error.
 
-The device attempt also invokes WARP's private preferred-GPU-node escape
-through the adapter callback handle. Its ABI-compatible payload returns node
-ordinal `8` and engine affinity `1`; those values are used to create the
-context. The escape returns `S_OK`, but adding this initialization step does
-not move the runtime past the pre-table `DXGI_ERROR_DRIVER_INTERNAL_ERROR`.
+The device attempt follows WARP's private initialization gates. The private
+adapter query returned `DriverCaps=0x00000001`; according to WARP's bit layout,
+`FullWddmDevice` (bit 3) and `SupportsVirtualGpu` (bit 4) are clear. The probe
+therefore performs the BasicRender version escape (ID 3, expected/returned
+version 2), then the preferred-node escape (ID 1). The KMD returns an ordinal
+and engine affinity 1; the ordinal varies between runs and is passed through
+instead of being hardcoded. Both escape callbacks, paging-queue creation, and
+context creation return `S_OK`, but adding the version query does not move the
+runtime past the pre-table `DXGI_ERROR_DRIVER_INTERNAL_ERROR`.
 
 This is not a successful D3D12 device and does not close W0. In particular,
 `FillDDITable` remains uncalled, and no allocation, residency, mapping, or
-resource lifecycle has been demonstrated. The next investigation is the
-runtime/device-initialization work between the driver's `CreateDevice` return
-and table filling; the current evidence does not establish why the runtime
-rejects the attempt.
+resource lifecycle has been demonstrated. Official WARP also sends an
+init-device escape after constructing its user-mode device/context; this probe
+does not yet have a valid WARP `UMDevice` object to pass, so it deliberately
+does not fabricate that escape's private pointers. The next step is a valid
+user-mode device/context implementation, then measuring whether that required
+initialization advances the runtime. The current evidence does not establish
+why the runtime rejects the attempt.
