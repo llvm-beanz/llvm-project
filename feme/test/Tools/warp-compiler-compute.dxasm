@@ -5,6 +5,7 @@
 // REQUIRES: feme-warp-compiler
 // RUN: dxbc-as %s -o %t.dxbc
 // RUN: feme-warp-compiler-test %t.dxbc | FileCheck %s
+// RUN: feme-warp-compiler-test %t.dxbc --ddi | FileCheck %s --check-prefix=DDI
 // RUN: feme-warp-compiler-test %t.dxbc --bad-length 2>&1 | FileCheck %s --check-prefix=BAD
 // RUN: feme-warp-compiler-test %t.dxbc --bad-opcode 2>&1 | FileCheck %s --check-prefix=BAD
 
@@ -16,3 +17,4 @@ ret
 // CHECK-NEXT: native stage=5 wave=4 artifact={{[1-9][0-9]*}}
 // CHECK-NEXT: compiled and released twice
 // BAD: rejected without object
+// DDI: compiled DDI ownership PASS

@@ -13,6 +13,8 @@
 #include <cstring>
 #include <vector>
 
+bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens);
+
 int main(int Argc, char **Argv) {
   if (Argc < 2 || Argc > 3)
     return 1;
@@ -31,6 +33,8 @@ int main(int Argc, char **Argv) {
     std::fprintf(stderr, "Cannot read shader fixture\n");
     return 1;
   }
+  if (Argc == 3 && std::strcmp(Argv[2], "--ddi") == 0)
+    return testWarpCompilerDDIs(Tokens) ? 0 : 1;
   bool Reject = Argc == 3;
   if (Reject) {
     if (std::strcmp(Argv[2], "--bad-length") == 0)
@@ -61,7 +65,27 @@ int main(int Argc, char **Argv) {
     }
     std::printf("native stage=%u wave=%u artifact=%u\n", Info.Stage,
                 Info.WaveSize, Info.ArtifactVersion);
+    void *Pipeline = nullptr;
+    FeMeWarpVertexPipelineDesc Desc;
+    Result = FeMeWarpCreateVertexPipeline(Compiled, &Desc, &Pipeline);
+    if (Info.Stage == 0) {
+      if (Result || !Pipeline)
+        return 1;
+    } else if (Result >= 0 || Pipeline)
+      return 1;
+    if (Info.Stage == 5) {
+      Result = FeMeWarpCreateComputePipeline(Compiled, &Pipeline);
+      if (Result || !Pipeline)
+        return 1;
+    }
     FeMeWarpDestroyCompiledShader(Compiled);
+    // The shared pipeline retains its native stage after the DDI handle dies.
+    if (Pipeline) {
+      if (Info.Stage == 0)
+        FeMeWarpDestroyVertexPipeline(Pipeline);
+      else
+        FeMeWarpDestroyComputePipeline(Pipeline);
+    }
   }
   std::puts(Reject ? "rejected without object" : "compiled and released twice");
   return 0;

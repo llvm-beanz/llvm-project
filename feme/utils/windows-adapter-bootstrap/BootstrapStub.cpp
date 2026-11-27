@@ -829,6 +829,12 @@ void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device) {
   }
   Probe.LiveRootSignaturesAtDestroy = State->LiveRootSignatures.load();
   Probe.LiveNullShadersAtDestroy = State->LiveNullShaders.load();
+  Probe.LiveCompiledShadersAtDestroy = State->LiveCompiledShaders.load();
+  Probe.LiveImmutableStatesAtDestroy = State->LiveImmutableStates.load();
+  Probe.LivePipelinesAtDestroy = State->LivePipelines.load();
+  Probe.LiveCommandPoolsAtDestroy = State->LiveCommandPools.load();
+  Probe.LiveHeapsAtDestroy = State->LiveHeaps.load();
+  Probe.LiveResourcesAtDestroy = State->LiveResources.load();
 }
 #endif
 
@@ -1251,6 +1257,22 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
 
   if (!Args)
     return RecordResult(E_NOTIMPL);
+
+  if (Args->Type == D3D12DDICAPS_TYPE_GPUVA_CAPS) {
+    if (!Args->pData || Args->DataSize != sizeof(D3D12DDI_GPUVA_CAPS_0004))
+      return RecordResult(E_INVALIDARG);
+    // The current WARP allocation metadata bounds each buffer extent to UINT32.
+    D3D12DDI_GPUVA_CAPS_0004 Caps{};
+    Caps.MaxGPUVirtualAddressBitsPerResource = 32;
+    std::memcpy(Args->pData, &Caps, sizeof(Caps));
+    return RecordResult(S_OK);
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_0073_SUPPORT_BATCHED_MARKERS) {
+    if (!Args->pData || Args->DataSize != sizeof(BOOL))
+      return RecordResult(E_INVALIDARG);
+    *static_cast<BOOL *>(Args->pData) = FALSE;
+    return RecordResult(S_OK);
+  }
 
   if (Args->Type == D3D12DDICAPS_TYPE_MEMORY_ARCHITECTURE) {
     if (!Args->pInfo || *static_cast<const UINT *>(Args->pInfo) != 0 ||

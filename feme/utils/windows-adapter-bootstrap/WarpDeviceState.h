@@ -49,6 +49,10 @@ struct WarpDeviceState {
   std::atomic<SIZE_T> LiveResources{0};
   std::atomic<SIZE_T> LiveRootSignatures{0};
   std::atomic<SIZE_T> LiveNullShaders{0};
+  std::atomic<SIZE_T> LiveCompiledShaders{0};
+  std::atomic<SIZE_T> LiveImmutableStates{0};
+  std::atomic<SIZE_T> LivePipelines{0};
+  std::atomic<SIZE_T> LiveCommandPools{0};
   std::atomic<HRESULT> HeapCleanupResult{S_OK};
 };
 

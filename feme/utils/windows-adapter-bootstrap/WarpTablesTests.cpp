@@ -141,6 +141,44 @@ int main() {
           D3D12DDI_DRIVER_MATCHING_IDENTIFIER_UNSUPPORTED_TYPE &&
       LastError == E_NOTIMPL;
 
+  auto CheckImmutable = [&](auto Args, auto Size, auto Create, auto Destroy,
+                            auto Handle) {
+    alignas(MEMORY_ALLOCATION_ALIGNMENT) unsigned char Storage[512];
+    Handle.pDrvPrivate = Storage;
+    SIZE_T Required = Size(Device, &Args);
+    if (!Required || Required > sizeof(Storage))
+      return false;
+    Create(Device, &Args, Handle);
+    bool Good = State.LiveImmutableStates == 1;
+    Destroy(OtherDevice, Handle);
+    Good &= State.LiveImmutableStates == 1;
+    Destroy(Device, Handle);
+    Good &= State.LiveImmutableStates == 0;
+    std::memset(Storage, 0x5a, sizeof(Storage));
+    Args.LibraryReference.hLibrary.pDrvPrivate = Private;
+    UINT Before = ErrorCalls;
+    Good &= Size(Device, &Args) == 0 && ErrorCalls == Before + 1 &&
+            LastError == E_NOTIMPL;
+    Create(Device, &Args, Handle);
+    Good &= State.LiveImmutableStates == 0 && ErrorCalls == Before + 2;
+    for (unsigned char Byte : Storage)
+      Good &= Byte == 0x5a;
+    Good &= Size(Device, nullptr) == 0 && LastError == E_INVALIDARG;
+    return Good;
+  };
+  Valid &= CheckImmutable(D3D12DDI_BLEND_DESC_0010{},
+                          Core.pfnCalcPrivateBlendStateSize,
+                          Core.pfnCreateBlendState, Core.pfnDestroyBlendState,
+                          D3D12DDI_HBLENDSTATE{});
+  Valid &= CheckImmutable(
+      D3D12DDI_DEPTH_STENCIL_DESC_0025{},
+      Core.pfnCalcPrivateDepthStencilStateSize, Core.pfnCreateDepthStencilState,
+      Core.pfnDestroyDepthStencilState, D3D12DDI_HDEPTHSTENCILSTATE{});
+  Valid &= CheckImmutable(
+      D3D12DDI_RASTERIZER_DESC_0010{}, Core.pfnCalcPrivateRasterizerStateSize,
+      Core.pfnCreateRasterizerState, Core.pfnDestroyRasterizerState,
+      D3D12DDI_HRASTERIZERSTATE{});
+
   const auto Original = Core;
   for (SIZE_T Size : {sizeof(Core) - 1, sizeof(Core) + 1}) {
     Valid &=

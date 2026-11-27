@@ -29,11 +29,31 @@ struct FeMeWarpCompiledShaderInfo {
   std::uint32_t HasNativeEntry = 0;
 };
 
+/// Normalized vertex-only pipeline with no attachment or fragment stage.
+struct FeMeWarpVertexPipelineDesc {
+  std::uint32_t Size = sizeof(FeMeWarpVertexPipelineDesc);
+  std::uint32_t Topology = 2; // Point, line, triangle lists.
+  std::uint32_t Cull = 0;     // None, front, back.
+  std::uint32_t FrontCounterClockwise = 0;
+  std::uint32_t Wireframe = 0;
+  std::uint32_t DepthClamp = 0;
+  std::uint32_t SampleMask = 0xffffffffu;
+};
+
 extern "C" {
+FEME_WARP_COMPILER_API const char *FeMeWarpCompilerRevision();
 FEME_WARP_COMPILER_API std::int32_t
 FeMeWarpCompileRawDXBC(const std::uint32_t *Tokens, std::uint32_t Count,
                        void **Compiled, FeMeWarpCompiledShaderInfo *Info);
 FEME_WARP_COMPILER_API void FeMeWarpDestroyCompiledShader(void *Compiled);
+FEME_WARP_COMPILER_API std::int32_t
+FeMeWarpCreateVertexPipeline(void *CompiledShader,
+                             const FeMeWarpVertexPipelineDesc *Desc,
+                             void **Pipeline);
+FEME_WARP_COMPILER_API void FeMeWarpDestroyVertexPipeline(void *Pipeline);
+FEME_WARP_COMPILER_API std::int32_t
+FeMeWarpCreateComputePipeline(void *CompiledShader, void **Pipeline);
+FEME_WARP_COMPILER_API void FeMeWarpDestroyComputePipeline(void *Pipeline);
 }
 
 #undef FEME_WARP_COMPILER_API

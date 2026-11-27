@@ -85,7 +85,7 @@ HRESULT exerciseBuffer(ID3D12Device *Device) {
   return report("GetDeviceRemovedReason", Device->GetDeviceRemovedReason());
 }
 
-bool printCaps(HMODULE Module) {
+bool printCaps(HMODULE Module, bool OwnedDevice) {
   using CapacityFn = UINT32(APIENTRY *)();
   using AuditFn =
       void(APIENTRY *)(LONG *, LONG *, UINT32 *, LONG *, UINT *, UINT *, LONG *,
@@ -135,6 +135,17 @@ bool printCaps(HMODULE Module) {
       }
     Valid &= Found;
   }
+  if (OwnedDevice)
+    for (auto Type : {D3D12DDICAPS_TYPE_GPUVA_CAPS,
+                      D3D12DDICAPS_TYPE_0073_SUPPORT_BATCHED_MARKERS}) {
+      bool Found = false;
+      for (UINT32 I = 0; I < static_cast<UINT32>(Count) && I < Size; ++I)
+        if (Types[I] == Type) {
+          Found = true;
+          Valid &= Results[I] == S_OK;
+        }
+      Valid &= Found;
+    }
   return Valid;
 }
 } // namespace
@@ -184,6 +195,13 @@ int wmain(int Argc, wchar_t **Argv) {
       (Desc.VendorId != 0x1414 || Desc.DeviceId != 0x008c ||
        !(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)))
     Result = report("WARP identity mismatch", E_FAIL);
+  if (SUCCEEDED(Result))
+    std::printf(
+        "WARP vendor=0x%04x device=0x%04x software=%u LUID=%08lx:%08lx\n",
+        Desc.VendorId, Desc.DeviceId,
+        (Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0,
+        static_cast<unsigned long>(Desc.AdapterLuid.HighPart),
+        static_cast<unsigned long>(Desc.AdapterLuid.LowPart));
   HRESULT DeviceResult = E_FAIL;
   if (SUCCEEDED(Result)) {
     DeviceResult = D3D12CreateDevice(Adapter.Get(), D3D_FEATURE_LEVEL_11_0,
@@ -202,12 +220,40 @@ int wmain(int Argc, wchar_t **Argv) {
   }
   if (SUCCEEDED(Result))
     Result = exerciseBuffer(Device.Get());
+  bool ValidOwned = !Reference && !ExpectShaderRejection &&
+                    DeviceResult == S_OK && SUCCEEDED(Result);
+  if (ValidOwned) {
+    LUID DeviceLuid = Device->GetAdapterLuid();
+    ValidOwned &= DeviceLuid.HighPart == Desc.AdapterLuid.HighPart &&
+                  DeviceLuid.LowPart == Desc.AdapterLuid.LowPart &&
+                  Device->GetNodeCount() == 1;
+    HMODULE Compiler = GetModuleHandleW(L"feme_warp_compiler.dll");
+    using RevisionFn = const char *(*)();
+    auto Revision = Compiler ? reinterpret_cast<RevisionFn>(GetProcAddress(
+                                   Compiler, "FeMeWarpCompilerRevision"))
+                             : nullptr;
+    const char *Source = Revision ? Revision() : nullptr;
+    std::wstring Expected =
+        ModulePath.substr(0, ModulePath.find_last_of(L'\\')) +
+        L"\\feme_warp_compiler.dll";
+    DWORD CompilerLength =
+        Compiler ? GetModuleFileNameW(Compiler, Path, ARRAYSIZE(Path)) : 0;
+    ValidOwned &= CompilerLength && CompilerLength < ARRAYSIZE(Path) &&
+                  _wcsicmp(Expected.c_str(), Path) == 0 && Source &&
+                  std::strlen(Source) == 40 &&
+                  std::strspn(Source, "0123456789abcdef") == 40;
+    if (CompilerLength && Source) {
+      std::wprintf(L"Owned compiler: %ls\n", Path);
+      std::printf("Compiler source revision: %s\n", Source);
+    }
+  }
   Device.Reset();
   Adapter.Reset();
   Factory.Reset();
   if (!Reference) {
-    bool CapsValid = printCaps(Module);
+    bool CapsValid = printCaps(Module, ValidOwned);
     ValidRejection &= CapsValid;
+    ValidOwned &= CapsValid;
     if (!CapsValid)
       Result = report("Mandatory capability evidence mismatch", E_FAIL);
     using CallsFn = void(APIENTRY *)(LONG *, LONG *, LONG *, LONG *, LONG *,
@@ -225,9 +271,13 @@ int wmain(int Argc, wchar_t **Argv) {
       ValidRejection &= Open == 1 && Size == 1 && Versions == 2 && Caps == 14 &&
                         Optional == 1 && Fill == 5 && Create == 1 &&
                         Close == 1 && Destroy == 1;
+      ValidOwned &= Open == 1 && Size == 1 && Versions == 2 && Caps == 16 &&
+                    Optional == 1 && Fill == 5 && Create == 1 && Close == 1 &&
+                    Destroy == 1;
     } else {
       Result = report("Missing owned lifecycle counters", E_FAIL);
       ValidRejection = false;
+      ValidOwned = false;
     }
     using LastFn = const char *(APIENTRY *)();
     auto Last = reinterpret_cast<LastFn>(
@@ -235,9 +285,11 @@ int wmain(int Argc, wchar_t **Argv) {
     if (!Last) {
       Result = report("Missing owned diagnostic export", E_FAIL);
       ValidRejection = false;
+      ValidOwned = false;
     } else if (const char *Name = Last()) {
       std::printf("Last unavailable DDI: %s\n", Name);
       ValidRejection &= std::strcmp(Name, "pfnCalcPrivateShaderSize") == 0;
+      ValidOwned = false;
     } else {
       ValidRejection = false;
     }
@@ -253,12 +305,23 @@ int wmain(int Argc, wchar_t **Argv) {
                   Audit.CoreTables, Audit.QueueTables, Audit.CommandListTables,
                   Audit.ExtendedTables, Audit.ExecutableShaderQueries,
                   Audit.UnsupportedCalls);
+      std::printf("Native shader lifetimes: %u/%u; shared pipelines: %u/%u\n",
+                  Audit.CompiledShadersCreated, Audit.CompiledShadersDestroyed,
+                  Audit.PipelinesCreated, Audit.PipelinesDestroyed);
       ValidRejection &=
           Audit.CoreTables == 1 && Audit.QueueTables == 1 &&
           Audit.CommandListTables == 2 && Audit.ExtendedTables == 1 &&
           Audit.ExecutableShaderQueries == 1 && Audit.UnsupportedCalls == 0;
+      ValidOwned &=
+          Audit.CoreTables == 1 && Audit.QueueTables == 1 &&
+          Audit.CommandListTables == 2 && Audit.ExtendedTables == 1 &&
+          Audit.ExecutableShaderQueries == 2 && Audit.UnsupportedCalls == 0 &&
+          Audit.CompiledShadersCreated == 2 &&
+          Audit.CompiledShadersDestroyed == 2 && Audit.PipelinesCreated == 2 &&
+          Audit.PipelinesDestroyed == 2;
     } else {
       ValidRejection = false;
+      ValidOwned = false;
       Result = report("Missing table audit export", E_FAIL);
     }
     using ProbeFn = void(APIENTRY *)(feme::probe::WarpDeviceContextProbe *);
@@ -280,23 +343,51 @@ int wmain(int Argc, wchar_t **Argv) {
           Data.DmaUnlockReturned && Data.DmaUnlockResult == S_OK &&
           Data.DmaDeallocateReturned && Data.DmaDeallocateResult == S_OK &&
           !Data.LiveRootSignaturesAtDestroy && !Data.LiveNullShadersAtDestroy &&
-          !Data.ExceptionCode;
+          !Data.LiveCompiledShadersAtDestroy &&
+          !Data.LiveImmutableStatesAtDestroy && !Data.LivePipelinesAtDestroy &&
+          !Data.LiveCommandPoolsAtDestroy && !Data.LiveHeapsAtDestroy &&
+          !Data.LiveResourcesAtDestroy && !Data.ExceptionCode;
       ValidRejection &= CleanupValid;
+      ValidOwned &= CleanupValid;
       if (!CleanupValid)
         Result = report("Device cleanup mismatch", E_FAIL);
     } else {
       Result = report("Missing owned context export", E_FAIL);
       ValidRejection = false;
+      ValidOwned = false;
     }
+    using HeapAuditFn =
+        void(APIENTRY *)(feme::probe::WarpApplicationHeapAudit *);
+    auto HeapAudit = reinterpret_cast<HeapAuditFn>(
+        GetProcAddress(Module, "FeMeWarpGetApplicationHeapAudit"));
+    if (HeapAudit) {
+      feme::probe::WarpApplicationHeapAudit Data;
+      HeapAudit(&Data);
+      std::printf("Application KMD heaps: %u/%u maps=%u/%u "
+                  "resident=%u evict=%u runtime paging queue=%u\n",
+                  Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
+                  Data.MakeResidentCallbacks, Data.EvictCallbacks,
+                  Data.HasRuntimePagingQueue);
+      ValidOwned &= Data.Created == 1 && Data.Destroyed == 1 && Data.Maps > 0 &&
+                    Data.Maps == Data.Unmaps &&
+                    Data.MakeResidentCallbacks == 2 &&
+                    Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
+    } else
+      ValidOwned = false;
   }
   if (!FreeLibrary(Module)) {
     Result = report("FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
     ValidRejection = false;
+    ValidOwned = false;
   }
   if (ExpectShaderRejection) {
     report("Expected executable-shader rejection",
            ValidRejection ? S_OK : E_FAIL);
     return ValidRejection ? 0 : 1;
+  }
+  if (!Reference) {
+    report("Owned device/resource/provenance gate", ValidOwned ? S_OK : E_FAIL);
+    return ValidOwned && SUCCEEDED(Result) ? 0 : 1;
   }
   return SUCCEEDED(Result) ? 0 : 1;
 }

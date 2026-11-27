@@ -468,3 +468,45 @@ feme_add_probe_test(NAME os-routed-warp-prototype-not-a-device
   WILL_FAIL COMMAND warp-prototype-harness)
 feme_add_probe_test(NAME os-routed-warp-prototype-reference-buffer
   COMMAND warp-prototype-harness --reference)
+
+set(FEME_WARP_COMPILER_DLL "" CACHE FILEPATH "Owned FeMe compiler bridge DLL")
+set(FEME_WARP_COMPILER_LIBRARY "" CACHE FILEPATH "Compiler bridge import library")
+if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
+  if(NOT EXISTS "${FEME_WARP_COMPILER_DLL}" OR
+     NOT EXISTS "${FEME_WARP_COMPILER_LIBRARY}")
+    message(FATAL_ERROR "Both FeMe compiler DLL and import library are required")
+  endif()
+  set(WARP_COMPILER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/warp-compiler")
+  add_library(warp-compiler-shim SHARED
+    ../windows-adapter-bootstrap/BootstrapStub.cpp
+    ../windows-adapter-bootstrap/WarpHeap.cpp
+    ../windows-adapter-bootstrap/WarpTables.cpp)
+  target_compile_definitions(warp-compiler-shim PRIVATE
+    FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0072
+    FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO=1
+    FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT=1
+    FEME_BOOTSTRAP_WARP_PROTOTYPE=1 FEME_BOOTSTRAP_WARP_COMPILER=1)
+  target_link_libraries(warp-compiler-shim PRIVATE "${FEME_WARP_COMPILER_LIBRARY}")
+  set_target_properties(warp-compiler-shim PROPERTIES
+    OUTPUT_NAME d3d10warp
+    RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}"
+    ARCHIVE_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}"
+    LINK_DEPENDS "${FEME_WARP_COMPILER_DLL}")
+  add_custom_command(TARGET warp-compiler-shim POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FEME_WARP_COMPILER_DLL}"
+      "${WARP_COMPILER_OUTPUT_DIR}/feme_warp_compiler.dll")
+  add_executable(warp-compiler-harness
+    ../windows-adapter-probe/WarpPrototypeProbe.cpp)
+  set_target_properties(warp-compiler-harness PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
+  target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi)
+  add_dependencies(warp-compiler-harness warp-compiler-shim)
+  target_compile_options(warp-compiler-shim PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+  target_compile_options(warp-compiler-harness PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-buffer
+    COMMAND warp-compiler-harness)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-buffer
+    COMMAND warp-compiler-harness --reference)
+  feme_add_probe_test(NAME os-routed-warp-compiler-not-shader-rejection
+    WILL_FAIL COMMAND warp-compiler-harness --expect-shader-rejection)
+endif()

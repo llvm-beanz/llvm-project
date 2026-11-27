@@ -231,6 +231,24 @@ bool checkIntegrationCaps(D3D12DDI_HADAPTER Adapter,
   Flags = D3D12DDI_COMMAND_QUEUE_FLAG_3D;
   Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
            Flags == D3D12DDI_COMMAND_QUEUE_FLAG_3D;
+  D3D12DDI_GPUVA_CAPS_0004 GPUVA{};
+  Args.Type = D3D12DDICAPS_TYPE_GPUVA_CAPS;
+  Args.pInfo = nullptr;
+  Args.pData = &GPUVA;
+  Args.DataSize = sizeof(GPUVA);
+  Valid &= GetCaps(Adapter, &Args) == S_OK &&
+           GPUVA.MaxGPUVirtualAddressBitsPerResource == 32;
+  GPUVA.MaxGPUVirtualAddressBitsPerResource = 99;
+  --Args.DataSize;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
+           GPUVA.MaxGPUVirtualAddressBitsPerResource == 99;
+  BOOL Markers = TRUE;
+  Args.Type = D3D12DDICAPS_TYPE_0073_SUPPORT_BATCHED_MARKERS;
+  Args.pData = &Markers;
+  Args.DataSize = sizeof(Markers);
+  Valid &= GetCaps(Adapter, &Args) == S_OK && !Markers;
+  Args.pData = nullptr;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG;
   report(L"Memory and scheduling capability contract", Valid ? S_OK : E_FAIL);
   return Valid;
 }

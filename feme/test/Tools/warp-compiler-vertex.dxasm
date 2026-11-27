@@ -5,6 +5,7 @@
 // REQUIRES: feme-warp-compiler
 // RUN: dxbc-as %s -o %t.dxbc
 // RUN: feme-warp-compiler-test %t.dxbc | FileCheck %s
+// RUN: feme-warp-compiler-test %t.dxbc --ddi | FileCheck %s --check-prefix=DDI
 
 vs_4_0
 dcl_input v0.xyzw
@@ -15,3 +16,4 @@ ret
 // CHECK: native stage=0 wave=4 artifact={{[1-9][0-9]*}}
 // CHECK-NEXT: native stage=0 wave=4 artifact={{[1-9][0-9]*}}
 // CHECK-NEXT: compiled and released twice
+// DDI: compiled DDI ownership PASS

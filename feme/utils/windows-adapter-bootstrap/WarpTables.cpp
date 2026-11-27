@@ -12,16 +12,26 @@
 #include "BootstrapAudit.h"
 #include "WarpHeap.h"
 
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+#include "WarpShaderCompilerABI.h"
+#endif
+
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <new>
 #include <type_traits>
+#include <vector>
 
 namespace {
 std::atomic<const char *> LastUnsupported{nullptr};
 std::atomic<UINT> PublishedTables[4]{};
 std::atomic<UINT> ExecutableShaderQueries{0};
 std::atomic<UINT> UnsupportedCalls{0};
+std::atomic<UINT> CompiledShadersCreated{0};
+std::atomic<UINT> CompiledShadersDestroyed{0};
+std::atomic<UINT> PipelinesCreated{0};
+std::atomic<UINT> PipelinesDestroyed{0};
 
 void reportError(D3D12DDI_HDEVICE Device, HRESULT Result) {
   auto *State = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
@@ -123,6 +133,63 @@ struct EmptyRootSignature {
   D3D12DDI_ROOT_SIGNATURE_FLAGS Flags;
 };
 
+template <typename Descriptor, typename Handle> struct ImmutableState {
+  feme::probe::WarpDeviceState *Owner;
+  Descriptor Desc;
+
+  static HRESULT validate(const Descriptor *Args) {
+    if (!Args)
+      return E_INVALIDARG;
+    if (Args->LibraryReference.hLibrary.pDrvPrivate ||
+        Args->LibraryReference.PipelineIndex)
+      return E_NOTIMPL;
+    return S_OK;
+  }
+
+  static SIZE_T APIENTRY size(D3D12DDI_HDEVICE Device, const Descriptor *Args) {
+    HRESULT Result = validate(Args);
+    if (FAILED(Result)) {
+      reportError(Device, Result);
+      return 0;
+    }
+    return sizeof(ImmutableState);
+  }
+
+  static void APIENTRY create(D3D12DDI_HDEVICE Device, const Descriptor *Args,
+                              Handle Object) {
+    HRESULT Result = validate(Args);
+    auto *Owner =
+        static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+    if (SUCCEEDED(Result) && (!Owner || !Object.pDrvPrivate))
+      Result = E_INVALIDARG;
+    if (FAILED(Result)) {
+      reportError(Device, Result);
+      return;
+    }
+    new (Object.pDrvPrivate) ImmutableState{Owner, *Args};
+    ++Owner->LiveImmutableStates;
+  }
+
+  static void APIENTRY destroy(D3D12DDI_HDEVICE Device, Handle Object) {
+    auto *Owner =
+        static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+    auto *State = static_cast<ImmutableState *>(Object.pDrvPrivate);
+    if (!Owner || !State || State->Owner != Owner) {
+      reportError(Device, E_INVALIDARG);
+      return;
+    }
+    State->~ImmutableState();
+    --Owner->LiveImmutableStates;
+  }
+};
+
+using BlendState =
+    ImmutableState<D3D12DDI_BLEND_DESC_0010, D3D12DDI_HBLENDSTATE>;
+using DepthState = ImmutableState<D3D12DDI_DEPTH_STENCIL_DESC_0025,
+                                  D3D12DDI_HDEPTHSTENCILSTATE>;
+using RasterState =
+    ImmutableState<D3D12DDI_RASTERIZER_DESC_0010, D3D12DDI_HRASTERIZERSTATE>;
+
 HRESULT validateEmptyRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
   if (!Args || !Args->pRootSignature_1_1 || Args->NodeMask != 1)
     return E_INVALIDARG;
@@ -170,13 +237,28 @@ void APIENTRY destroyRoot(D3D12DDI_HDEVICE Device,
   --Owner->LiveRootSignatures;
 }
 
-struct NullShader {
+struct ShaderObject {
   feme::probe::WarpDeviceState *Owner;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  void *Compiled = nullptr;
+  FeMeWarpCompiledShaderInfo Info{};
+#endif
 };
 
-HRESULT validateNullShader(const D3D12DDIARG_CREATE_SHADER_0026 *Args) {
+HRESULT validateShader(const D3D12DDIARG_CREATE_SHADER_0026 *Args) {
   if (!Args)
     return E_INVALIDARG;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  if (Args->pShaderCode && !Args->LibraryReference.hLibrary.pDrvPrivate &&
+      !Args->LibraryReference.PipelineIndex && !Args->Flags) {
+    std::fprintf(stderr, "FeMe WARP raw shader: version=0x%08x tokens=%u\n",
+                 Args->pShaderCode[0], Args->pShaderCode[1]);
+    // The public tokenized-bytecode contract bounds the buffer by word 1.
+    if (Args->pShaderCode[1] < 2 || Args->pShaderCode[1] > 4 * 1024 * 1024)
+      return E_INVALIDARG;
+    return S_OK;
+  }
+#endif
   if (Args->pShaderCode || Args->LibraryReference.hLibrary.pDrvPrivate ||
       Args->LibraryReference.PipelineIndex || Args->Flags ||
       Args->IOSignatures.Standard) {
@@ -189,24 +271,30 @@ HRESULT validateNullShader(const D3D12DDIARG_CREATE_SHADER_0026 *Args) {
 
 SIZE_T APIENTRY shaderSize(D3D12DDI_HDEVICE Device,
                            const D3D12DDIARG_CREATE_SHADER_0026 *Args) {
-  HRESULT Result = validateNullShader(Args);
+  HRESULT Result = validateShader(Args);
+  if (Args && Args->pShaderCode)
+    ++ExecutableShaderQueries;
   if (FAILED(Result)) {
     if (Args && Args->pShaderCode) {
-      ++ExecutableShaderQueries;
       LastUnsupported.store("pfnCalcPrivateShaderSize");
     }
     reportError(Device, Result);
     return 0;
   }
-  return sizeof(NullShader);
+  return sizeof(ShaderObject);
 }
 
-void APIENTRY createNullShader(D3D12DDI_HDEVICE Device,
-                               const D3D12DDIARG_CREATE_SHADER_0026 *Args,
-                               D3D12DDI_HSHADER Shader) {
-  HRESULT Result = validateNullShader(Args);
+template <UINT Stage>
+void APIENTRY createShader(D3D12DDI_HDEVICE Device,
+                           const D3D12DDIARG_CREATE_SHADER_0026 *Args,
+                           D3D12DDI_HSHADER Shader) {
+  HRESULT Result = validateShader(Args);
   if (FAILED(Result)) {
     reportError(Device, Result);
+    return;
+  }
+  if (Args->pShaderCode && (Args->pShaderCode[0] >> 16) != Stage) {
+    reportError(Device, E_INVALIDARG);
     return;
   }
   auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
@@ -214,20 +302,281 @@ void APIENTRY createNullShader(D3D12DDI_HDEVICE Device,
     reportError(Device, E_INVALIDARG);
     return;
   }
-  new (Shader.pDrvPrivate) NullShader{Owner};
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  if (Args->pShaderCode) {
+    void *Compiled = nullptr;
+    FeMeWarpCompiledShaderInfo Info;
+    Result = FeMeWarpCompileRawDXBC(Args->pShaderCode, Args->pShaderCode[1],
+                                    &Compiled, &Info);
+    if (FAILED(Result)) {
+      LastUnsupported.store("pfnCreateShader: FeMe compilation failed");
+      reportError(Device, Result);
+      return;
+    }
+    new (Shader.pDrvPrivate) ShaderObject{Owner, Compiled, Info};
+    ++Owner->LiveCompiledShaders;
+    ++CompiledShadersCreated;
+    return;
+  }
+#endif
+  new (Shader.pDrvPrivate) ShaderObject{Owner};
   ++Owner->LiveNullShaders;
 }
 
 void APIENTRY destroyShader(D3D12DDI_HDEVICE Device, D3D12DDI_HSHADER Shader) {
   auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
-  auto *State = static_cast<NullShader *>(Shader.pDrvPrivate);
+  auto *State = static_cast<ShaderObject *>(Shader.pDrvPrivate);
   if (!Owner || !State || State->Owner != Owner) {
     reportError(Device, E_INVALIDARG);
     return;
   }
-  State->~NullShader();
-  --Owner->LiveNullShaders;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  if (State->Compiled) {
+    FeMeWarpDestroyCompiledShader(State->Compiled);
+    --Owner->LiveCompiledShaders;
+    ++CompiledShadersDestroyed;
+  } else
+#endif
+    --Owner->LiveNullShaders;
+  State->~ShaderObject();
 }
+
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+struct CommandPool {
+  feme::probe::WarpDeviceState *Owner;
+  std::vector<UINT8> Bytes;
+  UINT64 Generation = 0;
+  UINT Recorders = 0;
+};
+
+SIZE_T APIENTRY commandPoolSize(
+    D3D12DDI_HDEVICE Device, const D3D12DDIARG_CREATE_COMMAND_POOL_0040 *Args) {
+  if (!Args || Args->PoolFlags != D3D12DDI_COMMAND_POOL_FLAG_NONE) {
+    reportError(Device, E_INVALIDARG);
+    return 0;
+  }
+  return sizeof(CommandPool);
+}
+
+HRESULT APIENTRY createCommandPool(
+    D3D12DDI_HDEVICE Device, const D3D12DDIARG_CREATE_COMMAND_POOL_0040 *Args,
+    D3D12DDI_HCOMMANDPOOL_0040 Pool) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Pool.pDrvPrivate || !Args ||
+      Args->PoolFlags != D3D12DDI_COMMAND_POOL_FLAG_NONE)
+    return E_INVALIDARG;
+  new (Pool.pDrvPrivate) CommandPool{Owner, {}};
+  ++Owner->LiveCommandPools;
+  return S_OK;
+}
+
+void APIENTRY destroyCommandPool(D3D12DDI_HDEVICE Device,
+                                 D3D12DDI_HCOMMANDPOOL_0040 Pool) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  auto *State = static_cast<CommandPool *>(Pool.pDrvPrivate);
+  if (!Owner || !State || State->Owner != Owner || State->Recorders) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  State->~CommandPool();
+  --Owner->LiveCommandPools;
+}
+
+void APIENTRY resetCommandPool(D3D12DDI_HDEVICE Device,
+                               D3D12DDI_HCOMMANDPOOL_0040 Pool) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  auto *State = static_cast<CommandPool *>(Pool.pDrvPrivate);
+  if (!Owner || !State || State->Owner != Owner) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  State->Bytes.clear();
+  ++State->Generation;
+}
+
+struct DescriptorSlot {
+  D3D12DDI_DESCRIPTOR_HEAP_TYPE Type;
+  D3D12DDI_HRESOURCE Resource;
+  UINT64 ByteOffset;
+  UINT64 ByteSize;
+};
+
+UINT APIENTRY descriptorSize(D3D12DDI_HDEVICE Device,
+                             D3D12DDI_DESCRIPTOR_HEAP_TYPE Type) {
+  if (Type < D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+      Type >= D3D12DDI_DESCRIPTOR_HEAP_TYPE_NUM_TYPES) {
+    reportError(Device, E_INVALIDARG);
+    return 0;
+  }
+  return sizeof(DescriptorSlot);
+}
+
+struct PipelineObject {
+  feme::probe::WarpDeviceState *Owner;
+  void *Compiled;
+  bool Compute;
+};
+
+HRESULT pipelineDesc(D3D12DDI_HDEVICE Device,
+                     const D3D12DDIARG_CREATE_PIPELINE_STATE_0033 *Args,
+                     FeMeWarpVertexPipelineDesc &Desc, ShaderObject *&Vertex,
+                     bool &Compute) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Args || Args->NodeMask != 1)
+    return E_INVALIDARG;
+  std::fprintf(stderr,
+               "FeMe WARP pipeline: targets=%u depth=%u samples=%u quality=%u "
+               "topology=%u views=%u\n",
+               Args->NumRenderTargets, Args->DSVFormat, Args->SampleDesc.Count,
+               Args->SampleDesc.Quality, Args->PrimitiveTopologyType,
+               Args->ViewInstancingDesc.ViewInstanceCount);
+  if (Args->LibraryReference.hLibrary.pDrvPrivate ||
+      Args->LibraryReference.PipelineIndex || Args->NumRenderTargets ||
+      Args->DSVFormat != DXGI_FORMAT_UNKNOWN || Args->SampleDesc.Count != 1 ||
+      Args->SampleDesc.Quality || Args->ViewInstancingDesc.ViewInstanceCount ||
+      Args->hElementLayout.pDrvPrivate)
+    return E_NOTIMPL;
+  auto *Root =
+      static_cast<EmptyRootSignature *>(Args->hRootSignature.pDrvPrivate);
+  if (!Root || Root->Owner != Owner)
+    return E_INVALIDARG;
+  auto *ComputeShader =
+      static_cast<ShaderObject *>(Args->hComputeShader.pDrvPrivate);
+  if (ComputeShader && ComputeShader->Compiled) {
+    if (ComputeShader->Owner != Owner || ComputeShader->Info.Stage != 5)
+      return E_INVALIDARG;
+    for (auto Shader :
+         {Args->hVertexShader, Args->hPixelShader, Args->hDomainShader,
+          Args->hHullShader, Args->hGeometryShader}) {
+      auto *State = static_cast<ShaderObject *>(Shader.pDrvPrivate);
+      if (State && State->Owner != Owner)
+        return E_INVALIDARG;
+      if (State && State->Compiled)
+        return E_INVALIDARG;
+    }
+    Vertex = ComputeShader;
+    Compute = true;
+    return S_OK;
+  }
+  for (auto Shader :
+       {Args->hComputeShader, Args->hPixelShader, Args->hDomainShader,
+        Args->hHullShader, Args->hGeometryShader}) {
+    auto *State = static_cast<ShaderObject *>(Shader.pDrvPrivate);
+    if (State && State->Owner != Owner)
+      return E_INVALIDARG;
+    if (State && State->Compiled)
+      return E_NOTIMPL;
+  }
+  Vertex = static_cast<ShaderObject *>(Args->hVertexShader.pDrvPrivate);
+  auto *Raster = static_cast<RasterState *>(Args->hRasterizerState.pDrvPrivate);
+  auto *Depth = static_cast<DepthState *>(Args->hDepthStencilState.pDrvPrivate);
+  auto *Blend = static_cast<BlendState *>(Args->hBlendState.pDrvPrivate);
+  if (!Vertex || Vertex->Owner != Owner || !Vertex->Compiled ||
+      Vertex->Info.Stage != 0 || !Root || Root->Owner != Owner || !Raster ||
+      Raster->Owner != Owner || !Depth || Depth->Owner != Owner || !Blend ||
+      Blend->Owner != Owner)
+    return E_INVALIDARG;
+  if (Depth->Desc.DepthEnable || Depth->Desc.StencilEnable ||
+      Depth->Desc.DepthBoundsTestEnable || Blend->Desc.AlphaToCoverageEnable ||
+      Raster->Desc.DepthBias || Raster->Desc.DepthBiasClamp ||
+      Raster->Desc.SlopeScaledDepthBias || Raster->Desc.ForcedSampleCount ||
+      Raster->Desc.ConservativeRasterizationMode !=
+          D3D12DDI_CONSERVATIVE_RASTERIZATION_MODE_OFF ||
+      Raster->Desc.AntialiasedLineEnable)
+    return E_NOTIMPL;
+  switch (Args->PrimitiveTopologyType) {
+  case D3D12DDI_PRIMITIVE_TOPOLOGY_TYPE_POINT:
+    Desc.Topology = 0;
+    break;
+  case D3D12DDI_PRIMITIVE_TOPOLOGY_TYPE_LINE:
+    Desc.Topology = 1;
+    break;
+  case D3D12DDI_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE:
+    Desc.Topology = 2;
+    break;
+  default:
+    return E_NOTIMPL;
+  }
+  if (Raster->Desc.CullMode < D3D12DDI_CULL_MODE_NONE ||
+      Raster->Desc.CullMode > D3D12DDI_CULL_MODE_BACK)
+    return E_INVALIDARG;
+  switch (Raster->Desc.CullMode) {
+  case D3D12DDI_CULL_MODE_NONE:
+    Desc.Cull = 0;
+    break;
+  case D3D12DDI_CULL_MODE_FRONT:
+    Desc.Cull = 1;
+    break;
+  case D3D12DDI_CULL_MODE_BACK:
+    Desc.Cull = 2;
+    break;
+  }
+  if (Raster->Desc.FillMode != D3D12DDI_FILL_MODE_WIREFRAME &&
+      Raster->Desc.FillMode != D3D12DDI_FILL_MODE_SOLID)
+    return E_INVALIDARG;
+  Desc.Wireframe = Raster->Desc.FillMode == D3D12DDI_FILL_MODE_WIREFRAME;
+  Desc.FrontCounterClockwise = Raster->Desc.FrontCounterClockwise != FALSE;
+  Desc.DepthClamp = Raster->Desc.DepthClipEnable == FALSE;
+  Desc.SampleMask = Args->SampleMask;
+  return S_OK;
+}
+
+SIZE_T APIENTRY
+pipelineSize(D3D12DDI_HDEVICE Device,
+             const D3D12DDIARG_CREATE_PIPELINE_STATE_0033 *Args) {
+  FeMeWarpVertexPipelineDesc Desc;
+  ShaderObject *Vertex = nullptr;
+  bool Compute = false;
+  HRESULT Result = pipelineDesc(Device, Args, Desc, Vertex, Compute);
+  if (FAILED(Result)) {
+    LastUnsupported.store("pfnCalcPrivatePipelineStateSize");
+    reportError(Device, Result);
+    return 0;
+  }
+  return sizeof(PipelineObject);
+}
+
+HRESULT APIENTRY createPipeline(
+    D3D12DDI_HDEVICE Device, const D3D12DDIARG_CREATE_PIPELINE_STATE_0033 *Args,
+    D3D12DDI_HPIPELINESTATE Pipeline, D3D12DDI_HRTPIPELINESTATE) {
+  if (!Pipeline.pDrvPrivate)
+    return E_INVALIDARG;
+  FeMeWarpVertexPipelineDesc Desc;
+  ShaderObject *Vertex = nullptr;
+  bool Compute = false;
+  HRESULT Result = pipelineDesc(Device, Args, Desc, Vertex, Compute);
+  if (FAILED(Result))
+    return Result;
+  void *Compiled = nullptr;
+  Result = Compute ? FeMeWarpCreateComputePipeline(Vertex->Compiled, &Compiled)
+                   : FeMeWarpCreateVertexPipeline(Vertex->Compiled, &Desc,
+                                                  &Compiled);
+  if (FAILED(Result))
+    return Result;
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  new (Pipeline.pDrvPrivate) PipelineObject{Owner, Compiled, Compute};
+  ++Owner->LivePipelines;
+  ++PipelinesCreated;
+  return S_OK;
+}
+
+void APIENTRY destroyPipeline(D3D12DDI_HDEVICE Device,
+                              D3D12DDI_HPIPELINESTATE Pipeline) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  auto *State = static_cast<PipelineObject *>(Pipeline.pDrvPrivate);
+  if (!Owner || !State || State->Owner != Owner) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  if (State->Compute)
+    FeMeWarpDestroyComputePipeline(State->Compiled);
+  else
+    FeMeWarpDestroyVertexPipeline(State->Compiled);
+  State->~PipelineObject();
+  --Owner->LivePipelines;
+  ++PipelinesDestroyed;
+}
+#endif
 
 HRESULT APIENTRY extendedFeatures(D3D12DDI_HDEVICE, UINT32 *Count,
                                   D3D12DDI_FEATURE_0020 *) {
@@ -285,18 +634,37 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnGetImplicitPhysicalAdapterMask = implicitAdapterMask;
     Table.pfnCheckFormatSupport = checkFormat;
     Table.pfnCheckMultisampleQualityLevels = checkMultisample;
+    Table.pfnCalcPrivateBlendStateSize = BlendState::size;
+    Table.pfnCreateBlendState = BlendState::create;
+    Table.pfnDestroyBlendState = BlendState::destroy;
+    Table.pfnCalcPrivateDepthStencilStateSize = DepthState::size;
+    Table.pfnCreateDepthStencilState = DepthState::create;
+    Table.pfnDestroyDepthStencilState = DepthState::destroy;
+    Table.pfnCalcPrivateRasterizerStateSize = RasterState::size;
+    Table.pfnCreateRasterizerState = RasterState::create;
+    Table.pfnDestroyRasterizerState = RasterState::destroy;
     Table.pfnCalcPrivateRootSignatureSize = rootSize;
     Table.pfnCreateRootSignature = createRoot;
     Table.pfnDestroyRootSignature = destroyRoot;
     Table.pfnCalcPrivateShaderSize = shaderSize;
     Table.pfnCalcPrivateTessellationShaderSize = shaderSize;
-    Table.pfnCreateVertexShader = createNullShader;
-    Table.pfnCreatePixelShader = createNullShader;
-    Table.pfnCreateGeometryShader = createNullShader;
-    Table.pfnCreateComputeShader = createNullShader;
-    Table.pfnCreateHullShader = createNullShader;
-    Table.pfnCreateDomainShader = createNullShader;
+    Table.pfnCreateVertexShader = createShader<1>;
+    Table.pfnCreatePixelShader = createShader<0>;
+    Table.pfnCreateGeometryShader = createShader<2>;
+    Table.pfnCreateComputeShader = createShader<5>;
+    Table.pfnCreateHullShader = createShader<3>;
+    Table.pfnCreateDomainShader = createShader<4>;
     Table.pfnDestroyShader = destroyShader;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+    Table.pfnCalcPrivateCommandPoolSize = commandPoolSize;
+    Table.pfnCreateCommandPool = createCommandPool;
+    Table.pfnDestroyCommandPool = destroyCommandPool;
+    Table.pfnResetCommandPool = resetCommandPool;
+    Table.pfnGetDescriptorSizeInBytes = descriptorSize;
+    Table.pfnCalcPrivatePipelineStateSize = pipelineSize;
+    Table.pfnCreatePipelineState = createPipeline;
+    Table.pfnDestroyPipelineState = destroyPipeline;
+#endif
     return publish(Destination, Size, Table, 0);
   }
   case D3D12DDI_TABLE_TYPE_COMMAND_QUEUE_3D: {
@@ -352,5 +720,7 @@ FeMeWarpGetTableAudit(feme::probe::WarpPrototypeTableAudit *Audit) {
   }
   *Audit = {PublishedTables[0].load(),      PublishedTables[1].load(),
             PublishedTables[2].load(),      PublishedTables[3].load(),
-            ExecutableShaderQueries.load(), UnsupportedCalls.load()};
+            ExecutableShaderQueries.load(), UnsupportedCalls.load(),
+            CompiledShadersCreated.load(),  CompiledShadersDestroyed.load(),
+            PipelinesCreated.load(),        PipelinesDestroyed.load()};
 }

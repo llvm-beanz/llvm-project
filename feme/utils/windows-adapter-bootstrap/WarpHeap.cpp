@@ -9,8 +9,10 @@
 
 #include "WarpHeap.h"
 
+#include "BootstrapAudit.h"
 #include "WarpAllocationInfo.h"
 
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -20,6 +22,9 @@ namespace feme {
 namespace probe {
 namespace {
 constexpr UINT32 BufferAlignment = 64 * 1024;
+std::atomic<UINT> AppCreated{0}, AppDestroyed{0}, AppMaps{0}, AppUnmaps{0};
+std::atomic<UINT> AppMakeResident{0}, AppEvict{0};
+std::atomic<bool> HasRTPagingQueue{false};
 
 struct HeapState {
   WarpDeviceState *Owner;
@@ -45,6 +50,8 @@ WarpDeviceState *deviceState(D3D12DDI_HDEVICE Device) {
 }
 
 void reportError(WarpDeviceState *State, HRESULT Result) {
+  std::fprintf(stderr, "FeMe WARP heap DDI error: 0x%08lx\n",
+               static_cast<unsigned long>(Result));
   if (State && State->RTDevice && State->UMCallbacks &&
       State->UMCallbacks->pfnSetErrorCb) {
     D3D12DDI_HRTDEVICE RTDevice{};
@@ -127,6 +134,13 @@ D3D12DDI_HEAP_AND_RESOURCE_SIZES APIENTRY calcPrivateSizes(
     D3D12DDI_HPROTECTEDRESOURCESESSION_0030 Protected) {
   HRESULT Result = validateCreation(Heap, Resource, Protected);
   if (FAILED(Result)) {
+    if (Heap)
+      std::fprintf(stderr,
+                   "FeMe WARP heap size: bytes=%llu align=%llu flags=0x%x "
+                   "pool=%u cpu=%u nodes=%u/%u\n",
+                   Heap->ByteSize, Heap->Alignment, Heap->Flags,
+                   Heap->MemoryPool, Heap->CPUPageProperty,
+                   Heap->CreationNodeMask, Heap->VisibleNodeMask);
     reportError(deviceState(Device), Result);
     return {};
   }
@@ -255,6 +269,8 @@ HRESULT APIENTRY createHeapAndResource(
     return Result;
   }
   ++Owner->LiveHeaps;
+  if (State->RTResource)
+    ++AppCreated;
   if (ResourceArgs) {
     ::new (Resource.pDrvPrivate) ResourceState{Owner, State, *ResourceArgs};
     ++State->ResourceCount;
@@ -289,6 +305,8 @@ void APIENTRY destroyHeapAndResource(D3D12DDI_HDEVICE Device,
     if (State->Allocation)
       return;
     --Owner->LiveHeaps;
+    if (State->RTResource)
+      ++AppDestroyed;
     State->~HeapState();
   }
 }
@@ -305,6 +323,8 @@ HRESULT APIENTRY mapHeap(D3D12DDI_HDEVICE Device, D3D12DDI_HHEAP Heap,
     return E_UNEXPECTED;
   }
   ++State->MapCount;
+  if (State->RTResource)
+    ++AppMaps;
   *Data = State->Memory;
   ReleaseSRWLockExclusive(&State->MapLock);
   return S_OK;
@@ -323,6 +343,8 @@ void APIENTRY unmapHeap(D3D12DDI_HDEVICE Device, D3D12DDI_HHEAP Heap) {
     return;
   }
   --State->MapCount;
+  if (State->RTResource)
+    ++AppUnmaps;
   ReleaseSRWLockExclusive(&State->MapLock);
 }
 
@@ -437,6 +459,8 @@ HRESULT APIENTRY makeResident(D3D12DDI_HDEVICE Device,
     Args->pPagingFenceValue[0] = 0;
     return S_OK;
   }
+  if (!Args->pRTPagingQueue[0].handle)
+    return E_INVALIDARG;
   if (!Owner->UMCallbacks || !Owner->UMCallbacks->pfnMakeResidentCb)
     return E_NOINTERFACE;
   std::unique_ptr<D3DKMT_HANDLE[]> Handles(new (std::nothrow)
@@ -456,6 +480,11 @@ HRESULT APIENTRY makeResident(D3D12DDI_HDEVICE Device,
   if (Result == E_PENDING && !Resident.PagingFenceValue)
     return E_UNEXPECTED;
   if (Result == S_OK || Result == E_PENDING) {
+    for (UINT I = 0; I < Args->NumObjects; ++I)
+      if (static_cast<HeapState *>(Args->pObjects[I].Handle)->RTResource) {
+        ++AppMakeResident;
+        HasRTPagingQueue = true;
+      }
     Args->WaitMask = Result == E_PENDING ? 1 : 0;
     Args->pPagingFenceValue[0] = Resident.PagingFenceValue;
     return Result;
@@ -487,6 +516,10 @@ HRESULT APIENTRY evict(D3D12DDI_HDEVICE Device, const D3D12DDIARG_EVICT *Args) {
   D3D12DDI_HRTDEVICE RTDevice{};
   RTDevice.handle = Owner->RTDevice;
   Result = Owner->UMCallbacks->pfnEvictCb(RTDevice, &Evict);
+  if (Result == S_OK)
+    for (UINT I = 0; I < Args->NumObjects; ++I)
+      if (static_cast<HeapState *>(Args->pObjects[I].Handle)->RTResource)
+        ++AppEvict;
   return Result == S_OK || FAILED(Result) ? Result : E_UNEXPECTED;
 }
 } // namespace
@@ -507,3 +540,16 @@ void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table) {
 }
 } // namespace probe
 } // namespace feme
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeWarpGetApplicationHeapAudit(feme::probe::WarpApplicationHeapAudit *Audit) {
+  if (!Audit) {
+    OutputDebugStringA("FeMe WARP heap audit requires an output pointer.\n");
+    return;
+  }
+  *Audit = {
+      feme::probe::AppCreated.load(),      feme::probe::AppDestroyed.load(),
+      feme::probe::AppMaps.load(),         feme::probe::AppUnmaps.load(),
+      feme::probe::AppMakeResident.load(), feme::probe::AppEvict.load(),
+      feme::probe::HasRTPagingQueue.load()};
+}

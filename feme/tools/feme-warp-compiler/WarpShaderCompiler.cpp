@@ -12,6 +12,7 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
 #include "feme/Dialect/DXSA/IR/DXSA.h"
+#include "feme/Graphics/Pipeline.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/DXSA/BinaryParser.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
@@ -21,11 +22,16 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/VCSRevision.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace {
 constexpr std::int32_t InvalidArgument = static_cast<std::int32_t>(0x80070057u);
 constexpr std::int32_t CompileFailure = static_cast<std::int32_t>(0x80004005u);
+
+struct CompiledShader {
+  std::shared_ptr<feme::cpu::CompiledStage> Stage;
+};
 
 std::int32_t report(llvm::Error Error) {
   llvm::logAllUnhandledErrors(std::move(Error), llvm::errs(),
@@ -33,6 +39,15 @@ std::int32_t report(llvm::Error Error) {
   return CompileFailure;
 }
 } // namespace
+
+const char *FeMeWarpCompilerRevision() {
+#ifdef LLVM_REVISION
+  return LLVM_REVISION;
+#else
+  llvm::errs() << "FeMe WARP compiler: build revision unavailable\n";
+  return nullptr;
+#endif
+}
 
 std::int32_t FeMeWarpCompileRawDXBC(const std::uint32_t *Tokens,
                                     std::uint32_t Count, void **Compiled,
@@ -108,10 +123,69 @@ std::int32_t FeMeWarpCompileRawDXBC(const std::uint32_t *Tokens,
   Output.WaveSize = (*Result)->getWaveSize();
   Output.HasNativeEntry = 1;
   *Info = Output;
-  *Compiled = Result->release();
+  *Compiled = new CompiledShader{std::move(*Result)};
   return 0;
 }
 
 void FeMeWarpDestroyCompiledShader(void *Compiled) {
-  delete static_cast<feme::cpu::CompiledStage *>(Compiled);
+  delete static_cast<CompiledShader *>(Compiled);
+}
+
+std::int32_t FeMeWarpCreateVertexPipeline(
+    void *Shader, const FeMeWarpVertexPipelineDesc *Desc, void **Pipeline) {
+  if (Pipeline)
+    *Pipeline = nullptr;
+  if (!Shader || !Desc || !Pipeline || Desc->Size != sizeof(*Desc) ||
+      Desc->Topology > 2 || Desc->Cull > 2 || Desc->FrontCounterClockwise > 1 ||
+      Desc->Wireframe > 1 || Desc->DepthClamp > 1) {
+    llvm::errs() << "FeMe WARP compiler: invalid vertex pipeline descriptor\n";
+    return InvalidArgument;
+  }
+  auto &Stage = static_cast<CompiledShader *>(Shader)->Stage;
+  if (Stage->getStage() != feme::ShaderStage::Vertex) {
+    llvm::errs() << "FeMe WARP compiler: pipeline requires a vertex stage\n";
+    return InvalidArgument;
+  }
+  using namespace feme::graphics;
+  constexpr PrimitiveTopology Topologies[] = {PrimitiveTopology::PointList,
+                                              PrimitiveTopology::LineList,
+                                              PrimitiveTopology::TriangleList};
+  constexpr CullMode Culls[] = {CullMode::None, CullMode::Front,
+                                CullMode::Back};
+  RasterState Raster;
+  Raster.Cull = Culls[Desc->Cull];
+  Raster.Front = Desc->FrontCounterClockwise ? FrontFace::CounterClockwise
+                                             : FrontFace::Clockwise;
+  Raster.Polygon = Desc->Wireframe ? PolygonMode::Line : PolygonMode::Fill;
+  Raster.DepthClampEnable = Desc->DepthClamp != 0;
+  auto Result = std::make_unique<GraphicsPipeline>(
+      Stage, nullptr, Topologies[Desc->Topology], Raster, DepthState{},
+      BlendMode::Replace, 1, std::vector<AttachmentFormat>{});
+  Result->setSampleMask(Desc->SampleMask);
+  *Pipeline = Result.release();
+  return 0;
+}
+
+void FeMeWarpDestroyVertexPipeline(void *Pipeline) {
+  delete static_cast<feme::graphics::GraphicsPipeline *>(Pipeline);
+}
+
+std::int32_t FeMeWarpCreateComputePipeline(void *Shader, void **Pipeline) {
+  if (Pipeline)
+    *Pipeline = nullptr;
+  if (!Shader || !Pipeline) {
+    llvm::errs() << "FeMe WARP compiler: missing compute pipeline input\n";
+    return InvalidArgument;
+  }
+  auto &Stage = static_cast<CompiledShader *>(Shader)->Stage;
+  if (Stage->getStage() != feme::ShaderStage::Compute) {
+    llvm::errs() << "FeMe WARP compiler: pipeline requires a compute stage\n";
+    return InvalidArgument;
+  }
+  *Pipeline = new CompiledShader{Stage};
+  return 0;
+}
+
+void FeMeWarpDestroyComputePipeline(void *Pipeline) {
+  delete static_cast<CompiledShader *>(Pipeline);
 }

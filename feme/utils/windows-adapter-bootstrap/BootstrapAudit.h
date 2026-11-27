@@ -125,6 +125,12 @@ struct WarpDeviceContextProbe {
   bool HeapDestroyed = false;
   std::uint64_t LiveRootSignaturesAtDestroy = 0;
   std::uint64_t LiveNullShadersAtDestroy = 0;
+  std::uint64_t LiveCompiledShadersAtDestroy = 0;
+  std::uint64_t LiveImmutableStatesAtDestroy = 0;
+  std::uint64_t LivePipelinesAtDestroy = 0;
+  std::uint64_t LiveCommandPoolsAtDestroy = 0;
+  std::uint64_t LiveHeapsAtDestroy = 0;
+  std::uint64_t LiveResourcesAtDestroy = 0;
   bool PagingQueueDestroyAttempted = false;
   bool PagingQueueDestroyReturned = false;
   std::int32_t PagingQueueDestroyResult = 0;
@@ -142,6 +148,21 @@ struct WarpPrototypeTableAudit {
   std::uint32_t ExtendedTables = 0;
   std::uint32_t ExecutableShaderQueries = 0;
   std::uint32_t UnsupportedCalls = 0;
+  std::uint32_t CompiledShadersCreated = 0;
+  std::uint32_t CompiledShadersDestroyed = 0;
+  std::uint32_t PipelinesCreated = 0;
+  std::uint32_t PipelinesDestroyed = 0;
+};
+
+/// Only application resources with a real HRTRESOURCE contribute here.
+struct WarpApplicationHeapAudit {
+  std::uint32_t Created = 0;
+  std::uint32_t Destroyed = 0;
+  std::uint32_t Maps = 0;
+  std::uint32_t Unmaps = 0;
+  std::uint32_t MakeResidentCallbacks = 0;
+  std::uint32_t EvictCallbacks = 0;
+  bool HasRuntimePagingQueue = false;
 };
 
 /// Results of the opt-in kernel paging-queue create/destroy experiment.
