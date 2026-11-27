@@ -25,7 +25,7 @@ device or executing FeMe adapter.
 
 | Milestone | Status | Summary |
 |---|---|---|
-| W0 — Integration feasibility | **Blocked** | Corpus/DDI audit is complete. KMD initialization, shader negotiation and an internal kernel-backed buffer round trip work. Complete device tables and an application-created resource lifecycle are still missing. |
+| W0 — Integration feasibility | **Open** | Corpus/DDI audit and internal KMD buffer round trip pass. The opt-in prototype negotiates required tables/caps; executable-shader initialization, application resource lifecycle and runner provenance remain. |
 | W1 — Device and headless compute | **Open** | Portable compute, queue, lifetime, and fence plans and CPU/reference shader oracles exist. No owned device, D3D12 queue, resource, PSO, or dispatch. |
 | W2 — Binding, resources, synchronization | **Open** | Portable binding/resource/barrier plans and shared image/execution extractions exist. No D3D12 descriptor, allocation/residency, command, or synchronization implementation. |
 | W3 — Conventional graphics | **Open** | Portable graphics-state and draw plans exist; no D3D12 graphics execution or end-to-end rendering. |

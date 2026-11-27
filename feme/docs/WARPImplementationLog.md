@@ -193,7 +193,7 @@ throwaway-capable prototype, not an adapter compliance claim.
 | W0(d) | Add an explicit selection assertion to the future runner: verify Microsoft's WARP vendor/device/software identity and independently prove that the selected application-local UMD is the FeMe build, not the system WARP module. List and execute one applicable test on reference WARP, then demonstrate selection of the prototype through the chosen boundary. Record unavailable infrastructure as blocked, not Pass. WARP-only white-box tests remain oracle tests, never generic FeMe coverage. |
 | ~~W0(e)~~ | ~~Measure the no-install host integration paths: inbox/Agility runtime and reference-WARP versions, `CreateSoftwareAdapter`, executable-local WARP substitution, and an LLVM-owned rejection stub with DDI entry-point counters. Run an applicable public-API WARP queue/fence test.~~ Completed 2026-11-06; evidence and reproduction instructions in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md). This closes measurements only, not FeMe device creation. |
 | ~~W0(f)~~ | ~~Container-first user-mode proof: build the standalone probe in the Windows container; run all four CTest cases and record OS/kit/runtime/WARP identities and exact outcomes before implementation. Verify reference WARP and the expected pre-DDI stub rejection; do not substitute host results.~~ Completed 2026-11-06; container evidence, an extended NuGet-WARP/Agility-core matrix, and reproduction instructions are in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md#container-measurements). All four CTest cases passed with no discrepancy from the host measurements. This closes the container measurement step only -- it is not FeMe DDI negotiation; `W0(g)` below carries that forward. |
-| W0(g) | ~~Identify a public general-provider identity/thunk bootstrap~~ -- search completed with a negative result. ~~Reach owned `OpenAdapter12` through stock runtime and query/close its adapter table~~ -- W0(h) supplies historical host/container inbox/Agility evidence under Microsoft's WARP identity. ~~Audit a pinned supported DDI version's public negotiation and thunk-service surface; explain 0070/0071 rejection~~ -- the measured runtime's exact-match version map omits R7 builds 0/1 (0070/0071) and includes build 2 (0072), confirmed in the authorized reference sources and installed runtime. The `_0072` audit completes WARP KMD initialization and internal DMA allocation/cleanup with `S_OK`. The invalid shader wave limits are fixed; shader-model count/list negotiation now reaches `FillDDITable(DEVICE_CORE, 936 bytes)`. Its explicit `E_NOTIMPL` is the current device-creation result, replacing the unexplained pre-table driver-internal error. Remaining: genuine device DDIs and an application resource/allocation/residency/map lifecycle. Keep investigation VM-first and do not modify system WARP or drivers. [Detailed current evidence](W0WindowsIntegrationProbe.md#w0g-follow-up-kmd-device-initialization-and-cap-negotiation). |
+| W0(g) | ~~Identify a public general-provider identity/thunk bootstrap~~ -- search completed with a negative result. ~~Reach owned `OpenAdapter12` through stock runtime and query/close its adapter table~~ -- W0(h) supplies historical host/container inbox/Agility evidence under Microsoft's WARP identity. ~~Audit a pinned supported DDI version's public negotiation and thunk-service surface; explain 0070/0071 rejection~~ -- the measured runtime omits 0070/0071 and accepts 0072. KMD context/DMA initialization and an internal buffer round trip pass. The separate opt-in prototype now publishes core, queue, two command-list and extended-feature tables, passes all fourteen cap queries, and reaches executable-shader initialization. Shader creation remains rejected; no application device exists. Remaining: genuine shader/pipeline initialization and device DDIs, then application resource/allocation/residency/map lifecycle and provenance. [Current evidence](W0WindowsIntegrationProbe.md#w0g-follow-up-fail-closed-device-tables-and-shader-initialization). |
 | ~~W0(h)~~ | ~~Bounded alternative-B investigation: isolate reference forwarding, named-export forwarding, ordinal-199 forwarding, bare owned DDI and owned adapter-table cases; compare WARP selection with generic software-adapter rejection; build/test inside the container and verify inbox/Agility runtime paths.~~ Completed 2026-11-06: owned open/query/close needs neither private ordinal nor forwarding at this stage. Explicit preloading retains diagnostic counters; a debugger also proves executable-local entry without preloading. [Evidence, exact counters and remaining limits](W0WindowsIntegrationProbe.md#alternative-b-application-local-warp-ddi-routing). No real FeMe device or supported DDI is claimed; the selected WARP-compatible product contract does not imply a functioning drop-in yet. |
 
 W0(a) and W0(d) are **partially done**, not complete. W0(e) supplies the host
@@ -338,6 +338,26 @@ allocation/map/remap/teardown, but not an application-created resource. Stock-ru
 device/resource creation, execution and runner provenance remain open;
 direct callback fixtures do not close W0. See
 [owned-buffer evidence](W0WindowsIntegrationProbe.md#w0g-follow-up-owned-committed-buffer-callbacks).
+
+The opt-in `warp-prototype` continuation negotiates the required 0072 table
+layouts (117 core entries, 67 command-list entries, queue and extended-feature
+tables) and all fourteen observed capability queries. Typed unavailable
+operations report errors; no queue or command execution is claimed. Empty
+root signatures and null-stage shader objects have owned, counted lifetimes.
+Stock D3D12 then requests a non-null executable shader during device
+initialization. That request is deliberately rejected through `SetErrorCb`,
+yielding `DXGI_ERROR_DEVICE_REMOVED`; it is not bypassed with an opaque shader
+handle or reference execution. The strict OS test requires this exact failure,
+table publication, successful caps, owned-module/lifecycle counters and complete
+KMD/object teardown. The unchanged context-only variant still verifies the
+earlier core-table refusal. The callback suite passes 64/64 and the OS suite
+34/34; the latter also includes an independent reference-WARP upload-buffer
+allocation/map/remap/eviction/residency test. These are diagnostic and oracle
+results, not a usable FeMe device. W0 remains open: shader/pipeline initialization
+is now a measured prerequisite of its device/resource/provenance exit gates.
+The full `check-feme` gate passes 4,395 tests (15 skipped, 10 unsupported) after
+verifying the application-local FeMe Vulkan ICD in the launching shell.
+Assertions/caching remain enabled and precompiled headers disabled.
 
 `W0(c)`'s test-corpus and compatibility-scope work is **complete**, recorded in
 [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md):

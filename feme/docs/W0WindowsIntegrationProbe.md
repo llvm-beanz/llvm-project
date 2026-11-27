@@ -5622,3 +5622,61 @@ provide genuine runtime paging-queue handles to application resource DDIs.
 W0 still needs the complete core/queue/command-list table
 contract and remaining mandatory capabilities, followed by stock-runtime
 device/resource/residency/map/teardown and runner-provenance evidence.
+
+### W0(g) follow-up: fail-closed device tables and shader initialization
+
+The separate opt-in `warp-prototype` variant advances beyond the context-only
+audit without changing that audit's expected core-table refusal. It supplies
+the public 0072 core layout, inherited 0001 queue and 0062 command-list layouts,
+and the 0021 extended-feature layout. The inventory is compile-time checked
+against the SDK table sizes. Buffer entries reuse `WarpHeap.cpp`; unavailable
+operations use their exact callback types and fail explicitly. No working
+queue, PSO, dispatch, graphics, or texture-format support is advertised as
+implemented. Empty root signatures and null-stage shaders have real private
+objects and counted ownership; nonempty roots and executable shaders are
+rejected.
+
+The new mandatory responses report coherent UMA system memory, no serialization,
+no global-realtime queues or scheduling groups, no device-dependent texture
+layouts, and no CPU-page-table false-positive queues. Row-major alignment
+queries return the baseline alignment contract without claiming texture
+execution. Queries validate exact public structure sizes and required node/layout
+inputs; malformed queries leave caller output untouched.
+
+On the same ARM64 VM, SDK/WDK 10.0.26100.0 and inbox D3D12Core
+10.0.26100.9818, the measured result is:
+
+| Boundary | Result |
+|---|---|
+| Negotiated interface/build | `0x000c0046` / `0x00020000` (0072) |
+| Required tables | Core 1, queue 1, command list 2, extended features 1; all `S_OK` |
+| Capability queries | 14 queries; all `S_OK` |
+| Runtime's next required operation | `CalcPrivateShaderSize` with non-null executable bytecode |
+| Driver response | Explicit `E_NOTIMPL` through `SetErrorCb`; no shader object published |
+| `D3D12CreateDevice(11_0)` | `DXGI_ERROR_DEVICE_REMOVED` (`0x887a0005`) |
+| Cleanup | Context, paging queue, DMA fence/unlock/deallocation all `S_OK`; no live root/null-shader objects |
+
+The observed caps are 1074, 1006, 1004, 1012, 1012, 1005, 1062, 1067,
+1060, 1002, 1003, 1003, 1003 and 1059. The strict rejection test asserts
+owned module selection, all mandatory cap responses, all five table
+publications, the exact shader rejection and cleanup. Its default execution
+mode still fails: a known rejection must never be reported as successful device
+creation.
+
+```powershell
+cmake --build C:\Users\cbieneman\dev\warp-w0-current --target check-feme-windows-probes
+C:\Users\cbieneman\dev\warp-w0-current\warp-prototype\warp-prototype-harness.exe --expect-shader-rejection
+C:\Users\cbieneman\dev\warp-w0-current\warp-prototype\warp-prototype-harness.exe --reference
+```
+
+The final reference command explicitly loads system WARP and successfully
+creates an upload buffer, maps/writes/unmaps/remaps it, verifies retained data
+and VA, evicts/makes it resident, and tears it down without device removal.
+This proves the public-API test and host infrastructure, not FeMe execution.
+The standalone callback suite passes 64/64 and the OS-routing suite 34/34.
+
+**W0 is still open.** Genuine shader/pipeline initialization is necessary even
+for stock-runtime device creation; table publication alone cannot close the
+milestone. Application-created FeMe resources, live residency and runner/device
+provenance remain unverified. The selected WARP ABI/KMD path is unchanged; no
+Microsoft implementation is copied or used for owned execution.
