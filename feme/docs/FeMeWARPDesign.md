@@ -3,13 +3,15 @@
 ## Status
 
 The implementation now includes a portable, tested `FeMeDirect3D` plan library
-for W1-W7 state normalization. Its 34 unit cases validate root signatures,
+for W1-W7 state normalization. Its 56 unit cases validate root signatures,
 descriptor heaps, resource/subresource plans, barriers, graphics/blend/depth
 state, advanced-graphics limits, DXR bounds, presentation contracts, and FL
-12_2 capability gating, plus headless queue/wave/dispatch/copy/fence plans.
-It is deliberately not a device implementation: real D3D12 UMD callbacks,
-owned heaps/resources/queues, graphics execution, ray traversal, presentation,
-and conformance remain open.
+12_2 capability gating, plus headless queue/wave/dispatch/copy/fence/object
+plans, heap/residency/placed-resource plans, draw/mesh dispatch, BLAS/TLAS
+build policy, enhanced barriers and conformance release gating. It is
+deliberately not a device implementation: real D3D12 UMD callbacks, owned
+heaps/resources/queues, graphics execution, ray traversal, presentation, and
+conformance remain open.
 
 This design defines a full-featured Direct3D 12 software adapter using FeMe's
 CPU target as its shader execution engine. The completed adapter targets the
