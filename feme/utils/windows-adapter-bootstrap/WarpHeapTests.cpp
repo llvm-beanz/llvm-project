@@ -238,6 +238,17 @@ bool lifecycle() {
                      Allocation.ResourceDataAlignment == 65536 &&
                      Allocation.Layout == D3D12DDI_TL_ROW_MAJOR,
                  "buffer allocation size and alignment");
+  const auto OriginalAllocation = Allocation;
+  F.Table.pfnCheckResourceAllocationInfo(
+      F.Device, &F.ResourceArgs,
+      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_SHADER_RESOURCE |
+          D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_UNORDERED_ACCESS |
+          D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_DETERMINISTIC,
+      65536, 1, &Allocation);
+  Valid &=
+      check(F.Errors.Calls == 0 && std::memcmp(&OriginalAllocation, &Allocation,
+                                               sizeof(Allocation)) == 0,
+            "deterministic runtime buffer query preserves footprint");
   D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Existing{};
   F.ResourceArgs.Width = 65537;
   F.Table.pfnCheckExistingResourceAllocationInfo(F.Device, F.Resource,

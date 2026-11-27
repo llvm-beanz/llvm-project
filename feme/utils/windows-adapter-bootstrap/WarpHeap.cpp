@@ -337,10 +337,21 @@ void APIENTRY checkAllocationInfo(
     Result = E_INVALIDARG;
   constexpr UINT AllowedFlags =
       D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_SHADER_RESOURCE |
-      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_UNORDERED_ACCESS;
+      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_UNORDERED_ACCESS |
+      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_DETERMINISTIC;
   if (SUCCEEDED(Result) && (static_cast<UINT>(Flags) & ~AllowedFlags))
     Result = E_NOTIMPL;
   if (FAILED(Result)) {
+    if (Args)
+      std::fprintf(
+          stderr,
+          "FeMe WARP allocation info: type=%u width=%llu layout=%u "
+          "flags=0x%x optimizations=0x%x align=%u nodes=%u "
+          "rowMajor=%u reuse=%u\n",
+          Args->ResourceType, Args->Width, Args->Layout, Args->Flags, Flags,
+          Alignment, VisibleNodeMask, Args->pRowMajorLayout != nullptr,
+          Args->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate !=
+              nullptr);
     reportError(deviceState(Device), Result);
     return;
   }
