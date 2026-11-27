@@ -8,6 +8,7 @@ add_feme_library(FeMeDirect3D
   ObjectModel.cpp
   ResidencyPlan.cpp
   DrawPlan.cpp
+  MeshDispatchPlan.cpp
   BarrierPlan.cpp
   DescriptorHeap.cpp
   ResourcePlan.cpp

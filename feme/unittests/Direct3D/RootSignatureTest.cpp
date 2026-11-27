@@ -13,6 +13,7 @@
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/DrawPlan.h"
 #include "feme/Direct3D/ExecutionPlan.h"
+#include "feme/Direct3D/MeshDispatchPlan.h"
 #include "feme/Direct3D/ObjectModel.h"
 #include "feme/Direct3D/PipelinePlan.h"
 #include "feme/Direct3D/PresentationPlan.h"
@@ -571,6 +572,38 @@ TEST(DrawPlanTest, RejectsEmptyAndOverflowingDraws) {
 TEST(DrawPlanTest, RequiresPositiveIndirectArgumentSize) {
   DrawPlan Plan{36, 0, 1, 0, false, 0, 0, 0, 128, 0, false};
   llvm::Error Err = validateDrawPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(MeshDispatchPlanTest, AcceptsTier1MeshDispatch) {
+  MeshDispatchPlan Plan{{4, 2, 1}, 4096, 256, 256, 512, 32};
+  llvm::Error Err = validateMeshDispatchPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(MeshDispatchPlanTest, RejectsOversizedPayloadAndOutput) {
+  MeshDispatchPlan Payload{{1, 1, 1}, 16385, 64, 64, UINT64_MAX, 0};
+  llvm::Error Err = validateMeshDispatchPlan(Payload);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  MeshDispatchPlan Output{{1, 1, 1}, 1024, 257, 64, UINT64_MAX, 0};
+  Err = validateMeshDispatchPlan(Output);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(MeshDispatchPlanTest, RejectsZeroGroupAndIndirectSize) {
+  MeshDispatchPlan Zero{{0, 1, 1}, 1024, 64, 64, UINT64_MAX, 0};
+  llvm::Error Err = validateMeshDispatchPlan(Zero);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  MeshDispatchPlan Indirect{{1, 1, 1}, 1024, 64, 64, 128, 0};
+  Err = validateMeshDispatchPlan(Indirect);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
