@@ -1,5 +1,12 @@
 # W0 Windows user-mode integration probe
 
+**Current status: W0 is complete (2026-11-27).** The compiler-backed prototype
+creates a real stock-runtime device and validates application KMD buffer
+allocation/map/residency/eviction/teardown with independent build provenance.
+See [closure evidence](#w0-closure-compiler-backed-device-and-application-buffer).
+Earlier rejection and pointer-only results below are historical controls,
+not the current device boundary.
+
 **W0(b) decision: WARP-compatible application-local UMD drop-in.**
 Stock D3D12 reaches LLVM-owned `OpenAdapter12`, queries its public adapter
 callbacks, and closed it in the historical host and Windows-container
@@ -8,15 +15,16 @@ cases need neither ordinal 199 nor reference-WARP forwarding. This uses
 Microsoft's existing WARP adapter identity, not a distinct FeMe adapter;
 the user selected that identity and the unmodified WARP kernel-mode driver
 for FeMe's application-local compatibility path on 2026-11-17. This closes
-the product-choice gate only: no supported DDI/device/resource contract or
-universal transparent substitution is proven. See
+the product-choice gate only; the new compiler-backed continuation separately
+proves the selected device/resource feasibility contract, not universal
+transparent substitution. See
 [Alternative B: application-local WARP DDI routing](#alternative-b-application-local-warp-ddi-routing).
 The public general-provider search remains negative, but that is not a
 runtime-routing impossibility result. No system WARP binaries or kernel-mode
 driver are to be replaced or modified.
 The [VM paging-queue follow-up](#w0g-public-kernel-paging-queue-lifecycle-vm)
-now demonstrates a public kernel-service callback create/destroy round trip;
-it still creates no working D3D12 device or buffer/texture allocation.
+demonstrates a public kernel-service callback create/destroy round trip.
+The separate compiler-backed continuation adds a real device and application buffers.
 
 This report preserves historical host/container evidence summarized in
 [WARPRoadmap.md](WARPRoadmap.md) and detailed in
@@ -27,7 +35,82 @@ Windows VM, per the
 user-mode/software-adapter probing first, with no system changes. The LLVM-owned
 [standalone probe](../utils/windows-adapter-probe/CMakeLists.txt) uses public
 SDK/WDK types and APIs. It does not contain Microsoft implementation code,
-invoke private WARP APIs, install an adapter, or execute FeMe shaders.
+install an adapter, or execute FeMe shaders. The separate owned bootstrap
+implements the user-approved WARP KMD ABI and invokes the shared FeMe compiler.
+
+## W0 closure: compiler-backed device and application buffer
+
+Code baseline: `3ce0fc58b2b1`. Native ARM64 Windows VM, OS `10.0.26300`
+(build 26300), selected SDK/DDI headers `10.0.26100.0`, inbox `D3D12.dll`,
+`D3D12Core.dll` and reference `d3d10warp.dll` all `10.0.26100.9818`.
+The WARP kernel services are used unchanged through runtime callbacks; no
+system binary, driver, registry setting or signing configuration was modified.
+
+The `warp-compiler` variant links the owned main-build compiler DLL through a
+small C ABI. Runtime shaders are public raw tokenized DXBC (word 1 gives the
+token count): observed vertex SM 4.0 / 15 tokens and compute SM 5.0 / 8 tokens.
+No runtime shader or Microsoft implementation was copied into test fixtures.
+DXSA import/translation, DXIL raising and `CompiledStage::create` produce real
+native JIT entries. Bridge-owned shared stage references keep compute and
+vertex-only shared graphics pipelines alive after a DDI shader handle dies.
+
+| Gate | Measured result |
+|---|---|
+| Identity | WARP vendor `0x1414`, device `0x008c`, software flag; device LUID matches the selected adapter |
+| Independent ownership | Executable-local owned `d3d10warp.dll` and `feme_warp_compiler.dll`; compiler source revision exported and checked |
+| DDI | 0072, interface `0x000c0046`, build `0x00020000`; core 1, queue 1, command lists 2, extended table 1 |
+| Caps | 16 successful queries; prior 14 plus GPUVA extent (32 bits per buffer) and unsupported batched markers (`FALSE`) |
+| Device | `D3D12CreateDevice(11_0)` returns `S_OK` |
+| Application resource | `CreateCommittedResource(upload)` returns `S_OK` for a 4097-byte buffer |
+| Data | Two map/unmap rounds retain all written bytes and a nonzero VA |
+| Kernel residency | `Evict` and `MakeResident` return `S_OK`; two real application residency callbacks (initial plus explicit) and a genuine runtime paging queue |
+| Lifetimes | One application HRTRESOURCE-backed KMD heap created/destroyed; maps 2/2; shaders 2/2; shared pipelines 2/2; all device objects and KMD services cleaned up |
+| Removal | `GetDeviceRemovedReason` returns `S_OK` |
+| Regressions | 64/64 callback tests, 37/37 OS-routing tests, generated compute/vertex native compiler and DDI ownership tests |
+
+The full assertions-enabled, cached, PCH-disabled `check-feme` also passes:
+4397 passed, 15 skipped and 10 unsupported. `vulkaninfo --summary` identifies
+the selected ICD as FeMe CPU Vulkan Device before that gate. The final positive
+runner reports compiler revision `3ce0fc58b2b14c433ed1b109d7bc3a282ed38234`;
+main-build and packaged compiler DLL SHA256 hashes match.
+
+The runtime's allocation query combines shader-resource, UAV and deterministic
+optimization flags. The buffer-only row-major footprint already meets the
+deterministic requirement; accepting that flag fixes the measured application
+resource rejection without broadening format/resource support.
+
+Build `feme_warp_compiler` in the assertions-enabled, cached, PCH-disabled main
+FeMe build. Configure the existing standalone interposition build with
+`FEME_WARP_COMPILER_DLL` pointing to its `bin\feme_warp_compiler.dll` and
+`FEME_WARP_COMPILER_LIBRARY` pointing to `lib\feme_warp_compiler.lib`.
+The opt-in variant copies the DLL beside its UMD, including after DLL rebuilds.
+Run this PowerShell block in an ARM64 developer environment for SDK 26100.
+For automation, launch that shell from the same `cmd.exe` invocation that
+calls `vcvarsall.bat arm64 10.0.26100.0`; a separate invocation loses its
+environment:
+
+```powershell
+cmake --build build-rel --target feme-warp-compiler-test
+cmake -S feme\utils\windows-warp-interposition -B C:\Users\cbieneman\dev\warp-w0-current `
+  -DFEME_WARP_COMPILER_DLL="$PWD\build-rel\bin\feme_warp_compiler.dll" `
+  -DFEME_WARP_COMPILER_LIBRARY="$PWD\build-rel\lib\feme_warp_compiler.lib"
+cmake --build C:\Users\cbieneman\dev\warp-w0-current --target check-feme-windows-probes
+C:\Users\cbieneman\dev\warp-w0-current\warp-compiler\warp-compiler-harness.exe
+C:\Users\cbieneman\dev\warp-w0-current\warp-compiler\warp-compiler-harness.exe --reference
+```
+
+The owned gate fails on missing provenance, wrong counters, absent runtime
+paging queues, unsupported operations, or cleanup mismatches. The independent
+system-WARP control and prior shader-rejection variant remain separate tests.
+
+**Scope:** W0 feasibility is closed, not complete Direct3D behavior. The
+initialization PSOs are compute and vertex-only/no-attachment shapes.
+Descriptor stride is metadata only; descriptor heaps/views, queues/command
+recording/execution, fences, general resources/bindings, textures, rendering,
+DXR and presentation remain fail-closed. Neither FL 11_0 device creation nor
+diagnostic SM 5.1 enumeration proves compliance. This native VM result does
+not establish successful device creation on historical container, x64 or
+Agility configurations, and is not HLK/certification evidence.
 
 ## W2(a)/W2(b) floating-point dimension coverage (VM, 2026-11-25)
 

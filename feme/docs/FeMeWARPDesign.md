@@ -10,9 +10,11 @@ state, advanced-graphics limits, DXR bounds, presentation contracts, and FL
 plans, heap/residency/placed-resource/image-copy plans, draw/mesh dispatch,
 viewport/scissor/IA layout, BLAS/TLAS
 build policy, enhanced barriers and conformance release gating. It is
-deliberately not a device implementation: real D3D12 UMD callbacks, owned
-heaps/resources/queues, graphics execution, ray traversal, presentation, and
-conformance remain open.
+deliberately not itself a device implementation. A separate compiler-backed
+application-local prototype now closes W0 with real stock-runtime device
+creation, owned initialization shaders/pipelines and KMD-backed application
+buffers/map/residency/teardown. Queues/command execution, general bindings and
+resources, graphics, ray traversal, presentation and conformance remain open.
 
 This design defines a full-featured Direct3D 12 software adapter using FeMe's
 CPU target as its shader execution engine. The completed adapter targets the
@@ -39,9 +41,10 @@ claim that arbitrary applications can transparently load FeMe through the
 Windows-owned `D3D_DRIVER_TYPE_WARP`/`IDXGIFactory4::EnumWarpAdapter` paths.
 The current probe demonstrates application-local routing into an owned UMD
 under WARP identity, but the loading boundary is not a documented general
-third-party provider registration mechanism, and no real device/resource
-contract exists yet. The implementation and validation are now VM-first, per
-the 2026-11-17 development-flow change. System WARP binaries are not replaced,
+third-party provider registration mechanism. The buffer-only device/resource
+feasibility contract is now proven; a complete adapter and broad runtime
+compatibility remain W1-W7 work. The implementation and validation are now
+VM-first, per the 2026-11-17 development-flow change. System WARP binaries are not replaced,
 and no new kernel-mode driver is in scope. A separately implemented
 D3D12/DXGI COM runtime is not selected.
 
