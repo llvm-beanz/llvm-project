@@ -136752,3 +136752,38 @@ VM: implement callback-backed device/command/heap/resource objects, reuse
 `CompiledStage`/`PreparedDispatch`, execute a resource-free DXIL dispatch,
 then add copy/readback/fence and off-screen graphics. Do not substitute
 private ABI, ordinal forwarding or system-WARP replacement.
+
+# Session continuation: W3 viewport and IA layout
+
+## What changed
+
+Added W3(a) viewport/scissor and input-layout plans:
+
+- finite positive viewport extents,
+- ordered in-range depth bounds,
+- checked scissor rectangle bounds,
+- slot/stride/offset validation,
+- format-size checks,
+- unique semantic/slot/index bindings.
+
+The implementation is in `ViewportPlan.h/.cpp` and `InputLayoutPlan.h/.cpp`
+under `feme/include/feme/Direct3D` and `feme/lib/Direct3D`.
+
+## Verification
+
+The in-tree assertions-enabled, PCH-disabled Windows build compiled both
+files. `FeMeDirect3DTests` passes 62 tests across 20 suites.
+The mandatory `vulkaninfo --summary` check was run again; DZN initialization
+failed and no `FeMe CPU Vulkan Device` identity was found.
+
+## Commit
+
+- `98824bbc1633`: W3 viewport, scissor and IA input layout.
+
+## Next implementation boundary
+
+The next real step is still not another pure plan object. A real WARP-owned
+D3D12 frontend needs callback-backed device/queue/heap/resource/PSO objects,
+then `CompiledStage`/`PreparedDispatch` integration and a CPU resource-free
+dispatch with copy/readback/fence. The existing public matrix and plans do
+not replace that owned-device gate.
