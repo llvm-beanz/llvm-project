@@ -37,6 +37,10 @@ feme_add_probe_test(NAME memory-scheduling-capability-contract
     $<TARGET_FILE:feme-adapter-bootstrap-stub> --integration-caps)
 
 if(MSVC)
+  add_executable(feme-warp-table-tests
+    WarpTables.cpp WarpHeap.cpp WarpTablesTests.cpp)
+  target_compile_options(feme-warp-table-tests PRIVATE /W4 /WX /wd4201 /UNDEBUG)
+  feme_add_probe_test(NAME warp-table-contract COMMAND feme-warp-table-tests)
   add_executable(feme-warp-heap-tests WarpHeap.cpp WarpHeapTests.cpp)
   target_compile_options(feme-warp-heap-tests PRIVATE /W4 /WX /wd4201 /UNDEBUG)
   foreach(SCENARIO lifecycle validation residency)

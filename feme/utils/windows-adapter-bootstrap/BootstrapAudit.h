@@ -123,6 +123,8 @@ struct WarpDeviceContextProbe {
   std::uint64_t HeapCpuAddress = 0;
   bool HeapDataRoundTrip = false;
   bool HeapDestroyed = false;
+  std::uint64_t LiveRootSignaturesAtDestroy = 0;
+  std::uint64_t LiveNullShadersAtDestroy = 0;
   bool PagingQueueDestroyAttempted = false;
   bool PagingQueueDestroyReturned = false;
   std::int32_t PagingQueueDestroyResult = 0;
@@ -130,6 +132,16 @@ struct WarpDeviceContextProbe {
   bool DestroyReturned = false;
   std::int32_t DestroyResult = 0;
   std::uint32_t ExceptionCode = 0;
+};
+
+/// Publication and fail-closed shader evidence for the W0 diagnostic tables.
+struct WarpPrototypeTableAudit {
+  std::uint32_t CoreTables = 0;
+  std::uint32_t QueueTables = 0;
+  std::uint32_t CommandListTables = 0;
+  std::uint32_t ExtendedTables = 0;
+  std::uint32_t ExecutableShaderQueries = 0;
+  std::uint32_t UnsupportedCalls = 0;
 };
 
 /// Results of the opt-in kernel paging-queue create/destroy experiment.
