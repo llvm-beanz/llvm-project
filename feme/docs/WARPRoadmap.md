@@ -323,7 +323,10 @@ signatures, descriptor heaps, texture/buffer resource layouts, legacy and UAV
 barriers, graphics PSO/raster/OM state, Feature Level 12_2 advanced options,
 DXR 1.1 bounds, presentation/shared-fence contracts, and FL 12_2 capability
 gating. These plans compile in the in-tree Windows build and are covered by
-28 passing `FeMeDirect3DTests` unit cases.
+34 passing `FeMeDirect3DTests` unit cases. W1-specific progress adds checked
+direct/compute/copy queue policy, requested wave-size bounds, thread-group/
+dispatch overflow arithmetic, repeated dispatch, buffer-copy ranges and
+monotonic fence targets. It still is not a working D3D12 device or queue.
 
 This is implementation progress, not milestone closure: it does not create a
 D3D12 device, heap/resource, command queue, PSO, renderer, ray dispatcher,
