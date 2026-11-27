@@ -137065,3 +137065,51 @@ residency callbacks require the real runtime paging-queue handles supplied
 to resource DDIs; a KT-created kernel paging-queue handle is not a substitute.
 Finish the runner's owned-UMD/device provenance gate only after that path
 works. Do not close W0 from the internal heap round trip or callback fixtures.
+
+# Session continuation: WARP mandatory tables and shader initialization
+
+W0 remains open. The opt-in diagnostic prototype now negotiates the required
+device tables and capabilities, but the stock runtime requires an executable
+shader during device initialization. That shader is explicitly rejected; no
+opaque shader handle, success-shaped execution stub or reference forwarding
+was substituted for a FeMe implementation.
+
+`a1585f02bddc` adds validated memory/scheduling capability queries.
+`15ddc9be4826` inventories the exact public core/queue/command-list layouts,
+installs typed fail-closed callbacks, reuses the KMD buffer callbacks, and owns
+empty-root/null-stage object lifetimes. Tests cover table boundaries, output
+preservation, ownership, unavailable operations and failure-shaped status enums.
+`fe090888fb03` adds the remaining mandatory architecture/layout/page-table
+responses and opt-in publication while preserving the older refusal probe.
+`f3c3ca4c7b3d` adds the live prototype and its strict shader-rejection gate.
+`95474bacf174` records current status and evidence without closing W0.
+
+The measured inbox 0072 sequence publishes core 1, queue 1, command-list 2,
+and extended-feature 1 tables, then completes fourteen capability queries.
+The lifecycle counters are Open=1 Size=1 Versions=2 Caps=14 Optional=1
+Fill=5 Create=1 Close=1 Destroy=1. CalcPrivateShaderSize receives executable
+bytecode and reports E_NOTIMPL through SetErrorCb; D3D12CreateDevice returns
+DXGI_ERROR_DEVICE_REMOVED. KMD context/paging/DMA teardown succeeds, with
+zero live root/null-shader objects. This is a verified next boundary, not
+a successfully created application-facing device.
+
+The independent system-WARP control successfully creates an upload buffer,
+maps/writes/unmaps/remaps it, verifies data and VA, evicts/makes it resident,
+and tears down without device removal. It validates the test and host, not
+FeMe resource execution. No Microsoft implementation was copied or used to
+execute owned work, and no system driver/binary/registry setting was changed.
+
+Validation: 64/64 standalone callback tests, 34/34 OS-routing tests, the
+final strict live shader-boundary probe, and check-feme (4395 passed,
+15 skipped, 10 unsupported). FeMe CPU Vulkan Device was verified in the
+full-test launching shell; assertions/caching remained enabled and PCH
+disabled. Windows/DDI headers need their dependency-order include groups;
+automatic alphabetical regrouping caused an NTSTATUS declaration conflict,
+fixed and documented in feme/.instructions.md.
+
+Next steps: implement genuine shader/pipeline initialization using the shared
+FeMe compiler, not an opaque accepted bytecode object or reference execution.
+Continue device/object DDIs as the runtime requires them, then demonstrate
+application-owned buffer allocation/map/residency/teardown with real runtime
+paging queues and complete the device/build provenance gate. The diagnostic
+tables, null-stage objects and internal KMD buffer round trip do not close W0.
