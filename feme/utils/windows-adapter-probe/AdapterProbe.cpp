@@ -599,10 +599,14 @@ int wmain(int Argc, wchar_t **Argv) {
       std::wcscmp(Argv[3], L"--expect-warp-private-info") == 0;
   bool ExpectWarpContext = WarpBootstrapAudit && Argc == 4 &&
                            std::wcscmp(Argv[3], L"--expect-warp-context") == 0;
+  bool ExpectWarpDeviceContext =
+      WarpBootstrapAudit && Argc == 4 &&
+      std::wcscmp(Argv[3], L"--expect-warp-device-context") == 0;
   ExpectWarpPrivateInfo |= ExpectWarpContext;
   ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue || ExpectGpuVa ||
                         ExpectGpuVaRejected || ExpectMonitoredFence ||
-                        ExpectWarpPrivateInfo || ExpectWarpContext;
+                        ExpectWarpPrivateInfo || ExpectWarpContext ||
+                        ExpectWarpDeviceContext;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
        !WarpBootstrapAudit && !WarpBufferCopy && !WarpCompute) ||
       !ValidSpace || !ValidWorkload ||
@@ -619,7 +623,8 @@ int wmain(int Argc, wchar_t **Argv) {
         L"[--expect-create-device | --expect-unsupported | "
         L"--expect-callback | --expect-paging-queue | --expect-gpu-va | "
         L"--expect-gpu-va-rejected | --expect-monitored-fence | "
-        L"--expect-warp-private-info | --expect-warp-context]]\n",
+        L"--expect-warp-private-info | --expect-warp-context | "
+        L"--expect-warp-device-context]]\n",
         Argv[0]);
     return 1;
   }
@@ -686,6 +691,8 @@ int wmain(int Argc, wchar_t **Argv) {
   using GetWarpPrivateAdapterInfoProbe =
       void(APIENTRY *)(feme::probe::WarpPrivateAdapterInfoProbe *);
   using GetWarpContextProbe = void(APIENTRY *)(feme::probe::WarpContextProbe *);
+  using GetWarpDeviceContextProbe =
+      void(APIENTRY *)(feme::probe::WarpDeviceContextProbe *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
@@ -697,6 +704,7 @@ int wmain(int Argc, wchar_t **Argv) {
   GetMonitoredFenceProbe ReadMonitoredFenceProbe = nullptr;
   GetWarpPrivateAdapterInfoProbe ReadWarpPrivateAdapterInfoProbe = nullptr;
   GetWarpContextProbe ReadWarpContextProbe = nullptr;
+  GetWarpDeviceContextProbe ReadWarpDeviceContextProbe = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -744,6 +752,8 @@ int wmain(int Argc, wchar_t **Argv) {
             Module, "FeMeBootstrapGetWarpPrivateAdapterInfoProbe"));
     ReadWarpContextProbe = reinterpret_cast<GetWarpContextProbe>(
         GetProcAddress(Module, "FeMeBootstrapGetWarpContextProbe"));
+    ReadWarpDeviceContextProbe = reinterpret_cast<GetWarpDeviceContextProbe>(
+        GetProcAddress(Module, "FeMeBootstrapGetWarpDeviceContextProbe"));
     if (ExpectMonitoredFence && !ReadMonitoredFenceProbe) {
       report(L"GetProcAddress(FeMeBootstrapGetMonitoredFenceProbe)",
              HRESULT_FROM_WIN32(GetLastError()));
@@ -758,6 +768,12 @@ int wmain(int Argc, wchar_t **Argv) {
     }
     if (ExpectWarpContext && !ReadWarpContextProbe) {
       report(L"GetProcAddress(FeMeBootstrapGetWarpContextProbe)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
+    if (ExpectWarpDeviceContext && !ReadWarpDeviceContextProbe) {
+      report(L"GetProcAddress(FeMeBootstrapGetWarpDeviceContextProbe)",
              HRESULT_FROM_WIN32(GetLastError()));
       FreeLibrary(Module);
       return 1;
@@ -841,8 +857,13 @@ int wmain(int Argc, wchar_t **Argv) {
       // Destroy should still never fire, since createDevice deliberately
       // fails and no device handle is ever produced to destroy.
       ExpectedDDICalls =
-          Open == 1 && Versions > 0 && Caps > 0 && Close == 1 && Destroy == 0;
-      if (ExpectCreateDevice) {
+          Open == 1 && Versions > 0 && Caps > 0 && Close == 1 &&
+          (ExpectWarpDeviceContext ? Destroy == 1 : Destroy == 0);
+      if (ExpectWarpDeviceContext) {
+        ExpectedDDICalls &= Size == 1 && Create == 1 && Optional == 0 &&
+                            Fill == 0 &&
+                            Result == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+      } else if (ExpectCreateDevice) {
         HRESULT ExpectedResult = ExpectCallback ? DXGI_ERROR_DEVICE_REMOVED
                                  : ExpectGpuVaRejected ? E_INVALIDARG
                                                        : E_NOTIMPL;
@@ -1139,6 +1160,63 @@ int wmain(int Argc, wchar_t **Argv) {
            !WarpContext.DestroyAttempted || !WarpContext.DestroyReturned ||
            WarpContext.DestroyResult != S_OK || WarpContext.ExceptionCode)) {
         report(L"Expected successful WARP context create/destroy lifecycle",
+               E_FAIL);
+        ExpectedDDICalls = false;
+      }
+    }
+    if (ReadWarpDeviceContextProbe) {
+      feme::probe::WarpDeviceContextProbe DeviceProbe;
+      ReadWarpDeviceContextProbe(&DeviceProbe);
+      std::wprintf(
+          L"WARP device context: PagingQueueCreateAttempted=%u "
+          L"PagingQueueCreated=%u PagingQueueCreateResult=0x%08lx "
+          L"PagingQueueHasSyncObject=%u PagingQueueHasFenceMapping=%u "
+          L"CreateAttempted=%u ContextCreated=%u "
+          L"CreateContextResult=0x%08lx CommandBufferAddress=0x%016llx "
+          L"CommandBufferSize=%llu PrivateDataPointersIntact=%u "
+          L"FillTableAttempted=%u FillTableType=%u FillTableSize=%llu "
+          L"FillTableResult=0x%08lx PagingQueueDestroyAttempted=%u "
+          L"PagingQueueDestroyReturned=%u "
+          L"PagingQueueDestroyResult=0x%08lx DestroyAttempted=%u "
+          L"DestroyReturned=%u DestroyResult=0x%08lx ExceptionCode=0x%08lx\n",
+          unsigned(DeviceProbe.PagingQueueCreateAttempted),
+          unsigned(DeviceProbe.PagingQueueCreated),
+          static_cast<unsigned long>(DeviceProbe.PagingQueueCreateResult),
+          unsigned(DeviceProbe.PagingQueueHasSyncObject),
+          unsigned(DeviceProbe.PagingQueueHasFenceMapping),
+          unsigned(DeviceProbe.CreateAttempted),
+          unsigned(DeviceProbe.ContextCreated),
+          static_cast<unsigned long>(DeviceProbe.CreateContextResult),
+          static_cast<unsigned long long>(DeviceProbe.CommandBufferAddress),
+          static_cast<unsigned long long>(DeviceProbe.CommandBufferSize),
+          unsigned(DeviceProbe.PrivateDataPointersIntact),
+          unsigned(DeviceProbe.FillTableAttempted), DeviceProbe.FillTableType,
+          static_cast<unsigned long long>(DeviceProbe.FillTableSize),
+          static_cast<unsigned long>(DeviceProbe.FillTableResult),
+          unsigned(DeviceProbe.PagingQueueDestroyAttempted),
+          unsigned(DeviceProbe.PagingQueueDestroyReturned),
+          static_cast<unsigned long>(DeviceProbe.PagingQueueDestroyResult),
+          unsigned(DeviceProbe.DestroyAttempted),
+          unsigned(DeviceProbe.DestroyReturned),
+          static_cast<unsigned long>(DeviceProbe.DestroyResult),
+          static_cast<unsigned long>(DeviceProbe.ExceptionCode));
+      if (ExpectWarpDeviceContext &&
+          (!DeviceProbe.PagingQueueCreateAttempted ||
+           !DeviceProbe.PagingQueueCreated ||
+           DeviceProbe.PagingQueueCreateResult != S_OK ||
+           !DeviceProbe.PagingQueueHasSyncObject ||
+           !DeviceProbe.PagingQueueHasFenceMapping ||
+           !DeviceProbe.CreateAttempted || !DeviceProbe.ContextCreated ||
+           DeviceProbe.CreateContextResult != S_OK ||
+           !DeviceProbe.CommandBufferSize ||
+           !DeviceProbe.PrivateDataPointersIntact ||
+           DeviceProbe.FillTableAttempted ||
+           !DeviceProbe.PagingQueueDestroyAttempted ||
+           !DeviceProbe.PagingQueueDestroyReturned ||
+           DeviceProbe.PagingQueueDestroyResult != S_OK ||
+           !DeviceProbe.DestroyAttempted || !DeviceProbe.DestroyReturned ||
+           DeviceProbe.DestroyResult != S_OK || DeviceProbe.ExceptionCode)) {
+        report(L"Expected context cleanup after pre-table runtime rejection",
                E_FAIL);
         ExpectedDDICalls = false;
       }

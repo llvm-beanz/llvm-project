@@ -5460,3 +5460,25 @@ selected WARP identity, but the bootstrap still returns `E_NOTIMPL` from
 private context ABI only, not an owned D3D12 device, a resource allocation,
 residency, or mapped-resource lifecycle. The `os-routed-warp-context` test is
 part of the `check-feme-windows-probes` LIT suite.
+
+### W0(g) Persistent device-context attempt (VM, 2026-11-27)
+
+The follow-up gives `CreateDevice` aligned driver-private storage and retains
+both the WARP paging queue and context until `DestroyDevice`. It advertises
+DDI 0072, matching the version supported by official WARP, creates the paging
+queue before the context, and supplies an engine affinity of 1. On Windows 11
+Enterprise build 26300 ARM64, both kernel create callbacks return `S_OK` and
+provide valid handles, sync objects, fence mapping, and a 4096-byte context
+command buffer. The runtime nevertheless returns
+`DXGI_ERROR_DRIVER_INTERNAL_ERROR` before calling `FillDDITable`. It does call
+`DestroyDevice`; both `pfnDestroyContextCb` and `pfnDestroyPagingQueueCb`
+return `S_OK`. The new LIT case asserts this exact rejection stage and
+successful cleanup. The earlier DDI 0010 context-only experiment reached the
+same pre-table error.
+
+This is not a successful D3D12 device and does not close W0. In particular,
+`FillDDITable` remains uncalled, and no allocation, residency, mapping, or
+resource lifecycle has been demonstrated. The next investigation is the
+runtime/device-initialization work between the driver's `CreateDevice` return
+and table filling; the current evidence does not establish why the runtime
+rejects the attempt.

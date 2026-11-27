@@ -56,6 +56,33 @@ struct WarpContextProbe {
   std::uint32_t ExceptionCode = 0;
 };
 
+/// Results of a device attempt that retains its kernel context through
+/// teardown.
+struct WarpDeviceContextProbe {
+  bool PagingQueueCreateAttempted = false;
+  bool PagingQueueCreated = false;
+  std::int32_t PagingQueueCreateResult = 0;
+  bool PagingQueueHasSyncObject = false;
+  bool PagingQueueHasFenceMapping = false;
+  bool CreateAttempted = false;
+  bool ContextCreated = false;
+  std::int32_t CreateContextResult = 0;
+  std::uint64_t CommandBufferAddress = 0;
+  std::uint64_t CommandBufferSize = 0;
+  bool PrivateDataPointersIntact = false;
+  bool FillTableAttempted = false;
+  std::uint32_t FillTableType = 0;
+  std::uint64_t FillTableSize = 0;
+  std::int32_t FillTableResult = 0;
+  bool PagingQueueDestroyAttempted = false;
+  bool PagingQueueDestroyReturned = false;
+  std::int32_t PagingQueueDestroyResult = 0;
+  bool DestroyAttempted = false;
+  bool DestroyReturned = false;
+  std::int32_t DestroyResult = 0;
+  std::uint32_t ExceptionCode = 0;
+};
+
 /// Results of the opt-in kernel paging-queue create/destroy experiment.
 struct PagingQueueProbe {
   bool Enabled = false;

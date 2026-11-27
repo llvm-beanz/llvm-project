@@ -60,6 +60,7 @@
 #include <dxgi.h>
 
 #include <limits>
+#include <new>
 
 #if defined(FEME_BOOTSTRAP_PROBE_CALLBACK) &&                                  \
     defined(FEME_BOOTSTRAP_PROBE_PAGING_QUEUE)
@@ -120,6 +121,7 @@ feme::probe::GpuVirtualAddressProbe GGpuVirtualAddressProbe;
 feme::probe::MonitoredFenceProbe GMonitoredFenceProbe;
 feme::probe::WarpPrivateAdapterInfoProbe GWarpPrivateAdapterInfoProbe;
 feme::probe::WarpContextProbe GWarpContextProbe;
+feme::probe::WarpDeviceContextProbe GWarpDeviceContextProbe;
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO
 struct WarpPrivateAdapterInfo {
@@ -130,13 +132,16 @@ struct WarpPrivateAdapterInfo {
 static_assert(sizeof(WarpPrivateAdapterInfo) == 3 * sizeof(UINT32));
 #endif
 
-#ifdef FEME_BOOTSTRAP_PROBE_WARP_CONTEXT
+#if defined(FEME_BOOTSTRAP_PROBE_WARP_CONTEXT) ||                              \
+    defined(FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT)
 struct WarpPrivateContextBuffer {
   UINT64 *Buffer;
   UINT64 *BufferSize;
 };
 static_assert(sizeof(WarpPrivateContextBuffer) == 2 * sizeof(UINT64 *));
+#endif
 
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_CONTEXT
 HRESULT probeWarpContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
   auto &Probe = GWarpContextProbe;
   Probe.CreateAttempted = true;
@@ -192,6 +197,158 @@ HRESULT probeWarpContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
   if (Probe.DestroyResult != S_OK)
     return FAILED(Probe.DestroyResult) ? Probe.DestroyResult : E_FAIL;
   return Result;
+}
+#endif
+
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+struct WarpDeviceState {
+  const D3DDDI_DEVICECALLBACKS *KTCallbacks = nullptr;
+  HANDLE RTDevice = nullptr;
+  D3DKMT_HANDLE PagingQueue = 0;
+  D3DKMT_HANDLE PagingSyncObject = 0;
+  volatile UINT64 *PagingFenceValue = nullptr;
+  HANDLE Context = nullptr;
+  UINT64 CommandBufferAddress = 0;
+  UINT64 CommandBufferSize = 0;
+};
+
+static_assert(alignof(WarpDeviceState) <= MEMORY_ALLOCATION_ALIGNMENT);
+
+void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device);
+
+HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
+  auto &Probe = GWarpDeviceContextProbe;
+  Probe.CreateAttempted = true;
+  if (!Args || !Args->hRTDevice.handle || !Args->hDrvDevice.pDrvPrivate)
+    return E_INVALIDARG;
+  if (!Args->pKTCallbacks || !Args->pKTCallbacks->pfnCreatePagingQueueCb ||
+      !Args->pKTCallbacks->pfnDestroyPagingQueueCb ||
+      !Args->pKTCallbacks->pfnCreateContextVirtualCb ||
+      !Args->pKTCallbacks->pfnDestroyContextCb)
+    return E_NOINTERFACE;
+
+  auto *State = ::new (Args->hDrvDevice.pDrvPrivate) WarpDeviceState{};
+  State->KTCallbacks = Args->pKTCallbacks;
+  State->RTDevice = Args->hRTDevice.handle;
+
+  D3DDDICB_CREATEPAGINGQUEUE PagingQueue{};
+  Probe.PagingQueueCreateAttempted = true;
+  DWORD ExceptionCode = 0;
+  bool PagingQueueCallbackReturned = false;
+  __try {
+    Probe.PagingQueueCreateResult = State->KTCallbacks->pfnCreatePagingQueueCb(
+        State->RTDevice, &PagingQueue);
+    PagingQueueCallbackReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+  }
+  State->PagingQueue = PagingQueue.hPagingQueue;
+  State->PagingSyncObject = PagingQueue.hSyncObject;
+  State->PagingFenceValue =
+      static_cast<volatile UINT64 *>(PagingQueue.FenceValueCPUVirtualAddress);
+  Probe.PagingQueueCreated = State->PagingQueue != 0;
+  Probe.PagingQueueHasSyncObject = State->PagingSyncObject != 0;
+  Probe.PagingQueueHasFenceMapping = State->PagingFenceValue != nullptr;
+  if (!PagingQueueCallbackReturned || Probe.PagingQueueCreateResult != S_OK ||
+      !Probe.PagingQueueCreated || !Probe.PagingQueueHasSyncObject ||
+      !Probe.PagingQueueHasFenceMapping) {
+    if (State->PagingQueue) {
+      D3D12DDI_HDEVICE Device{};
+      Device.pDrvPrivate = State;
+      destroyWarpDeviceContext(Device);
+    }
+    if (!PagingQueueCallbackReturned)
+      return E_FAIL;
+    return FAILED(Probe.PagingQueueCreateResult) ? Probe.PagingQueueCreateResult
+                                                 : E_UNEXPECTED;
+  }
+
+  State->CommandBufferSize = sizeof(State->CommandBufferAddress);
+
+  WarpPrivateContextBuffer PrivateData{};
+  PrivateData.Buffer = &State->CommandBufferAddress;
+  PrivateData.BufferSize = &State->CommandBufferSize;
+  D3DDDICB_CREATECONTEXTVIRTUAL CreateContext{};
+  CreateContext.EngineAffinity = 1;
+  CreateContext.pPrivateDriverData = &PrivateData;
+  CreateContext.PrivateDriverDataSize = sizeof(PrivateData);
+
+  bool ContextCallbackReturned = false;
+  __try {
+    Probe.CreateContextResult = State->KTCallbacks->pfnCreateContextVirtualCb(
+        State->RTDevice, &CreateContext);
+    ContextCallbackReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+  }
+  State->Context = CreateContext.hContext;
+  Probe.ContextCreated = State->Context != nullptr;
+  if (!ContextCallbackReturned || Probe.CreateContextResult != S_OK) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    if (!ContextCallbackReturned)
+      return E_FAIL;
+    return FAILED(Probe.CreateContextResult) ? Probe.CreateContextResult
+                                             : E_FAIL;
+  }
+
+  Probe.PrivateDataPointersIntact =
+      PrivateData.Buffer == &State->CommandBufferAddress &&
+      PrivateData.BufferSize == &State->CommandBufferSize &&
+      CreateContext.pPrivateDriverData == &PrivateData;
+  if (!Probe.ContextCreated || !Probe.PrivateDataPointersIntact ||
+      !State->CommandBufferSize) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    return E_UNEXPECTED;
+  }
+
+  Probe.CommandBufferAddress = State->CommandBufferAddress;
+  Probe.CommandBufferSize = State->CommandBufferSize;
+  return S_OK;
+}
+
+SIZE_T warpDevicePrivateSize() {
+  constexpr SIZE_T Alignment = MEMORY_ALLOCATION_ALIGNMENT;
+  return (sizeof(WarpDeviceState) + Alignment - 1) & ~(Alignment - 1);
+}
+
+void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device) {
+  auto &Probe = GWarpDeviceContextProbe;
+  auto *State = static_cast<WarpDeviceState *>(Device.pDrvPrivate);
+  if (!State || !State->KTCallbacks)
+    return;
+
+  DWORD ExceptionCode = 0;
+  if (State->Context && State->KTCallbacks->pfnDestroyContextCb) {
+    D3DDDICB_DESTROYCONTEXT DestroyContext{};
+    DestroyContext.hContext = State->Context;
+    Probe.DestroyAttempted = true;
+    __try {
+      Probe.DestroyResult = State->KTCallbacks->pfnDestroyContextCb(
+          State->RTDevice, &DestroyContext);
+      Probe.DestroyReturned = true;
+    } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+      Probe.ExceptionCode = ExceptionCode;
+    }
+    State->Context = nullptr;
+  }
+  if (State->PagingQueue && State->KTCallbacks->pfnDestroyPagingQueueCb) {
+    D3DDDI_DESTROYPAGINGQUEUE DestroyQueue{};
+    DestroyQueue.hPagingQueue = State->PagingQueue;
+    Probe.PagingQueueDestroyAttempted = true;
+    __try {
+      Probe.PagingQueueDestroyResult =
+          State->KTCallbacks->pfnDestroyPagingQueueCb(State->RTDevice,
+                                                      &DestroyQueue);
+      Probe.PagingQueueDestroyReturned = true;
+    } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+      Probe.ExceptionCode = ExceptionCode;
+    }
+    State->PagingQueue = 0;
+  }
 }
 #endif
 
@@ -475,8 +632,12 @@ SIZE_T
 APIENTRY calcPrivateDeviceSize(D3D12DDI_HADAPTER,
                                CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE *) {
   InterlockedIncrement(&GCalls.CalcPrivateDeviceSize);
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+  return warpDevicePrivateSize();
+#else
   // A nonzero, deliberately recognizable size; nothing allocates against it.
   return 64;
+#endif
 }
 
 HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
@@ -553,10 +714,17 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
   if (FAILED(WarpContextResult))
     return WarpContextResult;
 #endif
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+  HRESULT DeviceContextResult = createWarpDeviceContext(Args);
+  if (FAILED(DeviceContextResult))
+    return DeviceContextResult;
+  return S_OK;
+#else
   // A real device table is out of scope for this experiment; fail loudly and
   // distinctly so a caller cannot mistake this for the generic rejection
   // windows-adapter-probe's RejectionStub already measures.
   return E_NOTIMPL;
+#endif
 }
 
 HRESULT APIENTRY closeAdapter(D3D12DDI_HADAPTER) {
@@ -627,14 +795,33 @@ HRESULT APIENTRY getOptionalDDITables(D3D12DDI_HADAPTER, UINT32 *EntryCount,
   return S_OK;
 }
 
-HRESULT APIENTRY fillDDITable(D3D12DDI_HADAPTER, D3D12DDI_TABLE_TYPE, VOID *,
-                              SIZE_T, UINT, D3D12DDI_HRTTABLE) {
+HRESULT APIENTRY fillDDITable(D3D12DDI_HADAPTER, D3D12DDI_TABLE_TYPE TableType,
+                              VOID *Table, SIZE_T TableSize, UINT Interface,
+                              D3D12DDI_HRTTABLE) {
   InterlockedIncrement(&GCalls.FillDDITable);
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+  (void)Table;
+  (void)Interface;
+  GWarpDeviceContextProbe.FillTableAttempted = true;
+  GWarpDeviceContextProbe.FillTableType = TableType;
+  GWarpDeviceContextProbe.FillTableSize = TableSize;
+  GWarpDeviceContextProbe.FillTableResult = E_NOTIMPL;
+#else
+  (void)TableType;
+  (void)Table;
+  (void)TableSize;
+  (void)Interface;
+#endif
   return E_NOTIMPL;
 }
 
-VOID APIENTRY destroyDevice(D3D12DDI_HDEVICE) {
+VOID APIENTRY destroyDevice(D3D12DDI_HDEVICE Device) {
   InterlockedIncrement(&GCalls.DestroyDevice);
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+  destroyWarpDeviceContext(Device);
+#else
+  (void)Device;
+#endif
 }
 } // namespace
 
@@ -745,6 +932,12 @@ FeMeBootstrapGetWarpPrivateAdapterInfoProbe(
 extern "C" __declspec(dllexport) void APIENTRY
 FeMeBootstrapGetWarpContextProbe(feme::probe::WarpContextProbe *Probe) {
   *Probe = GWarpContextProbe;
+}
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetWarpDeviceContextProbe(
+    feme::probe::WarpDeviceContextProbe *Probe) {
+  *Probe = GWarpDeviceContextProbe;
 }
 
 extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(
