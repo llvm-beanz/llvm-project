@@ -136703,3 +136703,52 @@ residence, command submission, or presentation claim.
 2. Add copy/readback/fence integration against a real owned resource path.
 3. Then normalize `GraphicsPipeline`/`PreparedDraw` into an off-screen triangle
    executable on the owned device.
+
+# Session continuation: W1-W7 checked plan expansion
+
+## What changed
+
+Continued the owned-object and resource roadmap in the API-neutral
+`FeMeDirect3D` library:
+
+- W1 object/device lifetime: typed handles, close, pending work, allocator
+  reset and replay.
+- W2 heap placement/residency: alignment, placed-resource bounds, residency
+  budget and allocation count.
+- W3 draw: indexed/non-indexed draws, instancing, base/indirect arguments and
+  predication state.
+- W4: mesh/amplification dispatch with payload and Tier 1 output limits.
+- W5: BLAS/TLAS build alignment, geometry/instance counts, update and
+  compaction policy.
+- W6: enhanced barrier split phases, sync/access scopes and subresource ranges.
+- W7: conformance result reconciliation and pass-only release readiness.
+
+## Verification
+
+The in-tree assertions-enabled, PCH-disabled Windows build compiled
+`FeMeDirect3DTests`. The suite now passes 56 tests across 18 test suites.
+The mandatory Vulkan identity check was run again, but no
+`FeMe CPU Vulkan Device` was registered and DZN initialization failed.
+
+## Commits
+
+- `7d26107a6964`: W1 typed object lifetime.
+- `255678ab62cb`: W2 heap placement/residency.
+- `1092c8d4ff65`: W3 indexed/indirect draws.
+- `6bac5d575404`: W4 mesh/amplification dispatch.
+- `32b8047de648`: W5 BLAS/TLAS builds.
+- `70a4b6d719da`: W6 enhanced barriers.
+- `e9554cda00a`: W7 conformance release gate.
+
+## Scope and next implementation boundary
+
+These changes are still checked plan contracts, not a real D3D12 adapter.
+They do not implement D3D12 UMD callbacks, GPU heap residency, command
+submission, graphics/ray execution, swap-chain presentation or external
+conformance evidence.
+
+The next actionable work is an owned D3D12 frontend in a real WARP-kernel
+VM: implement callback-backed device/command/heap/resource objects, reuse
+`CompiledStage`/`PreparedDispatch`, execute a resource-free DXIL dispatch,
+then add copy/readback/fence and off-screen graphics. Do not substitute
+private ABI, ordinal forwarding or system-WARP replacement.
