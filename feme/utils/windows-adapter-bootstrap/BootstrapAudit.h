@@ -115,6 +115,14 @@ struct WarpDeviceContextProbe {
   std::uint32_t FillTableType = 0;
   std::uint64_t FillTableSize = 0;
   std::int32_t FillTableResult = 0;
+  bool HeapAttempted = false;
+  std::int32_t HeapCreateResult = 0;
+  std::int32_t HeapMapResult = 0;
+  std::int32_t HeapDestroyResult = 0;
+  std::uint32_t HeapAllocationHandle = 0;
+  std::uint64_t HeapCpuAddress = 0;
+  bool HeapDataRoundTrip = false;
+  bool HeapDestroyed = false;
   bool PagingQueueDestroyAttempted = false;
   bool PagingQueueDestroyReturned = false;
   std::int32_t PagingQueueDestroyResult = 0;

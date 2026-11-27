@@ -1303,6 +1303,18 @@ int wmain(int Argc, wchar_t **Argv) {
           unsigned(DeviceProbe.DestroyReturned),
           static_cast<unsigned long>(DeviceProbe.DestroyResult),
           static_cast<unsigned long>(DeviceProbe.ExceptionCode));
+      std::wprintf(
+          L"WARP internal buffer heap: Attempted=%u CreateResult=0x%08lx "
+          L"MapResult=0x%08lx Allocation=%u CpuAddress=0x%016llx "
+          L"DataRoundTrip=%u Destroyed=%u DestroyResult=0x%08lx\n",
+          unsigned(DeviceProbe.HeapAttempted),
+          static_cast<unsigned long>(DeviceProbe.HeapCreateResult),
+          static_cast<unsigned long>(DeviceProbe.HeapMapResult),
+          DeviceProbe.HeapAllocationHandle,
+          static_cast<unsigned long long>(DeviceProbe.HeapCpuAddress),
+          unsigned(DeviceProbe.HeapDataRoundTrip),
+          unsigned(DeviceProbe.HeapDestroyed),
+          static_cast<unsigned long>(DeviceProbe.HeapDestroyResult));
       if (ExpectWarpDeviceContext &&
           (!DeviceProbe.VersionNumberEscapeAttempted ||
            !DeviceProbe.VersionNumberEscapeReturned ||
@@ -1336,6 +1348,11 @@ int wmain(int Argc, wchar_t **Argv) {
            !DeviceProbe.InitDeviceEscapeAttempted ||
            !DeviceProbe.InitDeviceEscapeReturned ||
            DeviceProbe.InitDeviceEscapeResult != S_OK ||
+           !DeviceProbe.HeapAttempted || DeviceProbe.HeapCreateResult != S_OK ||
+           DeviceProbe.HeapMapResult != S_OK ||
+           !DeviceProbe.HeapAllocationHandle || !DeviceProbe.HeapCpuAddress ||
+           !DeviceProbe.HeapDataRoundTrip || !DeviceProbe.HeapDestroyed ||
+           DeviceProbe.HeapDestroyResult != S_OK ||
            !DeviceProbe.FillTableAttempted ||
            DeviceProbe.FillTableType != D3D12DDI_TABLE_TYPE_DEVICE_CORE ||
            DeviceProbe.FillTableSize !=

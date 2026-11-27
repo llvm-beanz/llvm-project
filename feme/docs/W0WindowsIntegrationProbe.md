@@ -5568,3 +5568,57 @@ The OS-routed six-version matrix passes: 0070/0071 return
 reaches the owned device callback. This explains the observed rejection
 without private ordinal forwarding or a driver change. Other runtime
 versions still require their own negotiation evidence.
+
+### W0(g) follow-up: owned committed-buffer callbacks
+
+`WarpHeap.cpp` now implements twelve typed core-table heap/resource entries:
+private-size calculation, creation/destruction, map/unmap, new/existing
+allocation information, buffer VA/KMT-handle and subresource information,
+and KMD residency/eviction. These entries are tested
+directly but **are not published as a complete device table**; stock D3D12
+still reaches the deliberate `FillDDITable` refusal.
+
+The implementation allocates through the runtime's core-layer allocation
+callback using the existing 96-byte WARP KMD metadata ABI, and locks the
+returned allocation through the real KT callback. Its VA is the actual
+locked CPU address, and its allocation handle comes from the kernel callback.
+Resource descriptions are retained by value, logical
+buffer extents remain separate from allocation padding, maps are balanced
+and thread-safe, and destruction releases persistently mapped memory.
+Upload heaps pass WARP's write-combine flag. Unsupported
+textures, placed/protected heaps and unsupported residency objects
+are explicitly rejected. Void-DDI validation failures use the runtime error
+callback instead of fabricating successful metadata.
+
+The authorized reference's
+`src\warp\warp10\UMDriver\TilePool.cpp:649` routes D3D12 heaps through
+the kernel-backed path: the UMD cannot distinguish application-requested
+sharing and supplies shared-allocation metadata. FeMe matches that ABI,
+including aperture/shared/CPU-visible/write-combine flag positions, without
+copying the implementation. Residency uses the core-layer paging callbacks
+and preserves `E_PENDING` and the returned paging fence. Destruction unlocks
+and synchronously deallocates; associated runtime resources and unassociated
+allocation-handle lists use their respective teardown forms. Shared-resource
+opening, presentation, and larger-than-32-bit allocation metadata remain
+unsupported.
+
+The three new callback fixtures cover real allocation/map/teardown,
+metadata ownership, concurrent maps, invalid/unsupported inputs, upload
+allocation flags, rollback after allocation/lock failure, and synchronous,
+pending and failed KMD paging responses.
+The standalone suite now passes 62/62, and OS routing remains 31/31.
+The OS-routed owned device-context probe also creates a real 64-KiB
+kernel-backed buffer heap, maps/unmaps/remaps it, checks writes at the first
+and last logical byte of a 4097-byte buffer, verifies its VA and KMT handle,
+then unlocks and deallocates it successfully before the table refusal.
+The KMD lock mapping is not necessarily 64-KiB aligned (the measured address
+has a 4096-byte offset from that boundary). Preserve the returned pointer;
+buffer heap-placement alignment is not an absolute CPU-map alignment
+guarantee.
+This is an internal buffer round trip through stock-runtime callbacks,
+not an application-created D3D12 resource. KMD residency is covered by
+callback fixtures, not by this internal OS round trip: the runtime must
+provide genuine runtime paging-queue handles to application resource DDIs.
+W0 still needs the complete core/queue/command-list table
+contract and remaining mandatory capabilities, followed by stock-runtime
+device/resource/residency/map/teardown and runner-provenance evidence.

@@ -411,7 +411,8 @@ set(WARP_DEVICE_CONTEXT_OUTPUT_DIR
   "${CMAKE_CURRENT_BINARY_DIR}/${WARP_DEVICE_CONTEXT_VARIANT}")
 file(MAKE_DIRECTORY "${WARP_DEVICE_CONTEXT_OUTPUT_DIR}")
 add_library(${WARP_DEVICE_CONTEXT_VARIANT}-shim SHARED
-  ../windows-adapter-bootstrap/BootstrapStub.cpp)
+  ../windows-adapter-bootstrap/BootstrapStub.cpp
+  ../windows-adapter-bootstrap/WarpHeap.cpp)
 target_compile_definitions(${WARP_DEVICE_CONTEXT_VARIANT}-shim PRIVATE
   FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0072
   FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO=1

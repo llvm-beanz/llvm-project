@@ -44,7 +44,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "BootstrapAudit.h"
+#include "WarpAllocationInfo.h"
 #include "WarpDeviceState.h"
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
+#include "WarpHeap.h"
+#endif
 
 #include <windows.h>
 #include <winternl.h>
@@ -184,41 +188,8 @@ static_assert(offsetof(WarpInitContextVirtual2, DmaBufferSize) == 40);
 static_assert(sizeof(WarpInitContextVirtual2) == 48);
 constexpr UINT32 WarpEscapeInitContextVirtual2 = 7;
 
-struct WarpKmdAllocationInfo {
-  D3D10DDIRESOURCE_TYPE ResourceDimension;
-  UINT32 Width;
-  UINT32 Height;
-  UINT32 Depth;
-  DXGI_FORMAT Format;
-  UINT32 Pitch;
-  UINT32 TotalSize;
-  UINT32 ArraySize;
-  UINT32 MipLevels;
-  UINT32 Usage;
-  UINT32 BindFlags;
-  DXGI_SAMPLE_DESC SampleDesc;
-  D3DDDI_RATIONAL RefreshRate;
-  D3DDDI_ROTATION Rotation;
-  D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
-  union {
-    UINT32 VirtualGpuAlignment;
-    HANDLE FlipStart;
-    UINT64 FlipStartAlignment;
-  };
-  union {
-    struct {
-      UINT32 VirtualGpuSegmentId;
-      UINT32 VirtualGpuPrivateData;
-    };
-    HANDLE FlipFinished;
-    UINT64 FlipFinishedAlignment;
-  };
-  UINT32 Flags;
-};
-
-static_assert(sizeof(WarpKmdAllocationInfo) == 96);
-static_assert(offsetof(WarpKmdAllocationInfo, Flags) == 88);
-constexpr UINT32 WarpAllocationFlagInAperture = 1u << 7;
+using feme::probe::WarpAllocationFlagInAperture;
+using feme::probe::WarpKmdAllocationInfo;
 
 struct WarpInitDeviceEscape {
   UINT32 EscapeId;
@@ -449,6 +420,85 @@ HRESULT initializeWarpKmdDevice(WarpDeviceState *State, HANDLE RTAdapter) {
                                               : S_OK;
 }
 
+HRESULT probeWarpBufferHeap(D3D12DDI_HDEVICE Device) {
+  auto &Probe = GWarpDeviceContextProbe;
+  Probe.HeapAttempted = true;
+  Probe.HeapCreateResult = E_OUTOFMEMORY;
+  Probe.HeapMapResult = E_NOTIMPL;
+  D3D12DDI_DEVICE_FUNCS_CORE_0072 Table{};
+  feme::probe::populateWarpHeapDDIs(Table);
+  D3D12DDIARG_CREATEHEAP_0001 HeapArgs{};
+  HeapArgs.ByteSize = 65536;
+  HeapArgs.Alignment = 65536;
+  HeapArgs.MemoryPool = D3D12DDI_MEMORY_POOL_L0;
+  HeapArgs.CPUPageProperty = D3D12DDI_CPU_PAGE_PROPERTY_WRITE_BACK;
+  HeapArgs.Flags = D3D12DDI_HEAP_FLAG_BUFFERS;
+  HeapArgs.CreationNodeMask = 1;
+  HeapArgs.VisibleNodeMask = 1;
+  D3D12DDIARG_CREATERESOURCE_0003 ResourceArgs{};
+  ResourceArgs.ResourceType = D3D12DDI_RT_BUFFER;
+  ResourceArgs.Width = 4097;
+  ResourceArgs.Height = 1;
+  ResourceArgs.DepthOrArraySize = 1;
+  ResourceArgs.MipLevels = 1;
+  ResourceArgs.Layout = D3D12DDI_TL_ROW_MAJOR;
+  ResourceArgs.SampleDesc.Count = 1;
+  auto Sizes = Table.pfnCalcPrivateHeapAndResourceSizes(Device, &HeapArgs,
+                                                        &ResourceArgs, {});
+  D3D12DDI_HHEAP Heap{};
+  Heap.pDrvPrivate = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Sizes.Heap);
+  D3D12DDI_HRESOURCE Resource{};
+  Resource.pDrvPrivate =
+      HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Sizes.Resource);
+  HRESULT Result = E_OUTOFMEMORY;
+  if (Heap.pDrvPrivate && Resource.pDrvPrivate) {
+    Probe.HeapCreateResult = Table.pfnCreateHeapAndResource(
+        Device, &HeapArgs, Heap, {}, &ResourceArgs, nullptr, {}, Resource);
+    Result = Probe.HeapCreateResult;
+    if (Result == S_OK) {
+      Probe.HeapAllocationHandle =
+          Table.pfnCheckResourceAllocationHandle(Device, Resource);
+      void *Data = nullptr;
+      Probe.HeapMapResult = Table.pfnMapHeap(Device, Heap, &Data);
+      Result = Probe.HeapMapResult;
+      if (Result == S_OK && Data) {
+        Probe.HeapCpuAddress = reinterpret_cast<ULONG_PTR>(Data);
+        auto *Bytes = static_cast<unsigned char *>(Data);
+        Bytes[0] = 0x42;
+        Bytes[4096] = 0x93;
+        Table.pfnUnmapHeap(Device, Heap);
+        Data = nullptr;
+        Result = Table.pfnMapHeap(Device, Heap, &Data);
+        if (Result == S_OK && Data) {
+          Bytes = static_cast<unsigned char *>(Data);
+          Probe.HeapDataRoundTrip =
+              Bytes[0] == 0x42 && Bytes[4096] == 0x93 &&
+              reinterpret_cast<ULONG_PTR>(Data) == Probe.HeapCpuAddress &&
+              Table.pfnCheckResourceVirtualAddress(Device, Resource) ==
+                  Probe.HeapCpuAddress;
+          Table.pfnUnmapHeap(Device, Heap);
+        }
+      }
+      Table.pfnDestroyHeapAndResource(Device, Heap, Resource);
+      auto *State = static_cast<WarpDeviceState *>(Device.pDrvPrivate);
+      Probe.HeapDestroyResult = State->HeapCleanupResult;
+      Probe.HeapDestroyed = State->LiveHeaps == 0 && State->LiveResources == 0;
+      if (Result == S_OK && FAILED(Probe.HeapDestroyResult))
+        Result = Probe.HeapDestroyResult;
+      if (Result == S_OK && (!Probe.HeapAllocationHandle ||
+                             !Probe.HeapDataRoundTrip || !Probe.HeapDestroyed))
+        Result = E_UNEXPECTED;
+    }
+  }
+  if (Resource.pDrvPrivate &&
+      !HeapFree(GetProcessHeap(), 0, Resource.pDrvPrivate) && Result == S_OK)
+    Result = HRESULT_FROM_WIN32(GetLastError());
+  if (Heap.pDrvPrivate && !HeapFree(GetProcessHeap(), 0, Heap.pDrvPrivate) &&
+      Result == S_OK)
+    Result = HRESULT_FROM_WIN32(GetLastError());
+  return Result;
+}
+
 HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
                                 HANDLE RTAdapter) {
   auto &Probe = GWarpDeviceContextProbe;
@@ -672,6 +722,11 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
     D3D12DDI_HDEVICE Device{};
     Device.pDrvPrivate = State;
     destroyWarpDeviceContext(Device);
+    return Result;
+  }
+  Result = probeWarpBufferHeap(Args->hDrvDevice);
+  if (FAILED(Result)) {
+    destroyWarpDeviceContext(Args->hDrvDevice);
     return Result;
   }
   return S_OK;

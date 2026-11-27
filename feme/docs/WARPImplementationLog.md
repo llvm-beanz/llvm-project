@@ -328,6 +328,17 @@ bring-up boundary. The focused shader-cap/model regressions and callback
 fixtures pass (59/59), as does the
 OS-routing suite (31/31); these are not a working-device claim.
 
+The subsequent committed-buffer callback step implements twelve typed heap
+and resource DDIs using WARP KMD allocations, retained descriptions,
+thread-safe maps, kernel residency callbacks and explicit error paths. Its three fixtures
+bring the standalone suite to 62/62; OS routing remains 31/31. These entries
+are not yet published through the incomplete core table. The OS-routed
+context probe additionally demonstrates a real internal 64-KiB KMD buffer
+allocation/map/remap/teardown, but not an application-created resource. Stock-runtime
+device/resource creation, execution and runner provenance remain open;
+direct callback fixtures do not close W0. See
+[owned-buffer evidence](W0WindowsIntegrationProbe.md#w0g-follow-up-owned-committed-buffer-callbacks).
+
 `W0(c)`'s test-corpus and compatibility-scope work is **complete**, recorded in
 [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md):
 the local test corpus is classified into the five named categories (public
