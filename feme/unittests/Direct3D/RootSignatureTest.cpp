@@ -12,6 +12,7 @@
 #include "feme/Direct3D/ComputePlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
 #include "feme/Direct3D/ExecutionPlan.h"
+#include "feme/Direct3D/ObjectModel.h"
 #include "feme/Direct3D/PipelinePlan.h"
 #include "feme/Direct3D/PresentationPlan.h"
 #include "feme/Direct3D/RayTracingPlan.h"
@@ -426,6 +427,68 @@ TEST(ExecutionPlanTest, RejectsPastTargetAndDecreasingFence) {
 
   Plan.Fence = FencePlan{8, 7, 7, false};
   Err = validateExecutionPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ObjectModelTest, CreatesAndClosesTypedObjects) {
+  ObjectModel Model;
+  ObjectHandle Device = Model.create(ObjectKind::Device);
+  ObjectHandle Queue = Model.create(ObjectKind::CommandQueue);
+  EXPECT_TRUE(Model.isAlive(Device));
+  EXPECT_TRUE(Model.isAlive(Queue));
+  llvm::Error Err = Model.close(Device);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  EXPECT_FALSE(Model.isAlive(Device));
+  EXPECT_TRUE(Model.isAlive(Queue));
+}
+
+TEST(ObjectModelTest, RejectsCloseWithPendingWork) {
+  ObjectModel Model;
+  ObjectHandle Queue = Model.create(ObjectKind::CommandQueue);
+  llvm::Error Err = Model.setPending(Queue, 2);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  Err = Model.close(Queue);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+  EXPECT_TRUE(Model.isAlive(Queue));
+  EXPECT_EQ(Model.pending(Queue), 2);
+}
+
+TEST(ObjectModelTest, RejectsResetForNonAllocators) {
+  ObjectModel Model;
+  ObjectHandle Device = Model.create(ObjectKind::Device);
+  llvm::Error Err = Model.reset(Device);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ObjectModelTest, ResetsIdleAllocatorAndReplaysIt) {
+  ObjectModel Model;
+  ObjectHandle Allocator = Model.create(ObjectKind::Allocator);
+  llvm::Error Err = Model.reset(Allocator);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  Err = Model.replay(Allocator);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  EXPECT_EQ(Model.replayCount(Allocator), 1);
+}
+
+TEST(ObjectModelTest, RejectsResetWithPendingWork) {
+  ObjectModel Model;
+  ObjectHandle Allocator = Model.create(ObjectKind::Allocator);
+  llvm::Error Err = Model.setPending(Allocator, 1);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+  Err = Model.reset(Allocator);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
