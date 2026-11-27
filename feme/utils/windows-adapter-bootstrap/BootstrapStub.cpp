@@ -837,6 +837,7 @@ void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device) {
   Probe.LiveCommandListsAtDestroy = State->LiveCommandLists.load();
   Probe.LiveHeapsAtDestroy = State->LiveHeaps.load();
   Probe.LiveResourcesAtDestroy = State->LiveResources.load();
+  Probe.LiveFencesAtDestroy = State->LiveFences.load();
 }
 #endif
 

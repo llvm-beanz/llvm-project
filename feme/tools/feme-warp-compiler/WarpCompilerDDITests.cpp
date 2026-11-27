@@ -71,6 +71,29 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   if (feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE_DEVICE_CORE,
                                           &Core, sizeof(Core), 0) != S_OK)
     return false;
+  D3D12DDI_FENCE FenceDesc{};
+  FenceDesc.FenceValue.BaseAddress = 16;
+  FenceDesc.Flags = D3D12DDI_FENCE_FLAG_BOTTOM_OF_PIPE;
+  D3D12DDIARG_CREATE_FENCE FenceArgs{1, &FenceDesc};
+  Storage FenceStorage(Core.pfnCalcPrivateFenceSize(Device, &FenceArgs));
+  D3D12DDI_HFENCE Fence{FenceStorage.data()};
+  if (Core.pfnCreateFence(Device, Fence, &FenceArgs) != S_OK ||
+      Owner.LiveFences != 1)
+    return false;
+  Core.pfnDestroyFence(OtherDevice, Fence);
+  if (LastError != E_INVALIDARG || Owner.LiveFences != 1)
+    return false;
+  Core.pfnDestroyFence(Device, Fence);
+  FenceDesc.FenceValue.BaseAddress = 1;
+  if (Owner.LiveFences ||
+      Core.pfnCreateFence(Device, Fence, &FenceArgs) != E_INVALIDARG)
+    return false;
+  FenceDesc.FenceValue.BaseAddress = 16;
+  FenceArgs.FenceCount = 2;
+  if (Core.pfnCalcPrivateFenceSize(Device, &FenceArgs) ||
+      LastError != E_INVALIDARG)
+    return false;
+  LastError = S_OK;
   D3D12DDI_ROOT_SIGNATURE_0013 RootDesc{};
   D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 RootArgs{};
   RootArgs.Version = D3D12DDI_ROOT_SIGNATURE_VERSION_1_1;

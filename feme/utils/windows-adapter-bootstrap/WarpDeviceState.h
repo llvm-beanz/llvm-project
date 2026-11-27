@@ -67,6 +67,7 @@ struct WarpDeviceState {
   std::atomic<SIZE_T> LiveCommandQueues{0};
   std::atomic<SIZE_T> LiveCommandRecorders{0};
   std::atomic<SIZE_T> LiveCommandLists{0};
+  std::atomic<SIZE_T> LiveFences{0};
   std::atomic<HRESULT> HeapCleanupResult{S_OK};
 };
 

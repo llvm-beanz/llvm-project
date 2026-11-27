@@ -133,6 +133,77 @@ HRESULT createComputePipeline(ID3D12Device *Device, const char *Source,
   return Result;
 }
 
+HRESULT exerciseFences(ID3D12Device *Device) {
+  ComPtr<ID3D12Fence> Fence;
+  ComPtr<ID3D12CommandQueue> Queue;
+  HRESULT Result = report(
+      "Create application fence",
+      Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence)));
+  if (FAILED(Result))
+    return Result;
+  D3D12_COMMAND_QUEUE_DESC QueueDesc{};
+  QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  Result = report("Create fence command queue",
+                  Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
+  if (FAILED(Result))
+    return Result;
+  HANDLE Event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!Event)
+    return report("Create fence completion event",
+                  HRESULT_FROM_WIN32(GetLastError()));
+  bool PendingWait = false;
+  Result = [&]() -> HRESULT {
+    if (Fence->GetCompletedValue() != 0)
+      return report("Initial fence value mismatch", E_FAIL);
+    HRESULT Status = report("Arm CPU fence completion",
+                            Fence->SetEventOnCompletion(1, Event));
+    if (FAILED(Status))
+      return Status;
+    if (WaitForSingleObject(Event, 0) != WAIT_TIMEOUT)
+      return report("Unsignaled CPU fence completed", E_FAIL);
+    Status = report("Signal CPU fence", Fence->Signal(1));
+    if (FAILED(Status))
+      return Status;
+    if (WaitForSingleObject(Event, 5000) != WAIT_OBJECT_0 ||
+        Fence->GetCompletedValue() != 1)
+      return report("CPU fence completion mismatch", E_FAIL);
+    Status = report("Queue future fence wait", Queue->Wait(Fence.Get(), 3));
+    if (FAILED(Status))
+      return Status;
+    PendingWait = true;
+    Status =
+        report("Queue ordered fence signal", Queue->Signal(Fence.Get(), 4));
+    if (FAILED(Status))
+      return Status;
+    Status = report("Arm queue fence completion",
+                    Fence->SetEventOnCompletion(4, Event));
+    if (FAILED(Status))
+      return Status;
+    if (WaitForSingleObject(Event, 100) != WAIT_TIMEOUT)
+      return report("Queue signal bypassed future wait", E_FAIL);
+    Status = report("Release future fence wait", Fence->Signal(3));
+    if (FAILED(Status))
+      return Status;
+    PendingWait = false;
+    if (WaitForSingleObject(Event, 5000) != WAIT_OBJECT_0 ||
+        Fence->GetCompletedValue() != 4)
+      return report("Kernel-ordered fence completion mismatch", E_FAIL);
+    std::printf(
+        "Owned monitored fence lifecycle and future kernel wait PASS\n");
+    return report("Fence removal status", Device->GetDeviceRemovedReason());
+  }();
+  if (PendingWait) {
+    HRESULT Cleanup =
+        report("Release failed fence test wait", Fence->Signal(3));
+    if (FAILED(Cleanup))
+      Result = Cleanup;
+  }
+  if (!CloseHandle(Event))
+    Result = report("Close fence completion event",
+                    HRESULT_FROM_WIN32(GetLastError()));
+  return Result;
+}
+
 HRESULT exerciseCommands(ID3D12Device *Device,
                          const D3D12_SHADER_BYTECODE *DXIL = nullptr) {
   constexpr char Source[] = "[numthreads(1,1,1)] void main() {}";
@@ -424,6 +495,7 @@ bool printCaps(HMODULE Module, bool OwnedDevice) {
 
 int wmain(int Argc, wchar_t **Argv) {
   bool Reference = Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0;
+  bool Fences = Argc == 2 && std::wcscmp(Argv[1], L"--fences") == 0;
   bool DXILBufferCommands =
       Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0;
   bool BufferCommands =
@@ -435,11 +507,12 @@ int wmain(int Argc, wchar_t **Argv) {
                   (Argc == 2 && std::wcscmp(Argv[1], L"--commands") == 0);
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
-  if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands) {
+  if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands &&
+      !Fences) {
     std::fprintf(stderr, "Usage: warp-prototype-harness "
                          "[--reference|--expect-shader-rejection|--commands|"
                          "--buffer-commands|--dxil-commands FILE|"
-                         "--dxil-buffer-commands FILE]\n");
+                         "--dxil-buffer-commands FILE|--fences]\n");
     return 1;
   }
   std::vector<unsigned char> DXILBytes;
@@ -528,6 +601,8 @@ int wmain(int Argc, wchar_t **Argv) {
   }
   if (SUCCEEDED(Result))
     Result = exerciseBuffer(Device.Get());
+  if (SUCCEEDED(Result) && Fences)
+    Result = exerciseFences(Device.Get());
   if (SUCCEEDED(Result) && Commands)
     Result = exerciseCommands(Device.Get(), DXILCommands ? &DXIL : nullptr);
   if (SUCCEEDED(Result) && BufferCommands)
@@ -665,7 +740,7 @@ int wmain(int Argc, wchar_t **Argv) {
           !Data.LiveCommandQueuesAtDestroy &&
           !Data.LiveCommandRecordersAtDestroy &&
           !Data.LiveCommandListsAtDestroy && !Data.LiveResourcesAtDestroy &&
-          !Data.ExceptionCode;
+          !Data.LiveFencesAtDestroy && !Data.ExceptionCode;
       ValidRejection &= CleanupValid;
       ValidOwned &= CleanupValid;
       if (!CleanupValid)

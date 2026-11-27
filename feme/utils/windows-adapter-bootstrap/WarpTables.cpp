@@ -657,6 +657,59 @@ void APIENTRY destroyPipeline(D3D12DDI_HDEVICE Device,
   ++PipelinesDestroyed;
 }
 
+struct FenceObject {
+  feme::probe::WarpDeviceState *Owner;
+  D3D12DDI_FENCE Placement;
+};
+
+HRESULT validateFence(const D3D12DDIARG_CREATE_FENCE *Args) {
+  if (!Args || Args->FenceCount != 1 || !Args->Fences)
+    return E_INVALIDARG;
+  const auto &Fence = Args->Fences[0];
+  if ((Fence.FenceValue.BaseAddress & 7) ||
+      (Fence.FenceMonitoredValue.BaseAddress & 7) ||
+      (Fence.Flags != D3D12DDI_FENCE_FLAG_NONE &&
+       Fence.Flags != D3D12DDI_FENCE_FLAG_BOTTOM_OF_PIPE))
+    return E_INVALIDARG;
+  return S_OK;
+}
+
+SIZE_T APIENTRY fenceSize(D3D12DDI_HDEVICE Device,
+                          const D3D12DDIARG_CREATE_FENCE *Args) {
+  HRESULT Result = validateFence(Args);
+  if (FAILED(Result)) {
+    reportError(Device, Result);
+    return 0;
+  }
+  return sizeof(FenceObject);
+}
+
+HRESULT APIENTRY createFence(D3D12DDI_HDEVICE Device, D3D12DDI_HFENCE Fence,
+                             const D3D12DDIARG_CREATE_FENCE *Args) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Fence.pDrvPrivate)
+    return E_INVALIDARG;
+  HRESULT Result = validateFence(Args);
+  if (FAILED(Result))
+    return Result;
+  // The runtime owns the monitored synchronization object and its kernel
+  // Signal/Wait operations; this object retains only the UMD placements.
+  new (Fence.pDrvPrivate) FenceObject{Owner, Args->Fences[0]};
+  ++Owner->LiveFences;
+  return S_OK;
+}
+
+void APIENTRY destroyFence(D3D12DDI_HDEVICE Device, D3D12DDI_HFENCE Fence) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  auto *State = static_cast<FenceObject *>(Fence.pDrvPrivate);
+  if (!Owner || !State || State->Owner != Owner) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  State->~FenceObject();
+  --Owner->LiveFences;
+}
+
 struct CommandQueue {
   feme::probe::WarpDeviceState *Owner;
   D3D12DDI_COMMAND_QUEUE_FLAGS Flags;
@@ -1445,6 +1498,9 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnCalcPrivateCommandListSize = listSize;
     Table.pfnCreateCommandList = createList;
     Table.pfnDestroyCommandList = destroyList;
+    Table.pfnCalcPrivateFenceSize = fenceSize;
+    Table.pfnCreateFence = createFence;
+    Table.pfnDestroyFence = destroyFence;
 #endif
     return publish(Destination, Size, Table, 0);
   }

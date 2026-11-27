@@ -509,6 +509,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-buffer-commands
     COMMAND warp-compiler-harness --buffer-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-fences
+    COMMAND warp-compiler-harness --fences)
   find_program(FEME_DXC_EXECUTABLE NAMES dxc
     DOC "DXC for original owned-DXIL execution fixtures")
   if(FEME_DXC_EXECUTABLE)
