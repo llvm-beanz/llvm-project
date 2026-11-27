@@ -1182,10 +1182,22 @@ int wmain(int Argc, wchar_t **Argv) {
           L"InitContextEscapeAttempted=%u InitContextEscapeReturned=%u "
           L"InitContextEscapeResult=0x%08lx KernelContextHandle=0x%016llx "
           L"DmaBufferAddress=0x%016llx DmaBufferSize=%u "
+          L"DmaAllocationAttempted=%u DmaAllocationReturned=%u "
+          L"DmaAllocationResult=0x%08lx DmaAllocationHandle=%u "
+          L"DmaLockAttempted=%u DmaLockReturned=%u DmaLockResult=0x%08lx "
+          L"DmaCpuAddress=0x%016llx DmaFenceCreateAttempted=%u "
+          L"DmaFenceCreateReturned=%u DmaFenceCreateResult=0x%08lx "
+          L"DmaFenceHandle=%u InitDeviceEscapeAttempted=%u "
+          L"InitDeviceEscapeReturned=%u InitDeviceEscapeResult=0x%08lx "
           L"FillTableAttempted=%u FillTableType=%u FillTableSize=%llu "
           L"FillTableResult=0x%08lx PagingQueueDestroyAttempted=%u "
           L"PagingQueueDestroyReturned=%u "
           L"PagingQueueDestroyResult=0x%08lx DestroyAttempted=%u "
+          L"DmaFenceDestroyAttempted=%u DmaFenceDestroyReturned=%u "
+          L"DmaFenceDestroyResult=0x%08lx DmaUnlockAttempted=%u "
+          L"DmaUnlockReturned=%u DmaUnlockResult=0x%08lx "
+          L"DmaDeallocateAttempted=%u DmaDeallocateReturned=%u "
+          L"DmaDeallocateResult=0x%08lx "
           L"DestroyReturned=%u DestroyResult=0x%08lx ExceptionCode=0x%08lx\n",
           unsigned(DeviceProbe.VersionNumberEscapeAttempted),
           unsigned(DeviceProbe.VersionNumberEscapeReturned),
@@ -1211,14 +1223,38 @@ int wmain(int Argc, wchar_t **Argv) {
           static_cast<unsigned long>(DeviceProbe.InitContextEscapeResult),
           static_cast<unsigned long long>(DeviceProbe.KernelContextHandle),
           static_cast<unsigned long long>(DeviceProbe.DmaBufferAddress),
-          DeviceProbe.DmaBufferSize, unsigned(DeviceProbe.FillTableAttempted),
-          DeviceProbe.FillTableType,
+          DeviceProbe.DmaBufferSize,
+          unsigned(DeviceProbe.DmaAllocationAttempted),
+          unsigned(DeviceProbe.DmaAllocationReturned),
+          static_cast<unsigned long>(DeviceProbe.DmaAllocationResult),
+          DeviceProbe.DmaAllocationHandle,
+          unsigned(DeviceProbe.DmaLockAttempted),
+          unsigned(DeviceProbe.DmaLockReturned),
+          static_cast<unsigned long>(DeviceProbe.DmaLockResult),
+          static_cast<unsigned long long>(DeviceProbe.DmaCpuAddress),
+          unsigned(DeviceProbe.DmaFenceCreateAttempted),
+          unsigned(DeviceProbe.DmaFenceCreateReturned),
+          static_cast<unsigned long>(DeviceProbe.DmaFenceCreateResult),
+          DeviceProbe.DmaFenceHandle,
+          unsigned(DeviceProbe.InitDeviceEscapeAttempted),
+          unsigned(DeviceProbe.InitDeviceEscapeReturned),
+          static_cast<unsigned long>(DeviceProbe.InitDeviceEscapeResult),
+          unsigned(DeviceProbe.FillTableAttempted), DeviceProbe.FillTableType,
           static_cast<unsigned long long>(DeviceProbe.FillTableSize),
           static_cast<unsigned long>(DeviceProbe.FillTableResult),
           unsigned(DeviceProbe.PagingQueueDestroyAttempted),
           unsigned(DeviceProbe.PagingQueueDestroyReturned),
           static_cast<unsigned long>(DeviceProbe.PagingQueueDestroyResult),
           unsigned(DeviceProbe.DestroyAttempted),
+          unsigned(DeviceProbe.DmaFenceDestroyAttempted),
+          unsigned(DeviceProbe.DmaFenceDestroyReturned),
+          static_cast<unsigned long>(DeviceProbe.DmaFenceDestroyResult),
+          unsigned(DeviceProbe.DmaUnlockAttempted),
+          unsigned(DeviceProbe.DmaUnlockReturned),
+          static_cast<unsigned long>(DeviceProbe.DmaUnlockResult),
+          unsigned(DeviceProbe.DmaDeallocateAttempted),
+          unsigned(DeviceProbe.DmaDeallocateReturned),
+          static_cast<unsigned long>(DeviceProbe.DmaDeallocateResult),
           unsigned(DeviceProbe.DestroyReturned),
           static_cast<unsigned long>(DeviceProbe.DestroyResult),
           static_cast<unsigned long>(DeviceProbe.ExceptionCode));
@@ -1243,10 +1279,30 @@ int wmain(int Argc, wchar_t **Argv) {
            !DeviceProbe.InitContextEscapeReturned ||
            DeviceProbe.InitContextEscapeResult != S_OK ||
            !DeviceProbe.KernelContextHandle || !DeviceProbe.DmaBufferSize ||
+           !DeviceProbe.DmaAllocationAttempted ||
+           !DeviceProbe.DmaAllocationReturned ||
+           DeviceProbe.DmaAllocationResult != S_OK ||
+           !DeviceProbe.DmaAllocationCreated || !DeviceProbe.DmaLockAttempted ||
+           !DeviceProbe.DmaLockReturned || DeviceProbe.DmaLockResult != S_OK ||
+           !DeviceProbe.DmaCpuAddress || !DeviceProbe.DmaFenceCreateAttempted ||
+           !DeviceProbe.DmaFenceCreateReturned ||
+           DeviceProbe.DmaFenceCreateResult != S_OK ||
+           !DeviceProbe.DmaFenceCreated ||
+           !DeviceProbe.InitDeviceEscapeAttempted ||
+           !DeviceProbe.InitDeviceEscapeReturned ||
+           DeviceProbe.InitDeviceEscapeResult != S_OK ||
            DeviceProbe.FillTableAttempted ||
            !DeviceProbe.PagingQueueDestroyAttempted ||
            !DeviceProbe.PagingQueueDestroyReturned ||
            DeviceProbe.PagingQueueDestroyResult != S_OK ||
+           !DeviceProbe.DmaFenceDestroyAttempted ||
+           !DeviceProbe.DmaFenceDestroyReturned ||
+           DeviceProbe.DmaFenceDestroyResult != S_OK ||
+           !DeviceProbe.DmaUnlockAttempted || !DeviceProbe.DmaUnlockReturned ||
+           DeviceProbe.DmaUnlockResult != S_OK ||
+           !DeviceProbe.DmaDeallocateAttempted ||
+           !DeviceProbe.DmaDeallocateReturned ||
+           DeviceProbe.DmaDeallocateResult != S_OK ||
            !DeviceProbe.DestroyAttempted || !DeviceProbe.DestroyReturned ||
            DeviceProbe.DestroyResult != S_OK || DeviceProbe.ExceptionCode)) {
         report(L"Expected context cleanup after pre-table runtime rejection",

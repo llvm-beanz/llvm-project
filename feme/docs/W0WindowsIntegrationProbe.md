@@ -5486,14 +5486,15 @@ instead of being hardcoded. Both escape callbacks, paging-queue creation, and
 context creation return `S_OK`, but adding the version query does not move the
 runtime past the pre-table `DXGI_ERROR_DRIVER_INTERNAL_ERROR`.
 
-This is not a successful D3D12 device and does not close W0. In particular,
-`FillDDITable` remains uncalled, and no allocation, residency, mapping, or
-resource lifecycle has been demonstrated. The probe now creates a persistent
-user-mode context identity and sends WARP's `InitContextVirtual2` escape (ID 7)
-with the actual KMT context handle and command-buffer mapping. The KMD returns
-`S_OK`, a nonzero kernel-context handle, and a 4096-byte DMA-buffer size.
-However, the probe does not yet allocate/lock that DMA buffer, create the
-monitored fence, or send `InitDevice` with a fully initialized user-mode
-device. Those operations are still required by official WARP when the IOMMU
-capability is set. The current evidence does not establish why the runtime
-rejects the attempt.
+This is not a successful D3D12 device and does not close W0. The probe now
+allocates and locks the 4096-byte DMA buffer through the runtime's D3D12
+core-layer callback, creates and destroys a monitored fence, and sends the
+WARP `InitDevice` escape; all these operations and their teardown return
+`S_OK`. It also answers the observed D3D12-options query with baseline tiers
+and the shader-caps query with no optional caps. The direct harness observes
+caps 1074, 1006, and 1004, but still returns
+`DXGI_ERROR_DRIVER_INTERNAL_ERROR` after `CreateDevice` and before
+`FillDDITable`. The probe demonstrates an internal DMA-allocation and KMD
+object lifecycle only—not an application-owned D3D12 resource, residency,
+mapping, command execution, or usable device. The reason for the post-create
+runtime rejection remains unknown.

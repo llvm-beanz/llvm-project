@@ -10,33 +10,26 @@
 // DirectHarness.cpp invokes it by hand, independently of Windows routing.
 // windows-warp-interposition also builds it as a local d3d10warp.dll and
 // measures stock D3D12's adapter negotiation through Microsoft's WARP identity.
-// Neither experiment implements a real device, resource, or command contract:
-// device creation deliberately returns E_NOTIMPL. By default no supported DDI
-// versions are advertised. W0(g)'s audit variant defines
+// The default/bootstrap variants deliberately return E_NOTIMPL; the W0(g)
+// audit variant additionally initializes WARP KMD objects but still does not
+// implement a real device, resource, or command contract. By default no
+// supported DDI versions are advertised. W0(g)'s audit variant defines
 // FEME_BOOTSTRAP_PINNED_VERSION (one public D3D12DDI_SUPPORTED_00NN value) to
 // observe what the stock runtime asks for once negotiation can succeed. The
-// two GetCaps queries that W0(g) observed happen unconditionally before
-// CreateDevice (D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 and the older
-// D3D12DDICAPS_TYPE_3DPIPELINESUPPORT) are answered truthfully and minimally:
-// the former simply echoes back the runtime's own requested feature level
-// (its pData struct carries it as an input field), and the latter reports the
-// lowest defined D3D12DDI_3DPIPELINELEVEL. Neither answer fabricates driver
-// capability beyond what the runtime already told us or the lowest possible
-// truthful claim; every other cap and createDevice itself still deliberately
-// fail, so this remains audit work, not a device contract.
+// pre-device GetCaps queries observed by W0(g) receive minimal responses:
+// D3D12_OPTIONS reports only baseline tiers, optional shader caps are clear,
+// and the pipeline query is capped at feature level 11_0. These negotiation
+// responses are only probes; the shim implements no graphics/resource work.
 //
-// A further W0(g) follow-up audits CreateDevice's thunk-service pointers one
-// level deeper: individual function-pointer fields inside pKTCallbacks
-// (D3DDDI_DEVICECALLBACKS) and p12UMCallbacks are checked for non-null-ness
-// without invoking resource callbacks. Both tables include kernel-service
-// entry points; p12UMCallbacks also supplies user-mode diagnostics.
+// The W0(g) callback-table audit checks individual function pointers without
+// invoking them. The separate WARP-device-context variant does invoke the
+// core-layer allocation callback for its private DMA buffer and matching
+// teardown; it still does not create application resources.
 // FEME_BOOTSTRAP_PROBE_CALLBACK additionally invokes exactly one pure
 // user-mode, non-allocation callback (pfnSetErrorCb, the documented
 // mechanism for a driver to report a device error to the runtime) with a
 // truthful E_NOTIMPL, wrapped in SEH (__try/__except) so an unexpected fault
-// is observed rather than silently tearing down the whole process. This is
-// still audit work: no capability or device contract is implemented, and no
-// allocation/resource callback is ever called.
+// is observed rather than silently tearing down the whole process.
 //
 // FEME_BOOTSTRAP_PROBE_PAGING_QUEUE is a separate opt-in experiment using
 // the public KT create/destroy paging-queue callbacks and hRTDevice handle.
@@ -59,6 +52,7 @@
 #include <d3d12umddi.h>
 #include <dxgi.h>
 
+#include <cstring>
 #include <limits>
 #include <new>
 
@@ -186,6 +180,69 @@ static_assert(offsetof(WarpInitContextVirtual2, DmaBufferAddress) == 32);
 static_assert(offsetof(WarpInitContextVirtual2, DmaBufferSize) == 40);
 static_assert(sizeof(WarpInitContextVirtual2) == 48);
 constexpr UINT32 WarpEscapeInitContextVirtual2 = 7;
+
+struct WarpKmdAllocationInfo {
+  D3D10DDIRESOURCE_TYPE ResourceDimension;
+  UINT32 Width;
+  UINT32 Height;
+  UINT32 Depth;
+  DXGI_FORMAT Format;
+  UINT32 Pitch;
+  UINT32 TotalSize;
+  UINT32 ArraySize;
+  UINT32 MipLevels;
+  UINT32 Usage;
+  UINT32 BindFlags;
+  DXGI_SAMPLE_DESC SampleDesc;
+  D3DDDI_RATIONAL RefreshRate;
+  D3DDDI_ROTATION Rotation;
+  D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
+  union {
+    UINT32 VirtualGpuAlignment;
+    HANDLE FlipStart;
+    UINT64 FlipStartAlignment;
+  };
+  union {
+    struct {
+      UINT32 VirtualGpuSegmentId;
+      UINT32 VirtualGpuPrivateData;
+    };
+    HANDLE FlipFinished;
+    UINT64 FlipFinishedAlignment;
+  };
+  UINT32 Flags;
+};
+
+static_assert(sizeof(WarpKmdAllocationInfo) == 96);
+static_assert(offsetof(WarpKmdAllocationInfo, Flags) == 88);
+constexpr UINT32 WarpAllocationFlagInAperture = 1u << 7;
+
+struct WarpInitDeviceEscape {
+  UINT32 EscapeId;
+  union {
+    void *UMDevice;
+    UINT64 UMDeviceAlignment;
+  };
+  union {
+    void *CommandBuffer;
+    UINT64 CommandBufferAlignment;
+  };
+  UINT32 CommandBufferSize;
+  INT32 WddmV2Device;
+  INT32 FullWddmDevice;
+  union {
+    void *DisplaySet;
+    UINT64 DisplaySetAlignment;
+  };
+  UINT32 Flags;
+};
+
+static_assert(offsetof(WarpInitDeviceEscape, UMDevice) == 8);
+static_assert(offsetof(WarpInitDeviceEscape, CommandBuffer) == 16);
+static_assert(offsetof(WarpInitDeviceEscape, DisplaySet) == 40);
+static_assert(offsetof(WarpInitDeviceEscape, Flags) == 48);
+static_assert(sizeof(WarpInitDeviceEscape) == 56);
+constexpr UINT32 WarpEscapeInitDevice = 0;
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_CONTEXT
@@ -256,6 +313,7 @@ struct WarpUserModeContext {
 
 struct WarpDeviceState {
   const D3DDDI_DEVICECALLBACKS *KTCallbacks = nullptr;
+  const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *UMCallbacks = nullptr;
   HANDLE RTDevice = nullptr;
   UINT32 NodeOrdinal = 0;
   UINT32 EngineAffinity = 0;
@@ -266,11 +324,153 @@ struct WarpDeviceState {
   UINT64 CommandBufferAddress = 0;
   UINT64 CommandBufferSize = 0;
   WarpUserModeContext UserModeContext;
+  D3DKMT_HANDLE DmaAllocation = 0;
+  void *DmaCpuAddress = nullptr;
+  bool DmaLocked = false;
+  D3DKMT_HANDLE DmaFence = 0;
+  volatile UINT64 *DmaFenceValue = nullptr;
 };
 
 static_assert(alignof(WarpDeviceState) <= MEMORY_ALLOCATION_ALIGNMENT);
 
 void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device);
+
+HRESULT allocateWarpDmaBuffer(WarpDeviceState *State) {
+  auto &Probe = GWarpDeviceContextProbe;
+  if (!State->UMCallbacks || !State->UMCallbacks->pfnAllocateCb ||
+      !State->KTCallbacks->pfnLockCb)
+    return E_NOINTERFACE;
+  if (!Probe.DmaBufferSize)
+    return E_INVALIDARG;
+
+  WarpKmdAllocationInfo PrivateInfo{};
+  PrivateInfo.ResourceDimension = D3D10DDIRESOURCE_BUFFER;
+  PrivateInfo.Width = Probe.DmaBufferSize;
+  PrivateInfo.Height = 1;
+  PrivateInfo.Depth = 1;
+  PrivateInfo.Format = DXGI_FORMAT_UNKNOWN;
+  PrivateInfo.Pitch = Probe.DmaBufferSize;
+  PrivateInfo.TotalSize = Probe.DmaBufferSize;
+  PrivateInfo.ArraySize = 1;
+  PrivateInfo.MipLevels = 1;
+  PrivateInfo.Flags = WarpAllocationFlagInAperture;
+
+  D3D12DDI_ALLOCATION_INFO_0022 AllocationInfo{};
+  AllocationInfo.pPrivateDriverData = &PrivateInfo;
+  AllocationInfo.PrivateDriverDataSize = sizeof(PrivateInfo);
+  D3D12DDICB_ALLOCATE_0022 Allocate{};
+  Allocate.NumAllocations = 1;
+  Allocate.pAllocationInfo = &AllocationInfo;
+
+  D3D12DDI_HRTDEVICE RTDevice{};
+  RTDevice.handle = State->RTDevice;
+  Probe.DmaAllocationAttempted = true;
+  bool CallbackReturned = false;
+  DWORD ExceptionCode = 0;
+  __try {
+    Probe.DmaAllocationResult =
+        State->UMCallbacks->pfnAllocateCb(RTDevice, &Allocate);
+    CallbackReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+  }
+  Probe.DmaAllocationReturned = CallbackReturned;
+  State->DmaAllocation = AllocationInfo.hAllocation;
+  Probe.DmaAllocationHandle = State->DmaAllocation;
+  Probe.DmaAllocationCreated = State->DmaAllocation != 0;
+  if (!CallbackReturned)
+    return E_FAIL;
+  if (FAILED(Probe.DmaAllocationResult))
+    return Probe.DmaAllocationResult;
+  if (!State->DmaAllocation)
+    return E_UNEXPECTED;
+
+  D3DDDICB_LOCK Lock{};
+  Lock.hAllocation = State->DmaAllocation;
+  Lock.Flags.IgnoreSync = 1;
+  Lock.Flags.DonotWait = 1;
+  Probe.DmaLockAttempted = true;
+  CallbackReturned = false;
+  __try {
+    Probe.DmaLockResult = State->KTCallbacks->pfnLockCb(State->RTDevice, &Lock);
+    CallbackReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+  }
+  Probe.DmaLockReturned = CallbackReturned;
+  State->DmaCpuAddress = Lock.pData;
+  State->DmaLocked = CallbackReturned && SUCCEEDED(Probe.DmaLockResult);
+  Probe.DmaCpuAddress = reinterpret_cast<ULONG_PTR>(State->DmaCpuAddress);
+  if (!CallbackReturned)
+    return E_FAIL;
+  if (FAILED(Probe.DmaLockResult))
+    return Probe.DmaLockResult;
+  return State->DmaCpuAddress ? S_OK : E_UNEXPECTED;
+}
+
+HRESULT createWarpDmaFence(WarpDeviceState *State) {
+  auto &Probe = GWarpDeviceContextProbe;
+  if (!State->KTCallbacks->pfnCreateSynchronizationObject2Cb ||
+      !State->KTCallbacks->pfnDestroySynchronizationObjectCb)
+    return E_NOINTERFACE;
+
+  D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 Create{};
+  Create.Info.Type = D3DDDI_MONITORED_FENCE;
+  Create.Info.MonitoredFence.InitialFenceValue = 0;
+  Probe.DmaFenceCreateAttempted = true;
+  bool CallbackReturned = false;
+  DWORD ExceptionCode = 0;
+  __try {
+    Probe.DmaFenceCreateResult =
+        State->KTCallbacks->pfnCreateSynchronizationObject2Cb(State->RTDevice,
+                                                              &Create);
+    CallbackReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+  }
+  Probe.DmaFenceCreateReturned = CallbackReturned;
+  State->DmaFence = Create.hSyncObject;
+  State->DmaFenceValue = static_cast<volatile UINT64 *>(
+      Create.Info.MonitoredFence.FenceValueCPUVirtualAddress);
+  Probe.DmaFenceHandle = State->DmaFence;
+  Probe.DmaFenceCreated =
+      State->DmaFence != 0 && State->DmaFenceValue != nullptr;
+  if (!CallbackReturned)
+    return E_FAIL;
+  if (FAILED(Probe.DmaFenceCreateResult))
+    return Probe.DmaFenceCreateResult;
+  return Probe.DmaFenceCreated ? S_OK : E_UNEXPECTED;
+}
+
+HRESULT initializeWarpKmdDevice(WarpDeviceState *State, HANDLE RTAdapter) {
+  auto &Probe = GWarpDeviceContextProbe;
+  WarpInitDeviceEscape InitDevice{};
+  InitDevice.EscapeId = WarpEscapeInitDevice;
+  InitDevice.UMDevice = State;
+  InitDevice.CommandBuffer = State->UserModeContext.CommandBuffer;
+  InitDevice.CommandBufferSize = State->UserModeContext.CommandBufferSize;
+  InitDevice.Flags = 1u | (IsDebuggerPresent() ? 2u : 0u);
+
+  D3DDDICB_ESCAPE Escape{};
+  Escape.hDevice = State->RTDevice;
+  Escape.pPrivateDriverData = &InitDevice;
+  Escape.PrivateDriverDataSize = sizeof(InitDevice);
+  Probe.InitDeviceEscapeAttempted = true;
+  bool CallbackReturned = false;
+  DWORD ExceptionCode = 0;
+  __try {
+    Probe.InitDeviceEscapeResult =
+        State->KTCallbacks->pfnEscapeCb(RTAdapter, &Escape);
+    CallbackReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+  }
+  Probe.InitDeviceEscapeReturned = CallbackReturned;
+  if (!CallbackReturned)
+    return E_FAIL;
+  return FAILED(Probe.InitDeviceEscapeResult) ? Probe.InitDeviceEscapeResult
+                                              : S_OK;
+}
 
 HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
                                 HANDLE RTAdapter) {
@@ -288,6 +488,16 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
   auto *State = ::new (Args->hDrvDevice.pDrvPrivate) WarpDeviceState{};
   State->KTCallbacks = Args->pKTCallbacks;
   State->RTDevice = Args->hRTDevice.handle;
+  UINT64 DdiVersion =
+      (static_cast<UINT64>(Args->Interface) << 32) | Args->Version;
+  if (DdiVersion >= D3D12DDI_SUPPORTED_0022 && Args->p12UMCallbacks) {
+    State->UMCallbacks =
+        reinterpret_cast<const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *>(
+            Args->p12UMCallbacks);
+  }
+  if (!State->UMCallbacks || !State->UMCallbacks->pfnAllocateCb ||
+      !State->UMCallbacks->pfnDeallocateCb)
+    return E_NOINTERFACE;
   DWORD ExceptionCode = 0;
   UINT32 DriverCaps = GWarpPrivateAdapterInfoProbe.DriverCaps;
   if (!(DriverCaps & WarpDriverCapsFullWddmDevice)) {
@@ -466,6 +676,27 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
     return FAILED(Probe.InitContextEscapeResult) ? Probe.InitContextEscapeResult
                                                  : E_UNEXPECTED;
   }
+  HRESULT Result = allocateWarpDmaBuffer(State);
+  if (FAILED(Result)) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    return Result;
+  }
+  Result = createWarpDmaFence(State);
+  if (FAILED(Result)) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    return Result;
+  }
+  Result = initializeWarpKmdDevice(State, RTAdapter);
+  if (FAILED(Result)) {
+    D3D12DDI_HDEVICE Device{};
+    Device.pDrvPrivate = State;
+    destroyWarpDeviceContext(Device);
+    return Result;
+  }
   return S_OK;
 }
 
@@ -481,6 +712,56 @@ void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device) {
     return;
 
   DWORD ExceptionCode = 0;
+  if (State->DmaFence &&
+      State->KTCallbacks->pfnDestroySynchronizationObjectCb) {
+    D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT DestroyFence{};
+    DestroyFence.hSyncObject = State->DmaFence;
+    Probe.DmaFenceDestroyAttempted = true;
+    __try {
+      Probe.DmaFenceDestroyResult =
+          State->KTCallbacks->pfnDestroySynchronizationObjectCb(State->RTDevice,
+                                                                &DestroyFence);
+      Probe.DmaFenceDestroyReturned = true;
+    } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+      Probe.ExceptionCode = ExceptionCode;
+    }
+    State->DmaFence = 0;
+    State->DmaFenceValue = nullptr;
+  }
+  if (State->DmaLocked && State->KTCallbacks->pfnUnlockCb) {
+    D3DDDICB_UNLOCK Unlock{};
+    Unlock.NumAllocations = 1;
+    Unlock.phAllocations = &State->DmaAllocation;
+    Probe.DmaUnlockAttempted = true;
+    __try {
+      Probe.DmaUnlockResult =
+          State->KTCallbacks->pfnUnlockCb(State->RTDevice, &Unlock);
+      Probe.DmaUnlockReturned = true;
+    } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+      Probe.ExceptionCode = ExceptionCode;
+    }
+    State->DmaLocked = false;
+  }
+  if (State->DmaAllocation && State->UMCallbacks &&
+      State->UMCallbacks->pfnDeallocateCb) {
+    D3D12DDICB_DEALLOCATE_0022 Deallocate{};
+    Deallocate.NumAllocations = 1;
+    Deallocate.HandleList = &State->DmaAllocation;
+    Deallocate.Flags = D3D12DDI_DEALLOCATE_FLAGS_0022_ASSUME_NOT_IN_USE |
+                       D3D12DDI_DEALLOCATE_FLAGS_0022_SYNCHRONOUS_DESTROY;
+    D3D12DDI_HRTDEVICE RTDevice{};
+    RTDevice.handle = State->RTDevice;
+    Probe.DmaDeallocateAttempted = true;
+    __try {
+      Probe.DmaDeallocateResult =
+          State->UMCallbacks->pfnDeallocateCb(RTDevice, &Deallocate);
+      Probe.DmaDeallocateReturned = true;
+    } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+      Probe.ExceptionCode = ExceptionCode;
+    }
+    State->DmaAllocation = 0;
+    State->DmaCpuAddress = nullptr;
+  }
   if (State->Context && State->KTCallbacks->pfnDestroyContextCb) {
     D3DDDICB_DESTROYCONTEXT DestroyContext{};
     DestroyContext.hContext = State->Context;
@@ -924,25 +1205,44 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
   if (!Args)
     return E_NOTIMPL;
 
-  // W0(g): answer the two caps the stock runtime is observed to query before
-  // CreateDevice, truthfully and minimally. Every other cap still fails.
+  // Keep the observed pre-device capability queries to baseline values so the
+  // probe can determine whether the runtime proceeds to the next DDI stage.
+  if (Args->Type == D3D12DDICAPS_TYPE_D3D12_OPTIONS && Args->pData &&
+      Args->DataSize >= sizeof(D3D12DDI_D3D12_OPTIONS_DATA_0003)) {
+    std::memset(Args->pData, 0, Args->DataSize);
+    auto *Options =
+        static_cast<D3D12DDI_D3D12_OPTIONS_DATA_0003 *>(Args->pData);
+    Options->ResourceBindingTier = D3D12DDI_RESOURCE_BINDING_TIER_1;
+    Options->ConservativeRasterizationTier =
+        D3D12DDI_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED;
+    Options->TiledResourcesTier = D3D12DDI_TILED_RESOURCES_TIER_NOT_SUPPORTED;
+    Options->CrossNodeSharingTier =
+        D3D12DDI_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED;
+    Options->ResourceHeapTier = D3D12DDI_RESOURCE_HEAP_TIER_1;
+    return S_OK;
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_SHADER && Args->pData &&
+      Args->DataSize >= sizeof(D3D12DDI_SHADER_CAPS_0003)) {
+    std::memset(Args->pData, 0, Args->DataSize);
+    return S_OK;
+  }
   if (Args->Type == D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 && Args->pData &&
       Args->DataSize >= sizeof(D3D12DDI_3DPIPELINESUPPORT1_DATA_0081)) {
     auto *Data =
         static_cast<D3D12DDI_3DPIPELINESUPPORT1_DATA_0081 *>(Args->pData);
-    // The runtime supplies its own requested level as input; echoing it back
-    // as the maximum driver-supported level is a true statement, not a
-    // fabricated capability claim.
     Data->MaximumDriverSupportedFeatureLevel =
-        Data->HighestRuntimeSupportedFeatureLevel;
+        Data->HighestRuntimeSupportedFeatureLevel <
+                D3D12DDI_3DPIPELINELEVEL_11_0
+            ? Data->HighestRuntimeSupportedFeatureLevel
+            : D3D12DDI_3DPIPELINELEVEL_11_0;
     return S_OK;
   }
   if (Args->Type == D3D12DDICAPS_TYPE_3DPIPELINESUPPORT && Args->pData &&
       Args->DataSize >= sizeof(D3D12DDI_3DPIPELINELEVEL)) {
-    // Report the lowest defined pipeline level: a truthful floor, not a
-    // fabricated claim of broader support.
+    // Keep negotiation at the requested 11_0 floor; this probe does not claim
+    // support for higher feature levels or a complete device implementation.
     *static_cast<D3D12DDI_3DPIPELINELEVEL *>(Args->pData) =
-        D3D12DDI_3DPIPELINELEVEL_1_0_GENERIC;
+        D3D12DDI_3DPIPELINELEVEL_11_0;
     return S_OK;
   }
 
