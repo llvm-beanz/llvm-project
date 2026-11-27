@@ -118,6 +118,16 @@ feme::probe::BootstrapContractAudit GContractAudit;
 feme::probe::PagingQueueProbe GPagingQueueProbe;
 feme::probe::GpuVirtualAddressProbe GGpuVirtualAddressProbe;
 feme::probe::MonitoredFenceProbe GMonitoredFenceProbe;
+feme::probe::WarpPrivateAdapterInfoProbe GWarpPrivateAdapterInfoProbe;
+
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO
+struct WarpPrivateAdapterInfo {
+  UINT32 Version;
+  UINT32 WddmVersion;
+  UINT32 DriverCaps;
+};
+static_assert(sizeof(WarpPrivateAdapterInfo) == 3 * sizeof(UINT32));
+#endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_MONITORED_FENCE
 HRESULT exerciseMonitoredFence(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
@@ -572,6 +582,26 @@ OpenAdapter12(D3D12DDIARG_OPENADAPTER *Args) {
   if (!Args || !Args->pAdapterCallbacks || !Args->pAdapterFuncs)
     return E_INVALIDARG;
   InterlockedIncrement(&GCalls.OpenAdapter12);
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO
+  if (!Args->hRTAdapter.handle ||
+      !Args->pAdapterCallbacks->pfnQueryAdapterInfoCb)
+    return E_NOINTERFACE;
+  WarpPrivateAdapterInfo PrivateInfo{};
+  D3DDDICB_QUERYADAPTERINFO QueryInfo{};
+  QueryInfo.pPrivateDriverData = &PrivateInfo;
+  QueryInfo.PrivateDriverDataSize = sizeof(PrivateInfo);
+  GWarpPrivateAdapterInfoProbe.Attempted = true;
+  GWarpPrivateAdapterInfoProbe.Result =
+      Args->pAdapterCallbacks->pfnQueryAdapterInfoCb(Args->hRTAdapter.handle,
+                                                     &QueryInfo);
+  if (SUCCEEDED(GWarpPrivateAdapterInfoProbe.Result)) {
+    GWarpPrivateAdapterInfoProbe.Version = PrivateInfo.Version;
+    GWarpPrivateAdapterInfoProbe.WddmVersion = PrivateInfo.WddmVersion;
+    GWarpPrivateAdapterInfoProbe.DriverCaps = PrivateInfo.DriverCaps;
+  } else {
+    return GWarpPrivateAdapterInfoProbe.Result;
+  }
+#endif
   Args->pAdapterFuncs->pfnCalcPrivateDeviceSize = calcPrivateDeviceSize;
   Args->pAdapterFuncs->pfnCreateDevice = createDevice;
   Args->pAdapterFuncs->pfnCloseAdapter = closeAdapter;
@@ -633,6 +663,12 @@ FeMeBootstrapGetGpuVirtualAddressProbe(
 extern "C" __declspec(dllexport) void APIENTRY
 FeMeBootstrapGetMonitoredFenceProbe(feme::probe::MonitoredFenceProbe *Probe) {
   *Probe = GMonitoredFenceProbe;
+}
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetWarpPrivateAdapterInfoProbe(
+    feme::probe::WarpPrivateAdapterInfoProbe *Probe) {
+  *Probe = GWarpPrivateAdapterInfoProbe;
 }
 
 extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(

@@ -5425,3 +5425,21 @@ a complete public DDI implementation can create the required context.
 W0 remains open: no owned D3D12 device, runtime-owned allocation, residency,
 or mapped-resource lifecycle has been demonstrated. No allocation callback,
 private WARP ABI, system binary replacement, or kernel-driver change was used.
+
+### W0(g) WARP-private adapter-info query (VM, 2026-11-27)
+
+Following the user's explicit approval to align with the WARP ABI and reuse
+the existing WARP kernel driver, a separate native ARM64 LIT probe now queries
+the WARP-private adapter-info payload through the runtime's
+`pfnQueryAdapterInfoCb`. The FeMe-owned probe defines only the 12-byte
+wire-layout needed to receive the version, WDDM value, and capability mask;
+it does not include or copy Microsoft implementation code.
+
+On Windows 11 Enterprise build 26300 with SDK/WDK 10.0.26100.0 and inbox
+D3D12 runtime 10.0.26100.9818, the query returned `S_OK`, version `2`,
+WDDM value `12800`, and capability mask `0x00000001`. The OS-routed
+`D3D12CreateDevice(11_0)` still returns the deliberate `E_NOTIMPL` from the
+bootstrap's `CreateDevice`; `FillDDITable` remains uncalled. The passing
+`os-routed-warp-private-info` test establishes the adapter query path and
+response layout only, not a graphics context, D3D12 device, resource
+allocation, residency, or mapped-resource lifecycle. W0 remains open.

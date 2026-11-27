@@ -594,8 +594,12 @@ int wmain(int Argc, wchar_t **Argv) {
   bool ExpectMonitoredFence =
       WarpBootstrapAudit && Argc == 4 &&
       std::wcscmp(Argv[3], L"--expect-monitored-fence") == 0;
+  bool ExpectWarpPrivateInfo =
+      WarpBootstrapAudit && Argc == 4 &&
+      std::wcscmp(Argv[3], L"--expect-warp-private-info") == 0;
   ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue || ExpectGpuVa ||
-                        ExpectGpuVaRejected || ExpectMonitoredFence;
+                        ExpectGpuVaRejected || ExpectMonitoredFence ||
+                        ExpectWarpPrivateInfo;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
        !WarpBootstrapAudit && !WarpBufferCopy && !WarpCompute) ||
       !ValidSpace || !ValidWorkload ||
@@ -611,7 +615,8 @@ int wmain(int Argc, wchar_t **Argv) {
         L"--warp-bootstrap DLL | --warp-bootstrap-audit DLL "
         L"[--expect-create-device | --expect-unsupported | "
         L"--expect-callback | --expect-paging-queue | --expect-gpu-va | "
-        L"--expect-gpu-va-rejected | --expect-monitored-fence]]\n",
+        L"--expect-gpu-va-rejected | --expect-monitored-fence | "
+        L"--expect-warp-private-info]]\n",
         Argv[0]);
     return 1;
   }
@@ -675,6 +680,8 @@ int wmain(int Argc, wchar_t **Argv) {
       void(APIENTRY *)(feme::probe::GpuVirtualAddressProbe *);
   using GetMonitoredFenceProbe =
       void(APIENTRY *)(feme::probe::MonitoredFenceProbe *);
+  using GetWarpPrivateAdapterInfoProbe =
+      void(APIENTRY *)(feme::probe::WarpPrivateAdapterInfoProbe *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
@@ -684,6 +691,7 @@ int wmain(int Argc, wchar_t **Argv) {
   GetPagingQueueProbe ReadPagingQueueProbe = nullptr;
   GetGpuVirtualAddressProbe ReadGpuVirtualAddressProbe = nullptr;
   GetMonitoredFenceProbe ReadMonitoredFenceProbe = nullptr;
+  GetWarpPrivateAdapterInfoProbe ReadWarpPrivateAdapterInfoProbe = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -726,8 +734,17 @@ int wmain(int Argc, wchar_t **Argv) {
         GetProcAddress(Module, "FeMeBootstrapGetGpuVirtualAddressProbe"));
     ReadMonitoredFenceProbe = reinterpret_cast<GetMonitoredFenceProbe>(
         GetProcAddress(Module, "FeMeBootstrapGetMonitoredFenceProbe"));
+    ReadWarpPrivateAdapterInfoProbe =
+        reinterpret_cast<GetWarpPrivateAdapterInfoProbe>(GetProcAddress(
+            Module, "FeMeBootstrapGetWarpPrivateAdapterInfoProbe"));
     if (ExpectMonitoredFence && !ReadMonitoredFenceProbe) {
       report(L"GetProcAddress(FeMeBootstrapGetMonitoredFenceProbe)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
+    if (ExpectWarpPrivateInfo && !ReadWarpPrivateAdapterInfoProbe) {
+      report(L"GetProcAddress(FeMeBootstrapGetWarpPrivateAdapterInfoProbe)",
              HRESULT_FROM_WIN32(GetLastError()));
       FreeLibrary(Module);
       return 1;
@@ -1063,6 +1080,23 @@ int wmain(int Argc, wchar_t **Argv) {
          Probe.Win32Error)) {
       report(L"Expected successful kernel monitored-fence lifecycle", E_FAIL);
       ExpectedDDICalls = false;
+    }
+    if (ReadWarpPrivateAdapterInfoProbe) {
+      feme::probe::WarpPrivateAdapterInfoProbe WarpInfoProbe;
+      ReadWarpPrivateAdapterInfoProbe(&WarpInfoProbe);
+      std::wprintf(L"WARP private adapter info query: Attempted=%u "
+                   L"Result=0x%08lx Version=%u WddmVersion=%u "
+                   L"DriverCaps=0x%08x\n",
+                   unsigned(WarpInfoProbe.Attempted),
+                   static_cast<unsigned long>(WarpInfoProbe.Result),
+                   WarpInfoProbe.Version, WarpInfoProbe.WddmVersion,
+                   WarpInfoProbe.DriverCaps);
+      if (ExpectWarpPrivateInfo &&
+          (!WarpInfoProbe.Attempted || WarpInfoProbe.Result != S_OK ||
+           !WarpInfoProbe.Version || !WarpInfoProbe.WddmVersion)) {
+        report(L"Expected a valid WARP private adapter info response", E_FAIL);
+        ExpectedDDICalls = false;
+      }
     }
   }
   if ((ExpectCreateDevice || ExpectUnsupported) && !ExpectedDDICalls)

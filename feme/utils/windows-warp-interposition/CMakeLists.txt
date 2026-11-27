@@ -344,3 +344,34 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
           -P "${CMAKE_CURRENT_LIST_DIR}/../windows-adapter-probe/ExpectAuditFailure.cmake")
   endif()
 endforeach()
+
+set(WARP_PRIVATE_INFO_VARIANT warp-private-info)
+set(WARP_PRIVATE_INFO_OUTPUT_DIR
+  "${CMAKE_CURRENT_BINARY_DIR}/${WARP_PRIVATE_INFO_VARIANT}")
+file(MAKE_DIRECTORY "${WARP_PRIVATE_INFO_OUTPUT_DIR}")
+add_library(${WARP_PRIVATE_INFO_VARIANT}-shim SHARED
+  ../windows-adapter-bootstrap/BootstrapStub.cpp)
+target_compile_definitions(${WARP_PRIVATE_INFO_VARIANT}-shim PRIVATE
+  FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0010
+  FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO=1)
+set_target_properties(${WARP_PRIVATE_INFO_VARIANT}-shim PROPERTIES
+  OUTPUT_NAME d3d10warp
+  RUNTIME_OUTPUT_DIRECTORY "${WARP_PRIVATE_INFO_OUTPUT_DIR}"
+  ARCHIVE_OUTPUT_DIRECTORY "${WARP_PRIVATE_INFO_OUTPUT_DIR}")
+add_executable(${WARP_PRIVATE_INFO_VARIANT}-harness
+  ../windows-adapter-probe/AdapterProbe.cpp)
+set_target_properties(${WARP_PRIVATE_INFO_VARIANT}-harness PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${WARP_PRIVATE_INFO_OUTPUT_DIR}")
+target_link_libraries(${WARP_PRIVATE_INFO_VARIANT}-harness PRIVATE d3d12 dxgi)
+add_dependencies(${WARP_PRIVATE_INFO_VARIANT}-harness
+  ${WARP_PRIVATE_INFO_VARIANT}-shim)
+if(MSVC)
+  target_compile_options(${WARP_PRIVATE_INFO_VARIANT}-shim PRIVATE
+    /W4 /WX /wd4201 /UNDEBUG)
+  target_compile_options(${WARP_PRIVATE_INFO_VARIANT}-harness PRIVATE
+    /W4 /WX /UNDEBUG)
+endif()
+feme_add_probe_test(NAME os-routed-warp-private-info
+  COMMAND ${WARP_PRIVATE_INFO_VARIANT}-harness
+    --warp-bootstrap-audit $<TARGET_FILE:${WARP_PRIVATE_INFO_VARIANT}-shim>
+    --expect-warp-private-info)

@@ -32,6 +32,15 @@ struct BootstrapContractAudit {
   bool HasUMDeallocateCb = false;
 };
 
+/// Result of querying WARP's private adapter information through the runtime.
+struct WarpPrivateAdapterInfoProbe {
+  bool Attempted = false;
+  std::int32_t Result = 0;
+  std::uint32_t Version = 0;
+  std::uint32_t WddmVersion = 0;
+  std::uint32_t DriverCaps = 0;
+};
+
 /// Results of the opt-in kernel paging-queue create/destroy experiment.
 struct PagingQueueProbe {
   bool Enabled = false;
