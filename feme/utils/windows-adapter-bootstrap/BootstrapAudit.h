@@ -129,6 +129,9 @@ struct WarpDeviceContextProbe {
   std::uint64_t LiveImmutableStatesAtDestroy = 0;
   std::uint64_t LivePipelinesAtDestroy = 0;
   std::uint64_t LiveCommandPoolsAtDestroy = 0;
+  std::uint64_t LiveCommandQueuesAtDestroy = 0;
+  std::uint64_t LiveCommandRecordersAtDestroy = 0;
+  std::uint64_t LiveCommandListsAtDestroy = 0;
   std::uint64_t LiveHeapsAtDestroy = 0;
   std::uint64_t LiveResourcesAtDestroy = 0;
   bool PagingQueueDestroyAttempted = false;

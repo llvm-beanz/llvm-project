@@ -188,8 +188,16 @@ std::int32_t FeMeWarpCreateComputePipeline(void *Shader, void **Pipeline) {
     llvm::errs() << "FeMe WARP compiler: pipeline requires a compute stage\n";
     return InvalidArgument;
   }
-  *Pipeline = new CompiledShader{Stage};
+  *Pipeline = new (std::nothrow) CompiledShader{Stage};
+  if (!*Pipeline) {
+    llvm::errs() << "FeMe WARP compiler: compute pipeline allocation failed\n";
+    return OutOfMemory;
+  }
   return 0;
+}
+
+std::int32_t FeMeWarpRetainComputePipeline(void *Pipeline, void **Retained) {
+  return FeMeWarpCreateComputePipeline(Pipeline, Retained);
 }
 
 void FeMeWarpDestroyComputePipeline(void *Pipeline) {

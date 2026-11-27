@@ -458,7 +458,7 @@ add_executable(warp-prototype-harness
   ../windows-adapter-probe/WarpPrototypeProbe.cpp)
 set_target_properties(warp-prototype-harness PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${WARP_PROTOTYPE_OUTPUT_DIR}")
-target_link_libraries(warp-prototype-harness PRIVATE d3d12 dxgi)
+target_link_libraries(warp-prototype-harness PRIVATE d3d12 dxgi d3dcompiler)
 add_dependencies(warp-prototype-harness warp-prototype-shim)
 target_compile_options(warp-prototype-shim PRIVATE /W4 /WX /wd4201 /UNDEBUG)
 target_compile_options(warp-prototype-harness PRIVATE /W4 /WX /wd4201 /UNDEBUG)
@@ -499,12 +499,14 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     ../windows-adapter-probe/WarpPrototypeProbe.cpp)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
-  target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi)
+  target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
   add_dependencies(warp-compiler-harness warp-compiler-shim)
   target_compile_options(warp-compiler-shim PRIVATE /W4 /WX /wd4201 /UNDEBUG)
   target_compile_options(warp-compiler-harness PRIVATE /W4 /WX /wd4201 /UNDEBUG)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-buffer
     COMMAND warp-compiler-harness)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-commands
+    COMMAND warp-compiler-harness --commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-reference-buffer
     COMMAND warp-compiler-harness --reference)
   feme_add_probe_test(NAME os-routed-warp-compiler-not-shader-rejection

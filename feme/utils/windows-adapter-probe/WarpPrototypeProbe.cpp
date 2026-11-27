@@ -14,6 +14,7 @@
 
 #include <d3d12.h>
 #include <d3d12umddi.h>
+#include <d3dcompiler.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
@@ -28,6 +29,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 HRESULT report(const char *Name, HRESULT Result) {
   std::printf("%s: 0x%08lx\n", Name, static_cast<unsigned long>(Result));
+  std::fflush(stdout);
   return Result;
 }
 
@@ -83,6 +85,94 @@ HRESULT exerciseBuffer(ID3D12Device *Device) {
   if (FAILED(Result))
     return Result;
   return report("GetDeviceRemovedReason", Device->GetDeviceRemovedReason());
+}
+
+HRESULT exerciseCommands(ID3D12Device *Device) {
+  ComPtr<ID3DBlob> Shader, Errors, RootBlob;
+  constexpr char Source[] = "[numthreads(1,1,1)] void main() {}";
+  HRESULT Result = report("Compile application compute shader",
+                          D3DCompile(Source, sizeof(Source) - 1,
+                                     "FeMe command test", nullptr, nullptr,
+                                     "main", "cs_5_0", 0, 0, &Shader, &Errors));
+  if (FAILED(Result)) {
+    if (Errors)
+      std::fprintf(stderr, "%.*s\n", static_cast<int>(Errors->GetBufferSize()),
+                   static_cast<const char *>(Errors->GetBufferPointer()));
+    return Result;
+  }
+  D3D12_ROOT_SIGNATURE_DESC RootDesc{};
+  Result =
+      report("Serialize empty root",
+             D3D12SerializeRootSignature(
+                 &RootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &RootBlob, &Errors));
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12RootSignature> Root;
+  Result = report("Create application root",
+                  Device->CreateRootSignature(0, RootBlob->GetBufferPointer(),
+                                              RootBlob->GetBufferSize(),
+                                              IID_PPV_ARGS(&Root)));
+  if (FAILED(Result))
+    return Result;
+  D3D12_COMPUTE_PIPELINE_STATE_DESC PipelineDesc{};
+  PipelineDesc.pRootSignature = Root.Get();
+  PipelineDesc.CS = {Shader->GetBufferPointer(), Shader->GetBufferSize()};
+  ComPtr<ID3D12PipelineState> Pipeline;
+  Result = report("Create application compute pipeline",
+                  Device->CreateComputePipelineState(&PipelineDesc,
+                                                     IID_PPV_ARGS(&Pipeline)));
+  if (FAILED(Result))
+    return Result;
+  for (auto Type :
+       {D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+        D3D12_COMMAND_LIST_TYPE_COPY}) {
+    D3D12_COMMAND_QUEUE_DESC QueueDesc{};
+    QueueDesc.Type = Type;
+    ComPtr<ID3D12CommandQueue> Queue;
+    ComPtr<ID3D12CommandAllocator> Allocator;
+    ComPtr<ID3D12GraphicsCommandList> List;
+    Result =
+        report("Create application queue",
+               Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
+    if (FAILED(Result))
+      return Result;
+    Result =
+        report("Create application allocator",
+               Device->CreateCommandAllocator(Type, IID_PPV_ARGS(&Allocator)));
+    if (FAILED(Result))
+      return Result;
+    Result = report("Create application list",
+                    Device->CreateCommandList(0, Type, Allocator.Get(), nullptr,
+                                              IID_PPV_ARGS(&List)));
+    if (FAILED(Result))
+      return Result;
+    for (unsigned Repeat = 0; Repeat != 3; ++Repeat) {
+      if (Type != D3D12_COMMAND_LIST_TYPE_COPY) {
+        List->SetPipelineState(Pipeline.Get());
+        List->SetComputeRootSignature(Root.Get());
+        List->Dispatch(2, 3, 1);
+      }
+      Result = report("Close application list", List->Close());
+      if (FAILED(Result))
+        return Result;
+      ID3D12CommandList *Commands[] = {List.Get()};
+      Queue->ExecuteCommandLists(1, Commands);
+      Result = report("Command execution removal status",
+                      Device->GetDeviceRemovedReason());
+      if (FAILED(Result))
+        return Result;
+      if (Repeat != 2) {
+        Result = report("Reset application allocator", Allocator->Reset());
+        if (FAILED(Result))
+          return Result;
+        Result = report("Reset application list",
+                        List->Reset(Allocator.Get(), nullptr));
+        if (FAILED(Result))
+          return Result;
+      }
+    }
+  }
+  return S_OK;
 }
 
 bool printCaps(HMODULE Module, bool OwnedDevice) {
@@ -152,11 +242,13 @@ bool printCaps(HMODULE Module, bool OwnedDevice) {
 
 int wmain(int Argc, wchar_t **Argv) {
   bool Reference = Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0;
+  bool Commands = Argc == 2 && std::wcscmp(Argv[1], L"--commands") == 0;
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
-  if (Argc != 1 && !Reference && !ExpectShaderRejection) {
-    std::fprintf(stderr, "Usage: warp-prototype-harness "
-                         "[--reference|--expect-shader-rejection]\n");
+  if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands) {
+    std::fprintf(stderr,
+                 "Usage: warp-prototype-harness "
+                 "[--reference|--expect-shader-rejection|--commands]\n");
     return 1;
   }
   wchar_t Path[32768];
@@ -220,6 +312,8 @@ int wmain(int Argc, wchar_t **Argv) {
   }
   if (SUCCEEDED(Result))
     Result = exerciseBuffer(Device.Get());
+  if (SUCCEEDED(Result) && Commands)
+    Result = exerciseCommands(Device.Get());
   bool ValidOwned = !Reference && !ExpectShaderRejection &&
                     DeviceResult == S_OK && SUCCEEDED(Result);
   if (ValidOwned) {
@@ -315,10 +409,15 @@ int wmain(int Argc, wchar_t **Argv) {
       ValidOwned &=
           Audit.CoreTables == 1 && Audit.QueueTables == 1 &&
           Audit.CommandListTables == 2 && Audit.ExtendedTables == 1 &&
-          Audit.ExecutableShaderQueries == 2 && Audit.UnsupportedCalls == 0 &&
-          Audit.CompiledShadersCreated == 2 &&
-          Audit.CompiledShadersDestroyed == 2 && Audit.PipelinesCreated == 2 &&
-          Audit.PipelinesDestroyed == 2;
+          (Commands ? Audit.ExecutableShaderQueries >= 2
+                    : Audit.ExecutableShaderQueries == 2) &&
+          Audit.UnsupportedCalls == 0 &&
+          (Commands ? Audit.CompiledShadersCreated >= 2
+                    : Audit.CompiledShadersCreated == 2) &&
+          Audit.CompiledShadersCreated == Audit.CompiledShadersDestroyed &&
+          (Commands ? Audit.PipelinesCreated >= 2
+                    : Audit.PipelinesCreated == 2) &&
+          Audit.PipelinesCreated == Audit.PipelinesDestroyed;
     } else {
       ValidRejection = false;
       ValidOwned = false;
@@ -346,7 +445,10 @@ int wmain(int Argc, wchar_t **Argv) {
           !Data.LiveCompiledShadersAtDestroy &&
           !Data.LiveImmutableStatesAtDestroy && !Data.LivePipelinesAtDestroy &&
           !Data.LiveCommandPoolsAtDestroy && !Data.LiveHeapsAtDestroy &&
-          !Data.LiveResourcesAtDestroy && !Data.ExceptionCode;
+          !Data.LiveCommandQueuesAtDestroy &&
+          !Data.LiveCommandRecordersAtDestroy &&
+          !Data.LiveCommandListsAtDestroy && !Data.LiveResourcesAtDestroy &&
+          !Data.ExceptionCode;
       ValidRejection &= CleanupValid;
       ValidOwned &= CleanupValid;
       if (!CleanupValid)
@@ -374,6 +476,17 @@ int wmain(int Argc, wchar_t **Argv) {
                     Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
+    if (Commands) {
+      using CommandAuditFn = void(APIENTRY *)(UINT *, UINT *);
+      auto Audit = reinterpret_cast<CommandAuditFn>(
+          GetProcAddress(Module, "FeMeWarpGetCommandAudit"));
+      UINT Dispatches = 0, Copies = 0;
+      if (Audit)
+        Audit(&Dispatches, &Copies);
+      std::printf("Native command execution: dispatches=%u copies=%u\n",
+                  Dispatches, Copies);
+      ValidOwned &= Audit && Dispatches == 6 && Copies == 0;
+    }
   }
   if (!FreeLibrary(Module)) {
     Result = report("FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));

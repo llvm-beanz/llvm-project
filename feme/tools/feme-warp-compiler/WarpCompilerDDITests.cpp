@@ -21,6 +21,23 @@ void APIENTRY setError(D3D12DDI_HRTDEVICE, HRESULT Result) {
   LastError = Result;
 }
 
+HRESULT APIENTRY createQueueContext(D3D12DDI_HRTCOMMANDQUEUE Queue,
+                                    D3DDDICB_CREATECONTEXTVIRTUAL *Args) {
+  auto *Private = static_cast<feme::probe::WarpPrivateContextBuffer *>(
+      Args->pPrivateDriverData);
+  if (!Queue.handle || Args->PrivateDriverDataSize != sizeof(*Private))
+    return E_INVALIDARG;
+  *Private->Buffer = 0x10000;
+  *Private->BufferSize = 4096;
+  Args->hContext = Queue.handle;
+  return S_OK;
+}
+
+HRESULT APIENTRY destroyQueueContext(D3D12DDI_HRTCOMMANDQUEUE Queue,
+                                     const D3DDDICB_DESTROYCONTEXT *Args) {
+  return Args->hContext == Queue.handle ? S_OK : E_INVALIDARG;
+}
+
 struct Storage {
   std::vector<std::max_align_t> Words;
   explicit Storage(SIZE_T Size)
@@ -28,14 +45,26 @@ struct Storage {
               sizeof(std::max_align_t)) {}
   void *data() { return Words.data(); }
 };
+void APIENTRY setListTable(D3D12DDI_HRTCOMMANDLIST List,
+                           D3D12DDI_HRTTABLE Table) {
+  if (List.handle != Table.handle)
+    LastError = E_INVALIDARG;
+  else
+    LastError = S_OK;
+}
 } // namespace
 
 bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   feme::probe::WarpDeviceState Owner, Other;
   D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 Callbacks{};
   Callbacks.pfnSetErrorCb = setError;
+  Callbacks.pfnCreateContextVirtualCb = createQueueContext;
+  Callbacks.pfnDestroyContextCb = destroyQueueContext;
+  Callbacks.pfnSetCommandListDDITableCb = setListTable;
   Owner.UMCallbacks = Other.UMCallbacks = &Callbacks;
   Owner.RTDevice = &Owner;
+  D3D12DDI_HRTTABLE RuntimeTables[2] = {{&Owner}, {}};
+  Owner.CommandListTables = RuntimeTables;
   Other.RTDevice = &Other;
   D3D12DDI_HDEVICE Device{&Owner}, OtherDevice{&Other};
   D3D12DDI_DEVICE_FUNCS_CORE_0072 Core{};
@@ -124,7 +153,114 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Core.pfnDestroyShader(Device, Shader);
   Core.pfnDestroyPipelineState(OtherDevice, Pipeline);
   Good &= LastError == E_INVALIDARG && Owner.LivePipelines == 1;
-  Core.pfnDestroyPipelineState(Device, Pipeline);
+  if (Compute) {
+    D3D12DDI_COMMAND_LIST_FUNCS_3D_0062 Lists{};
+    D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001 Queues{};
+    Good &=
+        feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE_COMMAND_LIST_3D,
+                                            &Lists, sizeof(Lists), 0) == S_OK;
+    Good &= feme::probe::fillWarpPrototypeTable(
+                D3D12DDI_TABLE_TYPE_COMMAND_QUEUE_3D, &Queues, sizeof(Queues),
+                0) == S_OK;
+    D3D12DDIARG_CREATE_COMMAND_POOL_0040 PoolArgs{};
+    Storage PoolStorage(Core.pfnCalcPrivateCommandPoolSize(Device, &PoolArgs));
+    D3D12DDI_HCOMMANDPOOL_0040 Pool{PoolStorage.data()};
+    Good &= Core.pfnCreateCommandPool(Device, &PoolArgs, Pool) == S_OK;
+    D3D12DDIARG_CREATECOMMANDQUEUE_0050 QueueArgs{};
+    QueueArgs.NodeMask = 1;
+    QueueArgs.QueueFlags =
+        D3D12DDI_COMMAND_QUEUE_FLAG_COMPUTE | D3D12DDI_COMMAND_QUEUE_FLAG_COPY;
+    Storage QueueStorage(
+        Core.pfnCalcPrivateCommandQueueSize(Device, &QueueArgs));
+    D3D12DDI_HCOMMANDQUEUE Queue{QueueStorage.data()};
+    D3D12DDI_HRTCOMMANDQUEUE RTQueue{};
+    RTQueue.handle = &Owner;
+    Good &=
+        Core.pfnCreateCommandQueue(Device, &QueueArgs, Queue, RTQueue) == S_OK;
+    D3D12DDIARG_CREATE_COMMAND_RECORDER_0040 RecorderArgs{};
+    RecorderArgs.QueueFlags =
+        QueueArgs.QueueFlags | D3D12DDI_COMMAND_QUEUE_FLAG_3D;
+    Storage RecorderStorage(
+        Core.pfnCalcPrivateCommandRecorderSize(Device, &RecorderArgs));
+    D3D12DDI_HCOMMANDRECORDER_0040 Recorder{RecorderStorage.data()};
+    Good &=
+        Core.pfnCreateCommandRecorder(Device, &RecorderArgs, Recorder) == S_OK;
+    Core.pfnCommandRecorderSetCommandPoolAsTarget(Device, Recorder, Pool);
+    D3D12DDIARG_CREATE_COMMAND_LIST_0040 ListArgs{};
+    ListArgs.NodeMask = 1;
+    ListArgs.QueueFlags = QueueArgs.QueueFlags;
+    Storage ListStorage(Core.pfnCalcPrivateCommandListSize(Device, &ListArgs));
+    D3D12DDI_HCOMMANDLIST List{ListStorage.data()};
+    ListArgs.CommandListFlags =
+        static_cast<D3D12DDI_COMMAND_LIST_FLAGS>(0x80000000);
+    Good &= Core.pfnCalcPrivateCommandListSize(Device, &ListArgs) != 0;
+    Good &= Core.pfnCreateCommandList(Device, &ListArgs, List, {&Owner}) ==
+            E_INVALIDARG;
+    ListArgs.CommandListFlags = D3D12DDI_COMMAND_LIST_FLAG_NONE;
+    Good &=
+        Core.pfnCreateCommandList(Device, &ListArgs, List, {}) == E_NOINTERFACE;
+    LastError = E_FAIL;
+    Good &=
+        Core.pfnCreateCommandList(Device, &ListArgs, List, {&Owner}) == S_OK;
+    Good &= LastError == S_OK;
+    D3D12DDIARG_RESETCOMMANDLIST_0040 Reset{};
+    Reset.hDrvCommandRecorder = Recorder;
+    LastError = S_OK;
+    Lists.pfnResetCommandList(List, &Reset);
+    Lists.pfnIaSetTopology(List, D3D12DDI_PRIMITIVE_TOPOLOGY_UNDEFINED);
+    Lists.pfnSetDescriptorHeaps(List, 0, nullptr);
+    Lists.pfnRsSetViewports(List, 0, nullptr);
+    Lists.pfnRsSetScissorRects(List, 0, nullptr);
+    const FLOAT BlendFactor[4] = {1, 1, 1, 1};
+    Lists.pfnOmSetBlendFactor(List, BlendFactor);
+    Lists.pfnOmSetStencilRef(List, 0);
+    Lists.pfnIASetIndexBuffer(List, nullptr);
+    D3D12DDI_VERTEX_BUFFER_VIEW VertexViews[32] = {};
+    Lists.pfnIASetVertexBuffers(List, 0, 32, VertexViews);
+    D3D12DDI_STREAM_OUTPUT_BUFFER_VIEW StreamViews[4] = {};
+    Lists.pfnSOSetTargets(List, 0, 4, StreamViews);
+    Lists.pfnOMSetRenderTargets(List, 0, nullptr, TRUE, nullptr);
+    Lists.pfnSetPredication(List, {}, 0, D3D12DDI_PREDICATION_OP_EQUAL_ZERO);
+    Good &= LastError == S_OK;
+    VertexViews[31].BufferLocation = 1;
+    Lists.pfnIASetVertexBuffers(List, 0, 32, VertexViews);
+    Good &= LastError == E_NOTIMPL;
+    LastError = S_OK;
+    Lists.pfnSetPipelineState(List, Pipeline);
+    Lists.pfnDispatch(List, 2, 1, 1);
+    Good &= LastError == S_OK;
+    Core.pfnResetCommandPool(Device, Pool);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Queues.pfnExecuteCommandLists(Queue, 1, &List);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnCloseCommandList(List);
+    Core.pfnDestroyPipelineState(Device, Pipeline);
+    Queues.pfnExecuteCommandLists(Queue, 1, &List);
+    Queues.pfnExecuteCommandLists(Queue, 1, &List);
+    Good &= LastError == S_OK;
+    Core.pfnResetCommandPool(Device, Pool);
+    Queues.pfnExecuteCommandLists(Queue, 1, &List);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnResetCommandList(List, &Reset);
+    Lists.pfnCloseCommandList(List);
+    Queues.pfnExecuteCommandLists(Queue, 1, &List);
+    Good &= LastError == S_OK;
+    Core.pfnDestroyCommandQueue(OtherDevice, Queue);
+    Good &= LastError == E_INVALIDARG && Owner.LiveCommandQueues == 1;
+    LastError = S_OK;
+    Core.pfnDestroyCommandPool(Device, Pool);
+    Queues.pfnExecuteCommandLists(Queue, 1, &List);
+    Good &= LastError == E_INVALIDARG;
+    Core.pfnDestroyCommandList(Device, List);
+    Core.pfnDestroyCommandRecorder(Device, Recorder);
+    Core.pfnDestroyCommandQueue(Device, Queue);
+    Good &= Owner.LiveCommandQueues == 0 && Owner.LiveCommandRecorders == 0 &&
+            Owner.LiveCommandLists == 0 && Owner.LiveCommandPools == 0;
+  } else
+    Core.pfnDestroyPipelineState(Device, Pipeline);
   Core.pfnDestroyBlendState(Device, BlendHandle);
   Core.pfnDestroyDepthStencilState(Device, DepthHandle);
   Core.pfnDestroyRasterizerState(Device, RasterHandle);

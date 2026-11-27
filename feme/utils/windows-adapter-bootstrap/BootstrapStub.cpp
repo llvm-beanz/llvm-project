@@ -99,6 +99,7 @@ struct Counters {
 };
 Counters GCalls;
 HANDLE GWarpRuntimeAdapter = nullptr;
+D3D12DDI_HRTTABLE GCommandListTables[2] = {};
 
 // W0(g)'s audit evidence: which public D3D12DDICAPS_TYPE values GetCaps is
 // queried with, and whether CreateDevice's publicly documented thunk-service
@@ -142,11 +143,7 @@ static_assert(sizeof(WarpPrivateAdapterInfo) == 3 * sizeof(UINT32));
 
 #if defined(FEME_BOOTSTRAP_PROBE_WARP_CONTEXT) ||                              \
     defined(FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT)
-struct WarpPrivateContextBuffer {
-  UINT64 *Buffer;
-  UINT64 *BufferSize;
-};
-static_assert(sizeof(WarpPrivateContextBuffer) == 2 * sizeof(UINT64 *));
+using feme::probe::WarpPrivateContextBuffer;
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
@@ -521,6 +518,7 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
   auto *State = ::new (Args->hDrvDevice.pDrvPrivate) WarpDeviceState{};
   State->KTCallbacks = Args->pKTCallbacks;
   State->RTDevice = Args->hRTDevice.handle;
+  State->CommandListTables = GCommandListTables;
   UINT64 DdiVersion =
       (static_cast<UINT64>(Args->Interface) << 32) | Args->Version;
   if (DdiVersion >= D3D12DDI_SUPPORTED_0022 && Args->p12UMCallbacks) {
@@ -558,7 +556,8 @@ HRESULT createWarpDeviceContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args,
       return E_OUTOFMEMORY;
   }
 
-  if (!(DriverCaps & WarpDriverCapsSupportsVirtualGpu)) {
+  State->VirtualGpu = (DriverCaps & WarpDriverCapsSupportsVirtualGpu) != 0;
+  if (!State->VirtualGpu) {
     WarpQueryPreferredGpuNode PreferredNode{};
     PreferredNode.EscapeId = WarpEscapeQueryPreferredGpuNode;
     D3DDDICB_ESCAPE Escape{};
@@ -833,6 +832,9 @@ void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device) {
   Probe.LiveImmutableStatesAtDestroy = State->LiveImmutableStates.load();
   Probe.LivePipelinesAtDestroy = State->LivePipelines.load();
   Probe.LiveCommandPoolsAtDestroy = State->LiveCommandPools.load();
+  Probe.LiveCommandQueuesAtDestroy = State->LiveCommandQueues.load();
+  Probe.LiveCommandRecordersAtDestroy = State->LiveCommandRecorders.load();
+  Probe.LiveCommandListsAtDestroy = State->LiveCommandLists.load();
   Probe.LiveHeapsAtDestroy = State->LiveHeaps.load();
   Probe.LiveResourcesAtDestroy = State->LiveResources.load();
 }
@@ -1438,7 +1440,8 @@ HRESULT APIENTRY getOptionalDDITables(D3D12DDI_HADAPTER, UINT32 *EntryCount,
 
 HRESULT APIENTRY fillDDITable(D3D12DDI_HADAPTER, D3D12DDI_TABLE_TYPE TableType,
                               VOID *Table, SIZE_T TableSize, UINT TableIndex,
-                              D3D12DDI_HRTTABLE) {
+                              D3D12DDI_HRTTABLE RTTable) {
+  (void)RTTable;
   InterlockedIncrement(&GCalls.FillDDITable);
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
   GWarpDeviceContextProbe.FillTableAttempted = true;
@@ -1447,6 +1450,9 @@ HRESULT APIENTRY fillDDITable(D3D12DDI_HADAPTER, D3D12DDI_TABLE_TYPE TableType,
 #ifdef FEME_BOOTSTRAP_WARP_PROTOTYPE
   HRESULT Result = feme::probe::fillWarpPrototypeTable(TableType, Table,
                                                        TableSize, TableIndex);
+  if (SUCCEEDED(Result) && TableType == D3D12DDI_TABLE_TYPE_COMMAND_LIST_3D &&
+      TableIndex < 2)
+    GCommandListTables[TableIndex] = RTTable;
   GWarpDeviceContextProbe.FillTableResult = Result;
   return Result;
 #else

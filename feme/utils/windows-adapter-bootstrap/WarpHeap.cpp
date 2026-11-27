@@ -524,6 +524,18 @@ HRESULT APIENTRY evict(D3D12DDI_HDEVICE Device, const D3D12DDIARG_EVICT *Args) {
 }
 } // namespace
 
+HRESULT getWarpBufferRange(WarpDeviceState *Owner, D3D12DDI_HRESOURCE Resource,
+                           UINT64 Offset, UINT64 Size, void *&Data) {
+  Data = nullptr;
+  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
+  if (!Owner || !Buffer || Buffer->Owner != Owner || !Buffer->Heap->Locked ||
+      !Buffer->Heap->Memory || Offset > Buffer->Desc.Width ||
+      Size > Buffer->Desc.Width - Offset)
+    return E_INVALIDARG;
+  Data = static_cast<unsigned char *>(Buffer->Heap->Memory) + Offset;
+  return S_OK;
+}
+
 void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table) {
   Table.pfnCalcPrivateHeapAndResourceSizes = calcPrivateSizes;
   Table.pfnCreateHeapAndResource = createHeapAndResource;

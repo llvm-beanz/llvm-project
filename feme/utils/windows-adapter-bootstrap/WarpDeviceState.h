@@ -20,6 +20,13 @@
 namespace feme {
 namespace probe {
 
+/// Existing WARP KMD virtual-context buffer output ABI.
+struct WarpPrivateContextBuffer {
+  UINT64 *Buffer;
+  UINT64 *BufferSize;
+};
+static_assert(sizeof(WarpPrivateContextBuffer) == 2 * sizeof(UINT64 *));
+
 struct WarpUserModeContext {
   UINT64 KernelContextHandle = 0;
   void *CommandBuffer = nullptr;
@@ -31,8 +38,10 @@ struct WarpDeviceState {
   const D3DDDI_DEVICECALLBACKS *KTCallbacks = nullptr;
   const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *UMCallbacks = nullptr;
   HANDLE RTDevice = nullptr;
+  const D3D12DDI_HRTTABLE *CommandListTables = nullptr;
   UINT32 NodeOrdinal = 0;
   UINT32 EngineAffinity = 0;
+  bool VirtualGpu = false;
   D3DKMT_HANDLE PagingQueue = 0;
   D3DKMT_HANDLE PagingSyncObject = 0;
   volatile UINT64 *PagingFenceValue = nullptr;
@@ -53,6 +62,9 @@ struct WarpDeviceState {
   std::atomic<SIZE_T> LiveImmutableStates{0};
   std::atomic<SIZE_T> LivePipelines{0};
   std::atomic<SIZE_T> LiveCommandPools{0};
+  std::atomic<SIZE_T> LiveCommandQueues{0};
+  std::atomic<SIZE_T> LiveCommandRecorders{0};
+  std::atomic<SIZE_T> LiveCommandLists{0};
   std::atomic<HRESULT> HeapCleanupResult{S_OK};
 };
 

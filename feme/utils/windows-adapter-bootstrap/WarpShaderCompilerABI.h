@@ -75,6 +75,8 @@ FEME_WARP_COMPILER_API std::int32_t
 FeMeWarpCreateComputePipeline(void *CompiledShader, void **Pipeline);
 FEME_WARP_COMPILER_API void FeMeWarpDestroyComputePipeline(void *Pipeline);
 FEME_WARP_COMPILER_API std::int32_t
+FeMeWarpRetainComputePipeline(void *Pipeline, void **Retained);
+FEME_WARP_COMPILER_API std::int32_t
 FeMeWarpDispatchCompute(void *Pipeline, const FeMeWarpDispatchDesc *Desc);
 }
 
