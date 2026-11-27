@@ -11,6 +11,7 @@
 #include "feme/Direct3D/CapabilityInventory.h"
 #include "feme/Direct3D/ComputePlan.h"
 #include "feme/Direct3D/DescriptorHeap.h"
+#include "feme/Direct3D/ExecutionPlan.h"
 #include "feme/Direct3D/PipelinePlan.h"
 #include "feme/Direct3D/PresentationPlan.h"
 #include "feme/Direct3D/RayTracingPlan.h"
@@ -395,6 +396,38 @@ TEST(ComputePlanTest, DetectsThreadTotalOverflow) {
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
   EXPECT_EQ(totalComputeThreads(Dispatch), std::nullopt);
+}
+
+TEST(ExecutionPlanTest, AcceptsBufferCopyAndMonotonicFence) {
+  ExecutionPlan Plan;
+  Plan.Copies.push_back(BufferCopyPlan{16, 32, 64, 128, 32});
+  Plan.Fence = FencePlan{0, 7, 7, false};
+  Plan.RepeatCount = 3;
+  llvm::Error Err = validateExecutionPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(ExecutionPlanTest, RejectsOutOfBoundsBufferCopy) {
+  ExecutionPlan Plan;
+  Plan.Copies.push_back(BufferCopyPlan{48, 0, 64, 64, 32});
+  llvm::Error Err = validateExecutionPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ExecutionPlanTest, RejectsPastTargetAndDecreasingFence) {
+  ExecutionPlan Plan;
+  Plan.Fence = FencePlan{0, 9, 8, false};
+  llvm::Error Err = validateExecutionPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Plan.Fence = FencePlan{8, 7, 7, false};
+  Err = validateExecutionPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
 }
 
 } // namespace

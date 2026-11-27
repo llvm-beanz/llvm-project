@@ -4,6 +4,7 @@ add_feme_library(FeMeDirect3D
   PresentationPlan.cpp
   CapabilityInventory.cpp
   ComputePlan.cpp
+  ExecutionPlan.cpp
   BarrierPlan.cpp
   DescriptorHeap.cpp
   ResourcePlan.cpp
