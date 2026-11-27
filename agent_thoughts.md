@@ -136942,3 +136942,39 @@ matrix (28/28 LIT tests). W0 remains open; do not imply closure or fabricate
 allocation inputs. Further work needs a valid public device-context contract,
 and any private WARP/KMD ABI investigation requires separate explicit
 approval.
+
+# Session continuation: capability-gated WARP initialization escapes
+
+The user explicitly authorized matching WARP's private ABI to reuse the
+existing WARP kernel driver. I used the checked-out Direct3D sources as the
+behavioral reference and made three small commits:
+
+- `d3f582cf09ea` queries the preferred GPU node through WARP's escape ABI and
+  uses the returned node/engine data for context creation.
+- `9f477addad0d` interprets `DriverCaps` using WARP's published bit order and
+  performs the version-number escape when `FullWddmDevice` is clear.
+- `c9adcab0f5ec` records the resulting measurements and the remaining
+  initialization work.
+
+On the current machine, private adapter info reports `DriverCaps=0x1`: bit 0
+(`SupportsIOMMU`) is set while bit 3 (`FullWddmDevice`) and bit 4
+(`SupportsVirtualGpu`) are clear. The version escape (ID 3) returns version 2;
+the preferred-node escape (ID 1) returns engine affinity 1 and a runtime-
+selected node ordinal (5 in the latest run). Do not hardcode the ordinal.
+Both escapes, paging-queue creation, and context creation return `S_OK`, and
+the KMD objects are destroyed successfully, but `D3D12CreateDevice` still
+returns `DXGI_ERROR_DRIVER_INTERNAL_ERROR` before `FillDDITable`.
+
+The official UMD source shows additional work after context creation:
+`UMContext::InitializeVirtualCommon` sends `InitContextVirtual2`, initializes
+DMA memory and a monitored fence, and device initialization later sends
+`InitDevice`. Those escapes take actual `UMContext`/`UMDevice` pointers. This
+probe does not implement those objects, so do not pass fabricated pointers or
+claim the runtime rejection is caused by a specific missing escape. Next,
+establish a valid device/context implementation and its lifetime before
+attempting those escape calls; then continue toward runtime-owned allocation,
+residency, and resource evidence.
+
+Validation: `check-feme-windows-probes` passed all 31 LIT tests after the
+version-escape change. A direct harness run confirmed the escape values and
+the unchanged pre-table failure. W0 remains open.
