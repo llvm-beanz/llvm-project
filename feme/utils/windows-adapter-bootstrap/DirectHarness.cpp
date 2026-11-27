@@ -174,23 +174,63 @@ bool checkIntegrationCaps(D3D12DDI_HADAPTER Adapter,
       {D3D12DDICAPS_TYPE_0023_UMD_BASED_COMMAND_QUEUE_PRIORITY,
        sizeof(D3D12DDICAPS_UMD_BASED_COMMAND_QUEUE_PRIORITY_DATA_0023)},
       {D3D12DDICAPS_TYPE_0050_HARDWARE_SCHEDULING_CAPS,
-       sizeof(D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050)}};
+       sizeof(D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050)},
+      {D3D12DDICAPS_TYPE_ARCHITECTURE_INFO,
+       sizeof(D3D12DDI_ARCHITECTURE_INFO_DATA)},
+      {D3D12DDICAPS_TYPE_0022_TEXTURE_LAYOUT,
+       sizeof(D3D12DDI_TEXTURE_LAYOUT_CAPS_0026)}};
   for (const auto &Query : Queries) {
-    UINT Output[] = {0xffffffff, 0x12345678};
+    alignas(D3D12DDI_TEXTURE_LAYOUT_CAPS_0026) unsigned char
+        Output[sizeof(D3D12DDI_TEXTURE_LAYOUT_CAPS_0026) + 4];
+    std::memset(Output, 0x5a, sizeof(Output));
     Args.Type = Query.Type;
     Args.pInfo = nullptr;
     Args.pData = Output;
     Args.DataSize = Query.Size;
-    Valid &= GetCaps(Adapter, &Args) == S_OK && Output[0] == 0 &&
-             Output[1] == 0x12345678;
-    Output[0] = 0xffffffff;
+    Valid &= GetCaps(Adapter, &Args) == S_OK;
+    for (UINT I = 0; I < sizeof(Output); ++I)
+      Valid &= Output[I] == (I < Query.Size ? 0 : 0x5a);
+    std::memset(Output, 0x5a, sizeof(Output));
     Args.DataSize = Query.Size - 1;
-    Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
-             Output[0] == 0xffffffff && Output[1] == 0x12345678;
+    Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG;
+    for (unsigned char Byte : Output)
+      Valid &= Byte == 0x5a;
     Args.DataSize = Query.Size;
     Args.pData = nullptr;
     Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG;
   }
+  UINT Info[] = {D3D12DDI_TL_ROW_MAJOR, D3D12DDI_FUNCUNIT_COMBINED};
+  D3D12DDI_ROW_MAJOR_LAYOUT_CAPS Row{};
+  Args.Type = D3D12DDICAPS_TYPE_TEXTURE_LAYOUT_SETS;
+  Args.pInfo = Info;
+  Args.pData = &Row;
+  Args.DataSize = sizeof(Row);
+  Valid &= GetCaps(Adapter, &Args) == S_OK &&
+           Row.SubCaps[0].MaxElementSize == 16 &&
+           Row.SubCaps[0].BaseOffsetAlignment == 512 &&
+           Row.SubCaps[0].PitchAlignment == 256 &&
+           Row.SubCaps[0].DepthPitchAlignment == 256 &&
+           Row.SubCaps[1].MaxElementSize == 0;
+  const auto OriginalRow = Row;
+  Info[0] = D3D12DDI_TL_64KB_TILE_UNDEFINED_SWIZZLE;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
+           std::memcmp(&Row, &OriginalRow, sizeof(Row)) == 0;
+  Info[0] = D3D12DDI_TL_ROW_MAJOR;
+  Info[1] = 0xffffffff;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG;
+  Args.pInfo = nullptr;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG;
+
+  D3D12DDI_COMMAND_QUEUE_FLAGS Flags = D3D12DDI_COMMAND_QUEUE_FLAG_3D;
+  Args.Type = D3D12DDICAPS_TYPE_0022_CPU_PAGE_TABLE_FALSE_POSITIVES;
+  Args.pInfo = &Node;
+  Args.pData = &Flags;
+  Args.DataSize = sizeof(Flags);
+  Valid &= GetCaps(Adapter, &Args) == S_OK && Flags == 0;
+  Node = 1;
+  Flags = D3D12DDI_COMMAND_QUEUE_FLAG_3D;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
+           Flags == D3D12DDI_COMMAND_QUEUE_FLAG_3D;
   report(L"Memory and scheduling capability contract", Valid ? S_OK : E_FAIL);
   return Valid;
 }

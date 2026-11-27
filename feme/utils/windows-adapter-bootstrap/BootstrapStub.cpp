@@ -25,6 +25,9 @@
 // invoking them. The separate WARP-device-context variant does invoke the
 // core-layer allocation callback for its private DMA buffer and matching
 // teardown; it still does not create application resources.
+// FEME_BOOTSTRAP_WARP_PROTOTYPE additionally publishes fail-closed diagnostic
+// tables. It reports no texture formats and rejects executable shader creation;
+// the runtime's shader initialization still prevents an application device.
 // FEME_BOOTSTRAP_PROBE_CALLBACK additionally invokes exactly one pure
 // user-mode, non-allocation callback (pfnSetErrorCb, the documented
 // mechanism for a driver to report a device error to the runtime) with a
@@ -48,6 +51,9 @@
 #include "WarpDeviceState.h"
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
 #include "WarpHeap.h"
+#endif
+#ifdef FEME_BOOTSTRAP_WARP_PROTOTYPE
+#include "WarpTables.h"
 #endif
 
 #include <windows.h>
@@ -821,6 +827,8 @@ void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device) {
     }
     State->PagingQueue = 0;
   }
+  Probe.LiveRootSignaturesAtDestroy = State->LiveRootSignatures.load();
+  Probe.LiveNullShadersAtDestroy = State->LiveNullShaders.load();
 }
 #endif
 
@@ -1278,6 +1286,41 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
         Args->pData) = {};
     return RecordResult(S_OK);
   }
+  if (Args->Type == D3D12DDICAPS_TYPE_ARCHITECTURE_INFO) {
+    if (!Args->pData ||
+        Args->DataSize != sizeof(D3D12DDI_ARCHITECTURE_INFO_DATA))
+      return RecordResult(E_INVALIDARG);
+    *static_cast<D3D12DDI_ARCHITECTURE_INFO_DATA *>(Args->pData) = {};
+    return RecordResult(S_OK);
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_0022_TEXTURE_LAYOUT) {
+    if (!Args->pData ||
+        Args->DataSize != sizeof(D3D12DDI_TEXTURE_LAYOUT_CAPS_0026))
+      return RecordResult(E_INVALIDARG);
+    *static_cast<D3D12DDI_TEXTURE_LAYOUT_CAPS_0026 *>(Args->pData) = {};
+    return RecordResult(S_OK);
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_TEXTURE_LAYOUT_SETS) {
+    if (!Args->pInfo || !Args->pData ||
+        Args->DataSize != sizeof(D3D12DDI_ROW_MAJOR_LAYOUT_CAPS))
+      return RecordResult(E_INVALIDARG);
+    const auto *Info = static_cast<const UINT *>(Args->pInfo);
+    if (Info[0] != D3D12DDI_TL_ROW_MAJOR ||
+        Info[1] < D3D12DDI_FUNCUNIT_COMBINED ||
+        Info[1] > D3D12DDI_FUNCUNIT_COPY_DST)
+      return RecordResult(E_INVALIDARG);
+    D3D12DDI_ROW_MAJOR_LAYOUT_CAPS Caps{};
+    Caps.SubCaps[0] = {16, 512, 256, 256};
+    *static_cast<D3D12DDI_ROW_MAJOR_LAYOUT_CAPS *>(Args->pData) = Caps;
+    return RecordResult(S_OK);
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_0022_CPU_PAGE_TABLE_FALSE_POSITIVES) {
+    if (!Args->pInfo || *static_cast<const UINT *>(Args->pInfo) != 0 ||
+        !Args->pData || Args->DataSize != sizeof(D3D12DDI_COMMAND_QUEUE_FLAGS))
+      return RecordResult(E_INVALIDARG);
+    *static_cast<D3D12DDI_COMMAND_QUEUE_FLAGS *>(Args->pData) = {};
+    return RecordResult(S_OK);
+  }
 
   // Keep the observed pre-device capability queries to baseline values so the
   // probe can determine whether the runtime proceeds to the next DDI stage.
@@ -1372,23 +1415,32 @@ HRESULT APIENTRY getOptionalDDITables(D3D12DDI_HADAPTER, UINT32 *EntryCount,
 }
 
 HRESULT APIENTRY fillDDITable(D3D12DDI_HADAPTER, D3D12DDI_TABLE_TYPE TableType,
-                              VOID *Table, SIZE_T TableSize, UINT Interface,
+                              VOID *Table, SIZE_T TableSize, UINT TableIndex,
                               D3D12DDI_HRTTABLE) {
   InterlockedIncrement(&GCalls.FillDDITable);
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
-  (void)Table;
-  (void)Interface;
   GWarpDeviceContextProbe.FillTableAttempted = true;
   GWarpDeviceContextProbe.FillTableType = TableType;
   GWarpDeviceContextProbe.FillTableSize = TableSize;
+#ifdef FEME_BOOTSTRAP_WARP_PROTOTYPE
+  HRESULT Result = feme::probe::fillWarpPrototypeTable(TableType, Table,
+                                                       TableSize, TableIndex);
+  GWarpDeviceContextProbe.FillTableResult = Result;
+  return Result;
+#else
+  (void)Table;
+  (void)TableIndex;
   GWarpDeviceContextProbe.FillTableResult = E_NOTIMPL;
+#endif
 #else
   (void)TableType;
   (void)Table;
   (void)TableSize;
-  (void)Interface;
+  (void)TableIndex;
 #endif
+#ifndef FEME_BOOTSTRAP_WARP_PROTOTYPE
   return E_NOTIMPL;
+#endif
 }
 
 VOID APIENTRY destroyDevice(D3D12DDI_HDEVICE Device) {
