@@ -16,6 +16,7 @@
 #include "feme/Direct3D/DrawPlan.h"
 #include "feme/Direct3D/EnhancedBarrierPlan.h"
 #include "feme/Direct3D/ExecutionPlan.h"
+#include "feme/Direct3D/ImageCopyPlan.h"
 #include "feme/Direct3D/InputLayoutPlan.h"
 #include "feme/Direct3D/MeshDispatchPlan.h"
 #include "feme/Direct3D/ObjectModel.h"
@@ -783,6 +784,48 @@ TEST(InputLayoutPlanTest, RejectsEmptyAndOutOfStrideElements) {
   OutOfStride.Elements.push_back(InputElementPlan{
       0, 12, 16, 0, InputSemantic::Position, InputFormat::Float32x4});
   Err = validateInputLayoutPlan(OutOfStride);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ImageCopyPlanTest, AcceptsArrayAndVolumeCopy) {
+  ImageCopyRegionPlan Plan;
+  Plan.Source = ImageSubresourcePlan{2, 0, 4};
+  Plan.Destination = ImageSubresourcePlan{1, 3, 4};
+  Plan.SourceOffset = {16, 8, 2};
+  Plan.DestinationOffset = {0, 0, 1};
+  Plan.Extent = {64, 32, 2};
+  llvm::Error Err = validateImageCopyRegionPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(ImageCopyPlanTest, RejectsEmptySubresourcesAndExtent) {
+  ImageCopyRegionPlan Plan;
+  Plan.Source.ArraySliceCount = 0;
+  llvm::Error Err = validateImageCopyRegionPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Plan.Source.ArraySliceCount = 1;
+  Plan.Extent = {64, 0, 1};
+  Err = validateImageCopyRegionPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ImageCopyPlanTest, RejectsNegativeOffsetAndRangeOverflow) {
+  ImageCopyRegionPlan Negative;
+  Negative.SourceOffset = {-1, 0, 0};
+  llvm::Error Err = validateImageCopyRegionPlan(Negative);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  ImageCopyRegionPlan Overflow;
+  Overflow.SourceOffset = {INT64_MAX, 0, 0};
+  Overflow.Extent = {UINT64_MAX, 1, 1};
+  Err = validateImageCopyRegionPlan(Overflow);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
