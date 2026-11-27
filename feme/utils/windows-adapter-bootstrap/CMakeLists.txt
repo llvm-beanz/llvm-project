@@ -29,6 +29,9 @@ feme_add_probe_test(NAME direct-openadapter12 COMMAND feme-windows-adapter-direc
 feme_add_probe_test(NAME shader-capability-contract
   COMMAND feme-windows-adapter-direct-harness
     $<TARGET_FILE:feme-adapter-bootstrap-stub> --shader-caps)
+feme_add_probe_test(NAME shader-model-negotiation
+  COMMAND feme-windows-adapter-direct-harness
+    $<TARGET_FILE:feme-adapter-bootstrap-stub> --shader-models)
 
 if(MSVC)
   add_executable(feme-monitored-fence-tests BootstrapStub.cpp MonitoredFenceTests.cpp)

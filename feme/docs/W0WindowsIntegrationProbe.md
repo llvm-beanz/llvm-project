@@ -5493,10 +5493,8 @@ allocates and locks the 4096-byte DMA buffer through the runtime's D3D12
 core-layer callback, creates and destroys a monitored fence, and sends the
 WARP `InitDevice` escape; all these operations and their teardown return
 `S_OK`. It also answers the observed D3D12-options query with baseline tiers
-and the shader-caps query with no optional caps. The direct harness observes
-caps 1074, 1006, 1004, and 1012, but still returns
-`DXGI_ERROR_DRIVER_INTERNAL_ERROR` after `CreateDevice` and before
-`FillDDITable`. The probe demonstrates an internal DMA-allocation and KMD
+and the shader-caps query with no optional caps. The probe demonstrates an
+internal DMA-allocation and KMD
 object lifecycle only—not an application-owned D3D12 resource, residency,
 mapping, command execution, or usable device.
 
@@ -5505,11 +5503,31 @@ A native ARM64 CDB run localized the earlier failure to
 when `WaveOps` is false. The probe now provides valid four-lane limits while
 keeping optional shader features disabled. The direct regression covers
 modern and legacy shader-cap layouts, rejects truncated/null outputs, and
-checks the output boundary. All 58 standalone bootstrap tests and 31
-OS-routing tests pass with assertions, object caching, and PCH disabled.
+checks the output boundary.
 
-The next observed failure is `VersionedDeviceData::GetD3D12ShaderModel`.
-Cap type 1012 (`D3D12DDICAPS_TYPE_0011_SHADER_MODELS`, 16-byte query) returns
-`E_NOTIMPL`; the pipeline, options, and shader-cap queries return `S_OK`
-with data sizes 8, 92, and 44 bytes respectively. DDI tables are still not
-loaded, so W0 remains open.
+The subsequent shader-model query (cap 1012) now supports the runtime's
+count/list enumeration of the diagnostic SM 5.1 input profile. This is not a
+shader-execution claim. Missing/truncated queries, missing count pointers,
+and insufficient output capacity are rejected; the focused test verifies
+that enumeration does not overwrite the output boundary.
+
+The current inbox-runtime attempt observes cap types 1074, 1006, 1004,
+1012, and 1012. All five return `S_OK`, with data sizes 8, 92, 44, 16, and
+16 bytes. It reaches `GetOptionalDDITables` and then
+`FillDDITable(DEVICE_CORE, 936 bytes)`, matching the public
+`D3D12DDI_DEVICE_FUNCS_CORE_0072` layout. That callback deliberately returns
+`E_NOTIMPL`, which is now the `D3D12CreateDevice(11_0)` result. The earlier
+post-create, pre-table `DXGI_ERROR_DRIVER_INTERNAL_ERROR` is resolved.
+Counters are `Open=1 Size=1 Versions=2 Caps=5 Optional=1 Fill=1 Create=1
+Close=1 Destroy=1`; all KMD cleanup callbacks succeed. The updated
+OS-routing test checks this precise boundary, not successful device creation.
+All 59 standalone bootstrap tests and 31 OS-routing tests pass with
+assertions, object caching, and PCH disabled.
+The full `check-feme` target also passes: 4395 passed, 15 skipped, and
+10 unsupported. Its Vulkan tests used the verified application-local FeMe
+ICD (`FeMe CPU Vulkan Device`); those results are not D3D12 device evidence.
+
+The remaining bring-up boundary is implementing genuine device DDIs and an
+application-owned resource/allocation/residency/map lifecycle. Do not return
+success for an empty table or treat the internal DMA allocation as that
+resource evidence. W0 remains open.

@@ -25,7 +25,7 @@ device or executing FeMe adapter.
 
 | Milestone | Status | Summary |
 |---|---|---|
-| W0 — Integration feasibility | **Blocked** | W0(c) corpus/compatibility scope and the six-version public DDI audit (28/28) are complete. W0 cannot close until a valid owned graphics context/device and runtime-owned resource lifecycle are demonstrated. |
+| W0 — Integration feasibility | **Blocked** | Corpus/compatibility scope and public DDI audit are complete. KMD initialization and shader negotiation reach the owned core-table callback; genuine device DDIs and an application resource lifecycle are still missing. |
 | W1 — Device and headless compute | **Open** | Portable compute, queue, lifetime, and fence plans and CPU/reference shader oracles exist. No owned device, D3D12 queue, resource, PSO, or dispatch. |
 | W2 — Binding, resources, synchronization | **Open** | Portable binding/resource/barrier plans and shared image/execution extractions exist. No D3D12 descriptor, allocation/residency, command, or synchronization implementation. |
 | W3 — Conventional graphics | **Open** | Portable graphics-state and draw plans exist; no D3D12 graphics execution or end-to-end rendering. |

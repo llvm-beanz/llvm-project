@@ -858,15 +858,14 @@ int wmain(int Argc, wchar_t **Argv) {
     if (WarpBootstrapAudit) {
       // A pinned version is advertised, so the runtime may or may not reach
       // CreateDevice; that count is audit evidence here, not an assumption.
-      // Destroy should still never fire, since createDevice deliberately
-      // fails and no device handle is ever produced to destroy.
+      // Only the retained-context variant succeeds in CreateDevice and needs
+      // DestroyDevice after the subsequent table-negotiation failure.
       ExpectedDDICalls =
           Open == 1 && Versions > 0 && Caps > 0 && Close == 1 &&
           (ExpectWarpDeviceContext ? Destroy == 1 : Destroy == 0);
       if (ExpectWarpDeviceContext) {
-        ExpectedDDICalls &= Size == 1 && Create == 1 && Optional == 0 &&
-                            Fill == 0 &&
-                            Result == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+        ExpectedDDICalls &= Size == 1 && Create == 1 && Optional == 1 &&
+                            Fill == 1 && Result == E_NOTIMPL;
       } else if (ExpectCreateDevice) {
         HRESULT ExpectedResult = ExpectCallback ? DXGI_ERROR_DEVICE_REMOVED
                                  : ExpectGpuVaRejected ? E_INVALIDARG
@@ -928,6 +927,7 @@ int wmain(int Argc, wchar_t **Argv) {
       bool SawOptions = false;
       bool SawShader = false;
       bool SawPipelineSupport = false;
+      UINT ShaderModelQueries = 0;
       bool CapsSucceeded = true;
       for (UINT32 I = 0; I < Logged; ++I) {
         switch (CapsTypes[I]) {
@@ -943,11 +943,16 @@ int wmain(int Argc, wchar_t **Argv) {
           SawPipelineSupport = true;
           CapsSucceeded &= CapsResults[I] == S_OK;
           break;
+        case D3D12DDICAPS_TYPE_0011_SHADER_MODELS:
+          ++ShaderModelQueries;
+          CapsSucceeded &= CapsResults[I] == S_OK;
+          break;
         default:
           break;
         }
       }
-      if (!SawOptions || !SawShader || !SawPipelineSupport || !CapsSucceeded) {
+      if (!SawOptions || !SawShader || !SawPipelineSupport ||
+          ShaderModelQueries != 2 || !CapsSucceeded) {
         report(L"Expected successful pre-device capability responses", E_FAIL);
         ExpectedDDICalls = false;
       }
@@ -1331,7 +1336,11 @@ int wmain(int Argc, wchar_t **Argv) {
            !DeviceProbe.InitDeviceEscapeAttempted ||
            !DeviceProbe.InitDeviceEscapeReturned ||
            DeviceProbe.InitDeviceEscapeResult != S_OK ||
-           DeviceProbe.FillTableAttempted ||
+           !DeviceProbe.FillTableAttempted ||
+           DeviceProbe.FillTableType != D3D12DDI_TABLE_TYPE_DEVICE_CORE ||
+           DeviceProbe.FillTableSize !=
+               sizeof(D3D12DDI_DEVICE_FUNCS_CORE_0072) ||
+           DeviceProbe.FillTableResult != E_NOTIMPL ||
            !DeviceProbe.PagingQueueDestroyAttempted ||
            !DeviceProbe.PagingQueueDestroyReturned ||
            DeviceProbe.PagingQueueDestroyResult != S_OK ||
@@ -1345,7 +1354,7 @@ int wmain(int Argc, wchar_t **Argv) {
            DeviceProbe.DmaDeallocateResult != S_OK ||
            !DeviceProbe.DestroyAttempted || !DeviceProbe.DestroyReturned ||
            DeviceProbe.DestroyResult != S_OK || DeviceProbe.ExceptionCode)) {
-        report(L"Expected context cleanup after pre-table runtime rejection",
+        report(L"Expected context cleanup after unimplemented core DDI table",
                E_FAIL);
         ExpectedDDICalls = false;
       }

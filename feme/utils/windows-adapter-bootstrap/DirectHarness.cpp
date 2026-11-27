@@ -84,12 +84,54 @@ bool checkShaderCaps(D3D12DDI_HADAPTER Adapter, PFND3D12DDI_GETCAPS GetCaps) {
     report(L"Shader capability contract mismatch", E_FAIL);
   return Valid;
 }
+bool checkShaderModels(D3D12DDI_HADAPTER Adapter, PFND3D12DDI_GETCAPS GetCaps) {
+  UINT Count = 0;
+  D3D12DDI_D3D12_SHADER_MODELS_DATA_0011 Models{};
+  Models.pNumShaderModelsSupported = &Count;
+  D3D12DDIARG_GETCAPS Args{};
+  Args.Type = D3D12DDICAPS_TYPE_0011_SHADER_MODELS;
+  Args.pData = &Models;
+  Args.DataSize = sizeof(Models);
+  HRESULT Result = report(L"Shader model count", GetCaps(Adapter, &Args));
+  bool Valid = Result == S_OK && Count == 1;
+
+  D3D12DDI_SHADER_MODEL Output[] = {D3D12DDI_SHADER_MODEL_6_0_RELEASE_0011,
+                                    D3D12DDI_SHADER_MODEL_6_0_RELEASE_0011};
+  Models.pShaderModelsSupported = Output;
+  Result = report(L"Shader model list", GetCaps(Adapter, &Args));
+  Valid &= Result == S_OK && Count == 1 &&
+           Output[0] == D3D12DDI_SHADER_MODEL_5_1_RELEASE_0011 &&
+           Output[1] == D3D12DDI_SHADER_MODEL_6_0_RELEASE_0011;
+
+  Count = 0;
+  Output[0] = D3D12DDI_SHADER_MODEL_6_0_RELEASE_0011;
+  Result = report(L"Insufficient shader model output", GetCaps(Adapter, &Args));
+  Valid &= Result == HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) &&
+           Count == 1 && Output[0] == D3D12DDI_SHADER_MODEL_6_0_RELEASE_0011;
+
+  Models.pNumShaderModelsSupported = nullptr;
+  Result = report(L"Missing shader model count", GetCaps(Adapter, &Args));
+  Valid &= Result == E_INVALIDARG;
+  Args.DataSize = sizeof(Models) - 1;
+  Result = report(L"Truncated shader model query", GetCaps(Adapter, &Args));
+  Valid &= Result == E_INVALIDARG;
+  Args.DataSize = sizeof(Models);
+  Args.pData = nullptr;
+  Result = report(L"Missing shader model query", GetCaps(Adapter, &Args));
+  Valid &= Result == E_INVALIDARG;
+  if (!Valid)
+    report(L"Shader model negotiation mismatch", E_FAIL);
+  return Valid;
+}
 } // namespace
 
 int wmain(int Argc, wchar_t **Argv) {
   bool ShaderCaps = Argc == 3 && std::wcscmp(Argv[2], L"--shader-caps") == 0;
-  if (Argc != 2 && !ShaderCaps) {
-    std::fwprintf(stderr, L"Usage: %ls STUB_DLL_PATH [--shader-caps]\n",
+  bool ShaderModels =
+      Argc == 3 && std::wcscmp(Argv[2], L"--shader-models") == 0;
+  if (Argc != 2 && !ShaderCaps && !ShaderModels) {
+    std::fwprintf(stderr,
+                  L"Usage: %ls STUB_DLL_PATH [--shader-caps|--shader-models]\n",
                   Argv[0]);
     return 1;
   }
@@ -142,8 +184,10 @@ int wmain(int Argc, wchar_t **Argv) {
     FreeLibrary(Module);
     return 1;
   }
-  if (ShaderCaps) {
-    bool Valid = checkShaderCaps(OpenArgs.hAdapter, Funcs.pfnGetCaps);
+  if (ShaderCaps || ShaderModels) {
+    bool Valid = ShaderCaps
+                     ? checkShaderCaps(OpenArgs.hAdapter, Funcs.pfnGetCaps)
+                     : checkShaderModels(OpenArgs.hAdapter, Funcs.pfnGetCaps);
     Result =
         report(L"pfnCloseAdapter", Funcs.pfnCloseAdapter(OpenArgs.hAdapter));
     bool Released = FreeLibrary(Module) != FALSE;

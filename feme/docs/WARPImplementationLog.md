@@ -193,7 +193,7 @@ throwaway-capable prototype, not an adapter compliance claim.
 | W0(d) | Add an explicit selection assertion to the future runner: verify Microsoft's WARP vendor/device/software identity and independently prove that the selected application-local UMD is the FeMe build, not the system WARP module. List and execute one applicable test on reference WARP, then demonstrate selection of the prototype through the chosen boundary. Record unavailable infrastructure as blocked, not Pass. WARP-only white-box tests remain oracle tests, never generic FeMe coverage. |
 | ~~W0(e)~~ | ~~Measure the no-install host integration paths: inbox/Agility runtime and reference-WARP versions, `CreateSoftwareAdapter`, executable-local WARP substitution, and an LLVM-owned rejection stub with DDI entry-point counters. Run an applicable public-API WARP queue/fence test.~~ Completed 2026-11-06; evidence and reproduction instructions in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md). This closes measurements only, not FeMe device creation. |
 | ~~W0(f)~~ | ~~Container-first user-mode proof: build the standalone probe in the Windows container; run all four CTest cases and record OS/kit/runtime/WARP identities and exact outcomes before implementation. Verify reference WARP and the expected pre-DDI stub rejection; do not substitute host results.~~ Completed 2026-11-06; container evidence, an extended NuGet-WARP/Agility-core matrix, and reproduction instructions are in [W0WindowsIntegrationProbe.md](W0WindowsIntegrationProbe.md#container-measurements). All four CTest cases passed with no discrepancy from the host measurements. This closes the container measurement step only -- it is not FeMe DDI negotiation; `W0(g)` below carries that forward. |
-| W0(g) | ~~Identify a public general-provider identity/thunk bootstrap~~ -- search completed with a negative result. ~~Reach owned `OpenAdapter12` through stock runtime and query/close its adapter table~~ -- W0(h) supplies historical host/container inbox/Agility evidence under Microsoft's WARP identity. ~~Audit a pinned supported DDI version's public negotiation and thunk-service surface~~ -- the VM-first matrix found `_0070`/`_0071` rejected before device creation, while `_0072` reaches the callback; the reason for the narrow rejection remains unknown. The `_0072` audit now follows `DriverCaps=0x1`, performs version/preferred-node escapes, creates a paging queue and virtual context, sends `InitContextVirtual2`, allocates and locks its 4096-byte DMA buffer, creates/destroys a monitored fence, and sends `InitDevice`; all tested KMD operations and cleanup return `S_OK`. Minimal D3D12-options/shader-cap responses extend pre-device negotiation, but `D3D12CreateDevice(11_0)` still returns `DXGI_ERROR_DRIVER_INTERNAL_ERROR` after `CreateDevice` and before `FillDDITable`. This is not a D3D12 device and does not demonstrate an application resource, residency, mapping, or command lifecycle. Remaining: identify the post-`CreateDevice` rejection, demonstrate a real owned D3D12 device and runtime-owned resource lifecycle, and explain the `_0070`/`_0071` rejection. Keep investigation VM-first and do not modify system WARP or drivers. [Detailed current evidence](W0WindowsIntegrationProbe.md#w0g-follow-up-kmd-device-initialization-and-cap-negotiation). |
+| W0(g) | ~~Identify a public general-provider identity/thunk bootstrap~~ -- search completed with a negative result. ~~Reach owned `OpenAdapter12` through stock runtime and query/close its adapter table~~ -- W0(h) supplies historical host/container inbox/Agility evidence under Microsoft's WARP identity. ~~Audit a pinned supported DDI version's public negotiation and thunk-service surface~~ -- the VM-first matrix found `_0070`/`_0071` rejected before device creation, while `_0072` reaches the callback; the reason for the narrow rejection remains under investigation. The `_0072` audit completes WARP KMD initialization and internal DMA allocation/cleanup with `S_OK`. The invalid shader wave limits are fixed; shader-model count/list negotiation now reaches `FillDDITable(DEVICE_CORE, 936 bytes)`. Its explicit `E_NOTIMPL` is the current device-creation result, replacing the unexplained pre-table driver-internal error. Remaining: genuine device DDIs, an application resource/allocation/residency/map lifecycle, and the scoped `_0070`/`_0071` explanation. Keep investigation VM-first and do not modify system WARP or drivers. [Detailed current evidence](W0WindowsIntegrationProbe.md#w0g-follow-up-kmd-device-initialization-and-cap-negotiation). |
 | ~~W0(h)~~ | ~~Bounded alternative-B investigation: isolate reference forwarding, named-export forwarding, ordinal-199 forwarding, bare owned DDI and owned adapter-table cases; compare WARP selection with generic software-adapter rejection; build/test inside the container and verify inbox/Agility runtime paths.~~ Completed 2026-11-06: owned open/query/close needs neither private ordinal nor forwarding at this stage. Explicit preloading retains diagnostic counters; a debugger also proves executable-local entry without preloading. [Evidence, exact counters and remaining limits](W0WindowsIntegrationProbe.md#alternative-b-application-local-warp-ddi-routing). No real FeMe device or supported DDI is claimed; the selected WARP-compatible product contract does not imply a functioning drop-in yet. |
 
 W0(a) and W0(d) are **partially done**, not complete. W0(e) supplies the host
@@ -312,17 +312,20 @@ returned 4096-byte DMA buffer through the D3D12 core-layer allocation callback,
 creates and destroys a monitored fence, and sends the `InitDevice` escape;
 each call and its teardown returns `S_OK`. It also answers the subsequently
 observed D3D12 options and shader caps with baseline/no-optional-feature
-values. The direct harness now observes cap types 1074, 1006, 1004, and 1012, but
-still returns `DXGI_ERROR_DRIVER_INTERNAL_ERROR` after `CreateDevice` and
-before `FillDDITable`. The new `os-routed-warp-device-context` test verifies
-the KMD initialization/cleanup path and this remaining pre-table rejection.
+values. Shader-model count/list negotiation now also succeeds. The direct
+harness observes cap types 1074, 1006, 1004, 1012, and 1012, followed by
+`GetOptionalDDITables` and `FillDDITable(DEVICE_CORE, 936 bytes)`. That table
+is not implemented: its explicit `E_NOTIMPL` is the device-creation result.
+The `os-routed-warp-device-context` test verifies the KMD
+initialization/cleanup path and this precise table boundary.
 This advances private KMD and internal allocation lifetime evidence, not a
 D3D12 resource or usable device. A native debugger identified and verified the
 fix for invalid zero wave-lane limits in the shader-cap response, even with
-`WaveOps` disabled. Device creation now reaches shader-model enumeration
-(cap 1012), which returns `E_NOTIMPL`. Implementing that negotiation and the
-real DDI tables/resource lifecycle remain the bring-up boundary. The focused
-shader-contract regression and callback fixtures pass (58/58), as does the
+`WaveOps` disabled. Two-pass enumeration of the diagnostic SM 5.1 input profile
+resolves the subsequent shader-model failure; this is not a shader-execution
+claim. The genuine DDI tables and application resource lifecycle remain the
+bring-up boundary. The focused shader-cap/model regressions and callback
+fixtures pass (59/59), as does the
 OS-routing suite (31/31); these are not a working-device claim.
 
 `W0(c)`'s test-corpus and compatibility-scope work is **complete**, recorded in

@@ -1254,6 +1254,26 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
     }
     return RecordResult(S_OK);
   }
+  if (Args->Type == D3D12DDICAPS_TYPE_0011_SHADER_MODELS) {
+    if (!Args->pData ||
+        Args->DataSize != sizeof(D3D12DDI_D3D12_SHADER_MODELS_DATA_0011))
+      return RecordResult(E_INVALIDARG);
+    auto *Models =
+        static_cast<D3D12DDI_D3D12_SHADER_MODELS_DATA_0011 *>(Args->pData);
+    if (!Models->pNumShaderModelsSupported)
+      return RecordResult(E_INVALIDARG);
+    UINT Capacity =
+        Models->pShaderModelsSupported ? *Models->pNumShaderModelsSupported : 0;
+    *Models->pNumShaderModelsSupported = 1;
+    if (Models->pShaderModelsSupported) {
+      if (!Capacity)
+        return RecordResult(HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
+      // This is the audit's input profile, not a shader-execution claim.
+      Models->pShaderModelsSupported[0] =
+          D3D12DDI_SHADER_MODEL_5_1_RELEASE_0011;
+    }
+    return RecordResult(S_OK);
+  }
   if (Args->Type == D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1 && Args->pData &&
       Args->DataSize >= sizeof(D3D12DDI_3DPIPELINESUPPORT1_DATA_0081)) {
     auto *Data =
