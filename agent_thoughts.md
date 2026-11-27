@@ -136654,3 +136654,52 @@ ordinals, or replace system WARP binaries to bypass it.
    execute an off-screen triangle.
 4. Continue mesh, ray tracing, presentation and conformance as independent
    owned-device gates.
+
+# Session continuation: W1 compute/copy/fence contract
+
+## What changed
+
+Added a W1-specific API-neutral Direct3D contract with:
+
+- direct/compute/copy queue policy,
+- bounded requested wave size,
+- positive thread-group and dispatch dimensions,
+- overflow-safe total-thread and wave-count calculations,
+- repeated dispatch counts,
+- checked source/destination buffer copy ranges,
+- monotonic/decreasing fence policy and repeat counts.
+
+The implementation is in `feme/include/feme/Direct3D/ComputePlan.h`,
+`feme/lib/Direct3D/ComputePlan.cpp`,
+`feme/include/feme/Direct3D/ExecutionPlan.h`, and
+`feme/lib/Direct3D/ExecutionPlan.cpp`.
+
+## Verification
+
+- The in-tree assertions-enabled, PCH-disabled Windows build compiles
+  `FeMeDirect3DTests`.
+- `FeMeDirect3DTests` passes 34 tests across W1-W7 plan suites.
+- The mandatory `vulkaninfo --summary` check was run first and did not find
+  `FeMe CPU Vulkan Device`; Vulkan execution and CTS remain unavailable.
+
+One test run initially failed because the test oracle had the wrong 360/45
+thread/wave arithmetic. It was corrected to 360 total threads and 45 waves;
+the rerun passed all 34 tests.
+
+## Commit
+
+- `0e8c074633f9`: W1 copy/fence and compute plans.
+
+## Scope
+
+This remains a validated plan contract, not an owned D3D12 device. It adds
+no private ABI, kernel driver, system-WARP replacement, real heap, GPU
+residence, command submission, or presentation claim.
+
+## Next steps
+
+1. Bind `CompiledStage` and `PreparedDispatch` to a real D3D12 UMD frontend
+   with callback-backed resources and queue submission.
+2. Add copy/readback/fence integration against a real owned resource path.
+3. Then normalize `GraphicsPipeline`/`PreparedDraw` into an off-screen triangle
+   executable on the owned device.
