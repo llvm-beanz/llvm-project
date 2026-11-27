@@ -597,9 +597,12 @@ int wmain(int Argc, wchar_t **Argv) {
   bool ExpectWarpPrivateInfo =
       WarpBootstrapAudit && Argc == 4 &&
       std::wcscmp(Argv[3], L"--expect-warp-private-info") == 0;
+  bool ExpectWarpContext = WarpBootstrapAudit && Argc == 4 &&
+                           std::wcscmp(Argv[3], L"--expect-warp-context") == 0;
+  ExpectWarpPrivateInfo |= ExpectWarpContext;
   ExpectCreateDevice |= ExpectCallback || ExpectPagingQueue || ExpectGpuVa ||
                         ExpectGpuVaRejected || ExpectMonitoredFence ||
-                        ExpectWarpPrivateInfo;
+                        ExpectWarpPrivateInfo || ExpectWarpContext;
   if ((Argc != 1 && !Stub && !Software && !WarpShim && !WarpBootstrap &&
        !WarpBootstrapAudit && !WarpBufferCopy && !WarpCompute) ||
       !ValidSpace || !ValidWorkload ||
@@ -616,7 +619,7 @@ int wmain(int Argc, wchar_t **Argv) {
         L"[--expect-create-device | --expect-unsupported | "
         L"--expect-callback | --expect-paging-queue | --expect-gpu-va | "
         L"--expect-gpu-va-rejected | --expect-monitored-fence | "
-        L"--expect-warp-private-info]]\n",
+        L"--expect-warp-private-info | --expect-warp-context]]\n",
         Argv[0]);
     return 1;
   }
@@ -682,6 +685,7 @@ int wmain(int Argc, wchar_t **Argv) {
       void(APIENTRY *)(feme::probe::MonitoredFenceProbe *);
   using GetWarpPrivateAdapterInfoProbe =
       void(APIENTRY *)(feme::probe::WarpPrivateAdapterInfoProbe *);
+  using GetWarpContextProbe = void(APIENTRY *)(feme::probe::WarpContextProbe *);
   GetCalls ReadCalls = nullptr;
   GetBootstrapCalls ReadBootstrapCalls = nullptr;
   GetAuditCapacity ReadAuditCapacity = nullptr;
@@ -692,6 +696,7 @@ int wmain(int Argc, wchar_t **Argv) {
   GetGpuVirtualAddressProbe ReadGpuVirtualAddressProbe = nullptr;
   GetMonitoredFenceProbe ReadMonitoredFenceProbe = nullptr;
   GetWarpPrivateAdapterInfoProbe ReadWarpPrivateAdapterInfoProbe = nullptr;
+  GetWarpContextProbe ReadWarpContextProbe = nullptr;
   if (Stub || WarpShim) {
     ReadCalls =
         reinterpret_cast<GetCalls>(GetProcAddress(Module, "FeMeProbeGetCalls"));
@@ -737,6 +742,8 @@ int wmain(int Argc, wchar_t **Argv) {
     ReadWarpPrivateAdapterInfoProbe =
         reinterpret_cast<GetWarpPrivateAdapterInfoProbe>(GetProcAddress(
             Module, "FeMeBootstrapGetWarpPrivateAdapterInfoProbe"));
+    ReadWarpContextProbe = reinterpret_cast<GetWarpContextProbe>(
+        GetProcAddress(Module, "FeMeBootstrapGetWarpContextProbe"));
     if (ExpectMonitoredFence && !ReadMonitoredFenceProbe) {
       report(L"GetProcAddress(FeMeBootstrapGetMonitoredFenceProbe)",
              HRESULT_FROM_WIN32(GetLastError()));
@@ -745,6 +752,12 @@ int wmain(int Argc, wchar_t **Argv) {
     }
     if (ExpectWarpPrivateInfo && !ReadWarpPrivateAdapterInfoProbe) {
       report(L"GetProcAddress(FeMeBootstrapGetWarpPrivateAdapterInfoProbe)",
+             HRESULT_FROM_WIN32(GetLastError()));
+      FreeLibrary(Module);
+      return 1;
+    }
+    if (ExpectWarpContext && !ReadWarpContextProbe) {
+      report(L"GetProcAddress(FeMeBootstrapGetWarpContextProbe)",
              HRESULT_FROM_WIN32(GetLastError()));
       FreeLibrary(Module);
       return 1;
@@ -1095,6 +1108,38 @@ int wmain(int Argc, wchar_t **Argv) {
           (!WarpInfoProbe.Attempted || WarpInfoProbe.Result != S_OK ||
            !WarpInfoProbe.Version || !WarpInfoProbe.WddmVersion)) {
         report(L"Expected a valid WARP private adapter info response", E_FAIL);
+        ExpectedDDICalls = false;
+      }
+    }
+    if (ReadWarpContextProbe) {
+      feme::probe::WarpContextProbe WarpContext;
+      ReadWarpContextProbe(&WarpContext);
+      std::wprintf(
+          L"WARP private context lifecycle: CreateAttempted=%u "
+          L"CreateReturned=%u CreateResult=0x%08lx HasContext=%u "
+          L"CommandBufferAddress=0x%016llx CommandBufferSize=%llu "
+          L"PrivateDataPointersIntact=%u DestroyAttempted=%u "
+          L"DestroyReturned=%u DestroyResult=0x%08lx ExceptionCode=0x%08lx\n",
+          unsigned(WarpContext.CreateAttempted),
+          unsigned(WarpContext.CreateReturned),
+          static_cast<unsigned long>(WarpContext.CreateResult),
+          unsigned(WarpContext.HasContext),
+          static_cast<unsigned long long>(WarpContext.CommandBufferAddress),
+          static_cast<unsigned long long>(WarpContext.CommandBufferSize),
+          unsigned(WarpContext.PrivateDataPointersIntact),
+          unsigned(WarpContext.DestroyAttempted),
+          unsigned(WarpContext.DestroyReturned),
+          static_cast<unsigned long>(WarpContext.DestroyResult),
+          static_cast<unsigned long>(WarpContext.ExceptionCode));
+      if (ExpectWarpContext &&
+          (!WarpContext.CreateAttempted || !WarpContext.CreateReturned ||
+           WarpContext.CreateResult != S_OK || !WarpContext.HasContext ||
+           !WarpContext.CommandBufferSize ||
+           !WarpContext.PrivateDataPointersIntact ||
+           !WarpContext.DestroyAttempted || !WarpContext.DestroyReturned ||
+           WarpContext.DestroyResult != S_OK || WarpContext.ExceptionCode)) {
+        report(L"Expected successful WARP context create/destroy lifecycle",
+               E_FAIL);
         ExpectedDDICalls = false;
       }
     }

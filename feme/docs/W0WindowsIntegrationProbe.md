@@ -5443,3 +5443,20 @@ bootstrap's `CreateDevice`; `FillDDITable` remains uncalled. The passing
 `os-routed-warp-private-info` test establishes the adapter query path and
 response layout only, not a graphics context, D3D12 device, resource
 allocation, residency, or mapped-resource lifecycle. W0 remains open.
+
+### W0(g) WARP-private context lifecycle (VM, 2026-11-27)
+
+The next opt-in native ARM64 probe supplies the WARP private context-buffer
+layout to `pKTCallbacks->pfnCreateContextVirtualCb`, then destroys the
+returned context through `pfnDestroyContextCb`. Both callbacks returned
+`S_OK`; the runtime returned a non-null context, preserved the private-data
+output pointers, and filled a 4096-byte command-buffer size and nonzero
+command-buffer address. The probe verifies cleanup even when output validation
+fails and reports SEH faults rather than hiding them.
+
+This is a runtime-owned kernel context create/destroy round trip under the
+selected WARP identity, but the bootstrap still returns `E_NOTIMPL` from
+`CreateDevice`; `FillDDITable` is not reached. It therefore demonstrates the
+private context ABI only, not an owned D3D12 device, a resource allocation,
+residency, or mapped-resource lifecycle. The `os-routed-warp-context` test is
+part of the `check-feme-windows-probes` LIT suite.

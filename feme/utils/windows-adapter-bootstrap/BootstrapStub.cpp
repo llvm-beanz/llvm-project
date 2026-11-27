@@ -119,6 +119,7 @@ feme::probe::PagingQueueProbe GPagingQueueProbe;
 feme::probe::GpuVirtualAddressProbe GGpuVirtualAddressProbe;
 feme::probe::MonitoredFenceProbe GMonitoredFenceProbe;
 feme::probe::WarpPrivateAdapterInfoProbe GWarpPrivateAdapterInfoProbe;
+feme::probe::WarpContextProbe GWarpContextProbe;
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_PRIVATE_INFO
 struct WarpPrivateAdapterInfo {
@@ -127,6 +128,71 @@ struct WarpPrivateAdapterInfo {
   UINT32 DriverCaps;
 };
 static_assert(sizeof(WarpPrivateAdapterInfo) == 3 * sizeof(UINT32));
+#endif
+
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_CONTEXT
+struct WarpPrivateContextBuffer {
+  UINT64 *Buffer;
+  UINT64 *BufferSize;
+};
+static_assert(sizeof(WarpPrivateContextBuffer) == 2 * sizeof(UINT64 *));
+
+HRESULT probeWarpContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
+  auto &Probe = GWarpContextProbe;
+  Probe.CreateAttempted = true;
+  if (!Args || !Args->hRTDevice.handle)
+    return E_INVALIDARG;
+  if (!Args->pKTCallbacks || !Args->pKTCallbacks->pfnCreateContextVirtualCb ||
+      !Args->pKTCallbacks->pfnDestroyContextCb)
+    return E_NOINTERFACE;
+
+  Probe.CommandBufferSize = sizeof(Probe.CommandBufferAddress);
+  WarpPrivateContextBuffer PrivateData{};
+  PrivateData.Buffer = &Probe.CommandBufferAddress;
+  PrivateData.BufferSize = &Probe.CommandBufferSize;
+
+  D3DDDICB_CREATECONTEXTVIRTUAL CreateContext{};
+  CreateContext.pPrivateDriverData = &PrivateData;
+  CreateContext.PrivateDriverDataSize = sizeof(PrivateData);
+  DWORD ExceptionCode = 0;
+  __try {
+    Probe.CreateResult = Args->pKTCallbacks->pfnCreateContextVirtualCb(
+        Args->hRTDevice.handle, &CreateContext);
+    Probe.CreateReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+    return E_FAIL;
+  }
+  if (Probe.CreateResult != S_OK)
+    return FAILED(Probe.CreateResult) ? Probe.CreateResult : E_FAIL;
+
+  Probe.HasContext = CreateContext.hContext != nullptr;
+  Probe.PrivateDataPointersIntact =
+      PrivateData.Buffer == &Probe.CommandBufferAddress &&
+      PrivateData.BufferSize == &Probe.CommandBufferSize &&
+      CreateContext.pPrivateDriverData == &PrivateData;
+  if (!Probe.HasContext)
+    return E_UNEXPECTED;
+
+  HRESULT Result =
+      Probe.PrivateDataPointersIntact && Probe.CommandBufferSize != 0
+          ? S_OK
+          : E_UNEXPECTED;
+  D3DDDICB_DESTROYCONTEXT DestroyContext{};
+  DestroyContext.hContext = CreateContext.hContext;
+  Probe.DestroyAttempted = true;
+  __try {
+    Probe.DestroyResult = Args->pKTCallbacks->pfnDestroyContextCb(
+        Args->hRTDevice.handle, &DestroyContext);
+    Probe.DestroyReturned = true;
+  } __except (ExceptionCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+    Probe.ExceptionCode = ExceptionCode;
+    return E_FAIL;
+  }
+  if (Probe.DestroyResult != S_OK)
+    return FAILED(Probe.DestroyResult) ? Probe.DestroyResult : E_FAIL;
+  return Result;
+}
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_MONITORED_FENCE
@@ -482,6 +548,11 @@ HRESULT APIENTRY createDevice(D3D12DDI_HADAPTER,
   if (FAILED(FenceResult))
     return FenceResult;
 #endif
+#ifdef FEME_BOOTSTRAP_PROBE_WARP_CONTEXT
+  HRESULT WarpContextResult = probeWarpContext(Args);
+  if (FAILED(WarpContextResult))
+    return WarpContextResult;
+#endif
   // A real device table is out of scope for this experiment; fail loudly and
   // distinctly so a caller cannot mistake this for the generic rejection
   // windows-adapter-probe's RejectionStub already measures.
@@ -669,6 +740,11 @@ extern "C" __declspec(dllexport) void APIENTRY
 FeMeBootstrapGetWarpPrivateAdapterInfoProbe(
     feme::probe::WarpPrivateAdapterInfoProbe *Probe) {
   *Probe = GWarpPrivateAdapterInfoProbe;
+}
+
+extern "C" __declspec(dllexport) void APIENTRY
+FeMeBootstrapGetWarpContextProbe(feme::probe::WarpContextProbe *Probe) {
+  *Probe = GWarpContextProbe;
 }
 
 extern "C" __declspec(dllexport) void APIENTRY FeMeBootstrapGetAudit(

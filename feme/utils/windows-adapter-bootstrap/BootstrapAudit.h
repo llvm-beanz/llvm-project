@@ -41,6 +41,21 @@ struct WarpPrivateAdapterInfoProbe {
   std::uint32_t DriverCaps = 0;
 };
 
+/// Results of creating and destroying a WARP context through the runtime.
+struct WarpContextProbe {
+  bool CreateAttempted = false;
+  bool CreateReturned = false;
+  std::int32_t CreateResult = 0;
+  bool HasContext = false;
+  std::uint64_t CommandBufferAddress = 0;
+  std::uint64_t CommandBufferSize = 0;
+  bool PrivateDataPointersIntact = false;
+  bool DestroyAttempted = false;
+  bool DestroyReturned = false;
+  std::int32_t DestroyResult = 0;
+  std::uint32_t ExceptionCode = 0;
+};
+
 /// Results of the opt-in kernel paging-queue create/destroy experiment.
 struct PagingQueueProbe {
   bool Enabled = false;

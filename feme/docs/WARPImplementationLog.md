@@ -283,8 +283,13 @@ allocation; shared CPU addresses do not justify bypassing it with
 The [WARP-private adapter-info query](W0WindowsIntegrationProbe.md#w0g-warp-private-adapter-info-query-vm-2026-11-27)
 now succeeds through the runtime callback on the ARM64 VM (version 2,
 WDDM value 12800, driver-capability mask `0x1`). This verifies only the
-private adapter-info query ABI. Runtime-owned device context creation and
-allocation/residency remain unimplemented; W0 is still blocked.
+private adapter-info query ABI. A separate opt-in probe also creates and
+destroys a WARP context through the runtime's kernel callbacks using the
+private context-buffer payload; the returned context handle is valid, its
+private pointers remain intact, and the kernel returns a nonzero command
+buffer size. This verifies context lifecycle compatibility, not a D3D12
+device: `CreateDevice` still returns `E_NOTIMPL`, and runtime-owned
+resource allocation/residency remain unimplemented. W0 is still blocked.
 The negative public general-provider search and the successful WARP-specific
 route are different findings; do not classify all further research as blocked.
 Installed-path evaluation remains separate. No driver installation, signing
