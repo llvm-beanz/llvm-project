@@ -136846,3 +136846,37 @@ remains in progress; W1-W7 remain open.
 
 Continue implementation at the owned D3D12 device/runtime boundary; do not
 count plan-library tests or reference execution as owned-device completion.
+
+# Session continuation: W0 device-prototype closeout
+
+## What changed
+
+- Added strict matrix assertions for the allocation callback-table split:
+  DDI 0010 exposes the legacy KT pair; DDI 0022 and later expose the
+  core-layer allocation pair.
+- Reran the native ARM64 six-version matrix and recorded 28/28 passing LIT
+  tests in the roadmap and implementation log.
+- Tried an isolated DDI 0010 device-only path. Even after initializing
+  driver-private storage and returning `S_OK` from `CreateDevice`, the runtime
+  returned `DXGI_ERROR_DRIVER_INTERNAL_ERROR`, without calling `FillDDITable`,
+  then called `DestroyDevice`. Removed this incomplete experiment rather than
+  keep an unhelpful success-returning stub. This does not establish that the
+  public DDI path is impossible or requires private ABI.
+
+## Verification and commits
+
+- `check-feme-windows-probes`: 28/28 passed on Windows 11 Enterprise ARM64,
+  build 26300, SDK/WDK 10.0.26100.0.
+- `git diff --check` passed.
+- `18dcb9d1e1b8`: assert DDI allocation callback surfaces.
+- `edb819c1fafc`: record W0 device prototype boundary.
+
+## Remaining W0 gate
+
+W0 is not complete. There is still no owned D3D12 device or runtime-owned
+allocation/residency/resource lifecycle, and the 0070/0071 pre-device
+rejection remains unexplained. Do not invoke allocation with fabricated
+inputs or infer a private ABI requirement from the failed incomplete-table
+experiment. Next work must establish a public, valid device/resource contract
+and demonstrate creation, resource use, and teardown under the selected WARP
+identity; otherwise keep W0 explicitly open.
