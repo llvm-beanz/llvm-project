@@ -25,7 +25,7 @@ device or executing FeMe adapter.
 
 | Milestone | Status | Summary |
 |---|---|---|
-| W0 — Integration feasibility | **In progress** | Product direction is selected; owned UMD routing and public callback audits, reference-runtime controls, and shader oracles are recorded. The selected DDI/device/resource path is not implemented. Test-corpus classification is partial. |
+| W0 — Integration feasibility | **In progress** | Product direction is selected; the six-version public DDI matrix passes 28/28 and audits versioned allocation callback tables. No owned device or runtime-owned resource lifecycle exists. Test-corpus classification is partial. |
 | W1 — Device and headless compute | **Open** | Portable compute, queue, lifetime, and fence plans and CPU/reference shader oracles exist. No owned device, D3D12 queue, resource, PSO, or dispatch. |
 | W2 — Binding, resources, synchronization | **Open** | Portable binding/resource/barrier plans and shared image/execution extractions exist. No D3D12 descriptor, allocation/residency, command, or synchronization implementation. |
 | W3 — Conventional graphics | **Open** | Portable graphics-state and draw plans exist; no D3D12 graphics execution or end-to-end rendering. |

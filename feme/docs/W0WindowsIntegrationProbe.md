@@ -5390,3 +5390,31 @@ existing SDK 26100 manifest tool fixes that check while retaining SDK/WDK
 is not equivalent: the required DDI headers are absent in that kit here.
 This is a local probe-build workaround, not a change to the supported product
 kit pairing or an instruction to mix kits for a production driver build.
+
+### W0(g) allocation callback table assertions and device-only experiment (VM, 2026-11-26)
+
+The native ARM64 strict DDI matrix was rerun on Windows 11 Enterprise build
+26300 with SDK/WDK 10.0.26100.0 and inbox D3D12 runtime 10.0.26100.9818.
+The six tested public versions (`0010`, `0022`, `0070`, `0071`, `0072`, and
+`0110`) passed all 28 LIT tests, including wrong-stage negative controls.
+The harness now checks that `0010` exposes the legacy KT allocate/deallocate
+callback pair and that `0022` and later expose the core-layer allocation
+callbacks instead. The tests inspect pointer presence only; they do not call
+allocation callbacks or demonstrate a resource lifecycle. The established
+`0070`/`0071` rejection before device sizing remains unexplained.
+
+An isolated DDI `0010` experiment advertised the 11_0 pipeline level and
+returned `S_OK` from `CreateDevice` after initializing its driver-private
+storage. The runtime then returned
+`DXGI_ERROR_DRIVER_INTERNAL_ERROR` from `D3D12CreateDevice(11_0)`. Telemetry
+showed `CreateDevice=1`, `FillDDITable=0`, and `DestroyDevice=1`; the runtime
+rejected the attempted device before requesting its DDI table and did invoke
+cleanup. Initial capability variants either failed before `CreateDevice` or
+produced the same driver-internal error. The experiment was removed because it
+did not create a device and its incomplete table could not establish the
+public device contract. This is not evidence that the public route is
+impossible or that private ABI is required.
+
+W0 remains open: no owned D3D12 device, runtime-owned allocation, residency,
+or mapped-resource lifecycle has been demonstrated. No allocation callback,
+private WARP ABI, system binary replacement, or kernel-driver change was used.

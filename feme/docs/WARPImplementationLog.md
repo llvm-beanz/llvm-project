@@ -216,6 +216,16 @@ unknown. The public 0022-and-later core-layer callback table supplies
 allocation/deallocation entries even when the legacy KT entries are null.
 These entries are audited, not invoked; this is not resource-lifecycle
 evidence or closure of W0(g).
+The 2026-11-26 native ARM64 six-version LIT rerun passes 28/28 tests and
+asserts this allocation callback-table split: the legacy pair is present for
+0010, while 0022 and later expose the core-layer pair. Pointer presence is
+still not a valid resource allocation contract. An isolated 0010 device-only
+experiment returned `S_OK` from `CreateDevice` after initializing driver
+private storage, but `D3D12CreateDevice(11_0)` returned
+`DXGI_ERROR_DRIVER_INTERNAL_ERROR`; `FillDDITable` was never called, and
+runtime cleanup called `DestroyDevice`. The experimental path was removed:
+it did not establish a working device and is not evidence that the public
+contract is impossible or that private ABI is required.
 The subsequent [public paging-queue lifecycle probe](W0WindowsIntegrationProbe.md#w0g-public-kernel-paging-queue-lifecycle-vm)
 does invoke the KT create/destroy paging-queue pair: both return `S_OK`,
 with valid queue/sync handles and a fence mapping, on x64 inbox, native
