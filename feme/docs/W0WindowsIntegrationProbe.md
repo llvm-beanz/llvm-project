@@ -5415,6 +5415,13 @@ did not create a device and its incomplete table could not establish the
 public device contract. This is not evidence that the public route is
 impossible or that private ABI is required.
 
+The public
+[`PFND3D12DDI_CREATEDEVICE_0003` contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3d12umddi/nc-d3d12umddi-pfnd3d12ddi_createdevice_0003)
+describes this callback as creating a graphics context referenced in later
+calls. The experiment only initialized opaque driver-private storage; it did
+not implement that context. Its rejection therefore says nothing about whether
+a complete public DDI implementation can create the required context.
+
 W0 remains open: no owned D3D12 device, runtime-owned allocation, residency,
 or mapped-resource lifecycle has been demonstrated. No allocation callback,
 private WARP ABI, system binary replacement, or kernel-driver change was used.

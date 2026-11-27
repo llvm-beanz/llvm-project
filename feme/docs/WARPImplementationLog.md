@@ -227,6 +227,11 @@ private storage, but `D3D12CreateDevice(11_0)` returned
 runtime cleanup called `DestroyDevice`. The experimental path was removed:
 it did not establish a working device and is not evidence that the public
 contract is impossible or that private ABI is required.
+Microsoft's public
+[`PFND3D12DDI_CREATEDEVICE_0003` contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3d12umddi/nc-d3d12umddi-pfnd3d12ddi_createdevice_0003)
+describes the callback as creating a graphics context; the experiment did not
+implement one. See the [device-only experiment notes](W0WindowsIntegrationProbe.md#w0g-allocation-callback-table-assertions-and-device-only-experiment-vm-2026-11-26)
+for why its failure cannot establish the behavior of a complete public DDI.
 The subsequent [public paging-queue lifecycle probe](W0WindowsIntegrationProbe.md#w0g-public-kernel-paging-queue-lifecycle-vm)
 does invoke the KT create/destroy paging-queue pair: both return `S_OK`,
 with valid queue/sync handles and a fence mapping, on x64 inbox, native
