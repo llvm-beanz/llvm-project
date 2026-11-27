@@ -136787,3 +136787,37 @@ D3D12 frontend needs callback-backed device/queue/heap/resource/PSO objects,
 then `CompiledStage`/`PreparedDispatch` integration and a CPU resource-free
 dispatch with copy/readback/fence. The existing public matrix and plans do
 not replace that owned-device gate.
+
+# Session continuation: W2 image copy regions
+
+## What changed
+
+Added `feme::direct3d::ImageCopyRegionPlan` and
+`validateImageCopyRegionPlan` for:
+
+- source/destination mip and array subresources,
+- nonnegative source/destination offsets,
+- positive X/Y/Z extents,
+- source/destination range overflow checks.
+
+The implementation is in `ImageCopyPlan.h` and `ImageCopyPlan.cpp` under
+the existing `FeMeDirect3D` library.
+
+## Verification
+
+The in-tree assertions-enabled, PCH-disabled Windows build compiled the
+new files. `FeMeDirect3DTests` passes 65 tests across 21 suites.
+The mandatory Vulkan identity check was run and DZN initialization failed
+again, so no FeMe Vulkan ICD or Vulkan CTS execution is available.
+
+## Commit
+
+- `a6e78188a3db`: W2 image copy region plans.
+
+## Next implementation boundary
+
+Continue with real owned D3D12 objects and execution, not another standalone
+plan-only layer: callback-backed device/queue/heap/resource/fence/PSO objects,
+retained `CompiledStage`/`PreparedDispatch` dispatch, copy/readback, and
+off-screen triangle execution. Private ordinal forwarding or system-WARP
+replacement remains out of scope.
