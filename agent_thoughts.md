@@ -136978,3 +136978,29 @@ residency, and resource evidence.
 Validation: `check-feme-windows-probes` passed all 31 LIT tests after the
 version-escape change. A direct harness run confirmed the escape values and
 the unchanged pre-table failure. W0 remains open.
+
+# Session continuation: DMA initialization and capability negotiation
+
+The W0(g) audit now follows the reference WARP KMD initialization sequence
+after `InitContextVirtual2`: allocate and lock the returned 4096-byte DMA
+buffer through the D3D12 core-layer callback, create a monitored fence, and
+send the `InitDevice` escape. Every operation and corresponding teardown
+returned `S_OK`. This is evidence for an internal DMA allocation and KMD
+object lifecycle only; it is not an application-owned D3D12 resource or a
+usable device.
+
+The D3D12 runtime queried capability types 1074, 1006, and 1004. Type 1006 is
+`D3D12_OPTIONS`, not a pipeline-support cap; the probe now returns baseline
+resource tiers and clears optional shader caps. The runtime still returns
+`DXGI_ERROR_DRIVER_INTERNAL_ERROR` after `CreateDevice` and before
+`FillDDITable`, so W0 remains open. This leaves an unresolved post-create
+runtime/DDI compatibility issue, not evidence that the KMD initialization
+sequence itself failed.
+
+Validation: `check-feme-windows-probes` passed all 31 LIT tests after the
+capability changes. The direct Windows harness confirmed successful DMA
+allocation/lock, fence creation/destruction, `InitDevice`, and cleanup, but
+reproduced the unchanged device-creation error. The remaining work is to
+identify why the runtime rejects the created device before table fill, prove
+an application resource lifecycle, and explain the 0070/0071 version
+rejection. Do not close W0 based on these internal initialization results.
