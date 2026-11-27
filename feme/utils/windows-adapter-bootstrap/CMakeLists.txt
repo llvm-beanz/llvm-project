@@ -32,6 +32,9 @@ feme_add_probe_test(NAME shader-capability-contract
 feme_add_probe_test(NAME shader-model-negotiation
   COMMAND feme-windows-adapter-direct-harness
     $<TARGET_FILE:feme-adapter-bootstrap-stub> --shader-models)
+feme_add_probe_test(NAME memory-scheduling-capability-contract
+  COMMAND feme-windows-adapter-direct-harness
+    $<TARGET_FILE:feme-adapter-bootstrap-stub> --integration-caps)
 
 if(MSVC)
   add_executable(feme-warp-heap-tests WarpHeap.cpp WarpHeapTests.cpp)

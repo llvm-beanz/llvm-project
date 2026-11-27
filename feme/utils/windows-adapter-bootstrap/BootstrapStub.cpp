@@ -1244,6 +1244,41 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
   if (!Args)
     return RecordResult(E_NOTIMPL);
 
+  if (Args->Type == D3D12DDICAPS_TYPE_MEMORY_ARCHITECTURE) {
+    if (!Args->pInfo || *static_cast<const UINT *>(Args->pInfo) != 0 ||
+        !Args->pData ||
+        (Args->DataSize != sizeof(D3D12DDI_MEMORY_ARCHITECTURE_CAPS) &&
+         Args->DataSize != sizeof(D3D12DDI_MEMORY_ARCHITECTURE_CAPS_0041)))
+      return RecordResult(E_INVALIDARG);
+    D3D12DDI_MEMORY_ARCHITECTURE_CAPS_0041 Caps{};
+    // The CPU executor and KMD-backed buffers use coherent system memory.
+    Caps.UMA = TRUE;
+    Caps.IOCoherent = TRUE;
+    Caps.CacheCoherent = TRUE;
+    Caps.HeapSerializationTier = D3D12DDI_HEAP_SERIALIZATION_TIER_0041_0;
+    Caps.ResourceSerializationTier =
+        D3D12DDI_RESOURCE_SERIALIZATION_TIER_0041_0;
+    std::memcpy(Args->pData, &Caps, Args->DataSize);
+    return RecordResult(S_OK);
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_0023_UMD_BASED_COMMAND_QUEUE_PRIORITY) {
+    if (!Args->pData ||
+        Args->DataSize !=
+            sizeof(D3D12DDICAPS_UMD_BASED_COMMAND_QUEUE_PRIORITY_DATA_0023))
+      return RecordResult(E_INVALIDARG);
+    *static_cast<D3D12DDICAPS_UMD_BASED_COMMAND_QUEUE_PRIORITY_DATA_0023 *>(
+        Args->pData) = {};
+    return RecordResult(S_OK);
+  }
+  if (Args->Type == D3D12DDICAPS_TYPE_0050_HARDWARE_SCHEDULING_CAPS) {
+    if (!Args->pData ||
+        Args->DataSize != sizeof(D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050))
+      return RecordResult(E_INVALIDARG);
+    *static_cast<D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050 *>(
+        Args->pData) = {};
+    return RecordResult(S_OK);
+  }
+
   // Keep the observed pre-device capability queries to baseline values so the
   // probe can determine whether the runtime proceeds to the next DDI stage.
   if (Args->Type == D3D12DDICAPS_TYPE_D3D12_OPTIONS && Args->pData &&

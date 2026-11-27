@@ -123,15 +123,89 @@ bool checkShaderModels(D3D12DDI_HADAPTER Adapter, PFND3D12DDI_GETCAPS GetCaps) {
     report(L"Shader model negotiation mismatch", E_FAIL);
   return Valid;
 }
+
+bool checkIntegrationCaps(D3D12DDI_HADAPTER Adapter,
+                          PFND3D12DDI_GETCAPS GetCaps) {
+  struct {
+    D3D12DDI_MEMORY_ARCHITECTURE_CAPS_0041 Caps;
+    UINT Guard;
+  } Data{};
+  Data.Guard = 0x12345678;
+  UINT Node = 0;
+  D3D12DDIARG_GETCAPS Args{};
+  Args.Type = D3D12DDICAPS_TYPE_MEMORY_ARCHITECTURE;
+  Args.pInfo = &Node;
+  Args.pData = &Data.Caps;
+  Args.DataSize = sizeof(Data.Caps);
+  bool Valid = GetCaps(Adapter, &Args) == S_OK && Data.Caps.UMA &&
+               Data.Caps.IOCoherent && Data.Caps.CacheCoherent &&
+               Data.Caps.HeapSerializationTier ==
+                   D3D12DDI_HEAP_SERIALIZATION_TIER_0041_0 &&
+               Data.Caps.ResourceSerializationTier ==
+                   D3D12DDI_RESOURCE_SERIALIZATION_TIER_0041_0 &&
+               Data.Guard == 0x12345678;
+  const auto Original = Data;
+  Node = 1;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
+           std::memcmp(&Data, &Original, sizeof(Data)) == 0;
+  Node = 0;
+  Args.pInfo = nullptr;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG;
+  Args.pInfo = &Node;
+  Args.DataSize = sizeof(Data.Caps) - 1;
+  Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
+           std::memcmp(&Data, &Original, sizeof(Data)) == 0;
+
+  struct {
+    D3D12DDI_MEMORY_ARCHITECTURE_CAPS Caps;
+    UINT Guard;
+  } Legacy{};
+  Legacy.Guard = 0x12345678;
+  Args.pData = &Legacy.Caps;
+  Args.DataSize = sizeof(Legacy.Caps);
+  Valid &= GetCaps(Adapter, &Args) == S_OK && Legacy.Caps.UMA &&
+           Legacy.Caps.IOCoherent && Legacy.Caps.CacheCoherent &&
+           Legacy.Guard == 0x12345678;
+
+  const struct {
+    D3D12DDICAPS_TYPE Type;
+    UINT Size;
+  } Queries[] = {
+      {D3D12DDICAPS_TYPE_0023_UMD_BASED_COMMAND_QUEUE_PRIORITY,
+       sizeof(D3D12DDICAPS_UMD_BASED_COMMAND_QUEUE_PRIORITY_DATA_0023)},
+      {D3D12DDICAPS_TYPE_0050_HARDWARE_SCHEDULING_CAPS,
+       sizeof(D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050)}};
+  for (const auto &Query : Queries) {
+    UINT Output[] = {0xffffffff, 0x12345678};
+    Args.Type = Query.Type;
+    Args.pInfo = nullptr;
+    Args.pData = Output;
+    Args.DataSize = Query.Size;
+    Valid &= GetCaps(Adapter, &Args) == S_OK && Output[0] == 0 &&
+             Output[1] == 0x12345678;
+    Output[0] = 0xffffffff;
+    Args.DataSize = Query.Size - 1;
+    Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG &&
+             Output[0] == 0xffffffff && Output[1] == 0x12345678;
+    Args.DataSize = Query.Size;
+    Args.pData = nullptr;
+    Valid &= GetCaps(Adapter, &Args) == E_INVALIDARG;
+  }
+  report(L"Memory and scheduling capability contract", Valid ? S_OK : E_FAIL);
+  return Valid;
+}
 } // namespace
 
 int wmain(int Argc, wchar_t **Argv) {
   bool ShaderCaps = Argc == 3 && std::wcscmp(Argv[2], L"--shader-caps") == 0;
   bool ShaderModels =
       Argc == 3 && std::wcscmp(Argv[2], L"--shader-models") == 0;
-  if (Argc != 2 && !ShaderCaps && !ShaderModels) {
+  bool IntegrationCaps =
+      Argc == 3 && std::wcscmp(Argv[2], L"--integration-caps") == 0;
+  if (Argc != 2 && !ShaderCaps && !ShaderModels && !IntegrationCaps) {
     std::fwprintf(stderr,
-                  L"Usage: %ls STUB_DLL_PATH [--shader-caps|--shader-models]\n",
+                  L"Usage: %ls STUB_DLL_PATH "
+                  L"[--shader-caps|--shader-models|--integration-caps]\n",
                   Argv[0]);
     return 1;
   }
@@ -184,8 +258,10 @@ int wmain(int Argc, wchar_t **Argv) {
     FreeLibrary(Module);
     return 1;
   }
-  if (ShaderCaps || ShaderModels) {
-    bool Valid = ShaderCaps
+  if (ShaderCaps || ShaderModels || IntegrationCaps) {
+    bool Valid = IntegrationCaps
+                     ? checkIntegrationCaps(OpenArgs.hAdapter, Funcs.pfnGetCaps)
+                 : ShaderCaps
                      ? checkShaderCaps(OpenArgs.hAdapter, Funcs.pfnGetCaps)
                      : checkShaderModels(OpenArgs.hAdapter, Funcs.pfnGetCaps);
     Result =
