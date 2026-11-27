@@ -44,6 +44,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "BootstrapAudit.h"
+#include "WarpDeviceState.h"
 
 #include <windows.h>
 #include <winternl.h>
@@ -307,33 +308,7 @@ HRESULT probeWarpContext(const D3D12DDIARG_CREATEDEVICE_0003 *Args) {
 #endif
 
 #ifdef FEME_BOOTSTRAP_PROBE_WARP_DEVICE_CONTEXT
-struct WarpUserModeContext {
-  UINT64 KernelContextHandle = 0;
-  void *CommandBuffer = nullptr;
-  UINT32 CommandBufferSize = 0;
-};
-
-struct WarpDeviceState {
-  const D3DDDI_DEVICECALLBACKS *KTCallbacks = nullptr;
-  const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *UMCallbacks = nullptr;
-  HANDLE RTDevice = nullptr;
-  UINT32 NodeOrdinal = 0;
-  UINT32 EngineAffinity = 0;
-  D3DKMT_HANDLE PagingQueue = 0;
-  D3DKMT_HANDLE PagingSyncObject = 0;
-  volatile UINT64 *PagingFenceValue = nullptr;
-  HANDLE Context = nullptr;
-  UINT64 CommandBufferAddress = 0;
-  UINT64 CommandBufferSize = 0;
-  WarpUserModeContext UserModeContext;
-  D3DKMT_HANDLE DmaAllocation = 0;
-  void *DmaCpuAddress = nullptr;
-  bool DmaLocked = false;
-  D3DKMT_HANDLE DmaFence = 0;
-  volatile UINT64 *DmaFenceValue = nullptr;
-};
-
-static_assert(alignof(WarpDeviceState) <= MEMORY_ALLOCATION_ALIGNMENT);
+using feme::probe::WarpDeviceState;
 
 void destroyWarpDeviceContext(D3D12DDI_HDEVICE Device);
 
