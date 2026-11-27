@@ -23,6 +23,7 @@
 #include "feme/Direct3D/RayTracingPlan.h"
 #include "feme/Direct3D/ResidencyPlan.h"
 #include "feme/Direct3D/ResourcePlan.h"
+#include "feme/Direct3D/ViewportPlan.h"
 
 #include "gtest/gtest.h"
 
@@ -716,6 +717,36 @@ TEST(ConformanceReportTest, RejectsClassifiedCountOverflow) {
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
   EXPECT_FALSE(isConformanceReleaseReady(Report));
+}
+
+TEST(ViewportPlanTest, AcceptsViewportAndScissor) {
+  ViewportPlan Viewport{0.0f, 0.0f, 1920.0f, 1080.0f, 0.0f, 1.0f};
+  ScissorRectPlan Scissor{0, 0, 1920, 1080};
+  llvm::Error Err = validateViewportPlan(Viewport, Scissor);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(ViewportPlanTest, RejectsInvalidSizeAndDepth) {
+  ViewportPlan Viewport{0.0f, 0.0f, 0.0f, 1080.0f, 0.0f, 1.0f};
+  ScissorRectPlan Scissor{0, 0, 1920, 1080};
+  llvm::Error Err = validateViewportPlan(Viewport, Scissor);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Viewport = ViewportPlan{0.0f, 0.0f, 1920.0f, 1080.0f, 0.5f, 0.5f};
+  Err = validateViewportPlan(Viewport, Scissor);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(ViewportPlanTest, RejectsReversedScissor) {
+  ViewportPlan Viewport{0.0f, 0.0f, 1920.0f, 1080.0f, 0.0f, 1.0f};
+  ScissorRectPlan Scissor{1920, 1080, 0, 0};
+  llvm::Error Err = validateViewportPlan(Viewport, Scissor);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
 }
 
 } // namespace

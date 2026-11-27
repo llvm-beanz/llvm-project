@@ -12,6 +12,7 @@ add_feme_library(FeMeDirect3D
   AccelerationStructurePlan.cpp
   EnhancedBarrierPlan.cpp
   ConformanceReport.cpp
+  ViewportPlan.cpp
   BarrierPlan.cpp
   DescriptorHeap.cpp
   ResourcePlan.cpp
