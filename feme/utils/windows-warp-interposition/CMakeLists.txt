@@ -256,6 +256,15 @@ foreach(DDI_VERSION IN LISTS FEME_PROBE_DDI_VERSIONS)
   add_executable(${VARIANT}-harness ../windows-adapter-probe/AdapterProbe.cpp)
   set_target_properties(${VARIANT}-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
+  if(DDI_VERSION_SUFFIX STRGREATER_EQUAL "0022")
+    target_compile_definitions(${VARIANT}-harness PRIVATE
+      FEME_PROBE_EXPECT_CORE_LAYER_ALLOCATION_CALLBACKS=1
+      FEME_PROBE_EXPECT_KT_ALLOCATION_CALLBACKS=0)
+  else()
+    target_compile_definitions(${VARIANT}-harness PRIVATE
+      FEME_PROBE_EXPECT_CORE_LAYER_ALLOCATION_CALLBACKS=0
+      FEME_PROBE_EXPECT_KT_ALLOCATION_CALLBACKS=1)
+  endif()
   target_link_libraries(${VARIANT}-harness PRIVATE d3d12 dxgi)
   add_dependencies(${VARIANT}-harness ${VARIANT}-shim)
   if(MSVC)

@@ -908,6 +908,21 @@ int wmain(int Argc, wchar_t **Argv) {
                E_FAIL);
         ExpectedDDICalls = false;
       }
+#ifdef FEME_PROBE_EXPECT_CORE_LAYER_ALLOCATION_CALLBACKS
+      if (ExpectCreateDevice) {
+        bool ExpectedKTAllocationCallbacks =
+            FEME_PROBE_EXPECT_KT_ALLOCATION_CALLBACKS != 0;
+        bool ExpectedAllocationCallbacks =
+            FEME_PROBE_EXPECT_CORE_LAYER_ALLOCATION_CALLBACKS != 0;
+        if ((CreateHasKTAllocateCb != 0) != ExpectedKTAllocationCallbacks ||
+            (CreateHasKTDeallocateCb != 0) != ExpectedKTAllocationCallbacks ||
+            Audit.HasUMAllocateCb != ExpectedAllocationCallbacks ||
+            Audit.HasUMDeallocateCb != ExpectedAllocationCallbacks) {
+          report(L"Allocation callbacks do not match negotiated DDI", E_FAIL);
+          ExpectedDDICalls = false;
+        }
+      }
+#endif
       if (ExpectUnsupported && (!Audit.PinnedVersion || NegotiatedVersion ||
                                 CreateHasKTCallbacks || CreateHasUMCallbacks)) {
         report(L"Expected rejection before CreateDevice", E_FAIL);
