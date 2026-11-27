@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Direct3D/RootSignature.h"
+#include "feme/Direct3D/AccelerationStructurePlan.h"
 #include "feme/Direct3D/AdvancedGraphicsPlan.h"
 #include "feme/Direct3D/BarrierPlan.h"
 #include "feme/Direct3D/CapabilityInventory.h"
@@ -604,6 +605,51 @@ TEST(MeshDispatchPlanTest, RejectsZeroGroupAndIndirectSize) {
 
   MeshDispatchPlan Indirect{{1, 1, 1}, 1024, 64, 64, 128, 0};
   Err = validateMeshDispatchPlan(Indirect);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(AccelerationStructurePlanTest, AcceptsBLASAndTLASBuildPlans) {
+  AccelerationStructurePlan BLAS{
+      AccelerationStructureKind::BottomLevel, 65536, 256, 4, 0, true, false};
+  llvm::Error Err = validateAccelerationStructurePlan(BLAS);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+
+  AccelerationStructurePlan TLAS{
+      AccelerationStructureKind::TopLevel, 131072, 512, 0, 128, false, true};
+  Err = validateAccelerationStructurePlan(TLAS);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(AccelerationStructurePlanTest, RejectsInvalidSizeAndAlignment) {
+  AccelerationStructurePlan Plan{
+      AccelerationStructureKind::BottomLevel, 0, 0, 1, 0, false, false};
+  llvm::Error Err = validateAccelerationStructurePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  Plan.SizeBytes = 4096;
+  Plan.OffsetBytes = 255;
+  Err = validateAccelerationStructurePlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(AccelerationStructurePlanTest,
+     RejectsMissingCountsAndCombinedBuildPolicy) {
+  AccelerationStructurePlan TLAS{
+      AccelerationStructureKind::TopLevel, 4096, 0, 0, 0, false, false};
+  llvm::Error Err = validateAccelerationStructurePlan(TLAS);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  AccelerationStructurePlan Combined{
+      AccelerationStructureKind::BottomLevel, 4096, 0, 1, 0, true, true};
+  Err = validateAccelerationStructurePlan(Combined);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
