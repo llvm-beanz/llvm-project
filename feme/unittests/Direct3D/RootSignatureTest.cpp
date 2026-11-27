@@ -16,6 +16,7 @@
 #include "feme/Direct3D/DrawPlan.h"
 #include "feme/Direct3D/EnhancedBarrierPlan.h"
 #include "feme/Direct3D/ExecutionPlan.h"
+#include "feme/Direct3D/InputLayoutPlan.h"
 #include "feme/Direct3D/MeshDispatchPlan.h"
 #include "feme/Direct3D/ObjectModel.h"
 #include "feme/Direct3D/PipelinePlan.h"
@@ -745,6 +746,43 @@ TEST(ViewportPlanTest, RejectsReversedScissor) {
   ViewportPlan Viewport{0.0f, 0.0f, 1920.0f, 1080.0f, 0.0f, 1.0f};
   ScissorRectPlan Scissor{1920, 1080, 0, 0};
   llvm::Error Err = validateViewportPlan(Viewport, Scissor);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(InputLayoutPlanTest, AcceptsVectorAndColorElements) {
+  InputLayoutPlan Plan;
+  Plan.Elements.push_back(InputElementPlan{0, 0, 24, 0, InputSemantic::Position,
+                                           InputFormat::Float32x3});
+  Plan.Elements.push_back(InputElementPlan{0, 12, 24, 0, InputSemantic::Color,
+                                           InputFormat::Float32x3});
+  llvm::Error Err = validateInputLayoutPlan(Plan);
+  EXPECT_FALSE(static_cast<bool>(Err));
+  if (Err)
+    llvm::consumeError(std::move(Err));
+}
+
+TEST(InputLayoutPlanTest, RejectsDuplicateSemantics) {
+  InputLayoutPlan Plan;
+  Plan.Elements.push_back(InputElementPlan{0, 0, 16, 0, InputSemantic::Texcoord,
+                                           InputFormat::Float32x2});
+  Plan.Elements.push_back(InputElementPlan{0, 8, 16, 0, InputSemantic::Texcoord,
+                                           InputFormat::Float32x2});
+  llvm::Error Err = validateInputLayoutPlan(Plan);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+}
+
+TEST(InputLayoutPlanTest, RejectsEmptyAndOutOfStrideElements) {
+  InputLayoutPlan Empty;
+  llvm::Error Err = validateInputLayoutPlan(Empty);
+  ASSERT_TRUE(static_cast<bool>(Err));
+  llvm::consumeError(std::move(Err));
+
+  InputLayoutPlan OutOfStride;
+  OutOfStride.Elements.push_back(InputElementPlan{
+      0, 12, 16, 0, InputSemantic::Position, InputFormat::Float32x4});
+  Err = validateInputLayoutPlan(OutOfStride);
   ASSERT_TRUE(static_cast<bool>(Err));
   llvm::consumeError(std::move(Err));
 }
