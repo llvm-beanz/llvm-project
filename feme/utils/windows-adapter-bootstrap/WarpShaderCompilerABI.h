@@ -65,6 +65,9 @@ FEME_WARP_COMPILER_API const char *FeMeWarpCompilerRevision();
 FEME_WARP_COMPILER_API std::int32_t
 FeMeWarpCompileRawDXBC(const std::uint32_t *Tokens, std::uint32_t Count,
                        void **Compiled, FeMeWarpCompiledShaderInfo *Info);
+FEME_WARP_COMPILER_API std::int32_t
+FeMeWarpCompileDXILProgram(const std::uint32_t *Program, std::uint32_t Count,
+                           void **Compiled, FeMeWarpCompiledShaderInfo *Info);
 FEME_WARP_COMPILER_API void FeMeWarpDestroyCompiledShader(void *Compiled);
 FEME_WARP_COMPILER_API std::int32_t
 FeMeWarpCreateVertexPipeline(void *CompiledShader,

@@ -9,6 +9,9 @@
 
 #include "..\..\utils\windows-adapter-bootstrap\WarpShaderCompilerABI.h"
 
+#include "llvm/Object/DXContainer.h"
+#include "llvm/Support/raw_ostream.h"
+
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -16,12 +19,13 @@
 
 bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens);
 
-static bool testDispatch(const std::vector<std::uint32_t> &Tokens) {
+static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
+                         bool DXIL = false) {
   void *Shader = nullptr, *Pipeline = nullptr;
   FeMeWarpCompiledShaderInfo Info;
-  if (FeMeWarpCompileRawDXBC(Tokens.data(),
-                             static_cast<std::uint32_t>(Tokens.size()), &Shader,
-                             &Info) ||
+  auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
+  if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()), &Shader,
+              &Info) ||
       FeMeWarpCreateComputePipeline(Shader, &Pipeline))
     return false;
   FeMeWarpDestroyCompiledShader(Shader);
@@ -89,12 +93,41 @@ int main(int Argc, char **Argv) {
     std::fprintf(stderr, "Cannot read shader fixture\n");
     return 1;
   }
-  if (Argc == 3 && std::strcmp(Argv[2], "--ddi") == 0)
+  bool DXIL = Argc == 3 && std::strncmp(Argv[2], "--dxil", 6) == 0;
+  if (DXIL) {
+    llvm::StringRef Bytes(reinterpret_cast<const char *>(Tokens.data()),
+                          Tokens.size() * sizeof(Tokens[0]));
+    auto Container = llvm::object::DXContainer::create(
+        llvm::MemoryBufferRef(Bytes, "original DXC fixture"));
+    if (!Container) {
+      llvm::logAllUnhandledErrors(Container.takeError(), llvm::errs(),
+                                  "Cannot read DXIL fixture: ");
+      return 1;
+    }
+    std::vector<std::uint32_t> Program;
+    for (const auto &Part : *Container) {
+      if (std::memcmp(Part.Part.Name, "DXIL", 4))
+        continue;
+      if (Part.Data.size() % sizeof(Token))
+        return 1;
+      Program.resize(Part.Data.size() / sizeof(Token));
+      std::memcpy(Program.data(), Part.Data.data(), Part.Data.size());
+      break;
+    }
+    if (Program.size() < 6) {
+      std::fprintf(stderr, "Missing DXIL program part\n");
+      return 1;
+    }
+    Tokens = std::move(Program);
+  }
+  if (Argc == 3 && (std::strcmp(Argv[2], "--ddi") == 0 ||
+                    std::strcmp(Argv[2], "--dxil-ddi") == 0))
     return testWarpCompilerDDIs(Tokens) ? 0 : 1;
-  if (Argc == 3 && std::strcmp(Argv[2], "--dispatch") == 0) {
+  if (Argc == 3 && (std::strcmp(Argv[2], "--dispatch") == 0 ||
+                    std::strcmp(Argv[2], "--dxil-dispatch") == 0)) {
     bool Good[2]{};
-    std::thread First([&] { Good[0] = testDispatch(Tokens); });
-    std::thread Second([&] { Good[1] = testDispatch(Tokens); });
+    std::thread First([&] { Good[0] = testDispatch(Tokens, DXIL); });
+    std::thread Second([&] { Good[1] = testDispatch(Tokens, DXIL); });
     First.join();
     Second.join();
     bool Passed = Good[0] && Good[1];
@@ -102,21 +135,29 @@ int main(int Argc, char **Argv) {
                      : "native grouped dispatch and concurrent PSOs FAIL");
     return Passed ? 0 : 1;
   }
-  bool Reject = Argc == 3;
+  bool Reject = Argc == 3 && std::strcmp(Argv[2], "--dxil") != 0;
   if (Reject) {
-    if (std::strcmp(Argv[2], "--bad-length") == 0)
+    if (std::strcmp(Argv[2], "--bad-length") == 0 ||
+        std::strcmp(Argv[2], "--dxil-bad-length") == 0)
       ++Tokens[1];
     else if (std::strcmp(Argv[2], "--bad-opcode") == 0)
       Tokens.back() = 0x010007ff;
-    else
+    else if (std::strcmp(Argv[2], "--dxil-bad-offset") == 0)
+      Tokens[4] = 0xffffffff;
+    else if (std::strcmp(Argv[2], "--dxil-bad-size") == 0)
+      Tokens[5] = 0xffffffff;
+    else if (std::strcmp(Argv[2], "--dxil-bad-kind") == 0)
+      Tokens[0] = (Tokens[0] & 0xffff) | (1u << 16);
+    else if (std::strcmp(Argv[2], "--dxil-wave-reject") != 0)
       return 1;
   }
   for (unsigned Iteration = 0; Iteration != 2; ++Iteration) {
     void *Compiled = nullptr;
     FeMeWarpCompiledShaderInfo Info;
-    std::int32_t Result = FeMeWarpCompileRawDXBC(
-        Tokens.data(), static_cast<std::uint32_t>(Tokens.size()), &Compiled,
-        &Info);
+    auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
+    std::int32_t Result =
+        Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()),
+                &Compiled, &Info);
     if (Reject) {
       if (Result >= 0 || Compiled || Info.HasNativeEntry) {
         std::fprintf(stderr, "Rejected shader acquired an executable object\n");
@@ -146,6 +187,14 @@ int main(int Argc, char **Argv) {
         return 1;
     }
     FeMeWarpDestroyCompiledShader(Compiled);
+    if (DXIL && Info.Stage == 5) {
+      FeMeWarpDispatchDesc Dispatch;
+      Dispatch.GroupCount[0] = 2;
+      Dispatch.GroupCount[1] = 3;
+      if (FeMeWarpDispatchCompute(Pipeline, &Dispatch) ||
+          FeMeWarpDispatchCompute(Pipeline, &Dispatch))
+        return 1;
+    }
     // The shared pipeline retains its native stage after the DDI handle dies.
     if (Pipeline) {
       if (Info.Stage == 0)

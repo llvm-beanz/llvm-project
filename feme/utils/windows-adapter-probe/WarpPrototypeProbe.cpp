@@ -91,17 +91,24 @@ HRESULT createComputePipeline(ID3D12Device *Device, const char *Source,
                               SIZE_T SourceSize,
                               const D3D12_ROOT_SIGNATURE_DESC &RootDesc,
                               ComPtr<ID3D12RootSignature> &Root,
-                              ComPtr<ID3D12PipelineState> &Pipeline) {
+                              ComPtr<ID3D12PipelineState> &Pipeline,
+                              const D3D12_SHADER_BYTECODE *DXIL = nullptr) {
   ComPtr<ID3DBlob> Shader, Errors, RootBlob;
-  HRESULT Result =
-      report("Compile application compute shader",
-             D3DCompile(Source, SourceSize, "FeMe command test", nullptr,
-                        nullptr, "main", "cs_5_0", 0, 0, &Shader, &Errors));
-  if (FAILED(Result)) {
-    if (Errors)
-      std::fprintf(stderr, "%.*s\n", static_cast<int>(Errors->GetBufferSize()),
-                   static_cast<const char *>(Errors->GetBufferPointer()));
-    return Result;
+  HRESULT Result = S_OK;
+  if (!DXIL) {
+    Result =
+        report("Compile application compute shader",
+               D3DCompile(Source, SourceSize, "FeMe command test", nullptr,
+                          nullptr, "main", "cs_5_0", 0, 0, &Shader, &Errors));
+    if (FAILED(Result)) {
+      if (Errors)
+        std::fprintf(stderr, "%.*s\n",
+                     static_cast<int>(Errors->GetBufferSize()),
+                     static_cast<const char *>(Errors->GetBufferPointer()));
+      return Result;
+    }
+  } else if (!DXIL->pShaderBytecode || !DXIL->BytecodeLength) {
+    return report("Missing original DXC shader", E_INVALIDARG);
   }
   Result =
       report("Serialize application root",
@@ -117,20 +124,23 @@ HRESULT createComputePipeline(ID3D12Device *Device, const char *Source,
     return Result;
   D3D12_COMPUTE_PIPELINE_STATE_DESC PipelineDesc{};
   PipelineDesc.pRootSignature = Root.Get();
-  PipelineDesc.CS = {Shader->GetBufferPointer(), Shader->GetBufferSize()};
+  PipelineDesc.CS = DXIL ? *DXIL
+                         : D3D12_SHADER_BYTECODE{Shader->GetBufferPointer(),
+                                                 Shader->GetBufferSize()};
   Result = report("Create application compute pipeline",
                   Device->CreateComputePipelineState(&PipelineDesc,
                                                      IID_PPV_ARGS(&Pipeline)));
   return Result;
 }
 
-HRESULT exerciseCommands(ID3D12Device *Device) {
+HRESULT exerciseCommands(ID3D12Device *Device,
+                         const D3D12_SHADER_BYTECODE *DXIL = nullptr) {
   constexpr char Source[] = "[numthreads(1,1,1)] void main() {}";
   D3D12_ROOT_SIGNATURE_DESC RootDesc{};
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
   HRESULT Result = createComputePipeline(Device, Source, sizeof(Source) - 1,
-                                         RootDesc, Root, Pipeline);
+                                         RootDesc, Root, Pipeline, DXIL);
   if (FAILED(Result))
     return Result;
   for (auto Type :
@@ -185,7 +195,8 @@ HRESULT exerciseCommands(ID3D12Device *Device) {
   return S_OK;
 }
 
-HRESULT exerciseBufferCommands(ID3D12Device *Device) {
+HRESULT exerciseBufferCommands(ID3D12Device *Device,
+                               const D3D12_SHADER_BYTECODE *DXIL = nullptr) {
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
       "groupshared uint sharedValues[30];\n"
@@ -208,7 +219,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device) {
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
   HRESULT Result = createComputePipeline(Device, Source, sizeof(Source) - 1,
-                                         RootDesc, Root, Pipeline);
+                                         RootDesc, Root, Pipeline, DXIL);
   if (FAILED(Result))
     return Result;
   constexpr UINT Threads = 180, Words = Threads + 16;
@@ -413,17 +424,48 @@ bool printCaps(HMODULE Module, bool OwnedDevice) {
 
 int wmain(int Argc, wchar_t **Argv) {
   bool Reference = Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0;
+  bool DXILBufferCommands =
+      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0;
   bool BufferCommands =
-      Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0;
-  bool Commands =
-      BufferCommands || (Argc == 2 && std::wcscmp(Argv[1], L"--commands") == 0);
+      DXILBufferCommands ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0);
+  bool DXILCommands =
+      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-commands") == 0;
+  bool Commands = DXILCommands || BufferCommands ||
+                  (Argc == 2 && std::wcscmp(Argv[1], L"--commands") == 0);
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
   if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands) {
     std::fprintf(stderr, "Usage: warp-prototype-harness "
                          "[--reference|--expect-shader-rejection|--commands|"
-                         "--buffer-commands]\n");
+                         "--buffer-commands|--dxil-commands FILE|"
+                         "--dxil-buffer-commands FILE]\n");
     return 1;
+  }
+  std::vector<unsigned char> DXILBytes;
+  D3D12_SHADER_BYTECODE DXIL{};
+  if (DXILCommands || DXILBufferCommands) {
+    FILE *Input = nullptr;
+    if (_wfopen_s(&Input, Argv[2], L"rb") || !Input) {
+      report("Open original DXC shader", E_FAIL);
+      return 1;
+    }
+    bool Valid = std::fseek(Input, 0, SEEK_END) == 0;
+    long Size = Valid ? std::ftell(Input) : -1;
+    Valid = Valid && Size > 0 && Size <= 32 * 1024 * 1024;
+    if (Valid)
+      Valid = std::fseek(Input, 0, SEEK_SET) == 0;
+    if (Valid) {
+      DXILBytes.resize(static_cast<SIZE_T>(Size));
+      Valid = std::fread(DXILBytes.data(), 1, DXILBytes.size(), Input) ==
+              DXILBytes.size();
+    }
+    Valid &= std::fclose(Input) == 0;
+    if (!Valid) {
+      report("Read original DXC shader", E_FAIL);
+      return 1;
+    }
+    DXIL = {DXILBytes.data(), DXILBytes.size()};
   }
   wchar_t Path[32768];
   DWORD Length = Reference ? GetSystemDirectoryW(Path, ARRAYSIZE(Path))
@@ -487,9 +529,10 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result))
     Result = exerciseBuffer(Device.Get());
   if (SUCCEEDED(Result) && Commands)
-    Result = exerciseCommands(Device.Get());
+    Result = exerciseCommands(Device.Get(), DXILCommands ? &DXIL : nullptr);
   if (SUCCEEDED(Result) && BufferCommands)
-    Result = exerciseBufferCommands(Device.Get());
+    Result = exerciseBufferCommands(Device.Get(),
+                                    DXILBufferCommands ? &DXIL : nullptr);
   bool ValidOwned = !Reference && !ExpectShaderRejection &&
                     DeviceResult == S_OK && SUCCEEDED(Result);
   if (ValidOwned) {

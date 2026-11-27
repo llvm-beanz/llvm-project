@@ -25,6 +25,7 @@
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 using namespace llvm;
 
@@ -887,6 +888,12 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
   LLVMContext &Ctx = M.getContext();
   Type *I8Ty = Type::getInt8Ty(Ctx);
 
+  // Retention metadata must not keep a static copy of dispatch-local storage.
+  removeFromUsedLists(M, [&](Constant *Value) {
+    auto *Global = dyn_cast<GlobalVariable>(Value);
+    return Global && Layout.Offsets.contains(Global);
+  });
+
   // Every use of a groupshared global, gathered up front so the pass can
   // bail without touching `F` at all if it finds a shape it does not
   // support: a scalar or vector-of-pointers (divergent index, roadmap step
@@ -903,6 +910,7 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
   // address space changes, just as it does for `load`/`store`.
   for (auto &[GVConst, Offset] : Layout.Offsets) {
     auto *GV = const_cast<GlobalVariable *>(GVConst);
+    GV->removeDeadConstantUsers();
     if (GV->use_empty())
       continue;
 

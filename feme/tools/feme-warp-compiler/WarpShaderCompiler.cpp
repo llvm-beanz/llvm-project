@@ -14,18 +14,24 @@
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Direct3D/ComputePlan.h"
 #include "feme/Graphics/Pipeline.h"
+#include "feme/Import/DXIL/DXILImporter.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/DXSA/BinaryParser.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "feme/Translate/DXSA/DXSATranslator.h"
 
+#include "llvm/BinaryFormat/DXContainer.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/VCSRevision.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -43,6 +49,39 @@ std::int32_t report(llvm::Error Error) {
   llvm::logAllUnhandledErrors(std::move(Error), llvm::errs(),
                               "FeMe WARP shader compiler: ");
   return CompileFailure;
+}
+
+std::int32_t compileStage(feme::Context &Context, feme::Module Module,
+                          feme::ShaderStage Stage, void **Compiled,
+                          FeMeWarpCompiledShaderInfo *Info) {
+  llvm::ModuleAnalysisManager Analyses;
+  feme::dxil::OpRaisingPass().run(Module.getLLVMModule(), Analyses);
+  feme::dxil::MetadataRaisingPass().run(Module.getLLVMModule(), Analyses);
+  feme::cpu::StageCompileOptions Options;
+  Options.Stage = Stage;
+  Options.WaveSize = 4;
+  auto Result =
+      feme::cpu::CompiledStage::create(Context, std::move(Module), Options);
+  if (!Result)
+    return report(Result.takeError());
+  if (!(*Result)->EntryFn) {
+    llvm::errs() << "FeMe WARP shader compiler: missing native entry point\n";
+    return CompileFailure;
+  }
+  auto *Object = new (std::nothrow) CompiledShader{std::move(*Result)};
+  if (!Object) {
+    llvm::errs()
+        << "FeMe WARP shader compiler: native wrapper allocation failed\n";
+    return OutOfMemory;
+  }
+  FeMeWarpCompiledShaderInfo Output;
+  Output.ArtifactVersion = feme::cpu::ArtifactAbiVersion;
+  Output.Stage = static_cast<std::uint32_t>(Object->Stage->getStage());
+  Output.WaveSize = Object->Stage->getWaveSize();
+  Output.HasNativeEntry = 1;
+  *Info = Output;
+  *Compiled = Object;
+  return 0;
 }
 } // namespace
 
@@ -64,6 +103,11 @@ std::int32_t FeMeWarpCompileRawDXBC(const std::uint32_t *Tokens,
       Info->BridgeVersion != 1 || Count < 2 || Count > 4 * 1024 * 1024 ||
       Tokens[1] != Count) {
     llvm::errs() << "FeMe WARP shader compiler: invalid token buffer or ABI\n";
+    return InvalidArgument;
+  }
+  auto Major = (Tokens[0] >> 4) & 0xf;
+  if (Major != 4 && Major != 5) {
+    llvm::errs() << "FeMe WARP shader compiler: expected legacy DXBC tokens\n";
     return InvalidArgument;
   }
   feme::ShaderStage Stage;
@@ -109,28 +153,71 @@ std::int32_t FeMeWarpCompileRawDXBC(const std::uint32_t *Tokens,
       Translator.translate(feme::Module::fromMLIR(std::move(Parsed)), Context);
   if (!Module)
     return report(Module.takeError());
-  llvm::ModuleAnalysisManager Analyses;
-  feme::dxil::OpRaisingPass().run(Module->getLLVMModule(), Analyses);
-  feme::dxil::MetadataRaisingPass().run(Module->getLLVMModule(), Analyses);
-  feme::cpu::StageCompileOptions Options;
-  Options.Stage = Stage;
-  Options.WaveSize = 4;
-  auto Result =
-      feme::cpu::CompiledStage::create(Context, std::move(*Module), Options);
-  if (!Result)
-    return report(Result.takeError());
-  if (!(*Result)->EntryFn) {
-    llvm::errs() << "FeMe WARP shader compiler: missing native entry point\n";
-    return CompileFailure;
+  return compileStage(Context, std::move(*Module), Stage, Compiled, Info);
+}
+
+std::int32_t FeMeWarpCompileDXILProgram(const std::uint32_t *Program,
+                                        std::uint32_t Count, void **Compiled,
+                                        FeMeWarpCompiledShaderInfo *Info) {
+  if (Compiled)
+    *Compiled = nullptr;
+  if (!Program || !Compiled || !Info || Info->Size != sizeof(*Info) ||
+      Info->BridgeVersion != 1 || Count < 6 || Count > 4 * 1024 * 1024) {
+    llvm::errs() << "FeMe WARP DXIL compiler: invalid program buffer or ABI\n";
+    return InvalidArgument;
   }
-  FeMeWarpCompiledShaderInfo Output;
-  Output.ArtifactVersion = feme::cpu::ArtifactAbiVersion;
-  Output.Stage = static_cast<std::uint32_t>((*Result)->getStage());
-  Output.WaveSize = (*Result)->getWaveSize();
-  Output.HasNativeEntry = 1;
-  *Info = Output;
-  *Compiled = new CompiledShader{std::move(*Result)};
-  return 0;
+  llvm::dxbc::ProgramHeader Header;
+  std::memcpy(&Header, Program, sizeof(Header));
+  constexpr std::size_t BitcodeBase =
+      offsetof(llvm::dxbc::ProgramHeader, Bitcode);
+  std::size_t Bytes = static_cast<std::size_t>(Count) * sizeof(*Program);
+  if (Header.Size != Count || Header.getMajorVersion() != 6 ||
+      (Header.ShaderKind != 1 && Header.ShaderKind != 5) || Header.Unused ||
+      std::memcmp(Header.Bitcode.Magic, "DXIL", 4) ||
+      Header.Bitcode.MajorVersion != 1 || Header.Bitcode.Unused ||
+      Header.Bitcode.Offset < sizeof(Header.Bitcode) ||
+      Header.Bitcode.Offset > Bytes - BitcodeBase || !Header.Bitcode.Size ||
+      Header.Bitcode.Size > Bytes - BitcodeBase - Header.Bitcode.Offset) {
+    llvm::errs()
+        << "FeMe WARP DXIL compiler: invalid supported-stage program header\n";
+    return InvalidArgument;
+  }
+  auto *Data = reinterpret_cast<const char *>(Program) + BitcodeBase +
+               Header.Bitcode.Offset;
+  feme::Context Context;
+  feme::DXILImporter Importer;
+  auto Module = Importer.import(
+      llvm::MemoryBufferRef(llvm::StringRef(Data, Header.Bitcode.Size),
+                            "WARP DDI DXIL program"),
+      {}, Context);
+  if (!Module)
+    return report(Module.takeError());
+  auto *Model = Module->getLLVMModule().getNamedMetadata("dx.shaderModel");
+  auto *Description =
+      Model && Model->getNumOperands() == 1 ? Model->getOperand(0) : nullptr;
+  auto *Kind = Description && Description->getNumOperands() == 3
+                   ? llvm::dyn_cast<llvm::MDString>(Description->getOperand(0))
+                   : nullptr;
+  auto *Major = Kind ? llvm::mdconst::dyn_extract<llvm::ConstantInt>(
+                           Description->getOperand(1))
+                     : nullptr;
+  auto *Minor = Kind ? llvm::mdconst::dyn_extract<llvm::ConstantInt>(
+                           Description->getOperand(2))
+                     : nullptr;
+  bool Vertex = Header.ShaderKind == 1;
+  if (!Kind || Kind->getString() != (Vertex ? "vs" : "cs") || !Major ||
+      !Minor || !Major->getType()->isIntegerTy(32) ||
+      !Minor->getType()->isIntegerTy(32) ||
+      Major->getZExtValue() != Header.getMajorVersion() ||
+      Minor->getZExtValue() != Header.getMinorVersion()) {
+    llvm::errs()
+        << "FeMe WARP DXIL compiler: program/metadata stage mismatch\n";
+    return InvalidArgument;
+  }
+  return compileStage(Context, std::move(*Module),
+                      Vertex ? feme::ShaderStage::Vertex
+                             : feme::ShaderStage::Compute,
+                      Compiled, Info);
 }
 
 void FeMeWarpDestroyCompiledShader(void *Compiled) {

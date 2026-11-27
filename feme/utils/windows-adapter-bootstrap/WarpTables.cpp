@@ -369,8 +369,10 @@ void APIENTRY createShader(D3D12DDI_HDEVICE Device,
   if (Args->pShaderCode) {
     void *Compiled = nullptr;
     FeMeWarpCompiledShaderInfo Info;
-    Result = FeMeWarpCompileRawDXBC(Args->pShaderCode, Args->pShaderCode[1],
-                                    &Compiled, &Info);
+    auto Compile = ((Args->pShaderCode[0] >> 4) & 0xf) == 6
+                       ? FeMeWarpCompileDXILProgram
+                       : FeMeWarpCompileRawDXBC;
+    Result = Compile(Args->pShaderCode, Args->pShaderCode[1], &Compiled, &Info);
     if (FAILED(Result)) {
       LastUnsupported.store("pfnCreateShader: FeMe compilation failed");
       reportError(Device, Result);

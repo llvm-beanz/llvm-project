@@ -1396,13 +1396,24 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
       return RecordResult(E_INVALIDARG);
     UINT Capacity =
         Models->pShaderModelsSupported ? *Models->pNumShaderModelsSupported : 0;
-    *Models->pNumShaderModelsSupported = 1;
+    constexpr UINT ModelCount =
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+        2;
+#else
+        1;
+#endif
+    *Models->pNumShaderModelsSupported = ModelCount;
     if (Models->pShaderModelsSupported) {
-      if (!Capacity)
+      if (Capacity < ModelCount)
         return RecordResult(HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER));
-      // This is the audit's input profile, not a shader-execution claim.
+      // These are accepted input profiles for the partial diagnostic, not
+      // full shader-model or graphics conformance claims.
       Models->pShaderModelsSupported[0] =
           D3D12DDI_SHADER_MODEL_5_1_RELEASE_0011;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+      Models->pShaderModelsSupported[1] =
+          D3D12DDI_SHADER_MODEL_6_0_RELEASE_0011;
+#endif
     }
     return RecordResult(S_OK);
   }
