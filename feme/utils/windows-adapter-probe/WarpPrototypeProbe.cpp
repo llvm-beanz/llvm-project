@@ -18,6 +18,7 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -204,6 +205,49 @@ HRESULT exerciseFences(ID3D12Device *Device) {
   return Result;
 }
 
+HRESULT waitFence(ID3D12Fence *Fence, UINT64 Value) {
+  HANDLE Event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!Event)
+    return report("Create command completion event",
+                  HRESULT_FROM_WIN32(GetLastError()));
+  HRESULT Result = report("Arm command completion",
+                          Fence->SetEventOnCompletion(Value, Event));
+  if (SUCCEEDED(Result)) {
+    DWORD Wait = WaitForSingleObject(Event, 10000);
+    if (Wait != WAIT_OBJECT_0)
+      Result = report("Wait command completion",
+                      HRESULT_FROM_WIN32(Wait == WAIT_FAILED ? GetLastError()
+                                                             : ERROR_TIMEOUT));
+  }
+  if (!CloseHandle(Event))
+    Result = report("Close command completion event",
+                    HRESULT_FROM_WIN32(GetLastError()));
+  return Result;
+}
+
+HRESULT waitQueue(ID3D12CommandQueue *Queue, ID3D12Fence *Fence, UINT64 Value) {
+  HRESULT Result =
+      report("Signal command completion", Queue->Signal(Fence, Value));
+  return FAILED(Result) ? Result : waitFence(Fence, Value);
+}
+
+struct DelayedFenceSignal {
+  ID3D12CommandQueue *Queue;
+  ID3D12Fence *Fence;
+  UINT64 Value;
+  HRESULT Result = E_FAIL;
+};
+
+DWORD WINAPI signalDelayedFence(void *Argument) {
+  auto *Signal = static_cast<DelayedFenceSignal *>(Argument);
+  Sleep(100);
+  Signal->Result = Signal->Queue->Signal(Signal->Fence, Signal->Value);
+  if (FAILED(Signal->Result))
+    report("Release failed delayed queue signal",
+           Signal->Fence->Signal(Signal->Value));
+  return 0;
+}
+
 HRESULT exerciseCommands(ID3D12Device *Device,
                          const D3D12_SHADER_BYTECODE *DXIL = nullptr) {
   constexpr char Source[] = "[numthreads(1,1,1)] void main() {}";
@@ -222,9 +266,15 @@ HRESULT exerciseCommands(ID3D12Device *Device,
     ComPtr<ID3D12CommandQueue> Queue;
     ComPtr<ID3D12CommandAllocator> Allocator;
     ComPtr<ID3D12GraphicsCommandList> List;
+    ComPtr<ID3D12Fence> Completion;
     Result =
         report("Create application queue",
                Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
+    if (FAILED(Result))
+      return Result;
+    Result = report("Create command completion fence",
+                    Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                        IID_PPV_ARGS(&Completion)));
     if (FAILED(Result))
       return Result;
     Result =
@@ -248,6 +298,9 @@ HRESULT exerciseCommands(ID3D12Device *Device,
         return Result;
       ID3D12CommandList *Commands[] = {List.Get()};
       Queue->ExecuteCommandLists(1, Commands);
+      Result = waitQueue(Queue.Get(), Completion.Get(), Repeat + 1);
+      if (FAILED(Result))
+        return Result;
       Result = report("Command execution removal status",
                       Device->GetDeviceRemovedReason());
       if (FAILED(Result))
@@ -267,7 +320,8 @@ HRESULT exerciseCommands(ID3D12Device *Device,
 }
 
 HRESULT exerciseBufferCommands(ID3D12Device *Device,
-                               const D3D12_SHADER_BYTECODE *DXIL = nullptr) {
+                               const D3D12_SHADER_BYTECODE *DXIL = nullptr,
+                               bool Ordered = false) {
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
       "groupshared uint sharedValues[30];\n"
@@ -347,6 +401,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
   ComPtr<ID3D12CommandQueue> Queue;
   ComPtr<ID3D12CommandAllocator> Allocator;
   ComPtr<ID3D12GraphicsCommandList> List;
+  ComPtr<ID3D12Fence> Completion;
   Result = report("Create buffer command queue",
                   Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
   if (FAILED(Result))
@@ -362,6 +417,38 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                        Pipeline.Get(), IID_PPV_ARGS(&List)));
   if (FAILED(Result))
     return Result;
+  Result = report(
+      "Create buffer completion fence",
+      Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Completion)));
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12CommandQueue> GateQueue;
+  ComPtr<ID3D12Fence> Gate;
+  std::array<UINT, Words> Previous;
+  Previous.fill(0xcdcdcdcd);
+  if (Ordered) {
+    D3D12_COMMAND_QUEUE_DESC GateDesc{};
+    GateDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    Result =
+        report("Create cross-queue signal producer",
+               Device->CreateCommandQueue(&GateDesc, IID_PPV_ARGS(&GateQueue)));
+    if (FAILED(Result))
+      return Result;
+    Result = report(
+        "Create cross-queue gate",
+        Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Gate)));
+    if (FAILED(Result))
+      return Result;
+    Result =
+        report("Initialize held readback", Readback->Map(0, &NoRead, &Memory));
+    if (FAILED(Result))
+      return Result;
+    if (Memory)
+      std::memcpy(Memory, Previous.data(), Bytes);
+    Readback->Unmap(0, &Full);
+    if (!Memory)
+      return report("Missing held readback memory", E_FAIL);
+  }
   for (UINT Repeat = 0; Repeat < 3; ++Repeat) {
     if (!Repeat)
       List->CopyBufferRegion(Output.Get(), 0, Upload.Get(), 0, Bytes);
@@ -387,7 +474,73 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     if (FAILED(Result))
       return Result;
     ID3D12CommandList *Commands[] = {List.Get()};
-    Queue->ExecuteCommandLists(1, Commands);
+    bool GatePending = false;
+    Result = [&]() -> HRESULT {
+      if (Ordered) {
+        HRESULT Status = report("Queue future cross-queue wait",
+                                Queue->Wait(Gate.Get(), Repeat + 1));
+        if (FAILED(Status))
+          return Status;
+        GatePending = true;
+      }
+      Queue->ExecuteCommandLists(1, Commands);
+      if (!Ordered)
+        return waitQueue(Queue.Get(), Completion.Get(), Repeat + 1);
+      Sleep(100);
+      HRESULT Status =
+          report("Map held readback", Readback->Map(0, &Full, &Memory));
+      if (FAILED(Status))
+        return Status;
+      bool Unchanged =
+          Memory && std::memcmp(Memory, Previous.data(), Bytes) == 0;
+      Readback->Unmap(0, &NoRead);
+      if (!Unchanged)
+        return report("CPU commands bypassed future kernel wait", E_FAIL);
+      if (Repeat != 2) {
+        Status = report("Release cross-queue gate",
+                        GateQueue->Signal(Gate.Get(), Repeat + 1));
+        if (FAILED(Status))
+          return Status;
+        GatePending = false;
+        return waitQueue(Queue.Get(), Completion.Get(), Repeat + 1);
+      }
+      Status = report("Signal pending teardown completion",
+                      Queue->Signal(Completion.Get(), Repeat + 1));
+      if (FAILED(Status))
+        return Status;
+      DelayedFenceSignal Signal{GateQueue.Get(), Gate.Get(), Repeat + 1};
+      HANDLE Thread =
+          CreateThread(nullptr, 0, signalDelayedFence, &Signal, 0, nullptr);
+      if (!Thread)
+        return report("Create delayed signal thread",
+                      HRESULT_FROM_WIN32(GetLastError()));
+      List.Reset();
+      Allocator.Reset();
+      Pipeline.Reset();
+      Root.Reset();
+      Queue.Reset();
+      DWORD Wait = WaitForSingleObject(Thread, INFINITE);
+      DWORD WaitError = Wait == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT;
+      if (!CloseHandle(Thread))
+        return report("Close delayed signal thread",
+                      HRESULT_FROM_WIN32(GetLastError()));
+      if (Wait != WAIT_OBJECT_0)
+        return report("Join delayed signal thread",
+                      HRESULT_FROM_WIN32(WaitError));
+      if (FAILED(Signal.Result))
+        return report("Delayed cross-queue signal", Signal.Result);
+      GatePending = false;
+      std::printf("Pending queue teardown and recorded code lifetime PASS\n");
+      return waitFence(Completion.Get(), Repeat + 1);
+    }();
+    if (GatePending) {
+      HRESULT Cleanup =
+          report("Release failed cross-queue gate", Gate->Signal(Repeat + 1));
+      if (FAILED(Cleanup))
+        Result = Cleanup;
+    }
+    if (FAILED(Result))
+      return Result;
     Result = report("Buffer execution removal status",
                     Device->GetDeviceRemovedReason());
     if (FAILED(Result))
@@ -396,6 +549,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     if (FAILED(Result))
       return Result;
     bool Valid = Memory != nullptr;
+    if (Memory)
+      std::memcpy(Previous.data(), Memory, Bytes);
     for (UINT I = 0; Valid && I < Words; ++I) {
       UINT Expected = I * 7 + 5;
       if (I < Threads) {
@@ -413,7 +568,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Readback->Unmap(0, &NoRead);
     if (!Valid)
       return report("Owned grouped compute/readback mismatch", E_FAIL);
-    std::printf("Owned grouped buffer oracle: repeat=%u values=%u guards=%u\n",
+    std::printf("Grouped buffer oracle: repeat=%u values=%u guards=%u\n",
                 Repeat + 1, Threads, Words - Threads);
     if (Repeat != 2) {
       Result = report("Reset buffer command allocator", Allocator->Reset());
@@ -494,12 +649,17 @@ bool printCaps(HMODULE Module, bool OwnedDevice) {
 } // namespace
 
 int wmain(int Argc, wchar_t **Argv) {
-  bool Reference = Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0;
+  bool ReferenceBufferCommands =
+      Argc == 2 && std::wcscmp(Argv[1], L"--reference-buffer-commands") == 0;
+  bool Reference = ReferenceBufferCommands ||
+                   (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
+  bool OrderedBufferCommands =
+      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0;
   bool Fences = Argc == 2 && std::wcscmp(Argv[1], L"--fences") == 0;
   bool DXILBufferCommands =
       Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0;
   bool BufferCommands =
-      DXILBufferCommands ||
+      DXILBufferCommands || OrderedBufferCommands || ReferenceBufferCommands ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0);
   bool DXILCommands =
       Argc == 3 && std::wcscmp(Argv[1], L"--dxil-commands") == 0;
@@ -512,7 +672,9 @@ int wmain(int Argc, wchar_t **Argv) {
     std::fprintf(stderr, "Usage: warp-prototype-harness "
                          "[--reference|--expect-shader-rejection|--commands|"
                          "--buffer-commands|--dxil-commands FILE|"
-                         "--dxil-buffer-commands FILE|--fences]\n");
+                         "--dxil-buffer-commands FILE|--fences|"
+                         "--ordered-buffer-commands|"
+                         "--reference-buffer-commands]\n");
     return 1;
   }
   std::vector<unsigned char> DXILBytes;
@@ -607,7 +769,8 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseCommands(Device.Get(), DXILCommands ? &DXIL : nullptr);
   if (SUCCEEDED(Result) && BufferCommands)
     Result = exerciseBufferCommands(Device.Get(),
-                                    DXILBufferCommands ? &DXIL : nullptr);
+                                    DXILBufferCommands ? &DXIL : nullptr,
+                                    OrderedBufferCommands);
   bool ValidOwned = !Reference && !ExpectShaderRejection &&
                     DeviceResult == S_OK && SUCCEEDED(Result);
   if (ValidOwned) {

@@ -710,6 +710,7 @@ void APIENTRY destroyFence(D3D12DDI_HDEVICE Device, D3D12DDI_HFENCE Fence) {
   --Owner->LiveFences;
 }
 
+struct PendingSubmission;
 struct CommandQueue {
   feme::probe::WarpDeviceState *Owner;
   D3D12DDI_COMMAND_QUEUE_FLAGS Flags;
@@ -718,7 +719,21 @@ struct CommandQueue {
   HANDLE Context = nullptr;
   UINT64 Buffer = 0;
   UINT64 BufferSize = 0;
+  D3DKMT_HANDLE ReadyFence = 0;
+  D3DKMT_HANDLE DoneFence = 0;
+  volatile UINT64 *ReadyValue = nullptr;
+  volatile UINT64 *DoneValue = nullptr;
+  HANDLE ReadyEvent = nullptr;
+  HANDLE Worker = nullptr;
+  CONDITION_VARIABLE WorkAvailable = CONDITION_VARIABLE_INIT;
+  PendingSubmission *First = nullptr;
+  PendingSubmission *Last = nullptr;
+  UINT64 Submitted = 0;
+  bool Stopping = false;
+  std::atomic<HRESULT> Failure{S_OK};
 };
+
+DWORD WINAPI runQueue(void *Argument);
 
 struct CommandRecorder {
   feme::probe::WarpDeviceState *Owner;
@@ -744,6 +759,32 @@ struct RecordedCommand {
   }
 };
 
+void clearCommands(RecordedCommand *&First, RecordedCommand *&Last) {
+  while (First) {
+    auto *Next = First->Next;
+    delete First;
+    First = Next;
+  }
+  Last = nullptr;
+}
+
+void appendCommand(RecordedCommand *&First, RecordedCommand *&Last,
+                   RecordedCommand *Command) {
+  if (Last)
+    Last->Next = Command;
+  else
+    First = Command;
+  Last = Command;
+}
+
+struct PendingSubmission {
+  PendingSubmission *Next = nullptr;
+  UINT64 Value = 0;
+  RecordedCommand *First = nullptr;
+  RecordedCommand *Last = nullptr;
+  ~PendingSubmission() { clearCommands(First, Last); }
+};
+
 struct CommandList {
   feme::probe::WarpDeviceState *Owner;
   D3D12DDI_COMMAND_QUEUE_FLAGS Flags;
@@ -761,24 +802,13 @@ struct CommandList {
   RecordedCommand *Last = nullptr;
 
   void clear() {
-    while (First) {
-      auto *Next = First->Next;
-      delete First;
-      First = Next;
-    }
-    Last = nullptr;
+    clearCommands(First, Last);
     if (Pipeline)
       FeMeWarpDestroyComputePipeline(Pipeline);
     Pipeline = nullptr;
   }
 
-  void append(RecordedCommand *Command) {
-    if (Last)
-      Last->Next = Command;
-    else
-      First = Command;
-    Last = Command;
-  }
+  void append(RecordedCommand *Command) { appendCommand(First, Last, Command); }
 };
 
 void reportObjectError(D3D12DDI_HCOMMANDQUEUE Queue, HRESULT Result) {
@@ -819,6 +849,63 @@ SIZE_T APIENTRY queueSize(D3D12DDI_HDEVICE Device,
   return sizeof(CommandQueue);
 }
 
+HRESULT checkedCallbackResult(HRESULT Result) {
+  return Result == S_OK || FAILED(Result) ? Result : E_UNEXPECTED;
+}
+
+HRESULT lastWindowsError() {
+  DWORD Error = GetLastError();
+  return Error ? HRESULT_FROM_WIN32(Error) : E_UNEXPECTED;
+}
+
+HRESULT createQueueFence(CommandQueue *State, D3DKMT_HANDLE &Handle,
+                         volatile UINT64 *&Value) {
+  D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 Create{};
+  Create.Info.Type = D3DDDI_MONITORED_FENCE;
+  HRESULT Result = checkedCallbackResult(
+      State->Owner->KTCallbacks->pfnCreateSynchronizationObject2Cb(
+          State->Owner->RTDevice, &Create));
+  Handle = Create.hSyncObject;
+  Value = static_cast<volatile UINT64 *>(
+      Create.Info.MonitoredFence.FenceValueCPUVirtualAddress);
+  if (FAILED(Result))
+    return Result;
+  return Handle && Value && !(reinterpret_cast<UINT64>(Value) & 7)
+             ? S_OK
+             : E_UNEXPECTED;
+}
+
+HRESULT releaseQueueResources(CommandQueue *State) {
+  auto *Owner = State->Owner;
+  if (State->Context) {
+    D3DDDICB_DESTROYCONTEXT Destroy{State->Context};
+    HRESULT Result = checkedCallbackResult(
+        Owner->UMCallbacks->pfnDestroyContextCb(State->Runtime, &Destroy));
+    if (FAILED(Result))
+      return Result;
+    State->Context = nullptr;
+  }
+  for (auto *Fence : {&State->ReadyFence, &State->DoneFence}) {
+    if (!*Fence)
+      continue;
+    D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT Destroy{};
+    Destroy.hSyncObject = *Fence;
+    HRESULT Result = checkedCallbackResult(
+        Owner->KTCallbacks->pfnDestroySynchronizationObjectCb(Owner->RTDevice,
+                                                              &Destroy));
+    if (FAILED(Result))
+      return Result;
+    *Fence = 0;
+  }
+  State->ReadyValue = State->DoneValue = nullptr;
+  if (State->ReadyEvent) {
+    if (!CloseHandle(State->ReadyEvent))
+      return lastWindowsError();
+    State->ReadyEvent = nullptr;
+  }
+  return S_OK;
+}
+
 HRESULT APIENTRY createQueue(D3D12DDI_HDEVICE Device,
                              const D3D12DDIARG_CREATECOMMANDQUEUE_0050 *Args,
                              D3D12DDI_HCOMMANDQUEUE Queue,
@@ -827,7 +914,13 @@ HRESULT APIENTRY createQueue(D3D12DDI_HDEVICE Device,
   if (!Owner || !Queue.pDrvPrivate || !Runtime.handle)
     return E_INVALIDARG;
   if (!Owner->UMCallbacks || !Owner->UMCallbacks->pfnCreateContextVirtualCb ||
-      !Owner->UMCallbacks->pfnDestroyContextCb)
+      !Owner->UMCallbacks->pfnDestroyContextCb || !Owner->KTCallbacks ||
+      !Owner->KTCallbacks->pfnCreateSynchronizationObject2Cb ||
+      !Owner->KTCallbacks->pfnDestroySynchronizationObjectCb ||
+      !Owner->KTCallbacks->pfnSignalSynchronizationObjectFromGpuCb ||
+      !Owner->KTCallbacks->pfnWaitForSynchronizationObjectFromGpuCb ||
+      !Owner->KTCallbacks->pfnSignalSynchronizationObjectFromCpuCb ||
+      !Owner->KTCallbacks->pfnWaitForSynchronizationObjectFromCpuCb)
     return E_NOINTERFACE;
   HRESULT Result = validateQueue(Args);
   if (FAILED(Result))
@@ -846,21 +939,33 @@ HRESULT APIENTRY createQueue(D3D12DDI_HDEVICE Device,
   Context.PrivateDriverDataSize = sizeof(Private);
   Result = Owner->UMCallbacks->pfnCreateContextVirtualCb(Runtime, &Context);
   State->Context = Context.hContext;
-  if (Result != S_OK || !State->Context || !State->BufferSize) {
-    HRESULT Failure = FAILED(Result) ? Result : E_UNEXPECTED;
-    std::fprintf(stderr, "FeMe queue context creation failed: 0x%08lx\n",
-                 static_cast<unsigned long>(Failure));
-    if (State->Context) {
-      D3DDDICB_DESTROYCONTEXT Destroy{State->Context};
-      HRESULT Cleanup =
-          Owner->UMCallbacks->pfnDestroyContextCb(Runtime, &Destroy);
-      if (Cleanup != S_OK) {
-        Owner->HeapCleanupResult = FAILED(Cleanup) ? Cleanup : E_UNEXPECTED;
-        reportError(Device, Owner->HeapCleanupResult);
-      }
+  Result = checkedCallbackResult(Result);
+  if (SUCCEEDED(Result) && (!State->Context || !State->BufferSize))
+    Result = E_UNEXPECTED;
+  if (SUCCEEDED(Result))
+    Result = createQueueFence(State, State->ReadyFence, State->ReadyValue);
+  if (SUCCEEDED(Result))
+    Result = createQueueFence(State, State->DoneFence, State->DoneValue);
+  if (SUCCEEDED(Result)) {
+    State->ReadyEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!State->ReadyEvent)
+      Result = lastWindowsError();
+  }
+  if (SUCCEEDED(Result)) {
+    State->Worker = CreateThread(nullptr, 0, runQueue, State, 0, nullptr);
+    if (!State->Worker)
+      Result = lastWindowsError();
+  }
+  if (FAILED(Result)) {
+    std::fprintf(stderr, "FeMe queue creation failed: 0x%08lx\n",
+                 static_cast<unsigned long>(Result));
+    HRESULT Cleanup = releaseQueueResources(State);
+    if (FAILED(Cleanup)) {
+      Owner->HeapCleanupResult = Cleanup;
+      reportError(Device, Cleanup);
     }
     State->~CommandQueue();
-    return Failure;
+    return Result;
   }
   ++Owner->LiveCommandQueues;
   return S_OK;
@@ -874,11 +979,23 @@ void APIENTRY destroyQueue(D3D12DDI_HDEVICE Device,
     reportError(Device, E_INVALIDARG);
     return;
   }
-  D3DDDICB_DESTROYCONTEXT Destroy{State->Context};
-  HRESULT Result =
-      Owner->UMCallbacks->pfnDestroyContextCb(State->Runtime, &Destroy);
-  if (Result != S_OK) {
-    reportError(Device, FAILED(Result) ? Result : E_UNEXPECTED);
+  AcquireSRWLockExclusive(&State->Lock);
+  State->Stopping = true;
+  WakeConditionVariable(&State->WorkAvailable);
+  ReleaseSRWLockExclusive(&State->Lock);
+  if (WaitForSingleObject(State->Worker, INFINITE) != WAIT_OBJECT_0) {
+    reportError(Device, lastWindowsError());
+    return;
+  }
+  if (!CloseHandle(State->Worker)) {
+    reportError(Device, lastWindowsError());
+    return;
+  }
+  State->Worker = nullptr;
+  HRESULT Result = releaseQueueResources(State);
+  if (FAILED(Result)) {
+    Owner->HeapCleanupResult = Result;
+    reportError(Device, Result);
     return;
   }
   State->~CommandQueue();
@@ -1332,6 +1449,147 @@ void APIENTRY setPredication(D3D12DDI_HCOMMANDLIST List,
                            Operation == D3D12DDI_PREDICATION_OP_EQUAL_ZERO);
 }
 
+HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
+  HRESULT Result = S_OK;
+  for (auto *Command = Submission->First; Command && SUCCEEDED(Result);
+       Command = Command->Next) {
+    feme::probe::WarpBufferAccess Access(State->Owner);
+    if (Command->Type == RecordedCommand::Kind::Barrier) {
+      void *Data = nullptr;
+      if (Command->BarrierResource.pDrvPrivate)
+        Result = Access.range(Command->BarrierResource, 0, 0, Data);
+      if (SUCCEEDED(Result))
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+      continue;
+    }
+    if (Command->Type == RecordedCommand::Kind::Dispatch) {
+      for (UINT J = 0; J < Command->Dispatch.BufferCount && SUCCEEDED(Result);
+           ++J) {
+        const auto &Buffer = Command->Buffers[J];
+        void *Data = nullptr;
+        UINT64 Size = 0;
+        Result = Access.address(reinterpret_cast<UINT64>(Buffer.Data), Data,
+                                Size, Buffer.Namespace == 2);
+        if (SUCCEEDED(Result) && Size != Buffer.SizeInBytes)
+          Result = E_INVALIDARG;
+      }
+      if (SUCCEEDED(Result))
+        Result = FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);
+      if (SUCCEEDED(Result))
+        ++DispatchesExecuted;
+      continue;
+    }
+    void *Destination = nullptr, *Source = nullptr;
+    Result = Access.range(Command->Destination.BaseAddress.UMD.hResource,
+                          Command->Destination.BaseAddress.UMD.Offset,
+                          Command->Bytes, Destination);
+    if (SUCCEEDED(Result))
+      Result = Access.range(Command->Source.BaseAddress.UMD.hResource,
+                            Command->Source.BaseAddress.UMD.Offset,
+                            Command->Bytes, Source);
+    if (SUCCEEDED(Result)) {
+      std::memmove(Destination, Source, static_cast<SIZE_T>(Command->Bytes));
+      ++CopiesExecuted;
+    }
+  }
+  return Result;
+}
+
+void failQueue(CommandQueue *State, HRESULT Result) {
+  HRESULT Expected = S_OK;
+  if (State->Failure.compare_exchange_strong(Expected, Result)) {
+    std::fprintf(stderr, "FeMe queue execution failed: 0x%08lx\n",
+                 static_cast<unsigned long>(Result));
+    reportError({State->Owner}, Result);
+  }
+}
+
+DWORD WINAPI runQueue(void *Argument) {
+  auto *State = static_cast<CommandQueue *>(Argument);
+  for (;;) {
+    AcquireSRWLockExclusive(&State->Lock);
+    while (!State->First && !State->Stopping) {
+      if (!SleepConditionVariableSRW(&State->WorkAvailable, &State->Lock,
+                                     INFINITE, 0)) {
+        HRESULT Result = lastWindowsError();
+        State->Stopping = true;
+        ReleaseSRWLockExclusive(&State->Lock);
+        failQueue(State, Result);
+        return 0;
+      }
+    }
+    if (!State->First) {
+      ReleaseSRWLockExclusive(&State->Lock);
+      return 0;
+    }
+    std::unique_ptr<PendingSubmission> Submission(State->First);
+    State->First = Submission->Next;
+    if (!State->First)
+      State->Last = nullptr;
+    ReleaseSRWLockExclusive(&State->Lock);
+
+    auto *Owner = State->Owner;
+    HRESULT Result = State->Failure.load();
+    if (SUCCEEDED(Result)) {
+      D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU Wait{};
+      Wait.ObjectCount = 1;
+      Wait.ObjectHandleArray = &State->ReadyFence;
+      Wait.FenceValueArray = &Submission->Value;
+      Wait.hAsyncEvent = State->ReadyEvent;
+      Result = checkedCallbackResult(
+          Owner->KTCallbacks->pfnWaitForSynchronizationObjectFromCpuCb(
+              Owner->RTDevice, &Wait));
+    }
+    if (SUCCEEDED(Result) &&
+        WaitForSingleObject(State->ReadyEvent, INFINITE) != WAIT_OBJECT_0)
+      Result = lastWindowsError();
+    if (SUCCEEDED(Result)) {
+      UINT64 Ready = *State->ReadyValue;
+      if (Ready < Submission->Value ||
+          Ready == std::numeric_limits<UINT64>::max())
+        Result = DXGI_ERROR_DEVICE_REMOVED;
+    }
+    if (SUCCEEDED(Result))
+      Result = executeSubmission(State, Submission.get());
+    if (FAILED(Result))
+      failQueue(State, Result);
+
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMCPU Signal{};
+    Signal.ObjectCount = 1;
+    Signal.ObjectHandleArray = &State->DoneFence;
+    Signal.FenceValueArray = &Submission->Value;
+    Result = checkedCallbackResult(
+        Owner->KTCallbacks->pfnSignalSynchronizationObjectFromCpuCb(
+            Owner->RTDevice, &Signal));
+    if (FAILED(Result))
+      failQueue(State, Result);
+  }
+}
+
+HRESULT snapshotSubmission(UINT Count, const D3D12DDI_HCOMMANDLIST *Lists,
+                           PendingSubmission &Submission) {
+  for (UINT I = 0; I < Count; ++I)
+    for (auto *Command =
+             static_cast<CommandList *>(Lists[I].pDrvPrivate)->First;
+         Command; Command = Command->Next) {
+      auto *Copy = new (std::nothrow) RecordedCommand(*Command);
+      if (!Copy)
+        return E_OUTOFMEMORY;
+      Copy->Next = nullptr;
+      Copy->Pipeline = nullptr;
+      Copy->Dispatch.Buffers = Copy->Buffers.data();
+      appendCommand(Submission.First, Submission.Last, Copy);
+      if (Command->Pipeline) {
+        HRESULT Result =
+            FeMeWarpRetainComputePipeline(Command->Pipeline, &Copy->Pipeline);
+        if (FAILED(Result))
+          return Result;
+      }
+    }
+  return S_OK;
+}
+
 void APIENTRY executeLists(D3D12DDI_HCOMMANDQUEUE Queue, UINT Count,
                            const D3D12DDI_HCOMMANDLIST *Lists) {
   auto *State = static_cast<CommandQueue *>(Queue.pDrvPrivate);
@@ -1339,6 +1597,8 @@ void APIENTRY executeLists(D3D12DDI_HCOMMANDQUEUE Queue, UINT Count,
     reportObjectError(Queue, E_INVALIDARG);
     return;
   }
+  if (!Count)
+    return;
   for (UINT I = 0; I < Count; ++I) {
     auto *List = static_cast<CommandList *>(Lists[I].pDrvPrivate);
     if (!List || List->Owner != State->Owner || List->Open ||
@@ -1348,57 +1608,59 @@ void APIENTRY executeLists(D3D12DDI_HCOMMANDQUEUE Queue, UINT Count,
       return;
     }
   }
+  std::unique_ptr<PendingSubmission> Submission(new (std::nothrow)
+                                                    PendingSubmission);
+  if (!Submission) {
+    reportObjectError(Queue, E_OUTOFMEMORY);
+    return;
+  }
+  HRESULT Result = snapshotSubmission(Count, Lists, *Submission);
+  if (FAILED(Result)) {
+    reportObjectError(Queue, Result);
+    return;
+  }
   AcquireSRWLockExclusive(&State->Lock);
-  HRESULT Result = S_OK;
-  for (UINT I = 0; I < Count && SUCCEEDED(Result); ++I)
-    for (auto *Command =
-             static_cast<CommandList *>(Lists[I].pDrvPrivate)->First;
-         Command && SUCCEEDED(Result); Command = Command->Next) {
-      if (Command->Type == RecordedCommand::Kind::Barrier) {
-        void *Data = nullptr;
-        if (Command->BarrierResource.pDrvPrivate)
-          Result = feme::probe::getWarpBufferRange(
-              State->Owner, Command->BarrierResource, 0, 0, Data);
-        if (SUCCEEDED(Result))
-          std::atomic_thread_fence(std::memory_order_seq_cst);
-        continue;
-      }
-      if (Command->Type == RecordedCommand::Kind::Dispatch) {
-        for (UINT J = 0; J < Command->Dispatch.BufferCount && SUCCEEDED(Result);
-             ++J) {
-          const auto &Buffer = Command->Buffers[J];
-          void *Data = nullptr;
-          UINT64 Size = 0;
-          Result = feme::probe::getWarpBufferAddress(
-              State->Owner, reinterpret_cast<UINT64>(Buffer.Data), Data, Size,
-              Buffer.Namespace == 2);
-          if (SUCCEEDED(Result) && Size != Buffer.SizeInBytes)
-            Result = E_INVALIDARG;
-        }
-        if (SUCCEEDED(Result))
-          Result =
-              FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);
-        if (SUCCEEDED(Result))
-          ++DispatchesExecuted;
-        continue;
-      }
-      void *Destination = nullptr, *Source = nullptr;
-      Result = feme::probe::getWarpBufferRange(
-          State->Owner, Command->Destination.BaseAddress.UMD.hResource,
-          Command->Destination.BaseAddress.UMD.Offset, Command->Bytes,
-          Destination);
-      if (SUCCEEDED(Result))
-        Result = feme::probe::getWarpBufferRange(
-            State->Owner, Command->Source.BaseAddress.UMD.hResource,
-            Command->Source.BaseAddress.UMD.Offset, Command->Bytes, Source);
-      if (SUCCEEDED(Result)) {
-        std::memmove(Destination, Source, static_cast<SIZE_T>(Command->Bytes));
-        ++CopiesExecuted;
-      }
-    }
+  Result = State->Failure.load();
+  if (SUCCEEDED(Result) &&
+      (State->Stopping ||
+       State->Submitted >= std::numeric_limits<UINT64>::max() - 1))
+    Result = E_UNEXPECTED;
+  Submission->Value = State->Submitted + 1;
+  auto *Owner = State->Owner;
+  if (SUCCEEDED(Result)) {
+    // Ready is queued after any runtime kernel waits; Done keeps subsequent
+    // runtime signals behind completion of the owned CPU commands.
+    D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU Signal{};
+    Signal.hContext = State->Context;
+    Signal.ObjectCount = 1;
+    Signal.ObjectHandleArray = &State->ReadyFence;
+    Signal.MonitoredFenceValueArray = &Submission->Value;
+    Result = checkedCallbackResult(
+        Owner->KTCallbacks->pfnSignalSynchronizationObjectFromGpuCb(
+            Owner->RTDevice, &Signal));
+  }
+  if (SUCCEEDED(Result)) {
+    D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU Wait{};
+    Wait.hContext = State->Context;
+    Wait.ObjectCount = 1;
+    Wait.ObjectHandleArray = &State->DoneFence;
+    Wait.MonitoredFenceValueArray = &Submission->Value;
+    Result = checkedCallbackResult(
+        Owner->KTCallbacks->pfnWaitForSynchronizationObjectFromGpuCb(
+            Owner->RTDevice, &Wait));
+  }
+  if (SUCCEEDED(Result)) {
+    State->Submitted = Submission->Value;
+    if (State->Last)
+      State->Last->Next = Submission.get();
+    else
+      State->First = Submission.get();
+    State->Last = Submission.release();
+    WakeConditionVariable(&State->WorkAvailable);
+  }
   ReleaseSRWLockExclusive(&State->Lock);
   if (FAILED(Result))
-    reportObjectError(Queue, Result);
+    failQueue(State, Result);
 }
 #endif
 

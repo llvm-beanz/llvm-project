@@ -22,6 +22,21 @@ namespace probe {
 /// gated on the complete device contract.
 void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table);
 
+/// Keep live buffer mappings stable throughout a CPU command.
+class WarpBufferAccess {
+  WarpDeviceState *Owner;
+
+public:
+  explicit WarpBufferAccess(WarpDeviceState *Owner);
+  ~WarpBufferAccess();
+  WarpBufferAccess(const WarpBufferAccess &) = delete;
+  WarpBufferAccess &operator=(const WarpBufferAccess &) = delete;
+  HRESULT range(D3D12DDI_HRESOURCE Resource, UINT64 Offset, UINT64 Size,
+                void *&Data);
+  HRESULT address(UINT64 Address, void *&Data, UINT64 &Size,
+                  bool UnorderedAccess = false);
+};
+
 /// Borrow a checked, persistently locked buffer extent for CPU commands.
 HRESULT getWarpBufferRange(WarpDeviceState *Owner, D3D12DDI_HRESOURCE Resource,
                            UINT64 Offset, UINT64 Size, void *&Data);

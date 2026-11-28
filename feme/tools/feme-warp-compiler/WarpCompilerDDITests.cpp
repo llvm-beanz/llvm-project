@@ -9,6 +9,7 @@
 
 #include "..\..\utils\windows-adapter-bootstrap\WarpTables.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -16,7 +17,15 @@
 #include <vector>
 
 namespace {
-HRESULT LastError = S_OK;
+std::atomic<HRESULT> LastError{S_OK};
+std::atomic<UINT64> FenceValues[2]{};
+alignas(8) UINT64 MappedFenceValues[2]{};
+UINT NextFence = 0;
+UINT LiveFences = 0;
+UINT LiveContexts = 0;
+HRESULT FenceCreationResult = S_OK;
+std::atomic<HRESULT> CPUWaitResult{S_OK};
+bool CancelCPUWait = false;
 void APIENTRY setError(D3D12DDI_HRTDEVICE, HRESULT Result) {
   LastError = Result;
 }
@@ -30,12 +39,83 @@ HRESULT APIENTRY createQueueContext(D3D12DDI_HRTCOMMANDQUEUE Queue,
   *Private->Buffer = 0x10000;
   *Private->BufferSize = 4096;
   Args->hContext = Queue.handle;
+  ++LiveContexts;
   return S_OK;
 }
 
 HRESULT APIENTRY destroyQueueContext(D3D12DDI_HRTCOMMANDQUEUE Queue,
                                      const D3DDDICB_DESTROYCONTEXT *Args) {
-  return Args->hContext == Queue.handle ? S_OK : E_INVALIDARG;
+  if (Args->hContext != Queue.handle || !LiveContexts)
+    return E_INVALIDARG;
+  --LiveContexts;
+  return S_OK;
+}
+
+HRESULT APIENTRY createSync(HANDLE Device,
+                            D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 *Args) {
+  if (!Device || Args->Info.Type != D3DDDI_MONITORED_FENCE || NextFence == 2)
+    return E_INVALIDARG;
+  if (NextFence == 1 && FAILED(FenceCreationResult))
+    return FenceCreationResult;
+  Args->Info.MonitoredFence.FenceValueCPUVirtualAddress =
+      &MappedFenceValues[NextFence];
+  MappedFenceValues[NextFence] = 0;
+  Args->hSyncObject = ++NextFence;
+  ++LiveFences;
+  return NextFence == 2 ? FenceCreationResult : S_OK;
+}
+
+HRESULT APIENTRY
+destroySync(HANDLE Device, const D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT *Args) {
+  if (!Device || !Args->hSyncObject || Args->hSyncObject > 2 || !LiveFences)
+    return E_INVALIDARG;
+  --LiveFences;
+  return S_OK;
+}
+
+HRESULT APIENTRY signalGPU(
+    HANDLE Device, const D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU *Args) {
+  if (Args->hContext != Device || Args->ObjectCount != 1 ||
+      Args->ObjectHandleArray[0] != 1)
+    return E_INVALIDARG;
+  FenceValues[0] = Args->MonitoredFenceValueArray[0];
+  InterlockedExchange64(
+      reinterpret_cast<volatile LONG64 *>(&MappedFenceValues[0]),
+      static_cast<LONG64>(Args->MonitoredFenceValueArray[0]));
+  return S_OK;
+}
+
+HRESULT APIENTRY waitGPU(
+    HANDLE Device, const D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU *Args) {
+  return Args->hContext == Device && Args->ObjectCount == 1 &&
+                 Args->ObjectHandleArray[0] == 2
+             ? S_OK
+             : E_INVALIDARG;
+}
+
+HRESULT APIENTRY signalCPU(
+    HANDLE Device, const D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMCPU *Args) {
+  if (!Device || Args->ObjectCount != 1 || Args->ObjectHandleArray[0] != 2)
+    return E_INVALIDARG;
+  FenceValues[1] = Args->FenceValueArray[0];
+  InterlockedExchange64(
+      reinterpret_cast<volatile LONG64 *>(&MappedFenceValues[1]),
+      static_cast<LONG64>(Args->FenceValueArray[0]));
+  return S_OK;
+}
+
+HRESULT APIENTRY waitCPU(
+    HANDLE Device, const D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU *Args) {
+  if (!Device || Args->ObjectCount != 1 || Args->ObjectHandleArray[0] != 1 ||
+      FenceValues[0] < Args->FenceValueArray[0] || !Args->hAsyncEvent)
+    return E_INVALIDARG;
+  if (FAILED(CPUWaitResult.load()))
+    return CPUWaitResult.load();
+  if (CancelCPUWait)
+    InterlockedExchange64(
+        reinterpret_cast<volatile LONG64 *>(&MappedFenceValues[0]), 0);
+  return SetEvent(Args->hAsyncEvent) ? S_OK
+                                     : HRESULT_FROM_WIN32(GetLastError());
 }
 
 struct Storage {
@@ -52,9 +132,72 @@ void APIENTRY setListTable(D3D12DDI_HRTCOMMANDLIST List,
   else
     LastError = S_OK;
 }
+
+bool testQueueWorkerFailure(D3D12DDI_HDEVICE Device,
+                            const D3D12DDI_DEVICE_FUNCS_CORE_0072 &Core,
+                            bool Canceled = false) {
+  NextFence = 0;
+  FenceValues[0] = FenceValues[1] = 0;
+  D3D12DDI_COMMAND_LIST_FUNCS_3D_0062 Lists{};
+  D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001 Queues{};
+  if (feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE_COMMAND_LIST_3D,
+                                          &Lists, sizeof(Lists), 0) != S_OK ||
+      feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE_COMMAND_QUEUE_3D,
+                                          &Queues, sizeof(Queues), 0) != S_OK)
+    return false;
+  D3D12DDIARG_CREATECOMMANDQUEUE_0050 QueueArgs{};
+  QueueArgs.NodeMask = 1;
+  QueueArgs.QueueFlags =
+      D3D12DDI_COMMAND_QUEUE_FLAG_COMPUTE | D3D12DDI_COMMAND_QUEUE_FLAG_COPY;
+  Storage QueueStorage(Core.pfnCalcPrivateCommandQueueSize(Device, &QueueArgs));
+  D3D12DDI_HCOMMANDQUEUE Queue{QueueStorage.data()};
+  if (Core.pfnCreateCommandQueue(Device, &QueueArgs, Queue,
+                                 {Device.pDrvPrivate}) != S_OK)
+    return false;
+  D3D12DDIARG_CREATE_COMMAND_POOL_0040 PoolArgs{};
+  Storage PoolStorage(Core.pfnCalcPrivateCommandPoolSize(Device, &PoolArgs));
+  D3D12DDI_HCOMMANDPOOL_0040 Pool{PoolStorage.data()};
+  if (Core.pfnCreateCommandPool(Device, &PoolArgs, Pool) != S_OK)
+    return false;
+  D3D12DDIARG_CREATE_COMMAND_RECORDER_0040 RecorderArgs{};
+  RecorderArgs.QueueFlags = QueueArgs.QueueFlags;
+  Storage RecorderStorage(
+      Core.pfnCalcPrivateCommandRecorderSize(Device, &RecorderArgs));
+  D3D12DDI_HCOMMANDRECORDER_0040 Recorder{RecorderStorage.data()};
+  if (Core.pfnCreateCommandRecorder(Device, &RecorderArgs, Recorder) != S_OK)
+    return false;
+  Core.pfnCommandRecorderSetCommandPoolAsTarget(Device, Recorder, Pool);
+  D3D12DDIARG_CREATE_COMMAND_LIST_0040 ListArgs{};
+  ListArgs.NodeMask = 1;
+  ListArgs.QueueFlags = QueueArgs.QueueFlags;
+  Storage ListStorage(Core.pfnCalcPrivateCommandListSize(Device, &ListArgs));
+  D3D12DDI_HCOMMANDLIST List{ListStorage.data()};
+  if (Core.pfnCreateCommandList(Device, &ListArgs, List,
+                                {Device.pDrvPrivate}) != S_OK)
+    return false;
+  D3D12DDIARG_RESETCOMMANDLIST_0040 Reset{};
+  Reset.hDrvCommandRecorder = Recorder;
+  Lists.pfnResetCommandList(List, &Reset);
+  Lists.pfnCloseCommandList(List);
+  CPUWaitResult = Canceled ? S_OK : E_FAIL;
+  CancelCPUWait = Canceled;
+  Queues.pfnExecuteCommandLists(Queue, 1, &List);
+  Core.pfnDestroyCommandQueue(Device, Queue);
+  CPUWaitResult = S_OK;
+  CancelCPUWait = false;
+  bool Good = LastError == (Canceled ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL) &&
+              FenceValues[1] == 1 && !LiveFences && !LiveContexts;
+  Core.pfnDestroyCommandList(Device, List);
+  Core.pfnDestroyCommandRecorder(Device, Recorder);
+  Core.pfnDestroyCommandPool(Device, Pool);
+  return Good;
+}
 } // namespace
 
 bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
+  NextFence = LiveFences = 0;
+  LiveContexts = 0;
+  FenceValues[0] = FenceValues[1] = 0;
   feme::probe::WarpDeviceState Owner, Other;
   D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 Callbacks{};
   Callbacks.pfnSetErrorCb = setError;
@@ -63,6 +206,14 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Callbacks.pfnSetCommandListDDITableCb = setListTable;
   Owner.UMCallbacks = Other.UMCallbacks = &Callbacks;
   Owner.RTDevice = &Owner;
+  D3DDDI_DEVICECALLBACKS KTCallbacks{};
+  KTCallbacks.pfnCreateSynchronizationObject2Cb = createSync;
+  KTCallbacks.pfnDestroySynchronizationObjectCb = destroySync;
+  KTCallbacks.pfnSignalSynchronizationObjectFromGpuCb = signalGPU;
+  KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb = waitGPU;
+  KTCallbacks.pfnSignalSynchronizationObjectFromCpuCb = signalCPU;
+  KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb = waitCPU;
+  Owner.KTCallbacks = &KTCallbacks;
   D3D12DDI_HRTTABLE RuntimeTables[2] = {{&Owner}, {}};
   Owner.CommandListTables = RuntimeTables;
   Other.RTDevice = &Other;
@@ -198,6 +349,17 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     D3D12DDI_HCOMMANDQUEUE Queue{QueueStorage.data()};
     D3D12DDI_HRTCOMMANDQUEUE RTQueue{};
     RTQueue.handle = &Owner;
+    FenceCreationResult = E_OUTOFMEMORY;
+    Good &= Core.pfnCreateCommandQueue(Device, &QueueArgs, Queue, RTQueue) ==
+                E_OUTOFMEMORY &&
+            !LiveFences && !LiveContexts && !Owner.LiveCommandQueues;
+    NextFence = 0;
+    FenceCreationResult = S_FALSE;
+    Good &= Core.pfnCreateCommandQueue(Device, &QueueArgs, Queue, RTQueue) ==
+                E_UNEXPECTED &&
+            !LiveFences && !LiveContexts && !Owner.LiveCommandQueues;
+    NextFence = 0;
+    FenceCreationResult = S_OK;
     Good &=
         Core.pfnCreateCommandQueue(Device, &QueueArgs, Queue, RTQueue) == S_OK;
     D3D12DDIARG_CREATE_COMMAND_RECORDER_0040 RecorderArgs{};
@@ -280,6 +442,7 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Core.pfnDestroyCommandList(Device, List);
     Core.pfnDestroyCommandRecorder(Device, Recorder);
     Core.pfnDestroyCommandQueue(Device, Queue);
+    Good &= LiveFences == 0 && FenceValues[1] == 3;
     Good &= Owner.LiveCommandQueues == 0 && Owner.LiveCommandRecorders == 0 &&
             Owner.LiveCommandLists == 0 && Owner.LiveCommandPools == 0;
   } else
@@ -320,6 +483,8 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Good &= LastError == E_INVALIDARG && Owner.LiveRootSignatures == 1;
   Core.pfnDestroyRootSignature(Device, BufferRoot);
   Good &= Owner.LiveRootSignatures == 0;
+  Good &= testQueueWorkerFailure(Device, Core);
+  Good &= testQueueWorkerFailure(Device, Core, true);
   std::puts(Good ? "compiled DDI ownership PASS"
                  : "compiled DDI ownership FAIL");
   return Good;

@@ -545,25 +545,40 @@ HRESULT APIENTRY evict(D3D12DDI_HDEVICE Device, const D3D12DDIARG_EVICT *Args) {
 }
 } // namespace
 
-HRESULT getWarpBufferRange(WarpDeviceState *Owner, D3D12DDI_HRESOURCE Resource,
-                           UINT64 Offset, UINT64 Size, void *&Data) {
-  Data = nullptr;
-  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
-  if (!Owner || !Buffer || Buffer->Owner != Owner || !Buffer->Heap->Locked ||
-      !Buffer->Heap->Memory || Offset > Buffer->Desc.Width ||
-      Size > Buffer->Desc.Width - Offset)
-    return E_INVALIDARG;
-  Data = static_cast<unsigned char *>(Buffer->Heap->Memory) + Offset;
-  return S_OK;
+WarpBufferAccess::WarpBufferAccess(WarpDeviceState *Owner) : Owner(Owner) {
+  if (Owner)
+    AcquireSRWLockShared(&Owner->ResourceLock);
 }
 
-HRESULT getWarpBufferAddress(WarpDeviceState *Owner, UINT64 Address,
-                             void *&Data, UINT64 &Size, bool UnorderedAccess) {
+WarpBufferAccess::~WarpBufferAccess() {
+  if (Owner)
+    ReleaseSRWLockShared(&Owner->ResourceLock);
+}
+
+HRESULT WarpBufferAccess::range(D3D12DDI_HRESOURCE Resource, UINT64 Offset,
+                                UINT64 Size, void *&Data) {
+  Data = nullptr;
+  if (!Owner || !Resource.pDrvPrivate)
+    return E_INVALIDARG;
+  for (auto *Buffer = static_cast<ResourceState *>(Owner->ResourceList); Buffer;
+       Buffer = Buffer->Next) {
+    if (Buffer != Resource.pDrvPrivate)
+      continue;
+    if (!Buffer->Heap->Locked || !Buffer->Heap->Memory ||
+        Offset > Buffer->Desc.Width || Size > Buffer->Desc.Width - Offset)
+      return E_INVALIDARG;
+    Data = static_cast<unsigned char *>(Buffer->Heap->Memory) + Offset;
+    return S_OK;
+  }
+  return E_INVALIDARG;
+}
+
+HRESULT WarpBufferAccess::address(UINT64 Address, void *&Data, UINT64 &Size,
+                                  bool UnorderedAccess) {
   Data = nullptr;
   Size = 0;
   if (!Owner || !Address)
     return E_INVALIDARG;
-  AcquireSRWLockShared(&Owner->ResourceLock);
   for (auto *Buffer = static_cast<ResourceState *>(Owner->ResourceList); Buffer;
        Buffer = Buffer->Next) {
     UINT64 Base = reinterpret_cast<UINT64>(Buffer->Heap->Memory);
@@ -577,8 +592,19 @@ HRESULT getWarpBufferAddress(WarpDeviceState *Owner, UINT64 Address,
     Size = Buffer->Desc.Width - (Address - Base);
     break;
   }
-  ReleaseSRWLockShared(&Owner->ResourceLock);
   return Data ? S_OK : E_INVALIDARG;
+}
+
+HRESULT getWarpBufferRange(WarpDeviceState *Owner, D3D12DDI_HRESOURCE Resource,
+                           UINT64 Offset, UINT64 Size, void *&Data) {
+  WarpBufferAccess Access(Owner);
+  return Access.range(Resource, Offset, Size, Data);
+}
+
+HRESULT getWarpBufferAddress(WarpDeviceState *Owner, UINT64 Address,
+                             void *&Data, UINT64 &Size, bool UnorderedAccess) {
+  WarpBufferAccess Access(Owner);
+  return Access.address(Address, Data, Size, UnorderedAccess);
 }
 
 void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table) {
