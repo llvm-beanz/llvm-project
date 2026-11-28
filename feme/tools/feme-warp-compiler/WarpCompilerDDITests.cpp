@@ -532,6 +532,15 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Good &= LastError == E_INVALIDARG && Owner.LiveRootSignatures == 1;
   Core.pfnDestroyRootSignature(Device, BufferRoot);
   Good &= Owner.LiveRootSignatures == 0;
+  Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_CBV;
+  Storage CBVRootStorage(
+      Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs));
+  D3D12DDI_HROOTSIGNATURE CBVRoot{CBVRootStorage.data()};
+  Good &= Core.pfnCreateRootSignature(Device, &RootArgs, CBVRoot) == S_OK;
+  Core.pfnDestroyRootSignature(Device, CBVRoot);
+  Parameters[0].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_CBV;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
+  Good &= Owner.LiveRootSignatures == 0;
   Good &= testQueueWorkerFailure(Device, Core);
   Good &= testQueueWorkerFailure(Device, Core, true);
   std::puts(Good ? "compiled DDI ownership PASS"

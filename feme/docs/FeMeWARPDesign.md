@@ -17,8 +17,8 @@ KMD-backed buffers, typed queues/lists, asynchronous kernel-ordered compute
 and copies, monitored fences, completed readback and pending teardown.
 The W1 v1 inventory records the completed internal headless subset. W2 now
 adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
-decreasing monitored fences and dispatch-only indirect commands; inventory
-v3 explicitly marks W2 in progress.
+decreasing monitored fences, dispatch-only indirect commands and multiple
+root CBVs; inventory v4 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
 
@@ -1335,7 +1335,9 @@ now provides portable, owned 1.0/1.1 binding plans and a non-dispatch
 inspection path. It preserves serialized promises and resolves table
 offsets, but does not implement the runtime mapping below, enforce every
 SDK semantic rule or replace use-inferred cbuffer promotion. Explicit
-root-driven CPU binding and descriptor preparation remain pending.
+root-driven tables, inline constants and general descriptor preparation
+remain pending. Owned raw SRV/UAV and CBV roots now map to bounded CPU
+descriptors; the owned compiler disables inferred single-CBV promotion.
 
 - Root constants become a submission-local root-constant byte block.
 - Root CBV/SRV/UAV descriptors become bounds-checked `FemeDescriptor` records.
@@ -1379,9 +1381,9 @@ runtime from creating the problem itself.
 FeMe's existing root-constant promotion is not a general root-signature
 mapping: it infers one binding from shader use rather than accepting a D3D
 root layout. W2 must supply an explicit binding map for multiple constants,
-CBVs, tables, and static samplers. General CBV handling remains compiler work,
-not only frontend translation; the first shader can use raw/structured buffers
-and builtins without waiting for that completion.
+CBVs, tables, and static samplers. Finite descriptor-backed CBV rows now use
+the shared bounded lowering, including independent 16/32/64-bit components.
+Inline constants and complete descriptor/table mappings remain separate work.
 
 ## Memory, Resources, and Residency
 
@@ -1719,7 +1721,14 @@ recorded maximum, padded strides preserve argument boundaries, and dimensions
 are validated before CPU dispatch. Applications keep signatures and buffers
 alive through submitted use; root-changing/draw signatures are not implemented.
 Complete descriptor/view identity and the requirements below remain open.
-See the implementation log's owned W2 progress and v3 inventory.
+Root CBVs require 256-byte-aligned GPUVAs and use the same live allocation
+bounds as other roots. Each recorded command preserves its root addresses;
+data is read at execution. Unused root parameters may remain unset or carry
+valid bindings absent from shader reflection. Required shader ranges still
+must be bound. Native tests cover one/multiple CBVs, short descriptors and
+concurrent pipelines; stock-runtime gates cover DXBC/DXIL, dynamic rows,
+register-space separation, post-record writes, root snapshots, guards and
+held cross-queue execution. See the implementation log and v4 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

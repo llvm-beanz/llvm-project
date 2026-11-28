@@ -24,15 +24,15 @@ an owned stock-runtime device and executes owned DXBC/DXIL compute, buffer
 copies/readback, and kernel-ordered asynchronous submissions through the
 existing WARP kernel services. Monitored fences, replay, retained code and
 pending teardown are tested. W2 adds placed buffers, bounded aliases and
-indirect compute dispatch. The generated v3 inventory is an internal
-headless subset, not complete graphics, shader-model or feature-level
+indirect compute dispatch and multiple root CBVs. The generated v4 inventory
+is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
 | Milestone | Status | Summary |
 |---|---|---|
 | ~~W0 — Integration feasibility~~ | **Complete** | Supported 0072 boundary, genuine FeMe initialization shaders/pipelines, owned device/build provenance, application KMD buffer lifecycle, and corpus audit are proven. |
 | ~~W1 — Device and headless compute~~ | **Complete** | Owned queues/lists/PSOs, grouped DXBC/DXIL dispatch, raw root buffers, copy/readback, monitored fences, pending teardown, exact exports and DXC/Vulkan coexistence; versioned internal capability inventory. |
-| W2 — Binding, resources, synchronization | **In progress** | Committed/placed buffers, raw roots, bounded aliases, buffer copies/alias barriers, decreasing monitored fences and dispatch-only indirect execution are proven. Complete roots/descriptors/views, images, resource classes, barriers, queries and other indirect signatures remain. |
+| W2 — Binding, resources, synchronization | **In progress** | Committed/placed buffers, raw roots and CBVs, bounded aliases, buffer copies/alias barriers, decreasing monitored fences and dispatch-only indirect execution are proven. Complete roots/descriptors/views, images, resource classes, barriers, queries and other indirect signatures remain. |
 | W3 — Conventional graphics | **Open** | Portable graphics-state and draw plans exist; no D3D12 graphics execution or end-to-end rendering. |
 | W4 — FL 12_2 advanced graphics/resources | **Open** | Portable capability and mesh-dispatch plans exist; no advanced-feature implementation or conformance evidence. |
 | W5 — DXR 1.1 | **Open** | Portable acceleration-structure planning exists; no BVH/ray execution, DXR objects, or ray conformance evidence. |
@@ -64,7 +64,7 @@ W2 remaining work is tracked without deeper milestone nesting:
 
 | Step | Current boundary and remaining work |
 |---|---|
-| W2(a) | Raw SRV/UAV roots execute; constants, multiple CBVs, general tables/static samplers and complete shader/root compatibility remain. |
+| W2(a) | Raw SRV/UAV roots and multiple CBVs execute, including dynamic rows and distinct register spaces; inline constants, general tables/static samplers and complete shader/root compatibility remain. |
 | W2(b) | Live-owner GPUVA lookup and alias bounds execute; descriptor creation/copies/preparation, volatility, null/OOB views, non-uniform ranges and complete typed/counter/atomic operations remain. |
 | W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Images/formats/views/footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, predication, indirect root changes/draws and general removal wakeups remain. |

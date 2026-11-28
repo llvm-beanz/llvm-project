@@ -40,7 +40,7 @@ struct FeMeWarpVertexPipelineDesc {
   std::uint32_t SampleMask = 0xffffffffu;
 };
 
-/// Borrowed buffer storage; namespace 1 is SRV and 2 is UAV.
+/// Borrowed buffer storage; namespaces 1/2/3 are SRV/UAV/CBV.
 /// Kind 0 is raw and kind 1 is structured. Storage must outlive dispatch.
 struct FeMeWarpBufferBinding {
   void *Data = nullptr;

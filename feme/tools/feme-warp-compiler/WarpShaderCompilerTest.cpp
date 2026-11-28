@@ -12,6 +12,7 @@
 #include "llvm/Object/DXContainer.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -20,7 +21,8 @@
 bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens);
 
 static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
-                         bool DXIL = false) {
+                         bool DXIL = false, bool CBV = false,
+                         bool SingleCBV = false) {
   void *Shader = nullptr, *Pipeline = nullptr;
   FeMeWarpCompiledShaderInfo Info;
   auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
@@ -32,14 +34,29 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   std::vector<std::uint32_t> Words(196, 0x5a5a5a5a);
   for (unsigned I = 0; I != 180; ++I)
     Words[I] = I;
-  FeMeWarpBufferBinding Buffer;
+  std::array<FeMeWarpBufferBinding, 4> Buffers{};
+  auto &Buffer = Buffers[0];
   Buffer.Data = Words.data();
   Buffer.SizeInBytes = 180 * sizeof(Words[0]);
+  Buffer.Register = CBV ? 3 : 0;
+  std::array<std::uint32_t, 8> ConstantsA{7, 0, 0, 0, 13, 0, 0, 0};
+  std::array<std::uint32_t, 8> ConstantsB{16, 0, 0, 0, 10, 0, 0, 0};
+  if (SingleCBV)
+    ConstantsA[0] = ConstantsA[4] = 23;
+  if (CBV) {
+    for (unsigned I = 1; I < Buffers.size(); ++I) {
+      Buffers[I].Data = I == 2 ? ConstantsB.data() : ConstantsA.data();
+      Buffers[I].SizeInBytes = sizeof(ConstantsA);
+      Buffers[I].Namespace = 3;
+      Buffers[I].Register = I == 3 ? 9 : 3;
+      Buffers[I].Space = I == 2 ? 7 : 0;
+    }
+  }
   FeMeWarpDispatchDesc Desc;
   Desc.GroupCount[0] = 3;
   Desc.GroupCount[1] = 2;
-  Desc.BufferCount = 1;
-  Desc.Buffers = &Buffer;
+  Desc.BufferCount = CBV ? 4 : 1;
+  Desc.Buffers = Buffers.data();
   bool Good = true;
   auto Bad = Desc;
   Bad.Version = 2;
@@ -55,7 +72,21 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) == 0;
   for (unsigned I = 0; I != 180; ++I)
     Good &= Words[I] == I;
+  if (CBV) {
+    Bad = Desc;
+    Bad.BufferCount = SingleCBV ? 1 : 2;
+    Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+    Buffers[1].Kind = 1;
+    Buffers[1].Stride = 16;
+    Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+    Buffers[1].Kind = Buffers[1].Stride = 0;
+    Buffers[3].Register = 3;
+    Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+    Buffers[3].Register = 9;
+  }
   for (unsigned Repeat = 1; Repeat != 4 && Good; ++Repeat) {
+    ConstantsA[0] = (SingleCBV ? 23 : 7) + (Repeat - 1) * 5;
+    ConstantsA[4] = (SingleCBV ? 23 : 13) + (Repeat - 1) * 5;
     Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) == 0;
     for (unsigned Z = 0; Z != 2; ++Z)
       for (unsigned Y = 0; Y != 6; ++Y)
@@ -66,10 +97,28 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
           unsigned PeerIndex =
               ((Peer / 15) * 6 + (Y / 3) * 3 + (Peer / 5) % 3) * 15 +
               (X / 5) * 5 + Peer % 5;
-          Good &= Words[Index] == Index + Repeat * (PeerIndex + 23);
+          unsigned Expected = Index + Repeat * (PeerIndex + 23);
+          if (CBV)
+            Expected += 5 * Repeat * (Repeat - 1) / 2;
+          Good &= Words[Index] == Expected;
         }
     for (unsigned I = 180; I != Words.size(); ++I)
       Good &= Words[I] == 0x5a5a5a5a;
+  }
+  if (CBV && Good) {
+    auto Previous = Words;
+    Buffers[SingleCBV ? 1 : 2].SizeInBytes = 16;
+    Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) == 0;
+    for (unsigned I = 0; I < 180; ++I) {
+      unsigned X = I % 15, Y = I / 15 % 6, Z = I / 90;
+      unsigned Peer = (X % 5 + 5 * (Y % 3 + 3 * Z) + 1) % 30;
+      unsigned PeerIndex = X / 5 * 5 + Peer % 5 +
+                           15 * (Y / 3 * 3 + Peer / 5 % 3 + 6 * (Peer / 15));
+      unsigned Bias = X % 2 ? (SingleCBV ? 0 : 23) : 33;
+      Good &= Words[I] == Previous[I] + PeerIndex + Bias;
+    }
+    for (unsigned I = 180; I < Words.size(); ++I)
+      Good &= Words[I] == Previous[I];
   }
   FeMeWarpDestroyComputePipeline(Pipeline);
   return Good;
@@ -124,10 +173,16 @@ int main(int Argc, char **Argv) {
                     std::strcmp(Argv[2], "--dxil-ddi") == 0))
     return testWarpCompilerDDIs(Tokens) ? 0 : 1;
   if (Argc == 3 && (std::strcmp(Argv[2], "--dispatch") == 0 ||
-                    std::strcmp(Argv[2], "--dxil-dispatch") == 0)) {
+                    std::strcmp(Argv[2], "--dxil-dispatch") == 0 ||
+                    std::strcmp(Argv[2], "--dxil-cbv-dispatch") == 0 ||
+                    std::strcmp(Argv[2], "--dxil-single-cbv-dispatch") == 0)) {
     bool Good[2]{};
-    std::thread First([&] { Good[0] = testDispatch(Tokens, DXIL); });
-    std::thread Second([&] { Good[1] = testDispatch(Tokens, DXIL); });
+    bool SingleCBV = std::strcmp(Argv[2], "--dxil-single-cbv-dispatch") == 0;
+    bool CBV = SingleCBV || std::strcmp(Argv[2], "--dxil-cbv-dispatch") == 0;
+    std::thread First(
+        [&] { Good[0] = testDispatch(Tokens, DXIL, CBV, SingleCBV); });
+    std::thread Second(
+        [&] { Good[1] = testDispatch(Tokens, DXIL, CBV, SingleCBV); });
     First.join();
     Second.join();
     bool Passed = Good[0] && Good[1];

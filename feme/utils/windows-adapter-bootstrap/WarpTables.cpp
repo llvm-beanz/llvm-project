@@ -231,7 +231,8 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
   for (UINT I = 0; I < Root.NumParameters; ++I) {
     const auto &Parameter = Root.pRootParameters[I];
     if ((Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_SRV &&
-         Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_UAV) ||
+         Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_UAV &&
+         Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_CBV) ||
         Parameter.ShaderVisibility != D3D12DDI_SHADER_VISIBILITY_ALL)
       return E_NOTIMPL;
     auto Flags = Parameter.Descriptor.Flags;
@@ -280,7 +281,9 @@ HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
   for (UINT I = 0; I < State->Count; ++I) {
     const auto &Parameter = Args->pRootSignature_1_1->pRootParameters[I];
     State->Parameters[I] = {
-        Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_SRV ? 1u : 2u,
+        Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_SRV   ? 1u
+        : Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_UAV ? 2u
+                                                                      : 3u,
         Parameter.Descriptor.RegisterSpace,
         Parameter.Descriptor.ShaderRegister};
   }
@@ -1308,7 +1311,7 @@ void setRootBuffer(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT64 Address,
   UINT64 Size = 0;
   HRESULT Result = feme::probe::getWarpBufferAddress(
       State->Owner, Address, Data, Size, Namespace == 2);
-  if (Index >= State->RootCount || Address % 16 ||
+  if (Index >= State->RootCount || Address % (Namespace == 3 ? 256 : 16) ||
       State->RootParameters[Index].Namespace != Namespace || FAILED(Result)) {
     reportObjectError(List, E_INVALIDARG);
     return;
@@ -1326,6 +1329,11 @@ void APIENTRY setRootSRV(D3D12DDI_HCOMMANDLIST List, UINT Index,
   setRootBuffer(List, Index, Address, 1);
 }
 
+void APIENTRY setRootCBV(D3D12DDI_HCOMMANDLIST List, UINT Index,
+                         D3D12DDI_GPU_VIRTUAL_ADDRESS Address) {
+  setRootBuffer(List, Index, Address, 3);
+}
+
 HRESULT prepareDispatch(CommandList *State,
                         std::unique_ptr<RecordedCommand> &Command) {
   if (!State->Pipeline)
@@ -1338,10 +1346,11 @@ HRESULT prepareDispatch(CommandList *State,
       FeMeWarpRetainComputePipeline(State->Pipeline, &Command->Pipeline);
   if (FAILED(Result))
     return Result;
-  Command->Dispatch.BufferCount = State->RootCount;
   Command->Dispatch.Buffers = Command->Buffers.data();
   for (UINT I = 0; I < State->RootCount; ++I) {
-    auto &Buffer = Command->Buffers[I];
+    if (!State->RootAddresses[I])
+      continue;
+    auto &Buffer = Command->Buffers[Command->Dispatch.BufferCount++];
     Result = feme::probe::getWarpBufferAddress(
         State->Owner, State->RootAddresses[I], Buffer.Data, Buffer.SizeInBytes,
         State->RootParameters[I].Namespace == 2);
@@ -1994,6 +2003,7 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnSetComputeRootSignature = setComputeRoot;
     Table.pfnSetComputeRootUnorderedAccessView = setRootUAV;
     Table.pfnSetComputeRootShaderResourceView = setRootSRV;
+    Table.pfnSetComputeRootConstantBufferView = setRootCBV;
     Table.pfnDispatch = dispatch;
     Table.pfnExecuteIndirect = executeIndirect;
     Table.pfnCopyBufferRegion = copyBuffer;

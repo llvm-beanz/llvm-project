@@ -16,12 +16,22 @@
 // RUN: feme-warp-compiler-test %t.wave4.dxil --dxil-dispatch | FileCheck %s --check-prefix=GROUPED
 // RUN: %dxil_dxc -T cs_6_6 -E main -DBUFFER=1 -DWAVE_SIZE=8 -Fo %t.wave8.dxil %s
 // RUN: feme-warp-compiler-test %t.wave8.dxil --dxil-wave-reject 2>&1 | FileCheck %s --check-prefix=BAD
+// RUN: %dxil_dxc -T cs_6_0 -E main -DBUFFER=1 -DCBV=1 -DROOT_REGISTER=u3 -Fo %t.cbv.dxil %s
+// RUN: feme-warp-compiler-test %t.cbv.dxil --dxil-cbv-dispatch | FileCheck %s --check-prefix=GROUPED
+// RUN: %dxil_dxc -T cs_6_0 -E main -DBUFFER=1 -DCBV=1 -DSINGLE_CBV=1 -DROOT_REGISTER=u3 -Fo %t.single.cbv.dxil %s
+// RUN: feme-warp-compiler-test %t.single.cbv.dxil --dxil-single-cbv-dispatch | FileCheck %s --check-prefix=GROUPED
 
 #ifdef BUFFER
 #ifndef ROOT_REGISTER
 #define ROOT_REGISTER u0
 #endif
 RWByteAddressBuffer output : register(ROOT_REGISTER);
+#ifdef CBV
+cbuffer A : register(b3) { uint valuesA[2]; };
+#ifndef SINGLE_CBV
+cbuffer B : register(b3, space7) { uint valuesB[2]; };
+#endif
+#endif
 groupshared uint sharedValues[30];
 #ifdef WAVE_SIZE
 [WaveSize(WAVE_SIZE)]
@@ -33,7 +43,14 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
   sharedValues[slot] = index;
   GroupMemoryBarrierWithGroupSync();
   uint peer = sharedValues[slot == 29 ? 0 : slot + 1];
-  output.Store(index * 4, output.Load(index * 4) + peer + 23);
+  uint bias = 23;
+#ifdef CBV
+  bias = valuesA[id.x % 2];
+#ifndef SINGLE_CBV
+  bias += valuesB[id.x % 2];
+#endif
+#endif
+  output.Store(index * 4, output.Load(index * 4) + peer + bias);
 }
 #else
 [numthreads(1, 1, 1)]

@@ -60,6 +60,7 @@ std::int32_t compileStage(feme::Context &Context, feme::Module Module,
   feme::cpu::StageCompileOptions Options;
   Options.Stage = Stage;
   Options.WaveSize = 4;
+  Options.PromoteInferredRootConstants = false;
   auto Result =
       feme::cpu::CompiledStage::create(Context, std::move(Module), Options);
   if (!Result)
@@ -325,17 +326,38 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
 
   std::array<feme::cpu::FemeDescriptor, 64> Descriptors{};
   std::array<feme::cpu::BoundResourceBinding, 64> Bindings{};
+  std::uint32_t BindingCount = 0;
   for (std::uint32_t I = 0; I < Desc->BufferCount; ++I) {
     const auto &Buffer = Desc->Buffers[I];
     if (!Buffer.Data || !Buffer.SizeInBytes || Buffer.Kind > 1 ||
-        (Buffer.Namespace != 1 && Buffer.Namespace != 2) ||
+        (Buffer.Namespace < 1 || Buffer.Namespace > 3) ||
+        (Buffer.Namespace == 3 && Buffer.Kind != 0) ||
         (Buffer.Kind == 0 && Buffer.Stride) ||
         (Buffer.Kind == 1 && (!Buffer.Stride || Buffer.Stride % 4 ||
                               Buffer.SizeInBytes % Buffer.Stride))) {
       llvm::errs() << "FeMe WARP dispatch: invalid buffer binding\n";
       return InvalidArgument;
     }
-    auto &Descriptor = Descriptors[I];
+    for (std::uint32_t J = 0; J < I; ++J) {
+      const auto &Previous = Desc->Buffers[J];
+      if (Previous.Namespace == Buffer.Namespace &&
+          Previous.Space == Buffer.Space &&
+          Previous.Register == Buffer.Register) {
+        llvm::errs() << "FeMe WARP dispatch: duplicate buffer binding\n";
+        return InvalidArgument;
+      }
+    }
+    bool Required = false;
+    for (const auto &Range : Info.BoundRanges)
+      Required |=
+          Range.Class == feme::cpu::BoundResourceClass::Buffer &&
+          Range.Namespace == static_cast<feme::cpu::BoundResourceNamespace>(
+                                 Buffer.Namespace) &&
+          Range.Space == Buffer.Space && Range.BaseRegister == Buffer.Register;
+    // Root signatures may contain parameters unused by this shader.
+    if (!Required)
+      continue;
+    auto &Descriptor = Descriptors[BindingCount];
     Descriptor.Data = Buffer.Data;
     Descriptor.SizeInBytes = Buffer.SizeInBytes;
     Descriptor.Kind = static_cast<std::uint32_t>(
@@ -344,14 +366,14 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
     Descriptor.Stride = Buffer.Stride;
     Descriptor.Flags =
         Buffer.Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
-    Bindings[I] = {
+    Bindings[BindingCount++] = {
         Buffer.Space,
         Buffer.Register,
         {&Descriptor, 1},
         static_cast<feme::cpu::BoundResourceNamespace>(Buffer.Namespace)};
   }
   llvm::ArrayRef<feme::cpu::BoundResourceBinding> Bound(Bindings.data(),
-                                                        Desc->BufferCount);
+                                                        BindingCount);
   if (auto Error = feme::cpu::validateBoundResourceBindings(Info, Bound))
     return report(std::move(Error));
   for (const auto &Range : Info.BoundRanges) {

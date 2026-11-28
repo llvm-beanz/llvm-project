@@ -729,6 +729,32 @@ Full assertions-enabled, cached, PCH-disabled `check-feme`: **4403 passed,
 Vulkan identity. This is a compiler prerequisite, not yet owned D3D12 root-CBV
 or complete W2 acceptance.
 
+#### Owned root-CBV binding
+
+The stock-runtime frontend now accepts root CBVs alongside SRV/UAV roots,
+with 256-byte GPUVA alignment and live logical-allocation bounds. The owned
+compiler disables single-CBV inline inference. Recorded commands retain root
+addresses, not constant-buffer contents; submission reads current data after
+kernel readiness. Unused roots may remain unset, and valid extra root bindings
+are filtered from shader materialization. Missing required bindings, duplicate
+bindings and non-raw CBVs are still explicit errors.
+
+Native execution covers one and multiple CBVs, different register spaces,
+overlapping b/u register numbers, dynamic rows, short descriptors, updates
+between executions and concurrent pipelines. Four stock-runtime gates cover
+owned legacy SM 5.1, original DXC DXIL, independent system WARP and held
+cross-queue execution/pending teardown. Two upload CBVs use 256-byte offsets,
+poisoned alternate storage and post-record data writes; root changes after
+dispatch must not alter the recorded bindings. An unused b9 root is exercised
+both unset and bound. Every output and guard word is checked.
+
+Validation: **4403** full-suite passes, **65/65** callback passes and **55/55**
+stock-runtime passes. Generated inventory **v4** contains nineteen OS gates,
+the distinct CBV alignment and existing native fixtures; complete feature
+level remains null. Inline constants, tables/static samplers, complete
+shader/root compatibility and the other W2 resource/synchronization work
+remain open.
+
 #### Owned W2 buffer and indirect progress (2026-11-27)
 
 W2 is **not closed**. Four tested implementation steps extend the owned

@@ -26,11 +26,12 @@
     "root_buffer_descriptors": 32,
     "root_dwords": 64,
     "root_gpuva_alignment": 16,
+    "root_cbv_gpuva_alignment": 256,
     "buffer_allocation_alignment": 65536,
     "max_buffer_allocation_bytes": 4294901760,
     "dispatch_groups_per_dimension": 65535
   },
-  "binding_scope": ["root raw SRV", "root raw UAV", "all-stage visibility"],
+  "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "all-stage visibility"],
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
@@ -38,6 +39,7 @@
   "synchronization": "runtime monitored fences and per-queue kernel Ready/Done gates",
   "normative_requirements": [
     "D3D12_MAX_ROOT_COST",
+    "D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT",
     "D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION",
     "D3D12DDI_ROOT_SIGNATURE_VERSION_1_1",
     "D3D12DDI_SHADER_CAPS_0012",
@@ -54,6 +56,7 @@
     "Tools/warp-compiler-vertex.dxasm",
     "Tools/warp-compiler-dispatch.dxasm",
     "Tools/warp-compiler-dxil.hlsl",
+    "Tools/feme-run/cbv-bounds.ll",
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
@@ -69,6 +72,10 @@
     "os-routed-warp-compiler-owned-ordered-indirect-commands",
     "os-routed-warp-compiler-owned-dxil-indirect-commands",
     "os-routed-warp-compiler-reference-indirect-commands",
+    "os-routed-warp-compiler-owned-cbv-commands",
+    "os-routed-warp-compiler-owned-ordered-cbv-commands",
+    "os-routed-warp-compiler-owned-dxil-cbv-commands",
+    "os-routed-warp-compiler-reference-cbv-commands",
     "os-routed-warp-compiler-owned-coexistence",
     "os-routed-warp-compiler-reference-buffer-commands",
     "os-routed-warp-compiler-reference-placed-buffers"
