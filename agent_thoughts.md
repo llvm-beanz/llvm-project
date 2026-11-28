@@ -137485,3 +137485,34 @@ before full/coexistence runs. No system binaries or drivers were modified.
 W2 is not closed. Continue with component mapping and remaining typed/
 counter/atomic operations, then image/sampler preparation, complete roots/
 resources, residency, barriers, queries and indirect/removal behavior.
+
+# W2 progress: shared structured-UAV counter execution
+
+ec7ff4ff8a8a implements the shared prerequisite rather than faking Windows
+counter support. Raise opcode 70 to llvm.dx.resource.updatecounter, then
+lower it to an explicitly atomic, trailing-mask canonical call. Reuse the
+existing descriptor Counter pointer and HAS_COUNTER flag; neither the runtime
+descriptor layout nor artifact ABI changes. Increment returns the old value;
+decrement returns the new value. Microsoft's public DecrementCounter contract
+confirms the latter. Unsigned 32-bit atomics make wraparound defined.
+
+Canonical atomic classification is important even for uniform operands:
+SIMD must execute once per active lane, not once per wave. Tests cover the
+four emitted lane calls, raising/bound normalization/lowering, rejected
+delta/read-only shapes, canonical matching/memory effects, guarded runtime
+accesses, exact return values and 512 concurrent updates with unique indices.
+The initial FileCheck ordering failure was a fixture assumption about where
+rewritten functions appear, not a compiler/runtime failure.
+
+Final full-suite evidence: 4408 passed, 15 skipped, 10 unsupported; refreshed
+stock-runtime/coexistence 123/123, with FeMe ICD identity checked in the launch
+shell. Advertisements, WARP inventory v11 and bridge 2 remain unchanged.
+Historical Windows CTS executable locations are absent, so no new CTS result
+is claimed; the report and both inventories record the actual regression
+scope. New LLVM fixtures were normalized to LF before whitespace checks.
+
+Next materialize counters through owned UAV descriptors and a deliberately
+versioned compiler bridge, with exact four-byte resource bounds, 4096-byte
+counter-offset alignment, UAV ownership, copies, execution-time refresh and
+DXBC/DXIL/system-WARP/pending-teardown controls. Then continue the remaining
+W2 format/image/root/resource/synchronization work; this is not W2 closeout.
