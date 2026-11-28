@@ -138076,3 +138076,44 @@ Continue with owned sampler heaps and static sampler state, texture UAV
 admission/stores, and the remaining dimensional/format execution matrix.
 General roots/heaps/volatility, resource classes/residency and complete
 barriers/queries/indirect/removal contracts remain. W2 is still open.
+
+# W2 owned sampler heaps and scalar static sampler state
+
+Commit 925bede873c4 materializes independent resource/sampler heaps, typed
+descriptor construction/copies, canonical sampler validation and copied
+static state. Native roots preserve sampler visibility and check collisions
+against table/static bindings. Compute recordings copy only ALL-visible static
+samplers; submission arrays keep them separate from buffers/images. Changing
+heaps invalidates tables; reordering the same pair preserves their state.
+
+The first native control exposed stock D3D12 zeroing unused anisotropy even
+when the public descriptor supplied one. Native normalization now handles
+inactive anisotropy/comparison before canonical validation; active values
+still fail when invalid. Static sampler-array declarations were rejected by
+both stock-runtime paths before native shader callbacks. Separate scalar
+declarations plus divergent selection are the valid static fixture; dynamic
+fixtures retain indexed sampler arrays. Both observations are recorded in
+feme/.instructions.md rather than worked around or mistaken for compiler bugs.
+
+Eight new owned/reference gates execute point/linear filtering, clamp/custom
+border and opaque-black static state, live CPU-source descriptor updates,
+selected mip/array views, null images, exact guards, unchanged upload storage,
+replay and held list/allocator/source-heap release. Native constructor/root
+negatives cover invalid state, foreign ownership, typed copies, heap limits,
+static/table collisions, visibility, flags and unsupported integer-border
+root versions while preserving descriptor contents on failure.
+
+Sampler focused controls pass 9/9, including dynamic/static JIT/AOT fixtures.
+Full FeMe passes 4429, 15 skipped and 10 unsupported; callbacks 65/65;
+stock-runtime/coexistence 387/387. FeMe ICD identity was confirmed and OS tests
+followed shared DLL relinking. Inventory v23 was parsed: 351 unique existing
+required OS gates, 15 native fixtures, bridge5/artifact12, complete FL null.
+No Vulkan advertisement or CTS claim changes.
+
+Next admit owned texture UAV resources and copied native UAV views, reusing
+selected geometry and independent image preparation. Add original-DXIL
+owned/reference stores/loads, subresource guards, replay/nulls and held lifetime.
+Reuse buffer integer-store saturation for Direct3D image stores without changing
+Vulkan behavior. Broader dimensions/formats/sampling, general resources/roots/
+heaps, residency and complete barriers/queries/indirect/removal work remain.
+W2 is not complete.
