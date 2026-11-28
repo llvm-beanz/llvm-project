@@ -15,8 +15,11 @@ application-local prototype now closes W0 and W1 with real stock-runtime
 device creation, owned initialization/application shaders and pipelines,
 KMD-backed buffers, typed queues/lists, asynchronous kernel-ordered compute
 and copies, monitored fences, completed readback and pending teardown.
-Generated capability inventory v1 records the internal headless subset and
-named evidence. General bindings/resources, graphics, ray traversal,
+The W1 v1 inventory records the completed internal headless subset. W2 now
+adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
+decreasing monitored fences and dispatch-only indirect commands; inventory
+v3 explicitly marks W2 in progress.
+General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
 
 This design defines a full-featured Direct3D 12 software adapter using FeMe's
@@ -1696,6 +1699,27 @@ the implementation log maps each to owned behavioral evidence.
   It is never distributed as the completed adapter.
 
 ### W2: Complete resource, binding, and synchronization model
+
+Current owned progress covers committed/placed buffers and whole-buffer alias
+ordering, not completion of this milestone. Placed buffers reuse an existing
+WARP-backed implicit heap buffer with checked offset/alignment/extent and
+balanced lifetimes. Public alias barriers arrive through the `0022` ranged
+DDI and alias BEGIN/END flags, not its deprecated predecessor's alias union.
+CPU ordering uses memory fences without introducing a WARP packet decoder.
+GPUVA-only roots use the largest matching live logical alias extent and
+exclude implicit heap padding; resource-handle ranges remain individually
+bounded. Submitted root bindings refresh their current live alias bounds at
+execution without changing the recorded GPUVA.
+
+Dispatch-only indirect signatures own their validated stride; recorded work
+retains the pipeline/root snapshot independently of the signature's storage.
+Arguments and optional counts are read through checked resource-handle ranges
+at execution, after preceding copies and kernel waits. Counts clamp to the
+recorded maximum, padded strides preserve argument boundaries, and dimensions
+are validated before CPU dispatch. Applications keep signatures and buffers
+alive through submitted use; root-changing/draw signatures are not implemented.
+Complete descriptor/view identity and the requirements below remain open.
+See the implementation log's owned W2 progress and v3 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

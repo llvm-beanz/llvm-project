@@ -708,6 +708,100 @@ compiler prerequisites, not work that a DDI wrapper can hide.
 | W2(c) | Committed/placed/reserved resources, residency/budgets, typeless view compatibility, planes/subresources, texture copy footprints and shared image/sampler preparation. Test D3D row/placement alignment separately from internal storage; exercise BC, sRGB, integer, depth/stencil and multisample operations individually. |
 | W2(d) | Queue-ordered copies/dispatch/indirect commands, legacy transitions including promotion/decay and split/alias/UAV barriers, queries/predication, and host/queue fence events. Preserve the dependency model needed by enhanced barriers. Test cross-queue progress, decreasing fence values, replay, timeout/removal wakeup, and indirect argument overflow. |
 
+#### Owned W2 buffer and indirect progress (2026-11-27)
+
+W2 is **not closed**. Four tested implementation steps extend the owned
+stock-runtime frontend without claiming the remaining resource/binding
+contract:
+
+- `f2533541132f`: placed buffers reuse the existing implicit heap buffer via
+  `ReuseBufferGPUVA`, without another KMD allocation. Creation validates live
+  ownership, 64 KiB alignment, rounded allocation extent, foreign/stale handles
+  and duplicate destination handles. Resource ranges/VA include the placement
+  offset; destruction of a heap with live placements is rejected. Independent
+  placed resources retain the backing allocation and bytes.
+- `d1c6e9d32b4b`: whole-buffer alias barriers use the actual `0022` ranged
+  DDI, including its alias BEGIN/END flags and all-subresource/all-byte
+  sentinels. Ordinary split transitions and finite ranged/atomic-copy barriers
+  remain unsupported. Public monitored-fence tests now decrease values to
+  zero, including while a future queue wait is held, before releasing that
+  wait and observing the correctly ordered final signal.
+- `86a0a0aedf76`: submitted dispatches preserve recorded GPUVAs but refresh
+  their live alias extents at execution. Creating/removing an overlapping
+  resource cannot freeze an obsolete larger extent into a valid surviving
+  root binding; native alias lifetime cases cover both growth and shrinkage.
+- `a8f70bba88d5`: dispatch-only command signatures validate stride, node,
+  argument type and live ownership. Recorded indirect work retains its
+  pipeline and root snapshot, but resolves bounded argument/count buffers
+  after preceding commands and kernel waits. Counts clamp to the maximum;
+  zero counts do no work. Each dispatch reads its padded argument record and
+  checks dimensions before invoking the shared CPU executor.
+
+The selected 0072 command table does not carry the obsolete
+`D3D12DDI_RESOURCE_ALIASING_BARRIER` union. The initial attempt to use that
+public-style shape failed compilation; inspection of the SDK and authorized
+runtime conversion established the versioned ranged representation. No
+reference implementation or executable fixture was copied.
+
+Root GPUVAs cannot identify a particular overlapping resource. Address lookup
+therefore selects the largest matching live logical buffer extent, excluding
+the implicit backing allocation; a small alias cannot shadow a larger valid
+binding. Resource-handle copy/view ranges remain individually bounded.
+Execution refreshes binding bounds from the current live aliases while
+preserving the recorded GPUVA. This is allocation-safe GPUVA handling, not a claim
+that GPUVA-only roots recover the application's original resource identity.
+
+`os-routed-warp-compiler-owned-placed-buffers` and the independent
+`os-routed-warp-compiler-reference-placed-buffers` create a three-page upload
+heap, two distinct 4097-byte placements and an overlapping alias. Alias writes
+must survive resource creation/destruction and appear through the original
+placement; GPUVAs must include offsets. A direct list records explicit/global
+alias barriers and two bounded copies into readback, followed by a real fence
+completion and every-byte scalar verification. The audit requires three
+application KMD heaps with balanced teardown and exactly two owned copies.
+
+Native `warp-heap-placement` additionally checks malformed/rounded bounds,
+foreign and stale handles, double creation, per-resource versus GPUVA alias
+bounds, and rejected premature heap destruction. Native compiler/DDI tests
+check a global ranged-alias barrier and invalid resource handles. These are
+owned execution/resource tests, not portable plan-only evidence.
+
+Four additional indirect gates cover owned DXBC, original DXC DXIL, independent
+system WARP and a held cross-queue wait/pending teardown. They reuse the
+original (5,3,2)-thread groupshared shader and every-word scalar/readback oracle.
+An upload written after recording is copied into a default argument buffer
+before indirect execution. Tests use a nonzero argument offset, a 16-byte stride,
+an optional count at a distinct offset, clamping 99 to two records, a zero
+count, no-count execution, a skipped invalid second record and output guards.
+The first reference run correctly rejected releasing the command signature
+before execution; the corrected application retains it through completion.
+Native DDI cases reject duplicate creation, foreign/stale signatures, invalid
+stride/root associations, unsupported draw signatures and invalid argument
+resources without dereferencing foreign handles.
+
+Generated inventory **v3**, `internal-headless-w2-in-progress`, records placed
+buffers, GPUVA alias bounds, whole-buffer alias barriers and dispatch-only
+indirect execution, with fifteen registered OS evidence gates and the callback
+placement fixture. Version 2 introduced the buffer/alias subset; v3 adds four
+indirect gates. The compiler bridge remains ABI version 1 and
+`complete_product_feature_level` remains null. The W1 v1 inventory above
+describes its closure checkpoint; later inventories explicitly leave W2 open.
+Descriptor tables/CBVs/samplers, images/texture aliasing, finite ranged barriers,
+queries/predication, indirect root changes/draws and the rest of the W2
+acceptance table remain unimplemented in the owned frontend.
+
+Validation: native compiler/DDI 4/4, callback probes 65/65, stock-runtime probes
+47/47 after the final alias-bound refresh, then 51/51 after indirect execution
+and refreshed profile-v3 packaging. The full assertions-enabled
+cached/PCH-disabled suite passed 4400 tests (15 skipped, 10 unsupported) after
+the indirect implementation, including its four native selectors. FeMe Vulkan
+identity is verified before each Vulkan-inclusive test launch. No driver
+installation, system-binary replacement or shared-environment process reset
+was used.
+
+The dated prerequisite entries below are historical compiler/plan evidence;
+their W0/W1 open-status statements do not describe the current owned frontend.
+
 W2(a) prerequisite progress (2026-11-21): the
 [root-binding-plan follow-up](W0WindowsIntegrationProbe.md#w2a-root-signature-parsing-and-immutable-binding-plans-vm-2026-11-21)
 adds owned, read-only Root Signature 1.0/1.1 reflection and
