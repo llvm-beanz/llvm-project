@@ -809,6 +809,20 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Shared Direct3D integer image-store conversion
+
+`FEME_IMAGE_SATURATE_INTEGER_STORES` opts storage-image stores into the same
+8-/16-bit UINT/SINT saturation used by Direct3D typed buffers. All dimensions
+reuse one typed-texel packer; Vulkan descriptors retain their existing
+truncation. Focused runtime coverage exercises all twelve narrow integer
+formats with the bit clear/set, signed/unsigned overflow, inactive and OOB
+stores, and neighboring physical guards. Owned native texture UAV admission,
+view preparation and stock-runtime evidence remain subsequent work.
+
+Validation: full `check-feme` **4430** passed / **15** skipped /
+**10** unsupported, with confirmed FeMe ICD identity. Bridge 5, artifact 12
+and the v23 native subset inventory are unchanged.
+
 #### Owned sampler heaps and copied scalar static sampler state
 
 Sampler heaps now support CPU/shader-visible ownership, the 2048-entry visible

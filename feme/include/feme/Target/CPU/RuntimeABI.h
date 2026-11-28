@@ -647,6 +647,9 @@ enum FemeImageDescriptorFlagBits : uint32_t {
   /// Apply component mapping to addressed loads (Direct3D SRVs). Ordinary
   /// storage-image reads retain their unmapped Vulkan semantics.
   FEME_IMAGE_LOAD_SWIZZLE = 1u << 3,
+  /// Saturate narrow integer stores for Direct3D UAVs. Without this opt-in,
+  /// storage-image conversion retains its Vulkan truncation behavior.
+  FEME_IMAGE_SATURATE_INTEGER_STORES = 1u << 4,
 };
 
 /// One subresource's byte layout within a `FemeImageDescriptor::Data`

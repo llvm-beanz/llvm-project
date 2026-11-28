@@ -30,8 +30,10 @@
 #include "llvm/IR/Module.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 using namespace feme::cpu;
 using namespace llvm;
@@ -7132,6 +7134,69 @@ TEST_F(ImageSamplingTest, StoreWritesOnlyRedComponentIntoR32Sint) {
   FeMeTestV4I32 Texel = {-7, 0, 0, 0};
   Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
   EXPECT_EQ(Storage[0][0], -7);
+}
+
+TEST_F(ImageSamplingTest,
+       Direct3DIntegerStoresSaturateWithoutChangingVulkanConversion) {
+  struct FormatCase {
+    ResourceFormat Format;
+    unsigned Bits;
+    unsigned Channels;
+    bool Signed;
+  };
+  const FormatCase Cases[] = {
+      {ResourceFormat::R8_UINT, 8, 1, false},
+      {ResourceFormat::R8_SINT, 8, 1, true},
+      {ResourceFormat::R8G8_UINT, 8, 2, false},
+      {ResourceFormat::R8G8_SINT, 8, 2, true},
+      {ResourceFormat::R8G8B8A8_UINT, 8, 4, false},
+      {ResourceFormat::R8G8B8A8_SINT, 8, 4, true},
+      {ResourceFormat::R16_UINT, 16, 1, false},
+      {ResourceFormat::R16_SINT, 16, 1, true},
+      {ResourceFormat::R16G16_UINT, 16, 2, false},
+      {ResourceFormat::R16G16_SINT, 16, 2, true},
+      {ResourceFormat::R16G16B16A16_UINT, 16, 4, false},
+      {ResourceFormat::R16G16B16A16_SINT, 16, 4, true},
+  };
+  StoreI32Fn Store =
+      resolveRuntime<StoreI32Fn>("feme.cpu.image.store.2d.v4i32");
+  for (const auto &Case : Cases) {
+    SCOPED_TRACE(static_cast<unsigned>(Case.Format));
+    unsigned ElementSize = Case.Channels * Case.Bits / 8;
+    FeMeTestV4I32 Texel = Case.Signed ? FeMeTestV4I32{-70000, 70000, -129, 129}
+                                      : FeMeTestV4I32{-1, 65536, 256, 17};
+    for (bool Saturate : {false, true}) {
+      SCOPED_TRACE(Saturate);
+      std::vector<unsigned char> Storage(3 * ElementSize, 0xa5);
+      FemeImageSubresourceLayout Layout;
+      FemeImageDescriptor Image =
+          makeImage2D(Storage.data(), Storage.size(), 3, 1, Case.Format, Layout,
+                      FEME_IMAGE_STORAGE |
+                          (Saturate ? FEME_IMAGE_SATURATE_INTEGER_STORES : 0));
+      Store(&Image, 1, 0, 1, 0, Texel, /*Mask=*/false);
+      Store(&Image, 1, 0, 3, 0, Texel, /*Mask=*/true);
+      EXPECT_EQ(Storage, std::vector<unsigned char>(3 * ElementSize, 0xa5));
+      Store(&Image, 1, 0, 1, 0, Texel, /*Mask=*/true);
+      for (unsigned C = 0; C < Case.Channels; ++C) {
+        int32_t Expected = Texel[C];
+        if (Saturate && Case.Signed)
+          Expected = std::clamp(Expected, -(1 << (Case.Bits - 1)),
+                                (1 << (Case.Bits - 1)) - 1);
+        else if (Saturate)
+          Expected =
+              std::min(static_cast<uint32_t>(Expected), (1u << Case.Bits) - 1);
+        uint32_t Actual = 0;
+        std::memcpy(&Actual, Storage.data() + ElementSize + C * Case.Bits / 8,
+                    Case.Bits / 8);
+        EXPECT_EQ(Actual,
+                  static_cast<uint32_t>(Expected) & ((1u << Case.Bits) - 1));
+      }
+      EXPECT_TRUE(std::all_of(Storage.begin(), Storage.begin() + ElementSize,
+                              [](unsigned char Byte) { return Byte == 0xa5; }));
+      EXPECT_TRUE(std::all_of(Storage.begin() + 2 * ElementSize, Storage.end(),
+                              [](unsigned char Byte) { return Byte == 0xa5; }));
+    }
+  }
 }
 
 // Roadmap H19f: `R16G16B16A16_{SFLOAT,UINT,SINT}` widen

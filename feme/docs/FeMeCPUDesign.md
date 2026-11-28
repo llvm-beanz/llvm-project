@@ -4011,6 +4011,13 @@ Notes and constraints:
   Ordinary Vulkan storage-image reads leave this bit clear and remain unmapped.
   OOB loads still return zero before mapping, including constant-one channels.
 
+  Storage-image integer stores can opt into
+  `FEME_IMAGE_SATURATE_INTEGER_STORES`. All image dimensions reuse the same
+  narrow typed-texel packer as buffers: 8-/16-bit UINT/SINT channels saturate
+  only with this bit set. Vulkan descriptors leave it clear and retain
+  truncation. Masking, coordinate checks and physical bounds precede conversion.
+  This shared mechanism does not itself admit owned native texture UAVs.
+
   DXIL normalization publishes six-field ranges in
   `!feme.cpu.bound_resources.v2`; legacy/SPIR-V five-field
   `!feme.cpu.bound_resources` remains readable with the shared/unspecified

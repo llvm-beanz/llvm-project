@@ -980,8 +980,8 @@ __attribute__((always_inline)) static void
 femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
                         FemeRTv4i32 Texel);
 __attribute__((always_inline)) static void
-femeRTPackBufferTexelI32(uint32_t Format, unsigned char *Ptr, FemeRTv4i32 Texel,
-                         uint32_t Flags);
+femeRTPackTypedTexelI32(uint32_t Format, unsigned char *Ptr, FemeRTv4i32 Texel,
+                        uint32_t Flags);
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTApplyImageSwizzleI32(FemeRTv4i32 Color, uint32_t Swizzle);
 
@@ -1052,7 +1052,7 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   if (!(AccessOK && Mask && IsUAV))
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
-  femeRTPackBufferTexelI32(Desc.Format, Ptr, Value, Desc.Flags);
+  femeRTPackTypedTexelI32(Desc.Format, Ptr, Value, Desc.Flags);
 }
 
 // `feme.cpu.resource.getdimensions.typed.i32` (roadmap H144): `Buffer<T>`/
@@ -3493,9 +3493,10 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
 }
 
 __attribute__((always_inline)) static void
-femeRTPackBufferTexelI32(uint32_t Format, unsigned char *Ptr, FemeRTv4i32 Texel,
-                         uint32_t Flags) {
-  if (Flags & 16u) { // FEME_DESCRIPTOR_SATURATE_INTEGER_STORES.
+femeRTPackTypedTexelI32(uint32_t Format, unsigned char *Ptr, FemeRTv4i32 Texel,
+                        uint32_t Flags) {
+  // Buffer and image descriptors share the integer-store saturation bit.
+  if (Flags & 16u) {
     unsigned Bits = 0;
     _Bool Signed = 0;
     switch (Format) {
@@ -3668,7 +3669,7 @@ femeCpuResourceStoreTypedI32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
   FemeRTv4i32 Texel = {Value, 0, 0, 1};
-  femeRTPackBufferTexelI32(Desc.Format, Ptr, Texel, Desc.Flags);
+  femeRTPackTypedTexelI32(Desc.Format, Ptr, Texel, Desc.Flags);
 }
 
 // `feme.cpu.resource.load.typed.v2f32` (roadmap L7a): reads a `<2 x
@@ -3799,7 +3800,7 @@ femeCpuResourceStoreTypedV2I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
   FemeRTv4i32 Texel = {Value[0], Value[1], 0, 1};
-  femeRTPackBufferTexelI32(Desc.Format, Ptr, Texel, Desc.Flags);
+  femeRTPackTypedTexelI32(Desc.Format, Ptr, Texel, Desc.Flags);
 }
 
 // Bounds-checked address helper for `feme.cpu.resource.atomic.*.typed.i32`
@@ -4837,7 +4838,7 @@ femeRTStoreTexel2DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   if (Offset + ElemSize > Img->SizeInBytes)
     return;
   unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
-  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+  femeRTPackTypedTexelI32(Img->Format, Ptr, Texel, Img->Flags);
 }
 
 // Bounds-checked address helper for `feme.cpu.image.atomic.*.2d.i32`
@@ -5065,7 +5066,7 @@ femeRTStoreTexel2DArrayI32(const FemeRTImageDescriptor *Img, int32_t X,
   if (Offset + ElemSize > Img->SizeInBytes)
     return;
   unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
-  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+  femeRTPackTypedTexelI32(Img->Format, Ptr, Texel, Img->Flags);
 }
 
 // The multisampled counterpart of `femeRTStoreTexel2D` above, for
@@ -5126,7 +5127,7 @@ femeRTStoreTexel2DMSI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   if (Offset + ElemSize > Img->SizeInBytes)
     return;
   unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
-  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+  femeRTPackTypedTexelI32(Img->Format, Ptr, Texel, Img->Flags);
 }
 
 // The arrayed-*and*-multisampled counterpart of `femeRTStoreTexel2D`
@@ -5192,7 +5193,7 @@ femeRTStoreTexel2DArrayMSI32(const FemeRTImageDescriptor *Img, int32_t X,
   if (Offset + ElemSize > Img->SizeInBytes)
     return;
   unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
-  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+  femeRTPackTypedTexelI32(Img->Format, Ptr, Texel, Img->Flags);
 }
 
 // The plain-1D counterpart of `femeRTFetchTexel2D` above, for
@@ -5403,7 +5404,7 @@ femeRTStoreTexel3DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   if (Offset + ElemSize > Img->SizeInBytes)
     return;
   unsigned char *Ptr = (unsigned char *)Img->Data + Offset;
-  femeRTPackImageTexelI32(Img->Format, Ptr, Texel);
+  femeRTPackTypedTexelI32(Img->Format, Ptr, Texel, Img->Flags);
 }
 
 

@@ -51,6 +51,10 @@ Finite sampler heaps and copied scalar static samplers also execute original
 DXIL against WARP, including live point/linear and clamp/border updates, replay,
 null images and held teardown. Texture UAVs and remaining image/sampling coverage
 stay open.
+The shared image-store runtime now supports descriptor-opted Direct3D narrow
+integer saturation, reusing the typed-buffer packer while preserving Vulkan
+truncation. Owned texture UAV admission/preparation and execution evidence
+are still required.
 Shared DXIL image/sampler bindings now use independent checked heap prefixes,
 qualified SRV/UAV image identity and artifact ABI 12. Native CPU JIT/scalar/AOT
 controls distinguish image namespaces and sampler arrays. Private Windows
