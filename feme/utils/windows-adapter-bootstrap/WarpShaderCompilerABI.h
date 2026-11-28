@@ -12,7 +12,8 @@
 
 #include <cstdint>
 
-inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 4;
+inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 5;
+inline constexpr std::uint32_t FeMeWarpMaxImageMipLevels = 15;
 /// D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, 3), without SDK headers.
 inline constexpr std::uint32_t FeMeWarpDefaultComponentMapping = 0x1688;
 
@@ -74,12 +75,75 @@ struct FeMeWarpBufferBinding {
   std::uint32_t Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
 };
 
+/// Values match the corresponding D3D12 SRV dimensions without SDK types.
+enum class FeMeWarpImageDimension : std::uint32_t {
+  Texture1D = 2,
+  Texture1DArray = 3,
+  Texture2D = 4,
+  Texture2DArray = 5,
+  Texture3D = 8,
+  TextureCube = 9,
+  TextureCubeArray = 10,
+};
+
+/// Checked byte geometry within the image binding's borrowed storage.
+struct FeMeWarpImageMipLayout {
+  std::uint64_t Offset = 0;
+  std::uint64_t RowPitch = 0;
+  std::uint64_t SlicePitch = 0;
+};
+
+/// Borrowed single-plane/single-sample image view, dense by mip level.
+/// Namespace 1/2 is SRV/UAV; Format and mapping use Direct3D values.
+/// Register identifies an individual array descriptor. Storage and layouts
+/// must outlive dispatch. Null images have zero extents/mips and no layouts.
+struct FeMeWarpImageBinding {
+  void *Data = nullptr;
+  std::uint64_t SizeInBytes = 0;
+  std::uint32_t Space = 0;
+  std::uint32_t Register = 0;
+  std::uint32_t Namespace = 1;
+  FeMeWarpImageDimension Dimension = FeMeWarpImageDimension::Texture2D;
+  std::uint32_t Format = 0;
+  std::uint32_t Width = 0;
+  std::uint32_t Height = 0;
+  std::uint32_t Depth = 0;
+  std::uint32_t MipLevels = 0;
+  std::uint32_t ArrayLayers = 1;
+  std::uint32_t PlaneCount = 1;
+  std::uint32_t SampleCount = 1;
+  std::uint32_t MipLayoutCount = 0;
+  const FeMeWarpImageMipLayout *MipLayouts = nullptr;
+  std::uint32_t Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
+};
+
+/// Direct3D sampler state without SDK types, identified by space/register.
+/// Filter, addressing and comparison values use their D3D12 encodings.
+struct FeMeWarpSamplerBinding {
+  std::uint32_t Space = 0;
+  std::uint32_t Register = 0;
+  std::uint32_t Filter = 0;
+  std::uint32_t AddressU = 1;
+  std::uint32_t AddressV = 1;
+  std::uint32_t AddressW = 1;
+  float MipLODBias = 0;
+  std::uint32_t MaxAnisotropy = 1;
+  std::uint32_t ComparisonFunc = 8;
+  float BorderColor[4] = {};
+  float MinLOD = 0;
+  float MaxLOD = 3.402823466e38f;
+};
+
 struct FeMeWarpDispatchDesc {
   std::uint32_t Size = sizeof(FeMeWarpDispatchDesc);
   std::uint32_t Version = FeMeWarpCompilerBridgeVersion;
   std::uint32_t GroupCount[3] = {1, 1, 1};
   std::uint32_t BufferCount = 0;
   const FeMeWarpBufferBinding *Buffers = nullptr;
+  std::uint32_t ImageCount = 0;
+  const FeMeWarpImageBinding *Images = nullptr;
+  std::uint32_t SamplerCount = 0;
+  const FeMeWarpSamplerBinding *Samplers = nullptr;
 };
 
 extern "C" {

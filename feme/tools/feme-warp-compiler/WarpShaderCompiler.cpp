@@ -23,6 +23,8 @@
 
 #include "llvm/BinaryFormat/DXContainer.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -31,10 +33,14 @@
 #include "llvm/Support/VCSRevision.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <limits>
 #include <new>
+#include <optional>
+#include <type_traits>
 
 #include <dxgiformat.h>
 
@@ -126,7 +132,7 @@ std::uint32_t typedBufferElementSize(feme::cpu::ResourceFormat Format) {
   }
 }
 
-std::uint32_t bufferSwizzle(std::uint32_t Mapping) {
+std::uint32_t componentSwizzle(std::uint32_t Mapping) {
   if (Mapping == FeMeWarpDefaultComponentMapping)
     return 0;
   std::uint32_t Swizzle = 0;
@@ -141,8 +147,224 @@ std::uint32_t bufferSwizzle(std::uint32_t Mapping) {
   return Swizzle;
 }
 
+std::optional<feme::cpu::ImageDimension>
+imageDimension(FeMeWarpImageDimension Dimension) {
+  using D = feme::cpu::ImageDimension;
+  switch (Dimension) {
+  case FeMeWarpImageDimension::Texture1D:
+    return D::Texture1D;
+  case FeMeWarpImageDimension::Texture1DArray:
+    return D::Texture1DArray;
+  case FeMeWarpImageDimension::Texture2D:
+    return D::Texture2D;
+  case FeMeWarpImageDimension::Texture2DArray:
+    return D::Texture2DArray;
+  case FeMeWarpImageDimension::Texture3D:
+    return D::Texture3D;
+  case FeMeWarpImageDimension::TextureCube:
+    return D::TextureCube;
+  case FeMeWarpImageDimension::TextureCubeArray:
+    return D::TextureCubeArray;
+  }
+  return std::nullopt;
+}
+
+bool prepareImage(const FeMeWarpImageBinding &Image,
+                  feme::cpu::FemeImageDescriptor &Descriptor,
+                  std::array<feme::cpu::FemeImageSubresourceLayout,
+                             FeMeWarpMaxImageMipLevels> &Layouts) {
+  auto Dimension = imageDimension(Image.Dimension);
+  auto Format = typedBufferFormat(Image.Format);
+  auto ElementSize = typedBufferElementSize(Format);
+  if (!Dimension || Image.Namespace < 1 || Image.Namespace > 2 ||
+      (!Image.Data != !Image.SizeInBytes) || Image.PlaneCount != 1 ||
+      Image.SampleCount != 1 ||
+      !FeMeWarpValidComponentMapping(Image.Shader4ComponentMapping) ||
+      (Image.Namespace == 2 &&
+       Image.Shader4ComponentMapping != FeMeWarpDefaultComponentMapping))
+    return false;
+  if (!Image.Data)
+    return !Image.Width && !Image.Height && !Image.Depth && !Image.MipLevels &&
+           !Image.MipLayoutCount && !Image.MipLayouts &&
+           (!Image.Format || ElementSize);
+  using D = feme::cpu::ImageDimension;
+  bool Volume = *Dimension == D::Texture3D;
+  bool OneDimensional =
+      *Dimension == D::Texture1D || *Dimension == D::Texture1DArray;
+  bool Cube = *Dimension == D::TextureCube || *Dimension == D::TextureCubeArray;
+  bool Array = *Dimension == D::Texture1DArray ||
+               *Dimension == D::Texture2DArray || Cube;
+  if (!ElementSize || !Image.Width || !Image.Height || !Image.Depth ||
+      Image.Width > (Volume ? 2048u : 16384u) ||
+      Image.Height > (Volume ? 2048u : 16384u) || Image.Depth > 2048 ||
+      (OneDimensional && Image.Height != 1) || (!Volume && Image.Depth != 1) ||
+      !Image.ArrayLayers || Image.ArrayLayers > 2048 ||
+      (!Array && Image.ArrayLayers != 1) ||
+      (Cube && (Image.Namespace != 1 || Image.Width != Image.Height ||
+                Image.ArrayLayers % 6)) ||
+      (*Dimension == D::TextureCube && Image.ArrayLayers != 6) ||
+      !Image.MipLevels || Image.MipLevels > Layouts.size() ||
+      Image.MipLayoutCount != Image.MipLevels || !Image.MipLayouts)
+    return false;
+  unsigned MaxMips = 0;
+  for (auto Extent = std::max(Image.Width, std::max(Image.Height, Image.Depth));
+       Extent; Extent >>= 1)
+    ++MaxMips;
+  if (Image.MipLevels > MaxMips)
+    return false;
+  for (unsigned I = 0; I < Image.MipLevels; ++I) {
+    const auto &Layout = Image.MipLayouts[I];
+    auto Width = std::max(1u, Image.Width >> I);
+    auto Height = std::max(1u, Image.Height >> I);
+    auto Slices = Volume ? std::max(1u, Image.Depth >> I) : Image.ArrayLayers;
+    std::uint64_t RowBytes = std::uint64_t(Width) * ElementSize;
+    if (Layout.Offset >= Image.SizeInBytes || Layout.RowPitch < RowBytes ||
+        Layout.RowPitch > Image.SizeInBytes ||
+        Layout.SlicePitch > Image.SizeInBytes)
+      return false;
+    std::uint64_t Remaining = Image.SizeInBytes - Layout.Offset;
+    if (RowBytes > Remaining ||
+        (Height > 1 && Layout.RowPitch > (Remaining - RowBytes) / (Height - 1)))
+      return false;
+    std::uint64_t SliceBytes =
+        RowBytes + std::uint64_t(Height - 1) * Layout.RowPitch;
+    if (Layout.SlicePitch < SliceBytes ||
+        (Slices > 1 &&
+         Layout.SlicePitch > (Remaining - SliceBytes) / (Slices - 1)))
+      return false;
+    Layouts[I] = {Layout.Offset, Layout.RowPitch, Layout.SlicePitch, 0};
+  }
+  Descriptor.Data = Image.Data;
+  Descriptor.SizeInBytes = Image.SizeInBytes;
+  Descriptor.Dimension = static_cast<std::uint32_t>(*Dimension);
+  Descriptor.Format = static_cast<std::uint32_t>(Format);
+  Descriptor.Width = Image.Width;
+  Descriptor.Height = Image.Height;
+  Descriptor.Depth = Image.Depth;
+  Descriptor.MipLevels = Image.MipLevels;
+  Descriptor.ArrayLayers = Image.ArrayLayers;
+  Descriptor.PlaneCount = Descriptor.SampleCount = 1;
+  Descriptor.Flags = Image.Namespace == 1 ? feme::cpu::FEME_IMAGE_SAMPLED
+                                          : feme::cpu::FEME_IMAGE_STORAGE;
+  if (Image.Namespace == 1)
+    Descriptor.Flags |= feme::cpu::FEME_IMAGE_LOAD_SWIZZLE;
+  Descriptor.MipLayouts = Layouts.data();
+  Descriptor.MipLayoutCount = Image.MipLevels;
+  Descriptor.Swizzle = componentSwizzle(Image.Shader4ComponentMapping);
+  return true;
+}
+
+bool prepareSampler(const FeMeWarpSamplerBinding &Sampler,
+                    feme::cpu::FemeSamplerDescriptor &Descriptor) {
+  if ((Sampler.Filter & ~0x1d5u) ||
+      ((Sampler.Filter & 0x40) && (Sampler.Filter & 0x15) != 0x15) ||
+      Sampler.AddressU < 1 || Sampler.AddressU > 5 || Sampler.AddressV < 1 ||
+      Sampler.AddressV > 5 || Sampler.AddressW < 1 || Sampler.AddressW > 5 ||
+      Sampler.ComparisonFunc < 1 || Sampler.ComparisonFunc > 8 ||
+      !Sampler.MaxAnisotropy || Sampler.MaxAnisotropy > 16 ||
+      !std::isfinite(Sampler.MipLODBias) || Sampler.MipLODBias < -16 ||
+      Sampler.MipLODBias > 15.99f || !std::isfinite(Sampler.MinLOD) ||
+      !std::isfinite(Sampler.MaxLOD) || Sampler.MinLOD > Sampler.MaxLOD)
+    return false;
+  for (float Channel : Sampler.BorderColor)
+    if (!std::isfinite(Channel))
+      return false;
+  Descriptor.MinFilter = (Sampler.Filter >> 4) & 1;
+  Descriptor.MagFilter = (Sampler.Filter >> 2) & 1;
+  Descriptor.MipFilter = Sampler.Filter & 1;
+  Descriptor.AddressU = Sampler.AddressU - 1;
+  Descriptor.AddressV = Sampler.AddressV - 1;
+  Descriptor.AddressW = Sampler.AddressW - 1;
+  Descriptor.LodBias = Sampler.MipLODBias;
+  Descriptor.MinLod = Sampler.MinLOD;
+  Descriptor.MaxLod = Sampler.MaxLOD;
+  Descriptor.CompareFunc = Sampler.ComparisonFunc - 1;
+  std::copy(std::begin(Sampler.BorderColor), std::end(Sampler.BorderColor),
+            Descriptor.BorderColor);
+  Descriptor.MaxAnisotropy = Sampler.MaxAnisotropy;
+  auto Reduction = (Sampler.Filter >> 7) & 3;
+  Descriptor.ReductionMode = Reduction > 1 ? Reduction - 1 : 0;
+  Descriptor.Flags =
+      (Reduction == 1 ? feme::cpu::FEME_SAMPLER_COMPARE_ENABLE : 0) |
+      (Sampler.Filter & 0x40 ? feme::cpu::FEME_SAMPLER_ANISOTROPY_ENABLE : 0);
+  return true;
+}
+
+template <typename Input>
+feme::cpu::BoundResourceNamespace bindingNamespace(const Input &Binding) {
+  if constexpr (std::is_same_v<Input, FeMeWarpSamplerBinding>)
+    return feme::cpu::BoundResourceNamespace::Unspecified;
+  else
+    return static_cast<feme::cpu::BoundResourceNamespace>(Binding.Namespace);
+}
+
+template <typename Input>
+bool validateBindingIdentities(llvm::ArrayRef<Input> Inputs) {
+  for (unsigned I = 0; I < Inputs.size(); ++I)
+    for (unsigned J = 0; J < I; ++J)
+      if (bindingNamespace(Inputs[I]) == bindingNamespace(Inputs[J]) &&
+          Inputs[I].Space == Inputs[J].Space &&
+          Inputs[I].Register == Inputs[J].Register) {
+        llvm::errs() << "FeMe WARP dispatch: duplicate descriptor binding\n";
+        return false;
+      }
+  return true;
+}
+
+template <typename Input, typename Descriptor, typename Binding>
+bool bindRanges(const feme::cpu::ResourceInfo &Info,
+                feme::cpu::BoundResourceClass Class,
+                llvm::ArrayRef<Input> Inputs,
+                const std::array<Descriptor, 64> &InputDescriptors,
+                std::array<Descriptor, 64> &Descriptors,
+                std::array<Binding, 64> &Bindings,
+                std::uint32_t &BindingCount) {
+  std::uint32_t DescriptorCount = 0;
+  for (const auto &Range : Info.BoundRanges) {
+    if (Range.Class != Class)
+      continue;
+    if (!Range.RangeSize ||
+        Range.RangeSize > Descriptors.size() - DescriptorCount ||
+        Range.BaseRegister >
+            std::numeric_limits<std::uint32_t>::max() - (Range.RangeSize - 1)) {
+      llvm::errs()
+          << "FeMe WARP dispatch: unsupported descriptor range extent\n";
+      return false;
+    }
+    auto *RangeDescriptors = Descriptors.data() + DescriptorCount;
+    for (unsigned I = 0; I < Range.RangeSize; ++I) {
+      bool Matched = false;
+      for (unsigned J = 0; J < Inputs.size(); ++J)
+        if (Range.Namespace == bindingNamespace(Inputs[J]) &&
+            Range.Space == Inputs[J].Space &&
+            Range.BaseRegister + I == Inputs[J].Register) {
+          RangeDescriptors[I] = InputDescriptors[J];
+          Matched = true;
+          break;
+        }
+      if (!Matched) {
+        llvm::errs()
+            << "FeMe WARP dispatch: required descriptor range not bound"
+            << " (class=" << static_cast<unsigned>(Class)
+            << ", space=" << Range.Space
+            << ", register=" << Range.BaseRegister + I << ")\n";
+        return false;
+      }
+    }
+    auto &BoundBinding = Bindings[BindingCount++];
+    BoundBinding.Space = Range.Space;
+    BoundBinding.BaseRegister = Range.BaseRegister;
+    BoundBinding.Descriptors = {RangeDescriptors, Range.RangeSize};
+    if constexpr (!std::is_same_v<Binding, feme::cpu::BoundSamplerBinding>)
+      BoundBinding.Namespace = Range.Namespace;
+    DescriptorCount += Range.RangeSize;
+  }
+  return true;
+}
+
 struct CompiledShader {
   std::shared_ptr<feme::cpu::CompiledStage> Stage;
+  bool UsesNativeImageOrSamplerHeap = false;
 };
 
 std::int32_t report(llvm::Error Error) {
@@ -157,6 +379,13 @@ std::int32_t compileStage(feme::Context &Context, feme::Module Module,
   llvm::ModuleAnalysisManager Analyses;
   feme::dxil::OpRaisingPass().run(Module.getLLVMModule(), Analyses);
   feme::dxil::MetadataRaisingPass().run(Module.getLLVMModule(), Analyses);
+  bool NativeImageHeap = false;
+  for (const auto &F : Module.getLLVMModule())
+    if (F.getIntrinsicID() == llvm::Intrinsic::dx_resource_handlefromheap)
+      if (auto *Ty = llvm::dyn_cast<llvm::TargetExtType>(F.getReturnType()))
+        if (Ty->getName() == "dx.Texture" || Ty->getName() == "dx.MSTexture" ||
+            Ty->getName() == "dx.Sampler")
+          NativeImageHeap |= !F.use_empty();
   feme::cpu::StageCompileOptions Options;
   Options.Stage = Stage;
   Options.WaveSize = 4;
@@ -169,7 +398,8 @@ std::int32_t compileStage(feme::Context &Context, feme::Module Module,
     llvm::errs() << "FeMe WARP shader compiler: missing native entry point\n";
     return CompileFailure;
   }
-  auto *Object = new (std::nothrow) CompiledShader{std::move(*Result)};
+  auto *Object =
+      new (std::nothrow) CompiledShader{std::move(*Result), NativeImageHeap};
   if (!Object) {
     llvm::errs()
         << "FeMe WARP shader compiler: native wrapper allocation failed\n";
@@ -377,7 +607,9 @@ std::int32_t FeMeWarpCreateComputePipeline(void *Shader, void **Pipeline) {
     llvm::errs() << "FeMe WARP compiler: pipeline requires a compute stage\n";
     return InvalidArgument;
   }
-  *Pipeline = new (std::nothrow) CompiledShader{Stage};
+  *Pipeline = new (std::nothrow) CompiledShader{
+      Stage,
+      static_cast<CompiledShader *>(Shader)->UsesNativeImageOrSamplerHeap};
   if (!*Pipeline) {
     llvm::errs() << "FeMe WARP compiler: compute pipeline allocation failed\n";
     return OutOfMemory;
@@ -397,15 +629,16 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
                                      const FeMeWarpDispatchDesc *Desc) {
   if (!Pipeline || !Desc || Desc->Size != sizeof(*Desc) ||
       Desc->Version != FeMeWarpCompilerBridgeVersion ||
-      Desc->BufferCount > 64 || (Desc->BufferCount && !Desc->Buffers)) {
+      Desc->BufferCount > 64 || (Desc->BufferCount && !Desc->Buffers) ||
+      Desc->ImageCount > 64 || (Desc->ImageCount && !Desc->Images) ||
+      Desc->SamplerCount > 64 || (Desc->SamplerCount && !Desc->Samplers)) {
     llvm::errs() << "FeMe WARP dispatch: invalid descriptor or ABI\n";
     return InvalidArgument;
   }
   auto &Stage = *static_cast<CompiledShader *>(Pipeline)->Stage;
   const auto &Info = Stage.getResourceInfo();
   if (Stage.getStage() != feme::ShaderStage::Compute || Info.RootConstantSize ||
-      Info.UsesSamplerHeap || Info.ReservedImageHeapSize ||
-      Info.ReservedSamplerHeapSize) {
+      static_cast<CompiledShader *>(Pipeline)->UsesNativeImageOrSamplerHeap) {
     llvm::errs() << "FeMe WARP dispatch: unsupported stage or bindings\n";
     return InvalidArgument;
   }
@@ -426,7 +659,7 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
     if (auto Error = feme::direct3d::validateComputeDispatchPlan(Plan))
       return report(std::move(Error));
 
-  std::array<feme::cpu::FemeDescriptor, 64> Descriptors{};
+  std::array<feme::cpu::FemeDescriptor, 64> InputDescriptors{}, Descriptors{};
   std::array<feme::cpu::BoundResourceBinding, 64> Bindings{};
   for (std::uint32_t I = 0; I < Desc->BufferCount; ++I) {
     const auto &Buffer = Desc->Buffers[I];
@@ -453,71 +686,68 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
       llvm::errs() << "FeMe WARP dispatch: invalid buffer binding\n";
       return InvalidArgument;
     }
-    for (std::uint32_t J = 0; J < I; ++J) {
-      const auto &Previous = Desc->Buffers[J];
-      if (Previous.Namespace == Buffer.Namespace &&
-          Previous.Space == Buffer.Space &&
-          Previous.Register == Buffer.Register) {
-        llvm::errs() << "FeMe WARP dispatch: duplicate buffer binding\n";
-        return InvalidArgument;
-      }
-    }
+    auto &Descriptor = InputDescriptors[I];
+    Descriptor.Data = Buffer.Data;
+    Descriptor.SizeInBytes = Buffer.SizeInBytes;
+    Descriptor.Kind = static_cast<std::uint32_t>(
+        Buffer.Kind == 2   ? feme::cpu::ResourceKind::Typed
+        : Buffer.Kind == 1 ? feme::cpu::ResourceKind::Structured
+                           : feme::cpu::ResourceKind::Raw);
+    Descriptor.Stride = Buffer.Stride;
+    Descriptor.Format = static_cast<std::uint32_t>(Format);
+    Descriptor.Swizzle = componentSwizzle(Buffer.Shader4ComponentMapping);
+    Descriptor.Flags =
+        Buffer.Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
+    if (Buffer.Namespace == 2 && Buffer.Kind == 2)
+      Descriptor.Flags |= feme::cpu::FEME_DESCRIPTOR_SATURATE_INTEGER_STORES;
+    Descriptor.Counter = Buffer.CounterData;
+    if (Descriptor.Counter)
+      Descriptor.Flags |= feme::cpu::FEME_DESCRIPTOR_HAS_COUNTER;
   }
-  std::uint32_t BindingCount = 0, DescriptorCount = 0;
-  for (const auto &Range : Info.BoundRanges) {
-    if (Range.Class != feme::cpu::BoundResourceClass::Buffer ||
-        !Range.RangeSize ||
-        Range.RangeSize > Descriptors.size() - DescriptorCount ||
-        Range.BaseRegister >
-            std::numeric_limits<std::uint32_t>::max() - (Range.RangeSize - 1)) {
-      llvm::errs() << "FeMe WARP dispatch: unsupported buffer range extent\n";
+  std::array<feme::cpu::FemeImageDescriptor, 64> InputImages{}, Images{};
+  std::array<std::array<feme::cpu::FemeImageSubresourceLayout,
+                        FeMeWarpMaxImageMipLevels>,
+             64>
+      ImageLayouts{};
+  std::array<feme::cpu::BoundImageBinding, 64> ImageBindings{};
+  std::array<feme::cpu::FemeSamplerDescriptor, 64> InputSamplers{}, Samplers{};
+  std::array<feme::cpu::BoundSamplerBinding, 64> SamplerBindings{};
+  for (unsigned I = 0; I < Desc->ImageCount; ++I)
+    if (!prepareImage(Desc->Images[I], InputImages[I], ImageLayouts[I])) {
+      llvm::errs() << "FeMe WARP dispatch: invalid image binding\n";
       return InvalidArgument;
     }
-    auto *RangeDescriptors = Descriptors.data() + DescriptorCount;
-    for (std::uint32_t I = 0; I < Range.RangeSize; ++I) {
-      const FeMeWarpBufferBinding *Matched = nullptr;
-      for (std::uint32_t J = 0; J < Desc->BufferCount; ++J) {
-        const auto &Buffer = Desc->Buffers[J];
-        if (Range.Namespace == static_cast<feme::cpu::BoundResourceNamespace>(
-                                   Buffer.Namespace) &&
-            Range.Space == Buffer.Space &&
-            Range.BaseRegister + I == Buffer.Register) {
-          Matched = &Buffer;
-          break;
-        }
-      }
-      if (!Matched) {
-        llvm::errs() << "FeMe WARP dispatch: required buffer range not bound\n";
-        return InvalidArgument;
-      }
-      auto &Descriptor = RangeDescriptors[I];
-      Descriptor.Data = Matched->Data;
-      Descriptor.SizeInBytes = Matched->SizeInBytes;
-      Descriptor.Kind = static_cast<std::uint32_t>(
-          Matched->Kind == 2   ? feme::cpu::ResourceKind::Typed
-          : Matched->Kind == 1 ? feme::cpu::ResourceKind::Structured
-                               : feme::cpu::ResourceKind::Raw);
-      Descriptor.Stride = Matched->Stride;
-      Descriptor.Format =
-          static_cast<std::uint32_t>(typedBufferFormat(Matched->Format));
-      Descriptor.Swizzle = bufferSwizzle(Matched->Shader4ComponentMapping);
-      Descriptor.Flags =
-          Matched->Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
-      if (Matched->Namespace == 2 && Matched->Kind == 2)
-        Descriptor.Flags |= feme::cpu::FEME_DESCRIPTOR_SATURATE_INTEGER_STORES;
-      Descriptor.Counter = Matched->CounterData;
-      if (Descriptor.Counter)
-        Descriptor.Flags |= feme::cpu::FEME_DESCRIPTOR_HAS_COUNTER;
+  for (unsigned I = 0; I < Desc->SamplerCount; ++I)
+    if (!prepareSampler(Desc->Samplers[I], InputSamplers[I])) {
+      llvm::errs() << "FeMe WARP dispatch: invalid sampler binding\n";
+      return InvalidArgument;
     }
-    Bindings[BindingCount++] = {Range.Space,
-                                Range.BaseRegister,
-                                {RangeDescriptors, Range.RangeSize},
-                                Range.Namespace};
-    DescriptorCount += Range.RangeSize;
-  }
+  llvm::ArrayRef<FeMeWarpBufferBinding> BufferInputs(Desc->Buffers,
+                                                     Desc->BufferCount);
+  llvm::ArrayRef<FeMeWarpImageBinding> ImageInputs(Desc->Images,
+                                                   Desc->ImageCount);
+  llvm::ArrayRef<FeMeWarpSamplerBinding> SamplerInputs(Desc->Samplers,
+                                                       Desc->SamplerCount);
+  std::uint32_t BindingCount = 0, ImageBindingCount = 0,
+                SamplerBindingCount = 0;
+  if (!validateBindingIdentities(BufferInputs) ||
+      !validateBindingIdentities(ImageInputs) ||
+      !validateBindingIdentities(SamplerInputs) ||
+      !bindRanges(Info, feme::cpu::BoundResourceClass::Buffer, BufferInputs,
+                  InputDescriptors, Descriptors, Bindings, BindingCount) ||
+      !bindRanges(Info, feme::cpu::BoundResourceClass::Image, ImageInputs,
+                  InputImages, Images, ImageBindings, ImageBindingCount) ||
+      !bindRanges(Info, feme::cpu::BoundResourceClass::Sampler, SamplerInputs,
+                  InputSamplers, Samplers, SamplerBindings,
+                  SamplerBindingCount))
+    return InvalidArgument;
   llvm::ArrayRef<feme::cpu::BoundResourceBinding> Bound(Bindings.data(),
                                                         BindingCount);
   if (auto Error = feme::cpu::validateBoundResourceBindings(Info, Bound))
+    return report(std::move(Error));
+  llvm::ArrayRef<feme::cpu::BoundImageBinding> BoundImages(ImageBindings.data(),
+                                                           ImageBindingCount);
+  if (auto Error = feme::cpu::validateBoundImageBindings(Info, BoundImages))
     return report(std::move(Error));
   for (auto Index : Info.StaticHeapIndices)
     if (Index >= Info.ReservedResourceHeapSize) {
@@ -556,6 +786,8 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
   }
   feme::cpu::DispatchResources Resources;
   Resources.BoundResources = Bound;
+  Resources.BoundImages = BoundImages;
+  Resources.BoundSamplers = {SamplerBindings.data(), SamplerBindingCount};
   auto Prepared =
       feme::cpu::PreparedDispatch::create(Info, Resources, Plan.GroupCount);
   for (std::uint32_t Z = 0; Z < Plan.GroupCount[2]; ++Z)

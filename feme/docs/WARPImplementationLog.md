@@ -809,6 +809,36 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Checked borrowed images and samplers through compiler bridge 5
+
+Private bridge **5** admits separate finite image/sampler bindings, rejects older
+callers and retains the existing buffer contract. Image PODs borrow storage and
+copy mip-layout fields into CPU descriptors; checked dimension/format/namespace,
+pointer/count pairs, pitches, mip extents and touched spans reject invalid input
+before execution. Sampler state validates Direct3D filter/address/comparison,
+LOD, border and anisotropy encodings. All three resource classes reuse one
+finite-range matcher without sharing physical heap prefixes.
+
+Original native DXIL controls execute divergent same-register SRV/UAV image
+arrays, padded mip/layer layouts, null replacement, repeated dispatch and retained/
+concurrent pipelines. Sampler controls distinguish point/linear/min/max filtering,
+repeat/border addressing and custom border colors. Native image/sampler heap
+inputs are explicitly rejected rather than silently executing an empty heap.
+The controls exposed and fixed UAV loads using DXIL's unused mip operand and
+SRV addressed loads ignoring mappings. UAV mips normalize to zero; a descriptor
+opt-in enables SRV load mappings while preserving Vulkan storage-read behavior
+and zero OOB results.
+
+Focused native/raising tests pass **3/3**, load-mapping/storage regressions
+**4/4**, full FeMe **4427** / **15** skipped / **10** unsupported, callbacks
+**65/65** and stock-runtime/coexistence **371/371**. FeMe ICD identity was
+confirmed before the full and coexistence launches; shared DLLs were relinked
+before OS testing. Inventory **v21**, bridge5/artifact12, has **335** required
+OS gates and **13** native fixtures, without a complete feature-level claim.
+These borrowed-view controls do not establish owned DDI texture views/sampler
+heaps or static samplers. Those, remaining formats/resources, roots and ordering
+remain W2 work; W2 is not complete. No new CTS evidence or advertisement change.
+
 #### Shared DXIL image/sampler normalization and artifact identity
 
 The DXIL normalizer now assigns independent buffer/image/sampler heap prefixes,

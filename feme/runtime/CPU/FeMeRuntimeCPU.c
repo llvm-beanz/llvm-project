@@ -7698,6 +7698,13 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageGather2DOffsetsV4I32(
 // (DXIL's `Load`/Vulkan's `OpImageFetch`/`OpImageRead`): an out-of-range
 // coordinate reads as zero rather than applying any address mode, since
 // there is no sampler to supply one.
+// Addressed Direct3D SRV loads use component mappings; Vulkan storage reads do
+// not. The descriptor opt-in keeps the latter's existing semantics unchanged.
+__attribute__((always_inline)) static _Bool
+femeRTImageLoadUsesSwizzle(const FemeRTImageDescriptor *Img) {
+  return (Img->Flags & 8u) != 0; // FEME_IMAGE_LOAD_SWIZZLE.
+}
+
 FemeRTv4f32
 femeCpuImageLoad2DV4F32(const FemeRTImageDescriptor *ImageHeap,
                         uint32_t ImageHeapCount, uint32_t ImageIndex, int32_t X,
@@ -7721,7 +7728,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel2D(&Img, Mip, /*Layer=*/0, X, Y, Sample,
-                            /*UseBorder=*/0, NoBorder, /*ApplySwizzle=*/0);
+                            /*UseBorder=*/0, NoBorder,
+                            femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.load.2d.v4i32` (roadmap E26): the integer-format
@@ -7752,7 +7760,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DV4I32(
       (uint32_t)Y >= femeRTMipExtent(Img.Height, Mip))
     return Zero;
   return femeRTFetchTexel2DI32(&Img, Mip, /*Layer=*/0, X, Y, Sample,
-                               /*ApplySwizzle=*/0);
+                               femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.store.2d.v4f32` (roadmap H19a): writes one texel of a 2D
@@ -9648,7 +9656,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel1D(&Img, Mip, X, Sample, /*UseBorder=*/0, NoBorder,
-                            /*ApplySwizzle=*/0);
+                            femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.load.1d.v4i32` (roadmap H19c): the integer-format
@@ -9672,7 +9680,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DV4I32(
     return Zero;
   if (X < 0 || (uint32_t)X >= femeRTMipExtent(Img.Width, Mip))
     return Zero;
-  return femeRTFetchTexel1DI32(&Img, Mip, X, /*ApplySwizzle=*/0);
+  return femeRTFetchTexel1DI32(&Img, Mip, X, femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.store.1d.v4f32` (roadmap H19c): writes one texel of a 1D
@@ -9737,7 +9745,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DArrayV4F32(
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel1DArray(&Img, Mip, X, (uint32_t)Layer, Sample,
                                  /*UseBorder=*/0, NoBorder,
-                                 /*ApplySwizzle=*/0);
+                                 femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.load.1darray.v4i32` (roadmap H19e): the integer-format
@@ -9763,7 +9771,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DArrayV4I32(
       (uint32_t)Layer >= Img.ArrayLayers)
     return Zero;
   return femeRTFetchTexel1DArrayI32(&Img, Mip, X, (uint32_t)Layer,
-                                    /*ApplySwizzle=*/0);
+                                    femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.store.1darray.v4f32` (roadmap H19e): writes one texel of
@@ -9836,7 +9844,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad3DV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel3D(&Img, Mip, X, Y, Z, /*UseBorder=*/0, NoBorder,
-                            /*ApplySwizzle=*/0);
+                            femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.load.3d.v4i32` (roadmap H19c): the integer-format
@@ -9864,7 +9872,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad3DV4I32(
       (uint32_t)Y >= femeRTMipExtent(Img.Height, Mip) ||
       (uint32_t)Z >= femeRTMipExtent(Img.Depth, Mip))
     return Zero;
-  return femeRTFetchTexel3DI32(&Img, Mip, X, Y, Z, /*ApplySwizzle=*/0);
+  return femeRTFetchTexel3DI32(&Img, Mip, X, Y, Z,
+                               femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.store.3d.v4f32` (roadmap H19c): writes one texel of a 3D
@@ -10832,7 +10841,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DArrayV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel2D(&Img, Mip, (uint32_t)Layer, X, Y, Sample,
-                            /*UseBorder=*/0, NoBorder, /*ApplySwizzle=*/0);
+                            /*UseBorder=*/0, NoBorder,
+                            femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // `feme.cpu.image.load.2darray.v4i32` (roadmap H7b-a): the integer-format
@@ -10865,7 +10875,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
       (uint32_t)Layer >= Img.ArrayLayers)
     return Zero;
   return femeRTFetchTexel2DI32(&Img, Mip, (uint32_t)Layer, X, Y, Sample,
-                               /*ApplySwizzle=*/0);
+                               femeRTImageLoadUsesSwizzle(&Img));
 }
 
 // The classic "major axis" cube-face-selection algorithm (Vulkan spec

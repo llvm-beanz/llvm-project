@@ -644,6 +644,9 @@ enum FemeImageDescriptorFlagBits : uint32_t {
   /// Set if the image is a depth/stencil format used as a depth attachment
   /// or depth-comparison sampling source.
   FEME_IMAGE_DEPTH = 1u << 2,
+  /// Apply component mapping to addressed loads (Direct3D SRVs). Ordinary
+  /// storage-image reads retain their unmapped Vulkan semantics.
+  FEME_IMAGE_LOAD_SWIZZLE = 1u << 3,
 };
 
 /// One subresource's byte layout within a `FemeImageDescriptor::Data`
@@ -738,14 +741,15 @@ struct FemeImageDescriptor {
   uint32_t MipLayoutCount;
   /// (Roadmap L125(d)) The image view's component swizzle, packed via
   /// `packImageSwizzle` (see `ImageComponentSwizzle`'s own comment for why
-  /// `Identity` is `0`, not pre-resolved). Applied to a synthesized border color
+  /// `Identity` is `0`, not pre-resolved). Applied to a synthesized border
+  /// color
   /// (`SamplerAddressMode::ClampToBorder` resolving out of range) the same
   /// way it would be to an in-bounds texel fetch, mirroring core Vulkan's
   /// own border-color "conversion to RGBA" rule (see
   /// `femeRTFetchTexel2D`/`femeRTFetchTexel3D`, FeMeRuntimeCPU.c). An
-  /// in-bounds texel fetch does not yet apply this swizzle itself --
-  /// tracked as a separate, broader gap (roadmap L125(e)) than this one's
-  /// narrower border-color scope. Taken from this struct's own former
+  /// in-bounds sampled texel fetch also applies it. Addressed loads apply
+  /// it only with FEME_IMAGE_LOAD_SWIZZLE; ordinary storage reads ignore it.
+  /// Taken from this struct's own former
   /// `Reserved[3]` headroom (now `Reserved[2]`).
   uint32_t Swizzle;
   /// (Roadmap L125(w)) Overrides the component mask

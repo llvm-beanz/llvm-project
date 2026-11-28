@@ -46,9 +46,11 @@ geometry. Mipmapped 3D and 2D-array texture copies pass selected-subresource
 indexing, partial regions and held execution; shader views/samplers remain open.
 Shared DXIL image/sampler bindings now use independent checked heap prefixes,
 qualified SRV/UAV image identity and artifact ABI 12. Native CPU JIT/scalar/AOT
-controls distinguish image namespaces and sampler arrays; the Windows image
-bridge and owned texture shader views/samplers remain open.
-The generated v20 inventory
+controls distinguish image namespaces and sampler arrays. Private Windows
+bridge 5 now prepares checked borrowed image views and finite sampler arrays,
+with copied mip layouts, SRV load mappings and explicit native-heap rejection.
+Owned DDI texture shader views/sampler heaps and static samplers remain open.
+The generated v21 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -86,7 +88,7 @@ not a device or runtime.
 
 W2 remaining work is tracked without deeper milestone nesting:
 
-The shared typed-buffer runtime and Windows bridge 4 execute descriptor-backed
+The shared typed-buffer runtime and Windows bridge 5 execute descriptor-backed
 typed SRV component mappings (artifact ABI 12), including post-record updates,
 nulls and held execution. Twelve additional narrow SRV formats reuse existing
 decoders with exact physical element geometry. All 21 mapped formats execute

@@ -1738,6 +1738,9 @@ bool raiseTextureLoad(CallInst &CI) {
 
   IRBuilder<> Builder(&CI);
   Value *MipLevel = CI.getArgOperand(2);
+  // UAV loads address the view's sole mip; DXIL leaves this operand undefined.
+  if (!IsMS && cast<dxil::TextureExtType>(HandleTy)->isWriteable())
+    MipLevel = Builder.getInt32(0);
   SmallVector<Value *, 3> Coords;
   for (unsigned I = 0; I != NumCoords; ++I)
     Coords.push_back(CI.getArgOperand(3 + I));

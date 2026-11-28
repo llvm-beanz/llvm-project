@@ -1,5 +1,10 @@
 # Vulkan core mandatory-feature/limit/extension inventory
 
+Bridge5 borrowed image/sampler execution passes 4427 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 371 coexistence gates.
+Descriptor-opted Direct3D load mappings preserve ordinary Vulkan storage reads.
+No inventory regeneration, advertisement change or new CTS result is claimed.
+
 Shared DXIL image/sampler normalization passes 4423 full FeMe tests
 (15 skipped, 10 unsupported), 65 callbacks and 371 stock-runtime/coexistence
 gates with confirmed FeMe ICD identity. Artifact ABI 12 changes image binding

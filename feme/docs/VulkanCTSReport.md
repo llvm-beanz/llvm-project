@@ -1,5 +1,13 @@
 # Vulkan CTS status
 
+## Windows borrowed-image bridge regression scope, not CTS
+
+Bridge5 image/sampler controls and Direct3D load mappings pass 4427 full FeMe
+tests (15 skipped, 10 unsupported), 65 callbacks and 371 stock-runtime/coexistence
+gates with confirmed FeMe ICD identity. Vulkan storage reads retain unmapped
+semantics. Artifact12 layouts and Vulkan advertisements are unchanged; this is
+not new CTS evidence or owned DDI texture-view/sampler-heap completion.
+
 ## Shared DXIL image-binding regression scope, not CTS
 
 Qualified image/sampler normalization passes 4423 full FeMe tests

@@ -103,6 +103,18 @@ define <4 x float> @textureload_2d(i32 %idx, i32 %x, i32 %y, i32 %mip) {
   ret <4 x float> %v3
 }
 
+; UAV texture loads use the selected view's mip zero, not DXIL's unused mip.
+; CHECK-LABEL: define float @rw_textureload_2darray(
+; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 1, 0, 1, 7) @llvm.dx.resource.handlefromheap
+; CHECK: call <4 x float> @llvm.dx.resource.load.level{{.*}}(target("dx.Texture", <4 x float>, 1, 0, 1, 7) [[TEX]], <3 x i32> {{.*}}, i32 0, <2 x i32> zeroinitializer)
+define float @rw_textureload_2darray(i32 %idx, i32 %x, i32 %y, i32 %layer) {
+  %h = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %t = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h, %dx.types.ResourceProperties { i32 4103, i32 1033 })
+  %r = call %dx.types.ResRet.f32 @dx.op.textureLoad.f32(i32 66, %dx.types.Handle %t, i32 undef, i32 %x, i32 %y, i32 %layer, i32 undef, i32 undef, i32 undef)
+  %v = extractvalue %dx.types.ResRet.f32 %r, 0
+  ret float %v
+}
+
 ; `dx.op.getDimensions` (72)'s `.x` (width) field alone raises to `llvm.dx.
 ; resource.getdimensions.x`, the scalar overload -- see `raiseGetDimensions`.
 ; CHECK-LABEL: define i32 @dimensions_2d(

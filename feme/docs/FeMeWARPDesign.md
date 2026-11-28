@@ -24,7 +24,7 @@ and buffer-command predication, plus checked structured-UAV counters and bounded
 uint append/consume, typed SRV component mappings and narrow/packed SRVs;
 pitched buffer-footprint copies and single-plane linear texture storage with
 mip/array subresource copies;
-inventory v20
+inventory v21
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1847,8 +1847,19 @@ source preservation and recording-object release. Texture shader views,
 samplers, compressed/depth/stencil/planar/MS storage and broader resource classes
 remain open. Shared DXIL image/sampler bindings now normalize into independent
 checked heap prefixes with qualified image namespaces and artifact ABI 12.
-Native CPU SIMD/scalar/AOT controls exercise those bindings; Windows bridge 4
-still accepts buffers only. See the implementation log and v20 inventory.
+Native CPU SIMD/scalar/AOT controls exercise those bindings. Windows bridge 5
+also admits checked borrowed image views and finite sampler bindings, copying
+private mip-layout POD fields into CPU layouts rather than aliasing structs.
+Namespace, dimension, format, layout spans, mip counts, pointer/count pairs and
+sampler state are validated before execution. Image and sampler ranges use their
+own heaps; missing and duplicate required descriptors are explicit errors.
+Direct3D SRV loads opt into component mappings through
+`FEME_IMAGE_LOAD_SWIZZLE`; Vulkan storage reads remain unmapped. Raised UAV loads
+use mip zero rather than DXIL's unused/undefined operand. Original native
+image/sampler heap indexing is rejected, including retained pipelines, until
+the bridge can provide actual dynamic heaps. The native borrowed-view tests
+do not establish owned DDI texture views, sampler heaps or static samplers.
+See the implementation log and v21 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

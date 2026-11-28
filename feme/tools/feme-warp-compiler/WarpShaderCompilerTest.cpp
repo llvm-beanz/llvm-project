@@ -21,6 +21,8 @@
 #include <dxgiformat.h>
 
 bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens);
+bool testWarpCompilerImages(const std::vector<std::uint32_t> &Tokens,
+                            bool Sampling, bool NativeHeap);
 
 static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
                          bool DXIL = false, bool CBV = false,
@@ -28,7 +30,7 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   void *Shader = nullptr, *Pipeline = nullptr;
   FeMeWarpCompiledShaderInfo Info;
   auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
-  for (auto Version : {1u, 2u, 3u}) {
+  for (auto Version : {1u, 2u, 3u, 4u}) {
     auto OldInfo = Info;
     OldInfo.BridgeVersion = Version;
     if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()),
@@ -74,6 +76,8 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   Bad.Version = 2;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
   Bad.Version = 3;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  Bad.Version = 4;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
   for (auto Mapping : {0u, 0x1006u, 0x1007u, 0x3000u, 0x168du}) {
     Buffer.Shader4ComponentMapping = Mapping;
@@ -223,6 +227,30 @@ int main(int Argc, char **Argv) {
   if (Argc == 3 && (std::strcmp(Argv[2], "--ddi") == 0 ||
                     std::strcmp(Argv[2], "--dxil-ddi") == 0))
     return testWarpCompilerDDIs(Tokens) ? 0 : 1;
+  if (Argc == 3 &&
+      (std::strcmp(Argv[2], "--dxil-images") == 0 ||
+       std::strcmp(Argv[2], "--dxil-samplers") == 0 ||
+       std::strcmp(Argv[2], "--dxil-native-image-heap-reject") == 0)) {
+    bool Sampling = std::strcmp(Argv[2], "--dxil-images") != 0;
+    bool NativeHeap =
+        std::strcmp(Argv[2], "--dxil-native-image-heap-reject") == 0;
+    bool Good[2]{};
+    std::thread First([&] {
+      Good[0] = testWarpCompilerImages(Tokens, Sampling, NativeHeap);
+    });
+    std::thread Second([&] {
+      Good[1] = testWarpCompilerImages(Tokens, Sampling, NativeHeap);
+    });
+    First.join();
+    Second.join();
+    bool Passed = Good[0] && Good[1];
+    std::puts(
+        Passed
+            ? "native borrowed image/sampler execution and concurrent PSOs PASS"
+            : "native borrowed image/sampler execution and concurrent PSOs "
+              "FAIL");
+    return Passed ? 0 : 1;
+  }
   if (Argc == 3 && (std::strcmp(Argv[2], "--dispatch") == 0 ||
                     std::strcmp(Argv[2], "--dxil-dispatch") == 0 ||
                     std::strcmp(Argv[2], "--dxil-cbv-dispatch") == 0 ||

@@ -3999,8 +3999,12 @@ Notes and constraints:
   these errors before preparation; low-level callers must validate first.
   Existing unambiguous unqualified inputs, including Vulkan's bindings, retain
   their behavior. DXIL image/sampler normalization and image namespace
-  serialization now supply this identity end-to-end. The Windows image bridge
-  and owned texture shader views/samplers remain open.
+  serialization now supply this identity end-to-end. Windows bridge 5 prepares
+  checked borrowed image/mip-layout and sampler PODs into these separate heaps;
+  owned DDI texture views and sampler heaps remain open. Direct3D SRV descriptors
+  set `FEME_IMAGE_LOAD_SWIZZLE`, opting addressed loads into component mapping.
+  Ordinary Vulkan storage-image reads leave this bit clear and remain unmapped.
+  OOB loads still return zero before mapping, including constant-one channels.
 
   DXIL normalization publishes six-field ranges in
   `!feme.cpu.bound_resources.v2`; legacy/SPIR-V five-field

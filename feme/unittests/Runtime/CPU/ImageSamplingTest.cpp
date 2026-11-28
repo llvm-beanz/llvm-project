@@ -1682,6 +1682,28 @@ TEST_F(ImageSamplingTest, LoadNeverAppliesImageViewSwizzle) {
   EXPECT_FLOAT_EQ(Out[3], 0.4f); // Unswizzled: raw A.
 }
 
+TEST_F(ImageSamplingTest, Direct3DSRVLoadAppliesMappingButNotToOOBResults) {
+  float Storage[4] = {2, 3, 4, 5};
+  FemeImageSubresourceLayout Layout;
+  auto Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                         ResourceFormat::R32G32B32A32_FLOAT, Layout);
+  Img.Flags |= FEME_IMAGE_LOAD_SWIZZLE;
+  Img.Swizzle =
+      packImageSwizzle(ImageComponentSwizzle::B, ImageComponentSwizzle::R,
+                       ImageComponentSwizzle::One, ImageComponentSwizzle::Zero);
+  auto Fn =
+      resolve<LoadFn>(addWrapper("srv_load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(&Img, 1, 0, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 4);
+  EXPECT_FLOAT_EQ(Out[1], 2);
+  EXPECT_FLOAT_EQ(Out[2], 1);
+  EXPECT_FLOAT_EQ(Out[3], 0);
+  Fn(&Img, 1, 0, 1, 0, 0, 0, true, Out);
+  for (float Channel : Out)
+    EXPECT_FLOAT_EQ(Channel, 0);
+}
+
 // (Roadmap L125(h)) The integer-sampled (`*.v4i32`) counterpart of
 // `SampleAppliesImageViewSwizzleToInBoundsTexel` above: an integer-format
 // image (`R32G32B32A32_SINT`) sampled via `feme.cpu.image.sample.2d.v4i32`
@@ -2156,6 +2178,25 @@ TEST_F(ImageSamplingTest, LoadI32NeverAppliesImageViewSwizzle) {
   EXPECT_EQ(Out[1], 2); // Unswizzled: raw G.
   EXPECT_EQ(Out[2], 3); // Unswizzled: raw B.
   EXPECT_EQ(Out[3], 4); // Unswizzled: raw A.
+}
+
+TEST_F(ImageSamplingTest, Direct3DSRVIntegerLoadAppliesMapping) {
+  int32_t Storage[4] = {-2, 3, -4, 5};
+  FemeImageSubresourceLayout Layout;
+  auto Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                         ResourceFormat::R32G32B32A32_SINT, Layout);
+  Img.Flags |= FEME_IMAGE_LOAD_SWIZZLE;
+  Img.Swizzle =
+      packImageSwizzle(ImageComponentSwizzle::B, ImageComponentSwizzle::R,
+                       ImageComponentSwizzle::One, ImageComponentSwizzle::Zero);
+  auto Fn = resolve<LoadI32Fn>(
+      addWrapper("srv_load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(&Img, 1, 0, 0, 0, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], -4);
+  EXPECT_EQ(Out[1], -2);
+  EXPECT_EQ(Out[2], 1);
+  EXPECT_EQ(Out[3], 0);
 }
 
 TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {

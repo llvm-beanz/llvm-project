@@ -11,7 +11,7 @@ target_compile_definitions(feme_warp_compiler PRIVATE FEME_WARP_COMPILER_EXPORTS
 add_dependencies(feme_warp_compiler llvm_vcsrevision_h)
 
 add_llvm_executable(feme-warp-compiler-test PARTIAL_SOURCES_INTENDED
-  WarpShaderCompilerTest.cpp WarpCompilerDDITests.cpp
+  WarpShaderCompilerTest.cpp WarpCompilerDDITests.cpp WarpCompilerImageTests.cpp
   ../../utils/windows-adapter-bootstrap/WarpTables.cpp
   ../../utils/windows-adapter-bootstrap/WarpHeap.cpp)
 target_compile_definitions(feme-warp-compiler-test PRIVATE
