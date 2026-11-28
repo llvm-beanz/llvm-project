@@ -130,7 +130,7 @@ such a configuration cannot reproduce the complete W1 exit evidence.
 | Copies/barriers | Checked buffer ranges and `memmove`; buffer transition/UAV barriers order CPU memory. No split/ranged/aliasing/enhanced barriers or texture copies. | Owned buffer-command scalar/guard oracle; ordered-buffer gate; independent reference-buffer-commands control. |
 | Fences/order | Runtime-owned monitored synchronization objects; generic GPU/CPU wait/signal callbacks and per-queue Ready/Done gates. Native fences and implicit multi-GPU are excluded. | Owned fences and ordered-buffer-commands; native fence placement/ownership, callback and worker-failure cases. |
 | Error behavior | Invalid arguments/unsupported operations report errors; failed queue creation cleans partial handles; a worker failure latches once, skips later work and attempts Done signaling to release its ordered wait. No forced OS-wide removal test. | Native compute/DDI OOM, S_FALSE-with-handle, failed wait and canceled event cases; all positive public gates require no removal. |
-| Coexistence | A live native `IDxcCompiler3`/DXIL blob and real FeMe Vulkan instance/device coexist with owned D3D12 execution. DXC compiles and Vulkan identity is queried before and after. | `os-routed-warp-compiler-owned-coexistence`; FeMe Vulkan identity verified in its launching shell. |
+| Coexistence | A live native `IDxcCompiler3`/DXIL blob and real FeMe Vulkan instance/physical device coexist with owned D3D12 execution. DXC compiles and Vulkan identity is queried before and after; no Vulkan logical-device execution is claimed. | `os-routed-warp-compiler-owned-coexistence`; FeMe Vulkan identity verified in its launching shell. |
 
 ### Execution and ownership
 
