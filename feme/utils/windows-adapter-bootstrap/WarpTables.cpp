@@ -1482,13 +1482,10 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
     if (Command->Type == RecordedCommand::Kind::Dispatch) {
       for (UINT J = 0; J < Command->Dispatch.BufferCount && SUCCEEDED(Result);
            ++J) {
-        const auto &Buffer = Command->Buffers[J];
-        void *Data = nullptr;
-        UINT64 Size = 0;
-        Result = Access.address(reinterpret_cast<UINT64>(Buffer.Data), Data,
-                                Size, Buffer.Namespace == 2);
-        if (SUCCEEDED(Result) && Size < Buffer.SizeInBytes)
-          Result = E_INVALIDARG;
+        auto &Buffer = Command->Buffers[J];
+        Result =
+            Access.address(reinterpret_cast<UINT64>(Buffer.Data), Buffer.Data,
+                           Buffer.SizeInBytes, Buffer.Namespace == 2);
       }
       if (SUCCEEDED(Result))
         Result = FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);

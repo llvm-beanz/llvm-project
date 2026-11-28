@@ -564,6 +564,22 @@ bool placement() {
                        "resource-handle bounds remain alias-specific");
         F.Table.pfnDestroyHeapAndResource(F.Device, {}, Alias);
       }
+      AliasArgs.Width = 8193;
+      AliasCreated = F.Table.pfnCreateHeapAndResource(F.Device, nullptr, {}, {},
+                                                      &AliasArgs, nullptr, {},
+                                                      Alias) == S_OK;
+      Valid &= check(AliasCreated &&
+                         feme::probe::getWarpBufferAddress(
+                             &F.State, Address, Data, Bytes, true) == S_OK &&
+                         Bytes == 8193,
+                     "larger live aliases extend GPUVA bounds");
+      if (AliasCreated) {
+        F.Table.pfnDestroyHeapAndResource(F.Device, {}, Alias);
+        Valid &= check(feme::probe::getWarpBufferAddress(
+                           &F.State, Address, Data, Bytes, true) == S_OK &&
+                           Bytes == 4097,
+                       "alias removal restores the surviving buffer extent");
+      }
       HeapFree(GetProcessHeap(), 0, Alias.pDrvPrivate);
     }
     Expected[4096] = 0x93;
