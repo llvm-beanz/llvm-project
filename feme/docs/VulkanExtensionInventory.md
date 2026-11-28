@@ -429,7 +429,8 @@ after any change that could affect either table.
 | `VK_KHR_zero_initialize_workgroup_memory` | Advertised |  |
 ## WARP shared-counter regression scope
 
-Extension advertisements are unchanged by the shared DirectX counter helper.
-Validation is the full FeMe gate (4408 passed, 15 skipped, 10 unsupported) and
+Extension advertisements are unchanged by the shared DirectX counter helper
+and typed-buffer component mappings.
+Validation is the full FeMe gate (4410 passed, 15 skipped, 10 unsupported) and
 139 stock-runtime/coexistence gates with confirmed FeMe ICD identity, not a new
 CTS run; no historical Windows CTS executable is available.

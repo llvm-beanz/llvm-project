@@ -2229,6 +2229,7 @@ typedef struct {
   uint32_t Kind;        // typed / structured / raw / cbuffer / none
   uint32_t Flags;       // UAV vs SRV, ROV, counter present, trusted, ...
   void    *Counter;     // append/consume/counter UAV, else null
+  uint32_t Swizzle;     // typed-load component mapping, zero is identity
 } FemeDescriptor;
 ```
 
@@ -2697,6 +2698,16 @@ general typed-format and owned-device closure remain open.
   turned into an arbitrary host memory access.
 
 ### Descriptor formats
+
+Artifact ABI **10** adds `FemeDescriptor::Swizzle`, using the existing
+`packImageSwizzle` encoding. Typed scalar/two/four-component FP32 and integer
+loads apply the mapping after physical-format decoding/default-component
+padding and before narrowing the shader result. Zero preserves identity.
+Masked, null and out-of-bounds accesses still return zero before swizzling,
+so a forced-one component cannot turn an invalid access into a nonzero result.
+Stores, raw/structured accesses and counter operations are unchanged.
+Artifacts from earlier descriptor layouts are rejected. Windows view/bridge
+materialization remains a separate prerequisite.
 
 This is the one place where bindless makes the CPU target's job harder
 rather than easier, so it is worth taking apart.

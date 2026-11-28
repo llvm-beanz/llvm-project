@@ -69,6 +69,9 @@ not a device or runtime.
 
 W2 remaining work is tracked without deeper milestone nesting:
 
+The shared typed-buffer runtime has descriptor-backed component mappings
+(artifact ABI 10); Windows view/bridge materialization remains open.
+
 The shared compiler/runtime and Windows bridge now support checked structured
 UAV counter views, per-active-lane increment/decrement and bounded uint append/
 consume. General payload coverage and dynamically indexed counter-expression parity, plus the other

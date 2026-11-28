@@ -253,7 +253,7 @@ typedef int16_t FemeRTv4i16Unaligned
     __attribute__((vector_size(8), aligned(2)));
 
 // Mirrors `feme::cpu::FemeDescriptor` (RuntimeABI.h): { Data, SizeInBytes,
-// Stride, Format, Kind, Flags, Counter }.
+// Stride, Format, Kind, Flags, Counter, Swizzle }.
 typedef struct {
   void *Data;
   uint64_t SizeInBytes;
@@ -262,6 +262,7 @@ typedef struct {
   uint32_t Kind;
   uint32_t Flags;
   void *Counter;
+  uint32_t Swizzle;
 } FemeRTDescriptor;
 
 // An internal, already-bounds-checked view of one descriptor's fields --
@@ -278,6 +279,7 @@ typedef struct {
   uint32_t Format;
   uint32_t Kind;
   uint32_t Flags;
+  uint32_t Swizzle;
   _Bool IndexOK;
 } FemeRTLoaded;
 
@@ -294,17 +296,13 @@ femeRTLoadDescriptor(const FemeRTDescriptor *Heap, uint32_t HeapCount,
                      uint32_t Index) {
   if (Index >= HeapCount) {
     // ResourceKind::None == 0.
-    FemeRTLoaded OutOfBounds = {0, 0, 0, 0, 0, 0, 0};
+    FemeRTLoaded OutOfBounds = {0, 0, 0, 0, 0, 0, 0, 0};
     return OutOfBounds;
   }
   const FemeRTDescriptor *Desc = &Heap[Index];
-  FemeRTLoaded Loaded = {Desc->Data,
-                         Desc->SizeInBytes,
-                         Desc->Stride,
-                         Desc->Format,
-                         Desc->Kind,
-                         Desc->Flags,
-                         1};
+  FemeRTLoaded Loaded = {
+      Desc->Data, Desc->SizeInBytes, Desc->Stride,  Desc->Format,
+      Desc->Kind, Desc->Flags,       Desc->Swizzle, 1};
   return Loaded;
 }
 
@@ -636,6 +634,8 @@ __attribute__((always_inline)) static FemeRTv4f32
 femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr);
 __attribute__((always_inline)) static void
 femeRTPackImageTexel(uint32_t Format, unsigned char *Ptr, FemeRTv4f32 Texel);
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTApplyImageSwizzle(FemeRTv4f32 Color, uint32_t Swizzle);
 
 // `feme.cpu.resource.load.typed.v4f32` (see `feme::cpu::ResourceCalls`):
 // reads a `<4 x float>` element through a bindless typed-buffer
@@ -687,7 +687,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
     return Zero;
   }
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  return femeRTUnpackImageTexel(Desc.Format, Ptr);
+  return femeRTApplyImageSwizzle(femeRTUnpackImageTexel(Desc.Format, Ptr),
+                                 Desc.Swizzle);
 }
 
 // `feme.cpu.resource.store.typed.v4f32`: the store counterpart of
@@ -978,6 +979,8 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr);
 __attribute__((always_inline)) static void
 femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
                         FemeRTv4i32 Texel);
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTApplyImageSwizzleI32(FemeRTv4i32 Color, uint32_t Swizzle);
 
 // `feme.cpu.resource.load.typed.v4i32` (V4, see `feme::cpu::ResourceCalls`):
 // reads a `<4 x i32>` element through a bindless typed-buffer descriptor,
@@ -1015,7 +1018,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     return Zero;
   }
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  return femeRTUnpackImageTexelI32(Desc.Format, Ptr);
+  return femeRTApplyImageSwizzleI32(femeRTUnpackImageTexelI32(Desc.Format, Ptr),
+                                    Desc.Swizzle);
 }
 
 // `feme.cpu.resource.store.typed.v4i32`: the store counterpart of
@@ -3525,7 +3529,8 @@ __attribute__((always_inline)) float femeCpuResourceLoadTypedF32(
   if (!(AccessOK && Mask))
     return 0.0f;
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  return femeRTUnpackImageTexel(Desc.Format, Ptr)[0];
+  return femeRTApplyImageSwizzle(femeRTUnpackImageTexel(Desc.Format, Ptr),
+                                 Desc.Swizzle)[0];
 }
 
 // `feme.cpu.resource.store.typed.f32` (roadmap L9): the store counterpart
@@ -3583,7 +3588,8 @@ __attribute__((always_inline)) int32_t femeCpuResourceLoadTypedI32(
   if (!(AccessOK && Mask))
     return 0;
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  return femeRTUnpackImageTexelI32(Desc.Format, Ptr)[0];
+  return femeRTApplyImageSwizzleI32(femeRTUnpackImageTexelI32(Desc.Format, Ptr),
+                                    Desc.Swizzle)[0];
 }
 
 // `feme.cpu.resource.store.typed.i32` (roadmap L9): the store counterpart
@@ -3650,7 +3656,8 @@ __attribute__((always_inline)) FemeRTv2f32 femeCpuResourceLoadTypedV2F32(
   if (!(AccessOK && Mask))
     return (FemeRTv2f32){0.0f, 0.0f};
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  FemeRTv4f32 Texel = femeRTUnpackImageTexel(Desc.Format, Ptr);
+  FemeRTv4f32 Texel = femeRTApplyImageSwizzle(
+      femeRTUnpackImageTexel(Desc.Format, Ptr), Desc.Swizzle);
   return (FemeRTv2f32){Texel[0], Texel[1]};
 }
 
@@ -3711,7 +3718,8 @@ __attribute__((always_inline)) FemeRTv2i32 femeCpuResourceLoadTypedV2I32(
   if (!(AccessOK && Mask))
     return (FemeRTv2i32){0, 0};
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
-  FemeRTv4i32 Texel = femeRTUnpackImageTexelI32(Desc.Format, Ptr);
+  FemeRTv4i32 Texel = femeRTApplyImageSwizzleI32(
+      femeRTUnpackImageTexelI32(Desc.Format, Ptr), Desc.Swizzle);
   return (FemeRTv2i32){Texel[0], Texel[1]};
 }
 

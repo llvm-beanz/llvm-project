@@ -32,6 +32,7 @@
 #include "llvm/IR/Module.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <array>
 #include <thread>
 
@@ -463,6 +464,114 @@ TEST_F(RuntimeCPUTest, TypedLoadV4I32IdentityFormat) {
   EXPECT_EQ(Result[1], 2);
   EXPECT_EQ(Result[2], -3);
   EXPECT_EQ(Result[3], 4);
+}
+
+TEST_F(RuntimeCPUTest, TypedBufferFloatComponentMappings) {
+  Function *Wrappers[] = {
+      addLoadWrapper("swizzle_scalar_f", "feme.cpu.resource.load.typed.f32"),
+      addLoadWrapper("swizzle_two_f", "feme.cpu.resource.load.typed.v2f32"),
+      addLoadWrapper("swizzle_four_f", "feme.cpu.resource.load.typed.v4f32")};
+  LoadFn Loads[] = {resolve<LoadFn>(Wrappers[0]), resolve<LoadFn>(Wrappers[1]),
+                    resolve<LoadFn>(Wrappers[2])};
+  const unsigned Widths[] = {1, 2, 4};
+  float Storage[] = {1.25f, -2.5f, 3.75f, -4.5f};
+  FemeDescriptor Heap[2] = {};
+  auto &Descriptor = Heap[1];
+  Descriptor.Data = Storage;
+  Descriptor.SizeInBytes = sizeof(Storage);
+  Descriptor.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_FLOAT);
+  Descriptor.Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Descriptor.Swizzle =
+      packImageSwizzle(ImageComponentSwizzle::B, ImageComponentSwizzle::R,
+                       ImageComponentSwizzle::Zero, ImageComponentSwizzle::One);
+  const float Expected[] = {3.75f, 1.25f, 0.0f, 1.0f};
+  for (unsigned I = 0; I != 3; ++I) {
+    ASSERT_TRUE(Loads[I]);
+    alignas(16) float Result[4] = {42, 42, 42, 42};
+    Loads[I](Heap, 2, 1, 0, true, Result);
+    for (unsigned C = 0; C != 4; ++C)
+      EXPECT_FLOAT_EQ(Result[C], C < Widths[I] ? Expected[C] : 42.0f);
+  }
+  Descriptor.Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Descriptor.SizeInBytes = sizeof(float);
+  Descriptor.Swizzle =
+      packImageSwizzle(ImageComponentSwizzle::A, ImageComponentSwizzle::G,
+                       ImageComponentSwizzle::B, ImageComponentSwizzle::One);
+  alignas(16) float Result[4] = {};
+  Loads[2](Heap, 2, 1, 0, true, Result);
+  const float Padded[] = {1, 0, 0, 1};
+  for (unsigned C = 0; C != 4; ++C)
+    EXPECT_FLOAT_EQ(Result[C], Padded[C]);
+  Heap[0] = Descriptor;
+  Heap[0].Data = nullptr;
+  Heap[0].SizeInBytes = 0;
+  Descriptor.Data = reinterpret_cast<void *>(uintptr_t{1});
+  for (unsigned I = 0; I != 3; ++I) {
+    for (unsigned Case = 0; Case != 5; ++Case) {
+      std::fill(std::begin(Result), std::end(Result), 42.0f);
+      Loads[I](Case == 3 ? nullptr : Heap, Case == 3 ? 0 : 2,
+               Case == 2   ? 2
+               : Case == 4 ? 0
+                           : 1,
+               Case == 1 ? 1 : 0, Case != 0, Result);
+      for (unsigned C = 0; C != 4; ++C)
+        EXPECT_FLOAT_EQ(Result[C], C < Widths[I] ? 0.0f : 42.0f);
+    }
+  }
+}
+
+TEST_F(RuntimeCPUTest, TypedBufferIntegerComponentMappings) {
+  Function *Wrappers[] = {
+      addLoadWrapper("swizzle_scalar_i", "feme.cpu.resource.load.typed.i32"),
+      addLoadWrapper("swizzle_two_i", "feme.cpu.resource.load.typed.v2i32"),
+      addLoadWrapper("swizzle_four_i", "feme.cpu.resource.load.typed.v4i32")};
+  LoadFn Loads[] = {resolve<LoadFn>(Wrappers[0]), resolve<LoadFn>(Wrappers[1]),
+                    resolve<LoadFn>(Wrappers[2])};
+  const unsigned Widths[] = {1, 2, 4};
+  int32_t Storage[] = {-1, 2, -3, 4};
+  FemeDescriptor Heap[2] = {};
+  auto &Descriptor = Heap[1];
+  Descriptor.Data = Storage;
+  Descriptor.SizeInBytes = sizeof(Storage);
+  Descriptor.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_SINT);
+  Descriptor.Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Descriptor.Swizzle =
+      packImageSwizzle(ImageComponentSwizzle::B, ImageComponentSwizzle::R,
+                       ImageComponentSwizzle::Zero, ImageComponentSwizzle::One);
+  const int32_t Expected[] = {-3, -1, 0, 1};
+  for (unsigned I = 0; I != 3; ++I) {
+    ASSERT_TRUE(Loads[I]);
+    alignas(16) int32_t Result[4] = {42, 42, 42, 42};
+    Loads[I](Heap, 2, 1, 0, true, Result);
+    for (unsigned C = 0; C != 4; ++C)
+      EXPECT_EQ(Result[C], C < Widths[I] ? Expected[C] : 42);
+  }
+  Descriptor.Format = static_cast<uint32_t>(ResourceFormat::R32_UINT);
+  Descriptor.SizeInBytes = sizeof(uint32_t);
+  Descriptor.Swizzle =
+      packImageSwizzle(ImageComponentSwizzle::A, ImageComponentSwizzle::G,
+                       ImageComponentSwizzle::B, ImageComponentSwizzle::One);
+  alignas(16) int32_t Result[4] = {};
+  Loads[2](Heap, 2, 1, 0, true, Result);
+  const int32_t Padded[] = {1, 0, 0, 1};
+  for (unsigned C = 0; C != 4; ++C)
+    EXPECT_EQ(Result[C], Padded[C]);
+  Heap[0] = Descriptor;
+  Heap[0].Data = nullptr;
+  Heap[0].SizeInBytes = 0;
+  Descriptor.Data = reinterpret_cast<void *>(uintptr_t{1});
+  for (unsigned I = 0; I != 3; ++I) {
+    for (unsigned Case = 0; Case != 5; ++Case) {
+      std::fill(std::begin(Result), std::end(Result), 42);
+      Loads[I](Case == 3 ? nullptr : Heap, Case == 3 ? 0 : 2,
+               Case == 2   ? 2
+               : Case == 4 ? 0
+                           : 1,
+               Case == 1 ? 1 : 0, Case != 0, Result);
+      for (unsigned C = 0; C != 4; ++C)
+        EXPECT_EQ(Result[C], C < Widths[I] ? 0 : 42);
+    }
+  }
 }
 
 TEST_F(RuntimeCPUTest, TypedLoadV4I32InactiveMaskReadsZero) {

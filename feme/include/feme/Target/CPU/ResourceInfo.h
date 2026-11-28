@@ -266,7 +266,8 @@ struct ResourceInfo {
 /// Version 8 adds a register namespace to each bound range, so DXIL SRVs
 /// and UAVs with equal register numbers cannot alias in host preparation.
 /// Version 9 admits descriptor-backed CBVs in their separate namespace.
-constexpr uint32_t ArtifactAbiVersion = 9;
+/// Version 10 adds component mappings to the buffer descriptor layout.
+constexpr uint32_t ArtifactAbiVersion = 10;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.

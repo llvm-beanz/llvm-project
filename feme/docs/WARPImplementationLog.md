@@ -784,6 +784,34 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Shared typed-buffer component-mapping prerequisite
+
+`FemeDescriptor::Swizzle` now carries the existing image component-mapping
+encoding for typed buffer loads. FP32/integer scalar, two-component and
+four-component helpers apply it after decoding/default-component padding and
+before narrowing. The existing swizzle helpers are reused rather than adding
+another conversion implementation. Zero is identity; stores, raw/structured
+accesses and counter operations are unchanged.
+
+Artifact ABI **10** rejects older layouts; the buffer descriptor grows from
+40 to 48 bytes on this 64-bit host. Two real-runtime JIT tests cover component
+reordering, forced zero/one, integer signedness, absent-channel defaults and
+all supported load widths. A nonzero heap index checks the actual descriptor
+array stride. Masked, null, out-of-bounds element/descriptor and empty-heap
+accesses return zero before mapping, even with a forced-one channel.
+The existing artifact rejection test additionally rejects versions 8 and 9.
+
+Validation: **4410** full-suite passes, **15** skipped, **10** unsupported;
+**139/139** stock-runtime/coexistence passes; refreshed null/old-version
+focused tests **3/3**. FeMe ICD identity was confirmed before full/coexistence
+launches. The new tests passed on their first execution. A pre-existing
+unhandled-format switch warning in feme-run was not changed.
+
+No new Windows mapping admission or capability is claimed: Windows view and
+bridge materialization remain open; inventory stays **v13**, bridge **3**,
+with **103** required OS gates. Vulkan advertisements are unchanged; historical
+Windows CTS executables remain unavailable, so this is not a new CTS result.
+
 #### Owned bounded structured append/consume
 
 Eight more public controls exercise AppendStructuredBuffer<uint> and

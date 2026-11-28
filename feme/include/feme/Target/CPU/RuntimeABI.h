@@ -610,6 +610,9 @@ struct FemeDescriptor {
   /// append/consume/counter UAV (see `FEME_DESCRIPTOR_HAS_COUNTER`);
   /// null otherwise.
   void *Counter;
+  /// Typed-buffer load component mapping, encoded by packImageSwizzle.
+  /// Zero preserves identity; stores and non-typed accesses ignore it.
+  uint32_t Swizzle;
 };
 
 /// The dimensionality of a `FemeImageDescriptor`, mirroring the DXIL/SPIR-V

@@ -304,8 +304,10 @@ TEST(ResourceInfoTest, RejectsInvalidNamespacesAndPreviousArtifactVersion) {
   Info.BoundRanges[0].Class = BoundResourceClass::Image;
   EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
   auto Bytes = serializeArtifact(StageArtifactInfo{});
-  Bytes[0] = 8;
-  EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
+  for (uint8_t Version : {8, 9}) {
+    Bytes[0] = Version;
+    EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
+  }
 }
 
 TEST(ResourceInfoTest, UnreadExplicitContractOverridesUseBasedReflection) {
@@ -347,8 +349,8 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsNine) {
-  EXPECT_EQ(ArtifactAbiVersion, 9u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsTen) {
+  EXPECT_EQ(ArtifactAbiVersion, 10u);
 }
 
 TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {

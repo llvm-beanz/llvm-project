@@ -1771,6 +1771,11 @@ mandatory additional-format set is implemented and tested. Only scalar R32
 typed-UAV read/write support is added, not texture/render-target support.
 Unbounded/general heaps, wider UAVs, other typed formats, image
 descriptors and broader residency remain open.
+The shared typed-buffer runtime additionally applies descriptor-backed
+component mappings after format decoding and before narrowing, including
+constant zero/one and absent-format-component defaults. Invalid accesses still
+return zero before mapping. Artifact ABI 10 invalidates older descriptor layouts;
+Windows view/bridge materialization remains open.
 Structured UAV views may associate a live UAV counter resource at a
 4096-byte-aligned offset. Descriptor creation and ordered execution validate
 the exact four-byte counter extent and owner; descriptors/copies retain the

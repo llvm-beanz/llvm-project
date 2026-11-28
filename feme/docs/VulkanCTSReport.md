@@ -1,5 +1,15 @@
 # Vulkan CTS status
 
+## Shared typed-buffer component mappings, not CTS
+
+The descriptor-backed typed-buffer mapping prerequisite passes the full FeMe
+gate: 4410 passed, 15 skipped, 10 unsupported, plus 139 stock-runtime/coexistence
+gates. FeMe CPU Vulkan Device identity was confirmed before these launches.
+Artifact ABI 10 invalidates older buffer descriptor layouts; default-zero
+mappings preserve existing Vulkan behavior. Advertisements are unchanged.
+Historical Windows CTS executables remain unavailable; no new CTS result or
+Windows component-mapping capability is claimed.
+
 ## Shared WARP counter prerequisite, not CTS
 
 The DirectX counter raising/lowering/runtime slice passes the full FeMe gate:
