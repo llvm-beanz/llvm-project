@@ -137638,3 +137638,22 @@ general counter payload/dynamic-expression coverage, images and samplers,
 full roots/resource classes/residency, transitions/splits/ranged barriers,
 queries and broader indirect signatures/removal wakeups. Keep W2 open until
 its complete acceptance evidence exists, not just these passing buffer slices.
+
+# W2 progress: non-uniform buffer dimension queries
+
+Packed-view geometry checks exposed an intentionally unrecognized canonical
+dimension-call family. I extended the existing resource-call matcher and
+scalarizer rather than inventing a separate query execution path. Typed
+queries have no offset; raw queries keep both stride and prefix, and every
+lane retains its governing mask. The same change fixes constant-false masks
+being ignored while scalarizing a divergent resource call.
+
+The canonical/query SIMD selectors pass 19 tests. Full check-feme passes
+4412 with 15 skipped and 10 unsupported; callback gates pass 65/65 and the
+current stock-runtime suite passes 271/271. FeMe Vulkan identity was verified
+before full/coexistence launches. The initial test insertion accidentally
+landed inside an existing IR raw string; I corrected it before validation.
+
+Next: commit the separately tested packed SRV admission and execution slice,
+then continue W2's additional typed UAV formats, roots/resources and
+synchronization. W2 is not complete; no new CTS or capability closure is claimed.
