@@ -503,7 +503,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 22)
+  set(FEME_WARP_PROFILE_VERSION 23)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -778,6 +778,24 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       "${WARP_COMPILER_OUTPUT_DIR}/owned-structured-array-compute.dxil")
     set(WARP_DXIL_TEXTURE_VIEW_FIXTURE
       "${WARP_COMPILER_OUTPUT_DIR}/owned-texture-view-compute.dxil")
+    set(WARP_DXIL_SAMPLER_VIEW_FIXTURE
+      "${WARP_COMPILER_OUTPUT_DIR}/owned-sampler-view-compute.dxil")
+    set(WARP_DXIL_STATIC_SAMPLER_VIEW_FIXTURE
+      "${WARP_COMPILER_OUTPUT_DIR}/owned-static-sampler-view-compute.dxil")
+    add_custom_command(OUTPUT "${WARP_DXIL_STATIC_SAMPLER_VIEW_FIXTURE}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${WARP_COMPILER_OUTPUT_DIR}"
+      COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main -DSTATIC_SAMPLERS=1
+        -Fo "${WARP_DXIL_STATIC_SAMPLER_VIEW_FIXTURE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-sampler-views.hlsl"
+      DEPENDS ../../test/Tools/warp-compiler-sampler-views.hlsl
+      VERBATIM)
+    add_custom_command(OUTPUT "${WARP_DXIL_SAMPLER_VIEW_FIXTURE}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${WARP_COMPILER_OUTPUT_DIR}"
+      COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
+        -Fo "${WARP_DXIL_SAMPLER_VIEW_FIXTURE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-sampler-views.hlsl"
+      DEPENDS ../../test/Tools/warp-compiler-sampler-views.hlsl
+      VERBATIM)
     add_custom_command(OUTPUT "${WARP_DXIL_TEXTURE_VIEW_FIXTURE}"
       COMMAND "${CMAKE_COMMAND}" -E make_directory "${WARP_COMPILER_OUTPUT_DIR}"
       COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
@@ -796,6 +814,12 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       feme_add_probe_test(NAME os-routed-warp-compiler-${gate_mode}single-layer-texture-views
         COMMAND warp-compiler-harness "--${mode}single-layer-texture-views"
           "${WARP_DXIL_TEXTURE_VIEW_FIXTURE}")
+      feme_add_probe_test(NAME os-routed-warp-compiler-${gate_mode}sampler-views
+        COMMAND warp-compiler-harness "--${mode}sampler-views"
+          "${WARP_DXIL_SAMPLER_VIEW_FIXTURE}")
+      feme_add_probe_test(NAME os-routed-warp-compiler-${gate_mode}static-sampler-views
+        COMMAND warp-compiler-harness "--${mode}static-sampler-views"
+          "${WARP_DXIL_STATIC_SAMPLER_VIEW_FIXTURE}")
     endforeach()
     add_custom_command(OUTPUT "${WARP_DXIL_FIXTURE}" "${WARP_DXIL_BUFFER_FIXTURE}"
         "${WARP_DXIL_CBV_FIXTURE}"
@@ -838,6 +862,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     add_custom_target(warp-owned-dxil-fixture
       DEPENDS ${WARP_DXIL_TYPED_FIXTURES}
         "${WARP_DXIL_TEXTURE_VIEW_FIXTURE}"
+        "${WARP_DXIL_SAMPLER_VIEW_FIXTURE}"
+        "${WARP_DXIL_STATIC_SAMPLER_VIEW_FIXTURE}"
         "${WARP_DXIL_FIXTURE}" "${WARP_DXIL_BUFFER_FIXTURE}"
         "${WARP_DXIL_CBV_FIXTURE}"
         "${WARP_DXIL_CONSTANT_FIXTURE}" "${WARP_DXIL_VIEW_FIXTURE}"

@@ -256,19 +256,8 @@ bool prepareImage(const FeMeWarpImageBinding &Image,
 
 bool prepareSampler(const FeMeWarpSamplerBinding &Sampler,
                     feme::cpu::FemeSamplerDescriptor &Descriptor) {
-  if ((Sampler.Filter & ~0x1d5u) ||
-      ((Sampler.Filter & 0x40) && (Sampler.Filter & 0x15) != 0x15) ||
-      Sampler.AddressU < 1 || Sampler.AddressU > 5 || Sampler.AddressV < 1 ||
-      Sampler.AddressV > 5 || Sampler.AddressW < 1 || Sampler.AddressW > 5 ||
-      Sampler.ComparisonFunc < 1 || Sampler.ComparisonFunc > 8 ||
-      !Sampler.MaxAnisotropy || Sampler.MaxAnisotropy > 16 ||
-      !std::isfinite(Sampler.MipLODBias) || Sampler.MipLODBias < -16 ||
-      Sampler.MipLODBias > 15.99f || !std::isfinite(Sampler.MinLOD) ||
-      !std::isfinite(Sampler.MaxLOD) || Sampler.MinLOD > Sampler.MaxLOD)
+  if (!FeMeWarpValidSampler(Sampler))
     return false;
-  for (float Channel : Sampler.BorderColor)
-    if (!std::isfinite(Channel))
-      return false;
   Descriptor.MinFilter = (Sampler.Filter >> 4) & 1;
   Descriptor.MagFilter = (Sampler.Filter >> 2) & 1;
   Descriptor.MipFilter = Sampler.Filter & 1;

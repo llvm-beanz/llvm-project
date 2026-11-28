@@ -10,6 +10,7 @@
 #ifndef FEME_UTILS_WINDOWS_ADAPTER_BOOTSTRAP_WARPSHADERCOMPILERABI_H
 #define FEME_UTILS_WINDOWS_ADAPTER_BOOTSTRAP_WARPSHADERCOMPILERABI_H
 
+#include <cmath>
 #include <cstdint>
 
 inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 5;
@@ -133,6 +134,25 @@ struct FeMeWarpSamplerBinding {
   float MinLOD = 0;
   float MaxLOD = 3.402823466e38f;
 };
+
+/// Validate canonical sampler state shared by the native DDI and private
+/// bridge.
+inline bool FeMeWarpValidSampler(const FeMeWarpSamplerBinding &Sampler) {
+  if ((Sampler.Filter & ~0x1d5u) ||
+      ((Sampler.Filter & 0x40) && (Sampler.Filter & 0x15) != 0x15) ||
+      Sampler.AddressU < 1 || Sampler.AddressU > 5 || Sampler.AddressV < 1 ||
+      Sampler.AddressV > 5 || Sampler.AddressW < 1 || Sampler.AddressW > 5 ||
+      Sampler.ComparisonFunc < 1 || Sampler.ComparisonFunc > 8 ||
+      !Sampler.MaxAnisotropy || Sampler.MaxAnisotropy > 16 ||
+      !std::isfinite(Sampler.MipLODBias) || Sampler.MipLODBias < -16 ||
+      Sampler.MipLODBias > 15.99f || !std::isfinite(Sampler.MinLOD) ||
+      !std::isfinite(Sampler.MaxLOD) || Sampler.MinLOD > Sampler.MaxLOD)
+    return false;
+  for (float Channel : Sampler.BorderColor)
+    if (!std::isfinite(Channel))
+      return false;
+  return true;
+}
 
 struct FeMeWarpDispatchDesc {
   std::uint32_t Size = sizeof(FeMeWarpDispatchDesc);

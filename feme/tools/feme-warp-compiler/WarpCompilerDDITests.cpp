@@ -10,6 +10,7 @@
 #include "..\..\utils\windows-adapter-bootstrap\WarpShaderCompilerABI.h"
 #include "..\..\utils\windows-adapter-bootstrap\WarpTables.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -252,6 +253,178 @@ bool testQueueWorkerFailure(D3D12DDI_HDEVICE Device,
   Core.pfnDestroyCommandList(Device, List);
   Core.pfnDestroyCommandRecorder(Device, Recorder);
   Core.pfnDestroyCommandPool(Device, Pool);
+  return Good;
+}
+bool testSamplerDescriptors(D3D12DDI_HDEVICE Device,
+                            D3D12DDI_HDEVICE OtherDevice,
+                            const D3D12DDI_DEVICE_FUNCS_CORE_0072 &Core) {
+  D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001 HeapArgs{};
+  HeapArgs.Type = D3D12DDI_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+  HeapArgs.NumDescriptors = 2;
+  HeapArgs.NodeMask = 1;
+  HeapArgs.Flags = D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE;
+  Storage CPUStorage(Core.pfnCalcPrivateDescriptorHeapSize(Device, &HeapArgs));
+  D3D12DDI_HDESCRIPTORHEAP CPUHeap{CPUStorage.data()};
+  if (Core.pfnCreateDescriptorHeap(Device, &HeapArgs, CPUHeap) != S_OK)
+    return false;
+  HeapArgs.Flags |= D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  Storage GPUStorage(Core.pfnCalcPrivateDescriptorHeapSize(Device, &HeapArgs));
+  D3D12DDI_HDESCRIPTORHEAP GPUHeap{GPUStorage.data()};
+  if (Core.pfnCreateDescriptorHeap(Device, &HeapArgs, GPUHeap) != S_OK) {
+    Core.pfnDestroyDescriptorHeap(Device, CPUHeap);
+    return false;
+  }
+  auto CPU = Core.pfnGetCPUDescriptorHandleForHeapStart(Device, CPUHeap);
+  auto GPU = Core.pfnGetCPUDescriptorHandleForHeapStart(Device, GPUHeap);
+  UINT Stride = Core.pfnGetDescriptorSizeInBytes(Device, HeapArgs.Type);
+  D3D12DDI_SAMPLER_DESC Desc{};
+  Desc.AddressU = Desc.AddressV = Desc.AddressW =
+      D3D12DDI_TEXTURE_ADDRESS_MODE_CLAMP;
+  Desc.ComparisonFunc = static_cast<D3D12DDI_COMPARISON_FUNC>(0);
+  Desc.MaxLOD = std::numeric_limits<float>::max();
+  D3D12DDIARG_CREATE_SAMPLER Args{&Desc};
+  LastError = S_OK;
+  Core.pfnCreateSampler(Device, &Args, CPU);
+  bool Good = LastError == S_OK;
+  std::vector<unsigned char> Before(Stride);
+  std::memcpy(Before.data(), reinterpret_cast<void *>(CPU.ptr), Stride);
+  for (UINT Case = 0; Case < 7; ++Case) {
+    auto Invalid = Desc;
+    switch (Case) {
+    case 0:
+      Invalid.Filter = static_cast<D3D12DDI_FILTER>(2);
+      break;
+    case 1:
+      Invalid.AddressU = static_cast<D3D12DDI_TEXTURE_ADDRESS_MODE>(0);
+      break;
+    case 2:
+      Invalid.Filter = D3D12DDI_FILTER_ANISOTROPIC;
+      break;
+    case 3:
+      Invalid.Filter = D3D12DDI_FILTER_ANISOTROPIC;
+      Invalid.MaxAnisotropy = 17;
+      break;
+    case 4:
+      Invalid.MinLOD = 1;
+      Invalid.MaxLOD = 0;
+      break;
+    case 5:
+      Invalid.AddressU = D3D12DDI_TEXTURE_ADDRESS_MODE_BORDER;
+      Invalid.BorderColor[0] = std::numeric_limits<float>::quiet_NaN();
+      break;
+    case 6:
+      Invalid.Filter = D3D12DDI_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+      Invalid.ComparisonFunc = static_cast<D3D12DDI_COMPARISON_FUNC>(0);
+      break;
+    }
+    Args.pSamplerDesc = &Invalid;
+    LastError = S_OK;
+    Core.pfnCreateSampler(Device, &Args, CPU);
+    Good &= LastError == E_INVALIDARG &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(CPU.ptr),
+                        Stride) == 0;
+  }
+  Args.pSamplerDesc = &Desc;
+  LastError = S_OK;
+  Core.pfnCreateSampler(OtherDevice, &Args, CPU);
+  Good &= LastError == E_INVALIDARG &&
+          std::memcmp(Before.data(), reinterpret_cast<void *>(CPU.ptr),
+                      Stride) == 0;
+  LastError = S_OK;
+  Core.pfnCopyDescriptorsSimple(Device, 1, GPU, CPU, HeapArgs.Type);
+  Good &= LastError == S_OK &&
+          std::memcmp(Before.data(), reinterpret_cast<void *>(GPU.ptr),
+                      Stride) == 0;
+  Core.pfnCopyDescriptorsSimple(Device, 1, GPU, CPU,
+                                D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  Good &= LastError == E_INVALIDARG &&
+          std::memcmp(Before.data(), reinterpret_cast<void *>(GPU.ptr),
+                      Stride) == 0;
+  HeapArgs.NumDescriptors = 2049;
+  LastError = S_OK;
+  Good &= !Core.pfnCalcPrivateDescriptorHeapSize(Device, &HeapArgs) &&
+          LastError == E_INVALIDARG;
+  Core.pfnDestroyDescriptorHeap(Device, GPUHeap);
+  Core.pfnDestroyDescriptorHeap(Device, CPUHeap);
+  return Good;
+}
+
+bool testStaticSamplers(D3D12DDI_HDEVICE Device,
+                        const D3D12DDI_DEVICE_FUNCS_CORE_0072 &Core) {
+  std::array<D3D12DDI_STATIC_SAMPLER, 2> Samplers{};
+  for (UINT I = 0; I < Samplers.size(); ++I) {
+    auto &Sampler = Samplers[I];
+    Sampler.AddressU = Sampler.AddressV = Sampler.AddressW =
+        D3D12DDI_TEXTURE_ADDRESS_MODE_CLAMP;
+    Sampler.ComparisonFunc = D3D12DDI_COMPARISON_FUNC_NEVER;
+    Sampler.MaxLOD = std::numeric_limits<float>::max();
+    Sampler.ShaderRegister = 3 + I;
+    Sampler.RegisterSpace = 7;
+  }
+  D3D12DDI_ROOT_SIGNATURE_0013 Desc{};
+  Desc.NumStaticSamplers = 2;
+  Desc.pStaticSamplers = Samplers.data();
+  D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 Args{};
+  Args.Version = D3D12DDI_ROOT_SIGNATURE_VERSION_1_1;
+  Args.pRootSignature_1_1 = &Desc;
+  Args.NodeMask = 1;
+  SIZE_T Size = Core.pfnCalcPrivateRootSignatureSize(Device, &Args);
+  if (!Size)
+    return false;
+  Storage Data(Size);
+  D3D12DDI_HROOTSIGNATURE Root{Data.data()};
+  if (Core.pfnCreateRootSignature(Device, &Args, Root) != S_OK)
+    return false;
+  Core.pfnDestroyRootSignature(Device, Root);
+  Desc.pStaticSamplers = nullptr;
+  LastError = S_OK;
+  bool Good = !Core.pfnCalcPrivateRootSignatureSize(Device, &Args) &&
+              LastError == E_INVALIDARG;
+  Desc.pStaticSamplers = Samplers.data();
+  Samplers[1].ShaderRegister = Samplers[0].ShaderRegister;
+  LastError = S_OK;
+  Good &= !Core.pfnCalcPrivateRootSignatureSize(Device, &Args) &&
+          LastError == E_INVALIDARG;
+  Samplers[0].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_VERTEX;
+  Samplers[1].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_PIXEL;
+  LastError = S_OK;
+  Good &=
+      Core.pfnCalcPrivateRootSignatureSize(Device, &Args) && LastError == S_OK;
+  Desc.NumStaticSamplers = 1;
+  Samplers[0].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_ALL;
+  D3D12DDI_DESCRIPTOR_RANGE_0013 Range{};
+  Range.RangeType = D3D12DDI_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+  Range.NumDescriptors = 1;
+  Range.BaseShaderRegister = 3;
+  Range.RegisterSpace = 7;
+  D3D12DDI_ROOT_PARAMETER_0013 Parameter{};
+  Parameter.ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  Parameter.DescriptorTable = {1, &Range};
+  Desc.NumParameters = 1;
+  Desc.pRootParameters = &Parameter;
+  LastError = S_OK;
+  Good &= !Core.pfnCalcPrivateRootSignatureSize(Device, &Args) &&
+          LastError == E_INVALIDARG;
+  Desc.NumStaticSamplers = 0;
+  Range.Flags = D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DATA_VOLATILE;
+  LastError = S_OK;
+  Good &= !Core.pfnCalcPrivateRootSignatureSize(Device, &Args) &&
+          LastError == E_INVALIDARG;
+  Desc.NumParameters = 0;
+  Desc.NumStaticSamplers = 1;
+  Samplers[0].BorderColor = D3D12DDI_STATIC_BORDER_COLOR_OPAQUE_BLACK_UINT;
+  LastError = S_OK;
+  Good &= !Core.pfnCalcPrivateRootSignatureSize(Device, &Args) &&
+          LastError == E_NOTIMPL;
+  Desc.NumStaticSamplers = 0;
+  Desc.NumParameters = 1;
+  Range.Flags = D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_NONE;
+  std::array<D3D12DDI_DESCRIPTOR_RANGE_0013, 2> Mixed{Range, Range};
+  Mixed[1].RangeType = D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV;
+  Parameter.DescriptorTable = {2, Mixed.data()};
+  LastError = S_OK;
+  Good &= !Core.pfnCalcPrivateRootSignatureSize(Device, &Args) &&
+          LastError == E_INVALIDARG;
   return Good;
 }
 } // namespace
@@ -1075,6 +1248,9 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Good &= !Core.pfnGetCPUDescriptorHandleForHeapStart(Device, CPUHeap).ptr &&
           LastError == E_INVALIDARG;
   Good &= Owner.LiveImmutableStates == 0;
+  Good &= testSamplerDescriptors(Device, OtherDevice, Core);
+  Good &= testStaticSamplers(Device, Core);
+  Good &= Owner.LiveImmutableStates == 0 && Owner.LiveRootSignatures == 0;
   Good &= testQueueWorkerFailure(Device, Core, true);
   std::puts(Good ? "compiled DDI ownership PASS"
                  : "compiled DDI ownership FAIL");

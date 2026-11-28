@@ -194,7 +194,7 @@ UINT rangeNamespace(D3D12DDI_DESCRIPTOR_RANGE_TYPE Type) {
   case D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV:
     return 3;
   case D3D12DDI_DESCRIPTOR_RANGE_TYPE_SAMPLER:
-    return 0;
+    return 4;
   }
   return 0;
 }
@@ -206,6 +206,9 @@ getRootParameter(const D3D12DDI_ROOT_PARAMETER_0013 &Parameter) {
     BufferRootParameter Result;
     Result.RangeCount = Parameter.DescriptorTable.NumDescriptorRanges;
     Result.Visibility = Parameter.ShaderVisibility;
+    if (Result.RangeCount && Parameter.DescriptorTable.pDescriptorRanges)
+      Result.Namespace = rangeNamespace(
+          Parameter.DescriptorTable.pDescriptorRanges[0].RangeType);
     return Result;
   }
   bool Constants =
@@ -224,6 +227,50 @@ getRootParameter(const D3D12DDI_ROOT_PARAMETER_0013 &Parameter) {
           Parameter.ShaderVisibility};
 }
 
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+template <typename NativeSampler>
+FeMeWarpSamplerBinding nativeSamplerState(const NativeSampler &Desc) {
+  FeMeWarpSamplerBinding Sampler;
+  Sampler.Filter = Desc.Filter;
+  Sampler.AddressU = Desc.AddressU;
+  Sampler.AddressV = Desc.AddressV;
+  Sampler.AddressW = Desc.AddressW;
+  Sampler.MipLODBias = Desc.MipLODBias;
+  // The runtime can zero fields that are unused by the selected filter.
+  Sampler.MaxAnisotropy = (Sampler.Filter & 0x40) ? Desc.MaxAnisotropy : 1;
+  Sampler.ComparisonFunc = (Sampler.Filter & 0x180) == 0x80
+                               ? Desc.ComparisonFunc
+                               : D3D12DDI_COMPARISON_FUNC_NEVER;
+  Sampler.MinLOD = Desc.MinLOD;
+  Sampler.MaxLOD = Desc.MaxLOD;
+  return Sampler;
+}
+
+struct StaticSamplerState {
+  FeMeWarpSamplerBinding Sampler;
+  D3D12DDI_SHADER_VISIBILITY Visibility = D3D12DDI_SHADER_VISIBILITY_ALL;
+};
+
+HRESULT staticSamplerState(const D3D12DDI_STATIC_SAMPLER &Desc,
+                           StaticSamplerState &State) {
+  if (static_cast<UINT>(Desc.ShaderVisibility) >
+          D3D12DDI_SHADER_VISIBILITY_PIXEL ||
+      static_cast<UINT>(Desc.BorderColor) >
+          D3D12DDI_STATIC_BORDER_COLOR_OPAQUE_WHITE)
+    return E_NOTIMPL;
+  State.Sampler = nativeSamplerState(Desc);
+  State.Sampler.Space = Desc.RegisterSpace;
+  State.Sampler.Register = Desc.ShaderRegister;
+  State.Visibility = Desc.ShaderVisibility;
+  if (Desc.BorderColor == D3D12DDI_STATIC_BORDER_COLOR_OPAQUE_WHITE)
+    std::fill(std::begin(State.Sampler.BorderColor),
+              std::end(State.Sampler.BorderColor), 1.0f);
+  else if (Desc.BorderColor == D3D12DDI_STATIC_BORDER_COLOR_OPAQUE_BLACK)
+    State.Sampler.BorderColor[3] = 1;
+  return FeMeWarpValidSampler(State.Sampler) ? S_OK : E_INVALIDARG;
+}
+#endif
+
 struct RootSignature {
   feme::probe::WarpDeviceState *Owner;
   D3D12DDI_ROOT_SIGNATURE_FLAGS Flags;
@@ -231,6 +278,10 @@ struct RootSignature {
   std::array<BufferRootParameter, MaxRootParameters> Parameters{};
   UINT RangeCount = 0;
   std::array<BufferTableRange, MaxRootParameters> Ranges{};
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  UINT StaticSamplerCount = 0;
+  std::array<StaticSamplerState, MaxRootParameters> StaticSamplers{};
+#endif
 };
 
 template <typename Descriptor, typename Handle> struct ImmutableState {
@@ -293,16 +344,17 @@ using RasterState =
 HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
   if (!Args || !Args->pRootSignature_1_1 || Args->NodeMask != 1)
     return E_INVALIDARG;
-  if (Args->Version != D3D12DDI_ROOT_SIGNATURE_VERSION_1_1 ||
-      Args->pRootSignature_1_1->NumStaticSamplers)
+  if (Args->Version != D3D12DDI_ROOT_SIGNATURE_VERSION_1_1)
     return E_NOTIMPL;
   const auto &Root = *Args->pRootSignature_1_1;
 #ifndef FEME_BOOTSTRAP_WARP_COMPILER
-  if (Root.NumParameters)
+  if (Root.NumParameters || Root.NumStaticSamplers)
     return E_NOTIMPL;
 #else
   if (Root.NumParameters > MaxRootParameters ||
-      (Root.NumParameters && !Root.pRootParameters))
+      (Root.NumParameters && !Root.pRootParameters) ||
+      Root.NumStaticSamplers > MaxRootParameters ||
+      (Root.NumStaticSamplers && !Root.pStaticSamplers))
     return E_INVALIDARG;
   UINT Cost = 0, BindingCount = 0;
   std::array<BufferRootParameter, MaxRootParameters> Bindings{};
@@ -352,6 +404,8 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
         UINT Namespace = rangeNamespace(Range.RangeType);
         if (!Namespace || Range.NumDescriptors > MaxRootParameters)
           return E_NOTIMPL;
+        if ((Namespace == 4) != (Binding.Namespace == 4))
+          return E_INVALIDARG;
         if (!Range.NumDescriptors ||
             Range.BaseShaderRegister >
                 std::numeric_limits<UINT>::max() - (Range.NumDescriptors - 1))
@@ -368,7 +422,8 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
         UINT DataFlags = Flags & DataMask;
         if ((Flags & ~(DataMask | Volatile | KeepingBounds)) ||
             (DataFlags && (DataFlags & (DataFlags - 1))) ||
-            ((Flags & Volatile) && (Flags & KeepingBounds)))
+            ((Flags & Volatile) && (Flags & KeepingBounds)) ||
+            (Namespace == 4 && (Flags & (DataMask | KeepingBounds))))
           return E_INVALIDARG;
         UINT64 Offset = Range.OffsetInDescriptorsFromTableStart ==
                                 std::numeric_limits<UINT>::max()
@@ -396,6 +451,19 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
             D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_STATIC_WHILE_SET_AT_EXECUTE &&
         Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_STATIC)
       return E_INVALIDARG;
+    if (!AddBinding(Binding))
+      return E_INVALIDARG;
+  }
+  for (UINT I = 0; I < Root.NumStaticSamplers; ++I) {
+    StaticSamplerState State;
+    HRESULT Result = staticSamplerState(Root.pStaticSamplers[I], State);
+    if (FAILED(Result))
+      return Result;
+    BufferRootParameter Binding;
+    Binding.Namespace = 4;
+    Binding.Space = State.Sampler.Space;
+    Binding.Register = State.Sampler.Register;
+    Binding.Visibility = State.Visibility;
     if (!AddBinding(Binding))
       return E_INVALIDARG;
   }
@@ -449,6 +517,17 @@ HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
       ConstantOffset += Parameter.Constants.Num32BitValues;
     }
   }
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  State->StaticSamplerCount = Args->pRootSignature_1_1->NumStaticSamplers;
+  for (UINT I = 0; I < State->StaticSamplerCount; ++I) {
+    Result = staticSamplerState(Args->pRootSignature_1_1->pStaticSamplers[I],
+                                State->StaticSamplers[I]);
+    if (FAILED(Result)) {
+      State->~RootSignature();
+      return Result;
+    }
+  }
+#endif
   ++Owner->LiveRootSignatures;
   return S_OK;
 }
@@ -653,6 +732,7 @@ struct DescriptorSlot {
   UINT Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
   bool Image = false;
   D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 ImageView{};
+  FeMeWarpSamplerBinding Sampler{};
 };
 
 struct DescriptorHeap {
@@ -694,10 +774,12 @@ DescriptorSlot *descriptorTableSlot(DescriptorHeap *Heap, UINT64 Address,
 
 DescriptorSlot *descriptorRange(feme::probe::WarpDeviceState *Owner,
                                 UINT64 Address, UINT Count,
-                                bool CopySource = false) {
+                                bool CopySource = false,
+                                D3D12DDI_DESCRIPTOR_HEAP_TYPE Type =
+                                    D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
   for (auto *Heap = DescriptorHeaps; Heap; Heap = Heap->Next) {
     UINT64 Base = reinterpret_cast<UINT64>(Heap->Slots.get());
-    if (Heap->Owner != Owner || Address < Base ||
+    if (Heap->Owner != Owner || Heap->Desc.Type != Type || Address < Base ||
         (Address - Base) % sizeof(DescriptorSlot) ||
         !(Heap->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE) ||
         (CopySource &&
@@ -718,6 +800,12 @@ validateDescriptorHeap(const D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001 *Args) {
       (Args->Flags & ~(D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE |
                        D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)))
     return E_INVALIDARG;
+  if (Args->Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
+    if ((Args->Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
+        Args->NumDescriptors > 2048)
+      return E_INVALIDARG;
+    return S_OK;
+  }
   return Args->Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ? S_OK
                                                                  : E_NOTIMPL;
 }
@@ -983,6 +1071,42 @@ createUAV(D3D12DDI_HDEVICE Device,
   *Slot = Value;
 }
 
+void APIENTRY createSampler(D3D12DDI_HDEVICE Device,
+                            const D3D12DDIARG_CREATE_SAMPLER *Args,
+                            D3D12DDI_CPU_DESCRIPTOR_HANDLE Destination) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Args || !Args->pSamplerDesc) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  const auto &Desc = *Args->pSamplerDesc;
+  DescriptorSlot Value;
+  Value.Namespace = 4;
+  auto &Sampler = Value.Sampler;
+  Sampler = nativeSamplerState(Desc);
+  std::copy(std::begin(Desc.BorderColor), std::end(Desc.BorderColor),
+            std::begin(Sampler.BorderColor));
+  if (!FeMeWarpValidSampler(Sampler)) {
+    std::fprintf(stderr,
+                 "FeMe sampler rejected: filter=%u address=%u/%u/%u "
+                 "anisotropy=%u comparison=%u bias=%g lod=%g/%g\n",
+                 Sampler.Filter, Sampler.AddressU, Sampler.AddressV,
+                 Sampler.AddressW, Sampler.MaxAnisotropy,
+                 Sampler.ComparisonFunc, Sampler.MipLODBias, Sampler.MinLOD,
+                 Sampler.MaxLOD);
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  DescriptorAccess Access;
+  auto *Slot = descriptorRange(Owner, Destination.ptr, 1, false,
+                               D3D12DDI_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+  if (!Slot) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  *Slot = Value;
+}
+
 void APIENTRY
 copyDescriptors(D3D12DDI_HDEVICE Device, UINT DestinationCount,
                 const D3D12DDI_CPU_DESCRIPTOR_HANDLE *Destinations,
@@ -990,7 +1114,9 @@ copyDescriptors(D3D12DDI_HDEVICE Device, UINT DestinationCount,
                 const D3D12DDI_CPU_DESCRIPTOR_HANDLE *Sources,
                 const UINT *SourceSizes, D3D12DDI_DESCRIPTOR_HEAP_TYPE Type) {
   auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
-  if (!Owner || Type != D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+  if (!Owner ||
+      (Type != D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
+       Type != D3D12DDI_DESCRIPTOR_HEAP_TYPE_SAMPLER) ||
       (DestinationCount && !Destinations) || (SourceCount && !Sources)) {
     reportError(Device, E_INVALIDARG);
     return;
@@ -999,7 +1125,7 @@ copyDescriptors(D3D12DDI_HDEVICE Device, UINT DestinationCount,
   UINT64 DestinationTotal = 0, SourceTotal = 0;
   for (UINT I = 0; I < DestinationCount; ++I) {
     UINT Count = DestinationSizes ? DestinationSizes[I] : 1;
-    if (!descriptorRange(Owner, Destinations[I].ptr, Count)) {
+    if (!descriptorRange(Owner, Destinations[I].ptr, Count, false, Type)) {
       reportError(Device, E_INVALIDARG);
       return;
     }
@@ -1007,7 +1133,7 @@ copyDescriptors(D3D12DDI_HDEVICE Device, UINT DestinationCount,
   }
   for (UINT I = 0; I < SourceCount; ++I) {
     UINT Count = SourceSizes ? SourceSizes[I] : 1;
-    if (!descriptorRange(Owner, Sources[I].ptr, Count, true)) {
+    if (!descriptorRange(Owner, Sources[I].ptr, Count, true, Type)) {
       reportError(Device, E_INVALIDARG);
       return;
     }
@@ -1031,14 +1157,14 @@ copyDescriptors(D3D12DDI_HDEVICE Device, UINT DestinationCount,
   for (UINT I = 0; I < SourceCount; ++I) {
     UINT Count = SourceSizes ? SourceSizes[I] : 1;
     std::memcpy(Values.get() + Offset,
-                descriptorRange(Owner, Sources[I].ptr, Count, true),
+                descriptorRange(Owner, Sources[I].ptr, Count, true, Type),
                 SIZE_T(Count) * sizeof(DescriptorSlot));
     Offset += Count;
   }
   Offset = 0;
   for (UINT I = 0; I < DestinationCount; ++I) {
     UINT Count = DestinationSizes ? DestinationSizes[I] : 1;
-    std::memcpy(descriptorRange(Owner, Destinations[I].ptr, Count),
+    std::memcpy(descriptorRange(Owner, Destinations[I].ptr, Count, false, Type),
                 Values.get() + Offset, SIZE_T(Count) * sizeof(DescriptorSlot));
     Offset += Count;
   }
@@ -1333,6 +1459,7 @@ struct DispatchBindings {
   FeMeWarpDispatchDesc Dispatch;
   std::array<FeMeWarpBufferBinding, MaxRootParameters> Buffers{};
   std::array<FeMeWarpImageBinding, MaxRootParameters> Images{};
+  std::array<FeMeWarpSamplerBinding, MaxRootParameters> Samplers{};
   std::array<std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels>,
              MaxRootParameters>
       ImageLayouts{};
@@ -1340,6 +1467,7 @@ struct DispatchBindings {
   DispatchBindings() {
     Dispatch.Buffers = Buffers.data();
     Dispatch.Images = Images.data();
+    Dispatch.Samplers = Samplers.data();
   }
 };
 
@@ -1355,8 +1483,11 @@ struct RecordedCommand {
   FeMeWarpDispatchDesc Dispatch;
   UINT BindingCount = 0;
   std::array<RecordedBinding, MaxRootParameters> Bindings{};
+  UINT StaticSamplerCount = 0;
+  std::array<FeMeWarpSamplerBinding, MaxRootParameters> StaticSamplers{};
   std::array<UINT, MaxRootDwords> RootConstants{};
   D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
+  D3D12DDI_HDESCRIPTORHEAP SamplerHeap{};
   D3D12DDIARG_BUFFER_PLACEMENT Destination{};
   D3D12DDIARG_BUFFER_PLACEMENT Source{};
   UINT64 Bytes = 0;
@@ -1419,8 +1550,11 @@ struct CommandList {
   std::array<UINT64, MaxRootParameters> RootAddresses{};
   std::array<UINT, MaxRootDwords> RootConstants{};
   std::array<BufferTableRange, MaxRootParameters> RootRanges{};
+  UINT StaticSamplerCount = 0;
+  std::array<StaticSamplerState, MaxRootParameters> StaticSamplers{};
   std::array<UINT64, MaxRootParameters> RootTables{};
   D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
+  D3D12DDI_HDESCRIPTORHEAP SamplerHeap{};
   PredicationState Predicate{};
   UINT64 Marker = 0;
   RecordedCommand *First = nullptr;
@@ -1846,10 +1980,12 @@ void APIENTRY resetList(D3D12DDI_HCOMMANDLIST List,
   State->Open = true;
   State->RootIdentity = nullptr;
   State->RootCount = 0;
+  State->StaticSamplerCount = 0;
   State->RootAddresses.fill(0);
   State->RootConstants.fill(0);
   State->RootTables.fill(0);
   State->DescriptorHeap = {};
+  State->SamplerHeap = {};
   State->Predicate = {};
 }
 
@@ -1914,9 +2050,11 @@ void APIENTRY setComputeRoot(D3D12DDI_HCOMMANDLIST List,
     return;
   State->RootIdentity = Signature;
   State->RootCount = Signature ? Signature->Count : 0;
+  State->StaticSamplerCount = Signature ? Signature->StaticSamplerCount : 0;
   if (Signature) {
     State->RootParameters = Signature->Parameters;
     State->RootRanges = Signature->Ranges;
+    State->StaticSamplers = Signature->StaticSamplers;
   }
   State->RootAddresses.fill(0);
   State->RootConstants.fill(0);
@@ -1989,9 +2127,14 @@ void APIENTRY setRootTable(D3D12DDI_HCOMMANDLIST List, UINT Index,
   if (!State)
     return;
   DescriptorAccess Access;
-  auto *Heap = *findDescriptorHeap(State->DescriptorHeap);
-  if (Index >= State->RootCount || !State->RootParameters[Index].RangeCount ||
-      !Heap || Heap->Owner != State->Owner ||
+  if (Index >= State->RootCount || !State->RootParameters[Index].RangeCount) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  auto *Heap = *findDescriptorHeap(State->RootParameters[Index].Namespace == 4
+                                       ? State->SamplerHeap
+                                       : State->DescriptorHeap);
+  if (!Heap || Heap->Owner != State->Owner ||
       !descriptorTableSlot(Heap, Address.ptr, 0)) {
     reportObjectError(List, E_INVALIDARG);
     return;
@@ -2013,6 +2156,7 @@ HRESULT prepareDispatch(CommandList *State,
     return Result;
   Command->RootConstants = State->RootConstants;
   Command->DescriptorHeap = State->DescriptorHeap;
+  Command->SamplerHeap = State->SamplerHeap;
   Command->Predicate = State->Predicate;
   for (UINT I = 0; I < State->RootCount; ++I) {
     const auto &Parameter = State->RootParameters[I];
@@ -2022,7 +2166,9 @@ HRESULT prepareDispatch(CommandList *State,
       if (!State->RootTables[I])
         continue;
       DescriptorAccess Access;
-      auto *Heap = *findDescriptorHeap(State->DescriptorHeap);
+      auto *Heap =
+          *findDescriptorHeap(Parameter.Namespace == 4 ? State->SamplerHeap
+                                                       : State->DescriptorHeap);
       if (!Heap || Heap->Owner != State->Owner)
         return E_INVALIDARG;
       for (UINT J = 0; J < Parameter.RangeCount; ++J) {
@@ -2064,6 +2210,15 @@ HRESULT prepareDispatch(CommandList *State,
     Binding.Namespace = Parameter.Namespace;
     Binding.Space = Parameter.Space;
     Binding.Register = Parameter.Register;
+  }
+  for (UINT I = 0; I < State->StaticSamplerCount; ++I) {
+    const auto &Sampler = State->StaticSamplers[I];
+    if (Sampler.Visibility != D3D12DDI_SHADER_VISIBILITY_ALL)
+      continue;
+    if (Command->BindingCount + Command->StaticSamplerCount ==
+        MaxRootParameters)
+      return E_INVALIDARG;
+    Command->StaticSamplers[Command->StaticSamplerCount++] = Sampler.Sampler;
   }
   return S_OK;
 }
@@ -2456,24 +2611,37 @@ void APIENTRY setDescriptorHeaps(D3D12DDI_HCOMMANDLIST List, UINT Count,
   auto *State = recordingList(List);
   if (!State)
     return;
-  if (Count > 1 || (Count && !Heaps)) {
+  if (Count > 2 || (Count && !Heaps)) {
     reportObjectError(List, E_INVALIDARG);
     return;
   }
-  D3D12DDI_HDESCRIPTORHEAP Selected{};
-  if (Count) {
+  D3D12DDI_HDESCRIPTORHEAP Selected{}, Samplers{};
+  {
     DescriptorAccess Access;
-    auto *Heap = *findDescriptorHeap(Heaps[0]);
-    if (!Heap || Heap->Owner != State->Owner ||
-        !(Heap->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)) {
-      reportObjectError(List, E_INVALIDARG);
-      return;
+    for (UINT I = 0; I < Count; ++I) {
+      auto *Heap = *findDescriptorHeap(Heaps[I]);
+      if (!Heap || Heap->Owner != State->Owner ||
+          !(Heap->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)) {
+        reportObjectError(List, E_INVALIDARG);
+        return;
+      }
+      auto &Target = Heap->Desc.Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_SAMPLER
+                         ? Samplers
+                         : Selected;
+      if (Target.pDrvPrivate) {
+        reportObjectError(List, E_INVALIDARG);
+        return;
+      }
+      Target = Heaps[I];
     }
-    Selected = Heaps[0];
   }
-  if (State->DescriptorHeap.pDrvPrivate != Selected.pDrvPrivate)
+  bool ResourcesChanged =
+      State->DescriptorHeap.pDrvPrivate != Selected.pDrvPrivate;
+  bool SamplersChanged = State->SamplerHeap.pDrvPrivate != Samplers.pDrvPrivate;
+  if (ResourcesChanged || SamplersChanged)
     State->RootTables.fill(0);
   State->DescriptorHeap = Selected;
+  State->SamplerHeap = Samplers;
 }
 
 void APIENTRY setViewports(D3D12DDI_HCOMMANDLIST List, UINT Count,
@@ -2561,17 +2729,27 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
                                 feme::probe::WarpBufferAccess &Buffers,
                                 DispatchBindings &Prepared) {
   DescriptorAccess Descriptors;
-  Prepared.Dispatch.BufferCount = Prepared.Dispatch.ImageCount = 0;
+  Prepared.Dispatch.BufferCount = Prepared.Dispatch.ImageCount =
+      Prepared.Dispatch.SamplerCount = 0;
   for (UINT J = 0; J < Command->BindingCount; ++J) {
     const auto &Binding = Command->Bindings[J];
     DescriptorSlot *Slot = nullptr;
     if (Binding.TableDescriptor) {
-      auto *Heap = *findDescriptorHeap(Command->DescriptorHeap);
+      auto *Heap =
+          *findDescriptorHeap(Binding.Namespace == 4 ? Command->SamplerHeap
+                                                     : Command->DescriptorHeap);
       if (!Heap || Heap->Owner != State->Owner)
         return E_INVALIDARG;
       Slot = descriptorTableSlot(Heap, Binding.TableDescriptor, 0);
       if (!Slot || Slot->Namespace != Binding.Namespace)
         return E_INVALIDARG;
+    }
+    if (Slot && Slot->Namespace == 4) {
+      auto &Sampler = Prepared.Samplers[Prepared.Dispatch.SamplerCount++];
+      Sampler = Slot->Sampler;
+      Sampler.Space = Binding.Space;
+      Sampler.Register = Binding.Register;
+      continue;
     }
     if (Slot && Slot->Image) {
       UINT Index = Prepared.Dispatch.ImageCount++;
@@ -2634,6 +2812,9 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
     if (FAILED(Result))
       return Result;
   }
+  for (UINT I = 0; I < Command->StaticSamplerCount; ++I)
+    Prepared.Samplers[Prepared.Dispatch.SamplerCount++] =
+        Command->StaticSamplers[I];
   return S_OK;
 }
 
@@ -3002,6 +3183,7 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnCreateConstantBufferView = createCBV;
     Table.pfnCreateShaderResourceView = createSRV;
     Table.pfnCreateUnorderedAccessView = createUAV;
+    Table.pfnCreateSampler = createSampler;
     Table.pfnCopyDescriptors = copyDescriptors;
     Table.pfnCopyDescriptorsSimple = copyDescriptorsSimple;
     Table.pfnCalcPrivatePipelineStateSize = pipelineSize;

@@ -4003,7 +4003,9 @@ Notes and constraints:
   checked borrowed image/mip-layout and sampler PODs into these separate heaps;
   owned finite texture SRVs now resolve live mip/layer geometry into these PODs.
   Submission-local layout banks keep recording identities separate from borrowed
-  execution pointers. Sampler heaps/static samplers and texture UAVs remain open.
+  execution pointers. Owned sampler tables now populate an independent array;
+  scalar static sampler state is copied from native roots into recordings.
+  Texture UAVs and complete operation/format coverage remain open.
   Direct3D SRV descriptors
   set `FEME_IMAGE_LOAD_SWIZZLE`, opting addressed loads into component mapping.
   Ordinary Vulkan storage-image reads leave this bit clear and remain unmapped.

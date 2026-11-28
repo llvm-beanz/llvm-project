@@ -47,18 +47,21 @@ indexing, partial regions and held execution. Finite texture SRVs now resolve
 copied native views into live owned mip/layer layouts. Original DXIL executes
 divergent 2D-array and singleton-array views, mappings, live dimensions, null
 loads, replay and queue-held recording teardown against independent WARP.
-Sampler heaps/static samplers, texture UAVs and remaining image coverage stay open.
+Finite sampler heaps and copied scalar static samplers also execute original
+DXIL against WARP, including live point/linear and clamp/border updates, replay,
+null images and held teardown. Texture UAVs and remaining image/sampling coverage
+stay open.
 Shared DXIL image/sampler bindings now use independent checked heap prefixes,
 qualified SRV/UAV image identity and artifact ABI 12. Native CPU JIT/scalar/AOT
 controls distinguish image namespaces and sampler arrays. Private Windows
 bridge 5 now prepares checked borrowed image views and finite sampler arrays,
 with copied mip layouts, SRV load mappings and explicit native-heap rejection.
-Owned finite texture SRV preparation reuses this bridge; sampler heaps and
-static samplers remain open.
+Owned finite texture SRV and sampler-table preparation reuse this bridge;
+static sampler state is copied through root, recording and submission ownership.
 Recorded binding identities are now separate from execution descriptors, retaining
 live descriptor updates and copied inline state. Buffer/image descriptors and
 copied mip layouts are now submission-local preparation, not recording storage.
-The generated v22 inventory
+The generated v23 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -110,9 +113,9 @@ W2(b) operations, still remain.
 
 | Step | Current boundary and remaining work |
 |---|---|
-| W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute. Disjoint conventional graphics-stage roots coexist while compute prepares only ALL-visible bindings; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |
+| W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured/sampler tables execute. Independent resource/sampler heaps and copied scalar static samplers execute. Disjoint conventional graphics-stage roots/static samplers coexist while compute prepares only ALL-visible bindings; unbounded/general heaps, complete sampler operation/format coverage and shader/root compatibility remain. |
 | W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, all 21 mapped typed SRV/UAV formats including the complete additional-format buffer set, typed SRV component mappings/live dimensions, Direct3D narrow-store saturation, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; other optional typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
-| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed placed footprints and linear texture storage reuse shared layouts; mipmapped 3D/2D-array copies pass selected-subresource indexing, pitched regions, guards and held lifetime. Finite texture SRVs now resolve copied native descriptions and live mip/layer metadata; owned/reference 2D-array and singleton-array execution passes mappings, dimensions, null loads, replay and held recording teardown. Sampler heaps/static samplers, texture UAVs, remaining dimensional/format/plane/MSAA coverage, footprints, reserved/shared resources and broader residency remain. |
+| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed placed footprints and linear texture storage reuse shared layouts; mipmapped 3D/2D-array copies pass selected-subresource indexing, pitched regions, guards and held lifetime. Finite texture SRVs now resolve copied native descriptions and live mip/layer metadata; owned/reference 2D-array and singleton-array execution passes mappings, dimensions, null loads, replay and held recording teardown. Owned sampler heaps and scalar static state also execute point/linear and clamp/border controls. Texture UAVs, remaining dimensional/sampling/format/plane/MSAA coverage, footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, execution-time 64-bit predication, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, indirect root changes/draws and general removal wakeups remain. |
 
 ```text

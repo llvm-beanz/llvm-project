@@ -1870,9 +1870,28 @@ copies, replay and queue-held list/allocator release. Resources, shader-visible
 heaps, root signatures and PSOs remain alive until completion. Null-view
 dimension queries are not part of that reference oracle: the installed WARP JIT
 faulted on the exploratory query; live-view queries and null loads pass
-independently. Other dimensions/formats need their execution matrix, and sampler
-heaps, static samplers and texture UAVs remain open. See the implementation log
-and v22 inventory.
+independently. Other dimensions/formats need their execution matrix, and texture
+UAVs remain open. Owned CPU/shader-visible sampler heaps now use checked
+heap-type-specific creation/copy paths and shared canonical state validation.
+Native inactive anisotropy/comparison fields normalize before validation.
+Resource and sampler heaps coexist, selected by type rather than bind order;
+changing either heap invalidates tables, while reordering the same heaps preserves
+them. Mixed sampler/resource ranges in one table and sampler data flags are
+rejected.
+
+Native scalar static samplers copy register/space/visibility, filter/address/LOD
+and float border enums into root-owned state, then ALL-visible state into each
+recording. They cost no root DWORDs but share the finite 64-binding preparation
+limit. Static/table and same-stage collisions are checked; disjoint conventional
+stage visibility is admitted without exposing it to compute. Newer integer-border
+root versions remain unsupported. Static execution fixtures use separate scalar
+sampler declarations: the stock runtime rejects a dynamically indexed array
+covered only by scalar static samplers before issuing shader DDIs.
+Original-DXIL owned/reference controls execute point/linear filtering,
+clamp/custom-border/opaque-black addressing, copied live sampler updates, null
+images, replay and held list/allocator/CPU-heap release. Complete sampling
+operation/format coverage remains open. See the implementation log and v23
+inventory.
 
 Recorded commands retain immutable binding identities separately from prepared
 buffer descriptors: register namespace/space, table slot, root address and inline
@@ -1881,8 +1900,8 @@ addresses into fresh descriptors. Inline pointers are formed against the
 submission's copied constant bank, not borrowed from recording storage. This
 preserves descriptor updates and replay. Submission-local buffer/image arrays
 and copied mip-layout banks no longer live in recorded commands or need pointer
-retargeting. Sampler preparation will use its own output array without compacting
-the recorded identities.
+retargeting. Sampler preparation uses its own output array without compacting
+recorded identities; static sampler state has no borrowed creation/root pointers.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

@@ -1,5 +1,10 @@
 # Vulkan `KHR`/`EXT` extension inventory
 
+Owned sampler heaps/static state pass 4429 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 387 stock-runtime/coexistence
+gates, with eight new sampler execution controls and confirmed FeMe ICD identity.
+No inventory regeneration, advertisement change or CTS result.
+
 Owned finite texture SRV preparation passes 4428 full FeMe tests
 (15 skipped, 10 unsupported), 65 callbacks and 379 stock-runtime/coexistence
 gates, including eight new owned/reference texture controls. FeMe ICD identity

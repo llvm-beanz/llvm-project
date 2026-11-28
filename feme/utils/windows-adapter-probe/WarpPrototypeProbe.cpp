@@ -954,7 +954,8 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered,
 
 HRESULT exerciseTextureViews(ID3D12Device *Device,
                              const D3D12_SHADER_BYTECODE &Shader, bool Ordered,
-                             bool SingleLayer) {
+                             bool SingleLayer, bool Sampling,
+                             bool StaticSampling) {
   constexpr UINT UploadBytes = 16384, SeedOffset = 15872;
   constexpr UINT Words = 34, Bytes = Words * sizeof(UINT);
   std::array<UINT, Words> Seed;
@@ -1002,7 +1003,8 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
   TextureDesc.Height = 4;
   TextureDesc.DepthOrArraySize = 3;
   TextureDesc.MipLevels = 2;
-  TextureDesc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+  TextureDesc.Format =
+      Sampling ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R32G32B32A32_UINT;
   TextureDesc.SampleDesc.Count = 1;
   D3D12_HEAP_PROPERTIES Heap{};
   Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1035,7 +1037,14 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
           if (Offset > SeedOffset || sizeof(Texel) > SeedOffset - Offset)
             return report("Texture-view upload span overlaps output seed",
                           E_FAIL);
-          std::memcpy(Data.data() + Offset, Texel.data(), sizeof(Texel));
+          if (Sampling) {
+            std::array<float, 4> Floating{};
+            for (UINT C = 0; C < Floating.size(); ++C)
+              Floating[C] = static_cast<float>(Texel[C]);
+            std::memcpy(Data.data() + Offset, Floating.data(),
+                        sizeof(Floating));
+          } else
+            std::memcpy(Data.data() + Offset, Texel.data(), sizeof(Texel));
         }
     }
   }
@@ -1062,13 +1071,36 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
   Range.NumDescriptors = 2;
   Range.BaseShaderRegister = 3;
   Range.RegisterSpace = 7;
-  std::array<D3D12_ROOT_PARAMETER, 2> Parameters{};
+  auto SamplerRange = Range;
+  SamplerRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+  std::array<D3D12_ROOT_PARAMETER, 3> Parameters{};
   Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
   Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   Parameters[1].DescriptorTable = {1, &Range};
+  Parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  Parameters[2].DescriptorTable = {1, &SamplerRange};
   D3D12_ROOT_SIGNATURE_DESC RootDesc{};
-  RootDesc.NumParameters = static_cast<UINT>(Parameters.size());
+  RootDesc.NumParameters = Sampling && !StaticSampling ? 3 : 2;
   RootDesc.pParameters = Parameters.data();
+  std::array<D3D12_STATIC_SAMPLER_DESC, 2> StaticSamplers{};
+  if (StaticSampling) {
+    for (UINT I = 0; I < StaticSamplers.size(); ++I) {
+      auto &Sampler = StaticSamplers[I];
+      Sampler.Filter =
+          I ? D3D12_FILTER_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_POINT;
+      Sampler.AddressU = Sampler.AddressV = Sampler.AddressW =
+          I ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP
+            : D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+      Sampler.MaxAnisotropy = 1;
+      Sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+      Sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+      Sampler.MaxLOD = D3D12_FLOAT32_MAX;
+      Sampler.ShaderRegister = 3 + I;
+      Sampler.RegisterSpace = 7;
+    }
+    RootDesc.NumStaticSamplers = static_cast<UINT>(StaticSamplers.size());
+    RootDesc.pStaticSamplers = StaticSamplers.data();
+  }
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
   Result = createComputePipeline(Device, nullptr, 0, RootDesc, Root, Pipeline,
@@ -1090,6 +1122,22 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
   if (FAILED(Result))
     return Result;
   UINT Step = Device->GetDescriptorHandleIncrementSize(HeapDesc.Type);
+  ComPtr<ID3D12DescriptorHeap> CPUSamplers, GPUSamplers;
+  if (Sampling && !StaticSampling) {
+    auto SamplerHeapDesc = HeapDesc;
+    SamplerHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    SamplerHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    Result = report("Create CPU sampler heap",
+                    Device->CreateDescriptorHeap(&SamplerHeapDesc,
+                                                 IID_PPV_ARGS(&CPUSamplers)));
+    SamplerHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (SUCCEEDED(Result))
+      Result = report("Create GPU sampler heap",
+                      Device->CreateDescriptorHeap(&SamplerHeapDesc,
+                                                   IID_PPV_ARGS(&GPUSamplers)));
+    if (FAILED(Result))
+      return Result;
+  }
   auto CPU = CPUHeap->GetCPUDescriptorHandleForHeapStart();
   auto GPUCPU = GPUHeap->GetCPUDescriptorHandleForHeapStart();
   D3D12_SHADER_RESOURCE_VIEW_DESC View{};
@@ -1104,14 +1152,39 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
     View.Texture2DArray.MipLevels = Selected ? 1 : 2;
     for (UINT I = 0; I < 2; ++I) {
       View.Shader4ComponentMapping =
-          I ? D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING
-            : D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 0, 5, 4);
+          I || Sampling ? D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING
+                        : D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 0, 5, 4);
       Device->CreateShaderResourceView(Null && !I ? nullptr : Textures[I].Get(),
                                        &View, {CPU.ptr + I * Step});
     }
     Device->CopyDescriptorsSimple(2, GPUCPU, CPU, HeapDesc.Type);
+    if (Sampling && !StaticSampling) {
+      auto Source = CPUSamplers->GetCPUDescriptorHandleForHeapStart();
+      UINT SamplerStep = Device->GetDescriptorHandleIncrementSize(
+          D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+      D3D12_SAMPLER_DESC Sampler{};
+      Sampler.MaxAnisotropy = 1;
+      Sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+      Sampler.MaxLOD = D3D12_FLOAT32_MAX;
+      for (UINT I = 0; I < 2; ++I) {
+        Sampler.Filter = Selected && I ? D3D12_FILTER_MIN_MAG_MIP_LINEAR
+                                       : D3D12_FILTER_MIN_MAG_MIP_POINT;
+        Sampler.AddressU = Sampler.AddressV = Sampler.AddressW =
+            Selected && !I ? D3D12_TEXTURE_ADDRESS_MODE_BORDER
+                           : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        constexpr std::array<float, 4> Border{2, 3, 5, 7};
+        std::copy(Border.begin(), Border.end(), Sampler.BorderColor);
+        Device->CreateSampler(&Sampler, {Source.ptr + I * SamplerStep});
+      }
+      Device->CopyDescriptorsSimple(
+          2, GPUSamplers->GetCPUDescriptorHandleForHeapStart(), Source,
+          D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    }
   };
   WriteViews(false, false);
+  Result = Device->GetDeviceRemovedReason();
+  if (FAILED(Result))
+    return report("Initial texture/sampler descriptors", Result);
   ComPtr<ID3D12CommandQueue> Queue;
   ComPtr<ID3D12CommandAllocator> Allocator;
   ComPtr<ID3D12GraphicsCommandList> List;
@@ -1171,12 +1244,19 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
     Result = List->Reset(Allocator.Get(), Pipeline.Get());
   if (FAILED(Result))
     return report("Prepare texture-view dispatch recording", Result);
-  ID3D12DescriptorHeap *Heaps[] = {GPUHeap.Get()};
-  List->SetDescriptorHeaps(1, Heaps);
+  ID3D12DescriptorHeap *Heaps[] = {GPUHeap.Get(), GPUSamplers.Get()};
+  List->SetDescriptorHeaps(Sampling && !StaticSampling ? 2 : 1, Heaps);
   List->SetComputeRootSignature(Root.Get());
   List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress());
   List->SetComputeRootDescriptorTable(
       1, GPUHeap->GetGPUDescriptorHandleForHeapStart());
+  if (Sampling && !StaticSampling)
+    List->SetComputeRootDescriptorTable(
+        2, GPUSamplers->GetGPUDescriptorHandleForHeapStart());
+  if (Sampling && !StaticSampling) {
+    std::swap(Heaps[0], Heaps[1]);
+    List->SetDescriptorHeaps(2, Heaps);
+  }
   List->Dispatch(1, 1, 1);
   Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
   Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -1210,6 +1290,7 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
       List.Reset();
       Allocator.Reset();
       CPUHeap.Reset();
+      CPUSamplers.Reset();
       HRESULT Released = Gate->Signal(1);
       if (FAILED(Released))
         return report("Release texture-view queue", Released);
@@ -1230,14 +1311,23 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
     for (UINT Thread = 0; Thread < 4; ++Thread) {
       UINT Index = Thread & 1;
       UINT Base = Index * 1000 + 100 + (1 + Thread / 2) * 40 + Thread;
-      for (UINT C = 0; C < 4; ++C)
-        Expected[1 + Thread * 8 + C] =
-            (Null && !Index) || (SingleLayer && Thread >= 2) ? 0
-            : Index                                          ? Base + C * 10000
-            : C == 0                                         ? Base + 20000
-            : C == 1                                         ? Base
-            : C == 2                                         ? 1
-                                                             : 0;
+      if (Sampling) {
+        constexpr std::array<UINT, 4> Border{2, 3, 5, 7};
+        for (UINT C = 0; C < 4; ++C)
+          Expected[1 + Thread * 8 + C] =
+              Null && !Index ? 0
+              : Index        ? 2 * (Base - Thread) + Thread - 1 + C * 20000
+                             : Base + C * 10000 +
+                            (StaticSampling ? (C == 3 ? 1 : 0) : Border[C]);
+      } else
+        for (UINT C = 0; C < 4; ++C)
+          Expected[1 + Thread * 8 + C] =
+              (Null && !Index) || (SingleLayer && Thread >= 2) ? 0
+              : Index  ? Base + C * 10000
+              : C == 0 ? Base + 20000
+              : C == 1 ? Base
+              : C == 2 ? 1
+                       : 0;
       for (UINT C = 0; C < 4; ++C)
         Expected[5 + Thread * 8 + C] = C == 0   ? 4
                                        : C == 1 ? 2
@@ -1264,9 +1354,10 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
   Upload->Unmap(0, &NoRead);
   if (!Valid)
     return report("Texture-view execution changed upload storage", E_FAIL);
-  std::printf("Live texture SRV mips/layers, mappings, dimensions, guards and "
-              "lifetime PASS (ordered=%u single-layer=%u)\n",
-              Ordered, SingleLayer);
+  std::printf(
+      "Live texture SRV mips/layers, mappings, dimensions, guards and "
+      "lifetime PASS (ordered=%u single-layer=%u sampling=%u static=%u)\n",
+      Ordered, SingleLayer, Sampling, StaticSampling);
   return S_OK;
 }
 
@@ -2855,20 +2946,48 @@ int wmain(int Argc, wchar_t **Argv) {
   bool Footprints =
       TextureCopies || ReferenceFootprints || OrderedFootprints ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--footprint-copies") == 0);
+  bool StaticSamplerViews =
+      Argc == 3 &&
+      (std::wcscmp(Argv[1], L"--static-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-static-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-static-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-static-sampler-views") == 0);
+  bool SamplerViews =
+      StaticSamplerViews ||
+      Argc == 3 &&
+          (std::wcscmp(Argv[1], L"--sampler-views") == 0 ||
+           std::wcscmp(Argv[1], L"--ordered-sampler-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-sampler-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-ordered-sampler-views") == 0);
+  bool ReferenceSamplerViews =
+      SamplerViews &&
+      (std::wcscmp(Argv[1], L"--reference-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-static-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-static-sampler-views") == 0);
+  bool OrderedSamplerViews =
+      SamplerViews &&
+      (std::wcscmp(Argv[1], L"--ordered-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-static-sampler-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-static-sampler-views") == 0);
   bool ReferenceTextureViews =
+      ReferenceSamplerViews ||
       Argc == 3 &&
-      (std::wcscmp(Argv[1], L"--reference-texture-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-texture-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-single-layer-texture-views") == 0 ||
-       std::wcscmp(Argv[1],
-                   L"--reference-ordered-single-layer-texture-views") == 0);
+          (std::wcscmp(Argv[1], L"--reference-texture-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-ordered-texture-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-single-layer-texture-views") ==
+               0 ||
+           std::wcscmp(Argv[1],
+                       L"--reference-ordered-single-layer-texture-views") == 0);
   bool OrderedTextureViews =
+      OrderedSamplerViews ||
       Argc == 3 &&
-      (std::wcscmp(Argv[1], L"--ordered-texture-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-texture-views") == 0 ||
-       std::wcscmp(Argv[1], L"--ordered-single-layer-texture-views") == 0 ||
-       std::wcscmp(Argv[1],
-                   L"--reference-ordered-single-layer-texture-views") == 0);
+          (std::wcscmp(Argv[1], L"--ordered-texture-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-ordered-texture-views") == 0 ||
+           std::wcscmp(Argv[1], L"--ordered-single-layer-texture-views") == 0 ||
+           std::wcscmp(Argv[1],
+                       L"--reference-ordered-single-layer-texture-views") == 0);
   bool SingleLayerTextureViews =
       Argc == 3 &&
       (std::wcscmp(Argv[1], L"--single-layer-texture-views") == 0 ||
@@ -2877,7 +2996,8 @@ int wmain(int Argc, wchar_t **Argv) {
        std::wcscmp(Argv[1],
                    L"--reference-ordered-single-layer-texture-views") == 0);
   bool TextureViews =
-      ReferenceTextureViews || OrderedTextureViews || SingleLayerTextureViews ||
+      SamplerViews || ReferenceTextureViews || OrderedTextureViews ||
+      SingleLayerTextureViews ||
       (Argc == 3 && std::wcscmp(Argv[1], L"--texture-views") == 0);
   bool Reference = ReferenceViews || ReferenceTables || ReferenceConstants ||
                    ReferenceCBV || ReferenceIndirect || ReferencePredication ||
@@ -2962,6 +3082,8 @@ int wmain(int Argc, wchar_t **Argv) {
                  "--reference-texture-views FILE|"
                  "--reference-ordered-texture-views FILE|"
                  "--[reference-][ordered-]single-layer-texture-views FILE|"
+                 "--[reference-][ordered-]sampler-views FILE|"
+                 "--[reference-][ordered-]static-sampler-views FILE|"
                  "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
@@ -3079,7 +3201,8 @@ int wmain(int Argc, wchar_t **Argv) {
       Result = queryWavePolicy(Device.Get());
   if (SUCCEEDED(Result) && TextureViews)
     Result = exerciseTextureViews(Device.Get(), DXIL, OrderedTextureViews,
-                                  SingleLayerTextureViews);
+                                  SingleLayerTextureViews, SamplerViews,
+                                  StaticSamplerViews);
   if (SUCCEEDED(Result) && Commands)
     Result = exerciseCommands(Device.Get(),
                               DXILCommands || Coexist ? &DXIL : nullptr);

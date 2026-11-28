@@ -1,5 +1,14 @@
 # Vulkan CTS status
 
+## Owned WARP sampler regression scope, not CTS
+
+Sampler heaps and copied scalar static state pass 4429 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 387 stock-runtime/coexistence
+gates with confirmed FeMe ICD identity. Eight new owned/reference gates execute
+point/linear, clamp/border, descriptor updates, null images, replay and held
+lifetime. Artifact12 layouts and Vulkan advertisements are unchanged; this is
+not CTS evidence or complete W2/sampling coverage.
+
 ## Owned WARP texture-SRV regression scope, not CTS
 
 Finite owned texture SRVs pass 4428 full FeMe tests (15 skipped, 10 unsupported),

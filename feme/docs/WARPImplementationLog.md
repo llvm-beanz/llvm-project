@@ -809,6 +809,40 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Owned sampler heaps and copied scalar static sampler state
+
+Sampler heaps now support CPU/shader-visible ownership, the 2048-entry visible
+limit, heap-type-checked construction/copies and independent resource/sampler
+table resolution. Binding the same two heaps in reversed order preserves table
+state; changing a heap invalidates tables. Shared canonical sampler validation
+is reused rather than duplicated. Native inactive anisotropy/comparison fields
+normalize first, including the zero anisotropy passed by stock D3D12 for a valid
+point/linear descriptor.
+
+Scalar static sampler state copies native register/space/visibility and sampler
+fields into roots, then ALL-visible state into recordings/submissions. Static
+samplers consume no root DWORDs and share the finite 64-binding preparation
+limit. Static/table and same-stage collisions, mixed sampler/resource tables,
+invalid sampler flags/state and newer integer-border roots are checked.
+Native constructor negatives preserve descriptors after failure. The installed
+runtime rejected the exploratory static sampler-array PSO before native shader
+callbacks; static fixtures now use scalar declarations with divergent control
+flow, while dynamic fixtures retain indexed arrays.
+
+Eight new original-DXIL owned/reference controls execute live point/linear
+samplers, clamp/custom-border and opaque-black static addressing, selected
+mip/array textures, null images, guards, unchanged upload storage, replay and
+held recording/CPU-source-heap teardown. Dynamic and scalar-static JIT/AOT
+fixtures pass alongside that execution matrix (**9/9** focused). Final full
+FeMe passes **4429** / **15** skipped / **10** unsupported, callbacks **65/65**,
+stock-runtime/coexistence **387/387**, with confirmed FeMe ICD identity and OS
+launches after shared DLL relinking. Native ownership/root negatives are included
+in full FeMe.
+Inventory **v23**, bridge5/artifact12, contains **351** unique required OS gates
+and **15** native fixtures. W2 remains open for texture UAVs, remaining
+dimensional/sampling/format/resource coverage, general heaps/roots and ordering.
+No Vulkan advertisement or CTS claim changes.
+
 #### Owned finite texture SRVs and submission-local image preparation
 
 Texture SRV creation copies native DDI view metadata rather than borrowed
