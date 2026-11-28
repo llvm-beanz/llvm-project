@@ -4001,7 +4001,10 @@ Notes and constraints:
   their behavior. DXIL image/sampler normalization and image namespace
   serialization now supply this identity end-to-end. Windows bridge 5 prepares
   checked borrowed image/mip-layout and sampler PODs into these separate heaps;
-  owned DDI texture views and sampler heaps remain open. Direct3D SRV descriptors
+  owned finite texture SRVs now resolve live mip/layer geometry into these PODs.
+  Submission-local layout banks keep recording identities separate from borrowed
+  execution pointers. Sampler heaps/static samplers and texture UAVs remain open.
+  Direct3D SRV descriptors
   set `FEME_IMAGE_LOAD_SWIZZLE`, opting addressed loads into component mapping.
   Ordinary Vulkan storage-image reads leave this bit clear and remain unmapped.
   OOB loads still return zero before mapping, including constant-one channels.
@@ -4020,8 +4023,8 @@ Notes and constraints:
   and admits SRV/UAV image ranges. Earlier objects must be recompiled; parsing
   still rejects unknown namespaces, CBV image namespaces and any qualified
   sampler namespace. Shader argument ABI layouts and Windows bridge 4 are
-  unchanged. This supplies shared binding identity, not owned D3D12 image
-  table materialization or complete descriptor promises.
+  unchanged. Shared identity now supports finite owned texture SRV preparation;
+  it does not establish complete descriptor or image-resource promises.
 - **Object-file path**: the same helper-bitcode link and optimization
   pipeline minus the JIT, through
   `feme::TargetMachineBackend` with the host triple, producing a relocatable

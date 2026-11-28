@@ -1,5 +1,14 @@
 # Vulkan CTS status
 
+## Owned WARP texture-SRV regression scope, not CTS
+
+Finite owned texture SRVs pass 4428 full FeMe tests (15 skipped, 10 unsupported),
+65 callbacks and 379 stock-runtime/coexistence gates with confirmed FeMe ICD
+identity. Eight new owned/reference gates execute 2D-array/singleton views,
+mappings, null loads, dimensions, replay and held recording teardown.
+Vulkan advertisements and artifact12 layouts are unchanged; this is not CTS
+evidence or complete W2/image/sampler coverage.
+
 ## Windows borrowed-image bridge regression scope, not CTS
 
 Bridge5 image/sampler controls and Direct3D load mappings pass 4427 full FeMe

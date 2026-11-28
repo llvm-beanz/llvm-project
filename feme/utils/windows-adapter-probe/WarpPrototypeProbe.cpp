@@ -952,6 +952,324 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered,
   return S_OK;
 }
 
+HRESULT exerciseTextureViews(ID3D12Device *Device,
+                             const D3D12_SHADER_BYTECODE &Shader, bool Ordered,
+                             bool SingleLayer) {
+  constexpr UINT UploadBytes = 16384, SeedOffset = 15872;
+  constexpr UINT Words = 34, Bytes = Words * sizeof(UINT);
+  std::array<UINT, Words> Seed;
+  Seed.fill(42);
+  auto CreateBuffer = [&](D3D12_HEAP_TYPE Type, UINT Size,
+                          D3D12_RESOURCE_FLAGS Flags,
+                          D3D12_RESOURCE_STATES State,
+                          ComPtr<ID3D12Resource> &Resource) {
+    D3D12_HEAP_PROPERTIES Heap{};
+    Heap.Type = Type;
+    Heap.CreationNodeMask = Heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC Desc{};
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Desc.Width = Size;
+    Desc.Height = Desc.DepthOrArraySize = Desc.MipLevels = 1;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    Desc.Flags = Flags;
+    return report("Create texture-view buffer",
+                  Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE,
+                                                  &Desc, State, nullptr,
+                                                  IID_PPV_ARGS(&Resource)));
+  };
+  ComPtr<ID3D12Resource> Upload, Output, Readback;
+  HRESULT Result = CreateBuffer(D3D12_HEAP_TYPE_UPLOAD, UploadBytes,
+                                D3D12_RESOURCE_FLAG_NONE,
+                                D3D12_RESOURCE_STATE_GENERIC_READ, Upload);
+  if (SUCCEEDED(Result))
+    Result = CreateBuffer(D3D12_HEAP_TYPE_DEFAULT, Bytes,
+                          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                          D3D12_RESOURCE_STATE_COPY_DEST, Output);
+  if (SUCCEEDED(Result))
+    Result =
+        CreateBuffer(D3D12_HEAP_TYPE_READBACK, Bytes, D3D12_RESOURCE_FLAG_NONE,
+                     D3D12_RESOURCE_STATE_COPY_DEST, Readback);
+  if (FAILED(Result))
+    return Result;
+  std::array<ComPtr<ID3D12Resource>, 2> Textures;
+  std::array<std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT, 6>, 2> Footprints{};
+  std::vector<unsigned char> Data(UploadBytes, 0xa5);
+  std::memcpy(Data.data() + SeedOffset, Seed.data(), Bytes);
+  D3D12_RESOURCE_DESC TextureDesc{};
+  TextureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  TextureDesc.Width = 8;
+  TextureDesc.Height = 4;
+  TextureDesc.DepthOrArraySize = 3;
+  TextureDesc.MipLevels = 2;
+  TextureDesc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+  TextureDesc.SampleDesc.Count = 1;
+  D3D12_HEAP_PROPERTIES Heap{};
+  Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  Heap.CreationNodeMask = Heap.VisibleNodeMask = 1;
+  for (UINT I = 0; I < Textures.size(); ++I) {
+    Result = report("Create shader-readable mip/array texture",
+                    Device->CreateCommittedResource(
+                        &Heap, D3D12_HEAP_FLAG_NONE, &TextureDesc,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                        IID_PPV_ARGS(&Textures[I])));
+    if (FAILED(Result))
+      return Result;
+    UINT64 Total = 0;
+    Device->GetCopyableFootprints(&TextureDesc, 0, 6, I * 8192,
+                                  Footprints[I].data(), nullptr, nullptr,
+                                  &Total);
+    if (Total > 8192)
+      return report("Unexpected texture-view upload footprint extent", E_FAIL);
+    for (UINT Subresource = 0; Subresource < 6; ++Subresource) {
+      const auto &Layout = Footprints[I][Subresource];
+      UINT Mip = Subresource % 2, Layer = Subresource / 2;
+      for (UINT Y = 0; Y < Layout.Footprint.Height; ++Y)
+        for (UINT X = 0; X < Layout.Footprint.Width; ++X) {
+          std::array<UINT, 4> Texel{};
+          for (UINT C = 0; C < Texel.size(); ++C)
+            Texel[C] =
+                I * 1000 + Mip * 100 + Layer * 40 + Y * 10 + X + C * 10000;
+          auto Offset = Layout.Offset + UINT64(Y) * Layout.Footprint.RowPitch +
+                        X * sizeof(Texel);
+          if (Offset > SeedOffset || sizeof(Texel) > SeedOffset - Offset)
+            return report("Texture-view upload span overlaps output seed",
+                          E_FAIL);
+          std::memcpy(Data.data() + Offset, Texel.data(), sizeof(Texel));
+        }
+    }
+  }
+  D3D12_RANGE NoRead{0, 0}, Full{0, Bytes}, UploadRange{0, UploadBytes};
+  void *Memory = nullptr;
+  Result = report("Map texture-view upload", Upload->Map(0, &NoRead, &Memory));
+  if (FAILED(Result))
+    return Result;
+  if (!Memory)
+    return report("Missing texture-view upload mapping", E_FAIL);
+  std::memcpy(Memory, Data.data(), UploadBytes);
+  Upload->Unmap(0, &UploadRange);
+  Result =
+      report("Seed texture-view readback", Readback->Map(0, &NoRead, &Memory));
+  if (FAILED(Result))
+    return Result;
+  if (!Memory)
+    return report("Missing texture-view readback mapping", E_FAIL);
+  std::memcpy(Memory, Seed.data(), Bytes);
+  Readback->Unmap(0, &Full);
+
+  D3D12_DESCRIPTOR_RANGE Range{};
+  Range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  Range.NumDescriptors = 2;
+  Range.BaseShaderRegister = 3;
+  Range.RegisterSpace = 7;
+  std::array<D3D12_ROOT_PARAMETER, 2> Parameters{};
+  Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  Parameters[1].DescriptorTable = {1, &Range};
+  D3D12_ROOT_SIGNATURE_DESC RootDesc{};
+  RootDesc.NumParameters = static_cast<UINT>(Parameters.size());
+  RootDesc.pParameters = Parameters.data();
+  ComPtr<ID3D12RootSignature> Root;
+  ComPtr<ID3D12PipelineState> Pipeline;
+  Result = createComputePipeline(Device, nullptr, 0, RootDesc, Root, Pipeline,
+                                 &Shader);
+  if (FAILED(Result))
+    return Result;
+  D3D12_DESCRIPTOR_HEAP_DESC HeapDesc{};
+  HeapDesc.NumDescriptors = 2;
+  HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  ComPtr<ID3D12DescriptorHeap> CPUHeap, GPUHeap;
+  Result =
+      report("Create texture-view CPU heap",
+             Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&CPUHeap)));
+  HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  if (SUCCEEDED(Result))
+    Result =
+        report("Create texture-view GPU heap",
+               Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&GPUHeap)));
+  if (FAILED(Result))
+    return Result;
+  UINT Step = Device->GetDescriptorHandleIncrementSize(HeapDesc.Type);
+  auto CPU = CPUHeap->GetCPUDescriptorHandleForHeapStart();
+  auto GPUCPU = GPUHeap->GetCPUDescriptorHandleForHeapStart();
+  D3D12_SHADER_RESOURCE_VIEW_DESC View{};
+  View.Format = TextureDesc.Format;
+  View.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+  View.Texture2DArray.ArraySize = 3;
+  View.Texture2DArray.MipLevels = 2;
+  auto WriteViews = [&](bool Selected, bool Null) {
+    View.Texture2DArray.MostDetailedMip = Selected ? 1 : 0;
+    View.Texture2DArray.FirstArraySlice = Selected ? 1 : 0;
+    View.Texture2DArray.ArraySize = Selected ? (SingleLayer ? 1 : 2) : 3;
+    View.Texture2DArray.MipLevels = Selected ? 1 : 2;
+    for (UINT I = 0; I < 2; ++I) {
+      View.Shader4ComponentMapping =
+          I ? D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING
+            : D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 0, 5, 4);
+      Device->CreateShaderResourceView(Null && !I ? nullptr : Textures[I].Get(),
+                                       &View, {CPU.ptr + I * Step});
+    }
+    Device->CopyDescriptorsSimple(2, GPUCPU, CPU, HeapDesc.Type);
+  };
+  WriteViews(false, false);
+  ComPtr<ID3D12CommandQueue> Queue;
+  ComPtr<ID3D12CommandAllocator> Allocator;
+  ComPtr<ID3D12GraphicsCommandList> List;
+  ComPtr<ID3D12Fence> Completion, Gate;
+  D3D12_COMMAND_QUEUE_DESC QueueDesc{};
+  Result = report("Create texture-view queue",
+                  Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
+  if (SUCCEEDED(Result))
+    Result = Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                            IID_PPV_ARGS(&Allocator));
+  if (SUCCEEDED(Result))
+    Result = Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                       Allocator.Get(), nullptr,
+                                       IID_PPV_ARGS(&List));
+  if (SUCCEEDED(Result))
+    Result = Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                 IID_PPV_ARGS(&Completion));
+  if (Ordered && SUCCEEDED(Result))
+    Result = Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Gate));
+  if (FAILED(Result))
+    return report("Create texture-view command objects", Result);
+  D3D12_RESOURCE_BARRIER Barrier{};
+  Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  Barrier.Transition.StateAfter =
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  for (UINT I = 0; I < 2; ++I) {
+    for (UINT Subresource = 0; Subresource < 6; ++Subresource) {
+      D3D12_TEXTURE_COPY_LOCATION Source{}, Destination{};
+      Source.pResource = Upload.Get();
+      Source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      Source.PlacedFootprint = Footprints[I][Subresource];
+      Destination.pResource = Textures[I].Get();
+      Destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      Destination.SubresourceIndex = Subresource;
+      List->CopyTextureRegion(&Destination, 0, 0, 0, &Source, nullptr);
+    }
+    Barrier.Transition.pResource = Textures[I].Get();
+    List->ResourceBarrier(1, &Barrier);
+  }
+  List->CopyBufferRegion(Output.Get(), 0, Upload.Get(), SeedOffset, Bytes);
+  Barrier.Transition.pResource = Output.Get();
+  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  List->ResourceBarrier(1, &Barrier);
+  Result = List->Close();
+  if (FAILED(Result))
+    return report("Close texture-view upload list", Result);
+  ID3D12CommandList *Lists[] = {List.Get()};
+  Queue->ExecuteCommandLists(1, Lists);
+  Result = Queue->Signal(Completion.Get(), 1);
+  if (SUCCEEDED(Result))
+    Result = waitFence(Completion.Get(), 1);
+  if (SUCCEEDED(Result))
+    Result = Allocator->Reset();
+  if (SUCCEEDED(Result))
+    Result = List->Reset(Allocator.Get(), Pipeline.Get());
+  if (FAILED(Result))
+    return report("Prepare texture-view dispatch recording", Result);
+  ID3D12DescriptorHeap *Heaps[] = {GPUHeap.Get()};
+  List->SetDescriptorHeaps(1, Heaps);
+  List->SetComputeRootSignature(Root.Get());
+  List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress());
+  List->SetComputeRootDescriptorTable(
+      1, GPUHeap->GetGPUDescriptorHandleForHeapStart());
+  List->Dispatch(1, 1, 1);
+  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  List->ResourceBarrier(1, &Barrier);
+  List->CopyBufferRegion(Readback.Get(), 0, Output.Get(), 0, Bytes);
+  Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  List->ResourceBarrier(1, &Barrier);
+  Result = List->Close();
+  if (FAILED(Result))
+    return report("Close texture-view dispatch list", Result);
+  WriteViews(true, false);
+  for (UINT Repeat = 0; Repeat < (Ordered ? 1u : 3u); ++Repeat) {
+    bool Null = Repeat == 2;
+    if (Null)
+      WriteViews(true, true);
+    if (Ordered) {
+      Result = Queue->Wait(Gate.Get(), 1);
+      if (FAILED(Result))
+        return report("Hold texture-view queue", Result);
+    }
+    Lists[0] = List.Get();
+    Queue->ExecuteCommandLists(1, Lists);
+    Result = Queue->Signal(Completion.Get(), Repeat + 2);
+    if (Ordered) {
+      HRESULT Status = Readback->Map(0, &Full, &Memory);
+      bool Untouched = SUCCEEDED(Status) && Memory &&
+                       std::memcmp(Memory, Seed.data(), Bytes) == 0;
+      if (SUCCEEDED(Status))
+        Readback->Unmap(0, &NoRead);
+      List.Reset();
+      Allocator.Reset();
+      CPUHeap.Reset();
+      HRESULT Released = Gate->Signal(1);
+      if (FAILED(Released))
+        return report("Release texture-view queue", Released);
+      if (FAILED(Status))
+        return report("Map held texture-view output", Status);
+      if (!Untouched)
+        return report("Texture shader ran before its queue gate", E_FAIL);
+    }
+    if (SUCCEEDED(Result))
+      Result = waitFence(Completion.Get(), Repeat + 2);
+    if (SUCCEEDED(Result))
+      Result = Device->GetDeviceRemovedReason();
+    if (SUCCEEDED(Result))
+      Result = Readback->Map(0, &Full, &Memory);
+    if (FAILED(Result))
+      return report("Read texture-view results", Result);
+    auto Expected = Seed;
+    for (UINT Thread = 0; Thread < 4; ++Thread) {
+      UINT Index = Thread & 1;
+      UINT Base = Index * 1000 + 100 + (1 + Thread / 2) * 40 + Thread;
+      for (UINT C = 0; C < 4; ++C)
+        Expected[1 + Thread * 8 + C] =
+            (Null && !Index) || (SingleLayer && Thread >= 2) ? 0
+            : Index                                          ? Base + C * 10000
+            : C == 0                                         ? Base + 20000
+            : C == 1                                         ? Base
+            : C == 2                                         ? 1
+                                                             : 0;
+      for (UINT C = 0; C < 4; ++C)
+        Expected[5 + Thread * 8 + C] = C == 0   ? 4
+                                       : C == 1 ? 2
+                                       : C == 2 ? (SingleLayer ? 1 : 2)
+                                                : 1;
+    }
+    bool Valid = Memory && std::memcmp(Memory, Expected.data(), Bytes) == 0;
+    if (!Valid && Memory) {
+      const auto *Actual = static_cast<const UINT *>(Memory);
+      for (UINT I = 0; I < Words; ++I)
+        if (Actual[I] != Expected[I])
+          std::printf("Texture-view replay %u word %u: actual=%u expected=%u\n",
+                      Repeat, I, Actual[I], Expected[I]);
+    }
+    Readback->Unmap(0, &NoRead);
+    if (!Valid)
+      return report("Texture-view data/dimensions/nulls or guards mismatch",
+                    E_FAIL);
+  }
+  Result = Upload->Map(0, &UploadRange, &Memory);
+  if (FAILED(Result))
+    return report("Map texture-view source check", Result);
+  bool Valid = Memory && std::memcmp(Memory, Data.data(), UploadBytes) == 0;
+  Upload->Unmap(0, &NoRead);
+  if (!Valid)
+    return report("Texture-view execution changed upload storage", E_FAIL);
+  std::printf("Live texture SRV mips/layers, mappings, dimensions, guards and "
+              "lifetime PASS (ordered=%u single-layer=%u)\n",
+              Ordered, SingleLayer);
+  return S_OK;
+}
+
 HRESULT exerciseBufferCommands(
     ID3D12Device *Device, const D3D12_SHADER_BYTECODE *DXIL = nullptr,
     bool Ordered = false, bool Indirect = false, bool CBV = false,
@@ -2537,10 +2855,34 @@ int wmain(int Argc, wchar_t **Argv) {
   bool Footprints =
       TextureCopies || ReferenceFootprints || OrderedFootprints ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--footprint-copies") == 0);
+  bool ReferenceTextureViews =
+      Argc == 3 &&
+      (std::wcscmp(Argv[1], L"--reference-texture-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-single-layer-texture-views") == 0 ||
+       std::wcscmp(Argv[1],
+                   L"--reference-ordered-single-layer-texture-views") == 0);
+  bool OrderedTextureViews =
+      Argc == 3 &&
+      (std::wcscmp(Argv[1], L"--ordered-texture-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-views") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-single-layer-texture-views") == 0 ||
+       std::wcscmp(Argv[1],
+                   L"--reference-ordered-single-layer-texture-views") == 0);
+  bool SingleLayerTextureViews =
+      Argc == 3 &&
+      (std::wcscmp(Argv[1], L"--single-layer-texture-views") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-single-layer-texture-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-single-layer-texture-views") == 0 ||
+       std::wcscmp(Argv[1],
+                   L"--reference-ordered-single-layer-texture-views") == 0);
+  bool TextureViews =
+      ReferenceTextureViews || OrderedTextureViews || SingleLayerTextureViews ||
+      (Argc == 3 && std::wcscmp(Argv[1], L"--texture-views") == 0);
   bool Reference = ReferenceViews || ReferenceTables || ReferenceConstants ||
                    ReferenceCBV || ReferenceIndirect || ReferencePredication ||
                    ReferenceBufferCommands || ReferencePlacedBuffers ||
-                   ReferenceFootprints ||
+                   ReferenceFootprints || ReferenceTextureViews ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
       OrderedViews || OrderedTables || OrderedConstants || OrderedCBV ||
@@ -2562,7 +2904,7 @@ int wmain(int Argc, wchar_t **Argv) {
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
   if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands &&
-      !Fences && !PlacedBuffers && !Footprints) {
+      !Fences && !PlacedBuffers && !Footprints && !TextureViews) {
     std::fprintf(stderr,
                  "Usage: warp-prototype-harness "
                  "[--reference|--expect-shader-rejection|--commands|"
@@ -2616,6 +2958,10 @@ int wmain(int Argc, wchar_t **Argv) {
                  "--texture-array-copies|--ordered-texture-array-copies|"
                  "--reference-texture-array-copies|"
                  "--reference-ordered-texture-array-copies|"
+                 "--texture-views FILE|--ordered-texture-views FILE|"
+                 "--reference-texture-views FILE|"
+                 "--reference-ordered-texture-views FILE|"
+                 "--[reference-][ordered-]single-layer-texture-views FILE|"
                  "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
@@ -2629,7 +2975,7 @@ int wmain(int Argc, wchar_t **Argv) {
             Coexistence.Shader->GetBufferSize()};
   }
 #endif
-  if (DXILCommands || DXILBufferCommands) {
+  if (DXILCommands || DXILBufferCommands || TextureViews) {
     FILE *Input = nullptr;
     if (_wfopen_s(&Input, Argv[2], L"rb") || !Input) {
       report("Open original DXC shader", E_FAIL);
@@ -2728,9 +3074,12 @@ int wmain(int Argc, wchar_t **Argv) {
                                      TextureCopies, ArrayTexture);
   if (SUCCEEDED(Result) && Fences)
     Result = exerciseFences(Device.Get());
-  if (SUCCEEDED(Result) && Commands)
+  if (SUCCEEDED(Result) && (Commands || TextureViews))
     if (!Reference)
       Result = queryWavePolicy(Device.Get());
+  if (SUCCEEDED(Result) && TextureViews)
+    Result = exerciseTextureViews(Device.Get(), DXIL, OrderedTextureViews,
+                                  SingleLayerTextureViews);
   if (SUCCEEDED(Result) && Commands)
     Result = exerciseCommands(Device.Get(),
                               DXILCommands || Coexist ? &DXIL : nullptr);
@@ -2838,7 +3187,9 @@ int wmain(int Argc, wchar_t **Argv) {
           Audit.CoreTables == 1 && Audit.QueueTables == 1 &&
           Audit.CommandListTables == 2 && Audit.ExtendedTables == 1 &&
           Audit.ExecutableShaderQueries == 1 && Audit.UnsupportedCalls == 0;
-      UINT ExpectedShaders = BufferCommands ? 4 : Commands ? 3 : 2;
+      UINT ExpectedShaders = BufferCommands             ? 4
+                             : Commands || TextureViews ? 3
+                                                        : 2;
       ValidOwned &=
           Audit.CoreTables == 1 && Audit.QueueTables == 1 &&
           Audit.CommandListTables == 2 && Audit.ExtendedTables == 1 &&
@@ -2900,7 +3251,8 @@ int wmain(int Argc, wchar_t **Argv) {
                   Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
                   Data.MakeResidentCallbacks, Data.EvictCallbacks,
                   Data.HasRuntimePagingQueue);
-      UINT ExpectedHeaps = TextureCopies                    ? 4
+      UINT ExpectedHeaps = TextureViews                     ? 6
+                           : TextureCopies                  ? 4
                            : CounterDelta                   ? 9
                            : CBV || Indirect || Predication ? 6
                            : BufferCommands                 ? 4
@@ -2909,7 +3261,8 @@ int wmain(int Argc, wchar_t **Argv) {
       ValidOwned &=
           Data.Created == ExpectedHeaps && Data.Destroyed == ExpectedHeaps &&
           Data.Maps > 0 && Data.Maps == Data.Unmaps &&
-          Data.MakeResidentCallbacks == (TextureCopies                    ? 5u
+          Data.MakeResidentCallbacks == (TextureViews                     ? 7u
+                                         : TextureCopies                  ? 5u
                                          : CounterDelta                   ? 10u
                                          : CBV || Indirect || Predication ? 7u
                                          : BufferCommands                 ? 5u
@@ -2918,7 +3271,7 @@ int wmain(int Argc, wchar_t **Argv) {
           Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
-    if (Commands || PlacedBuffers || Footprints) {
+    if (Commands || PlacedBuffers || Footprints || TextureViews) {
       using CommandAuditFn = void(APIENTRY *)(UINT *, UINT *);
       auto Audit = reinterpret_cast<CommandAuditFn>(
           GetProcAddress(Module, "FeMeWarpGetCommandAudit"));
@@ -2927,19 +3280,22 @@ int wmain(int Argc, wchar_t **Argv) {
         Audit(&Dispatches, &Copies);
       std::printf("Native command execution: dispatches=%u copies=%u\n",
                   Dispatches, Copies);
-      ValidOwned &= Audit &&
-                    Dispatches == (Predication                   ? 11u
-                                   : Indirect                    ? 10u
-                                   : BufferCommands              ? 9u
-                                   : PlacedBuffers || Footprints ? 0u
-                                                                 : 6u) &&
-                    Copies == (ArrayTexture                  ? 13u
-                               : TextureCopies               ? 7u
-                               : CounterDelta                ? 10u
-                               : Indirect || Predication     ? 7u
-                               : BufferCommands              ? 4u
-                               : PlacedBuffers || Footprints ? 2u
-                                                             : 0u);
+      ValidOwned &=
+          Audit &&
+          Dispatches == (TextureViews     ? (OrderedTextureViews ? 1u : 3u)
+                         : Predication    ? 11u
+                         : Indirect       ? 10u
+                         : BufferCommands ? 9u
+                         : PlacedBuffers || Footprints ? 0u
+                                                       : 6u) &&
+          Copies == (TextureViews    ? (OrderedTextureViews ? 14u : 16u)
+                     : ArrayTexture  ? 13u
+                     : TextureCopies ? 7u
+                     : CounterDelta  ? 10u
+                     : Indirect || Predication     ? 7u
+                     : BufferCommands              ? 4u
+                     : PlacedBuffers || Footprints ? 2u
+                                                   : 0u);
     }
   }
 #ifdef FEME_WARP_COEXIST

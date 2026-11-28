@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "..\..\utils\windows-adapter-bootstrap\WarpShaderCompilerABI.h"
 #include "..\..\utils\windows-adapter-bootstrap\WarpTables.h"
 
 #include <atomic>
@@ -1025,6 +1026,45 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Good &=
         std::memcmp(Expected.data(), reinterpret_cast<void *>(GPUCPUBase.ptr),
                     Expected.size()) == 0;
+    D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 TextureView{};
+    TextureView.ResourceDimension = D3D12DDI_RD_TEXTURE2D;
+    TextureView.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+    TextureView.Shader4ComponentMapping =
+        D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    TextureView.Tex2D.MipLevels = 1;
+    TextureView.Tex2D.ArraySize = 2;
+    LastError = S_OK;
+    Core.pfnCreateShaderResourceView(Device, &TextureView, Third);
+    Good &= LastError == S_OK;
+    std::memcpy(Before.data(), reinterpret_cast<void *>(Third.ptr), Stride);
+    for (UINT Case = 0; Case < 6; ++Case) {
+      auto Invalid = TextureView;
+      switch (Case) {
+      case 0:
+        Invalid.Tex2D.MipLevels = 0;
+        break;
+      case 1:
+        Invalid.Tex2D.MostDetailedMip = FeMeWarpMaxImageMipLevels;
+        break;
+      case 2:
+        Invalid.Tex2D.ArraySize = 0;
+        break;
+      case 3:
+        Invalid.Tex2D.FirstArraySlice = 2048;
+        break;
+      case 4:
+        Invalid.Tex2D.PlaneSlice = 1;
+        break;
+      case 5:
+        Invalid.Tex2D.ResourceMinLODClamp = 0.5f;
+        break;
+      }
+      LastError = S_OK;
+      Core.pfnCreateShaderResourceView(Device, &Invalid, Third);
+      Good &= LastError == (Case >= 4 ? E_NOTIMPL : E_INVALIDARG) &&
+              std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                          Stride) == 0;
+    }
   } else
     Good = false;
   Core.pfnDestroyDescriptorHeap(OtherDevice, GPUHeap);

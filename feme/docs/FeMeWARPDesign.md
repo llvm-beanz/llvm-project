@@ -1857,17 +1857,32 @@ Direct3D SRV loads opt into component mappings through
 `FEME_IMAGE_LOAD_SWIZZLE`; Vulkan storage reads remain unmapped. Raised UAV loads
 use mip zero rather than DXIL's unused/undefined operand. Original native
 image/sampler heap indexing is rejected, including retained pipelines, until
-the bridge can provide actual dynamic heaps. The native borrowed-view tests
-do not establish owned DDI texture views, sampler heaps or static samplers.
-See the implementation log and v21 inventory.
+the bridge can provide actual dynamic heaps. Borrowed-view tests alone do not
+establish owned DDI views. Owned finite texture SRVs now copy the native DDI
+description and resolve selected mip/layer spans from live resource geometry.
+The normalizer admits 1D/2D/3D/cube descriptions with checked resource identity,
+format, dimensions, mip/layer limits and cube faces; nonzero minimum-LOD clamps
+and plane slices remain unsupported. Textures stay excluded from buffer/GPUVA
+lookup. Original native DXIL owned/reference controls exercise 2D arrays,
+including singleton-array views whose DDI erases the public array distinction,
+SRV mappings, OOB/null loads, dimensions from a live view, post-record descriptor
+copies, replay and queue-held list/allocator release. Resources, shader-visible
+heaps, root signatures and PSOs remain alive until completion. Null-view
+dimension queries are not part of that reference oracle: the installed WARP JIT
+faulted on the exploratory query; live-view queries and null loads pass
+independently. Other dimensions/formats need their execution matrix, and sampler
+heaps, static samplers and texture UAVs remain open. See the implementation log
+and v22 inventory.
 
 Recorded commands retain immutable binding identities separately from prepared
 buffer descriptors: register namespace/space, table slot, root address and inline
 constant offset/count. Submission preparation resolves current live slots and
 addresses into fresh descriptors. Inline pointers are formed against the
 submission's copied constant bank, not borrowed from recording storage. This
-preserves descriptor updates and replay while allowing image/sampler preparation
-to use separate output arrays without compacting the recorded identities.
+preserves descriptor updates and replay. Submission-local buffer/image arrays
+and copied mip-layout banks no longer live in recorded commands or need pointer
+retargeting. Sampler preparation will use its own output array without compacting
+the recorded identities.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

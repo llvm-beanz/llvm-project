@@ -809,6 +809,38 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Owned finite texture SRVs and submission-local image preparation
+
+Texture SRV creation copies native DDI view metadata rather than borrowed
+creation pointers. Preparation resolves live owned resource identity, matching
+format/type, selected mip/layer bounds, cube face geometry and locked storage
+into bridge5 image/mip PODs. Nonzero plane slices and minimum-LOD clamps are
+explicitly unsupported. Buffers and images use separate submission-local arrays
+and mip-layout banks; recording stores no prepared descriptors or execution
+pointers. Textures remain excluded from shader buffer/GPUVA lookup.
+
+Six native descriptor negatives preserve the prior slot after invalid mip/layer
+geometry or unsupported plane/clamp state. Eight original-DXIL owned/reference
+gates exercise divergent 2D-array and singleton-array SRVs, selected base mips
+and layers, mappings/constant channels, OOB/null zero loads, live-view dimensions,
+CPU-source descriptor copies after recording, replay, guarded readback and
+unchanged upload storage. Ordered controls hold the kernel queue, verify untouched
+output, and release list/allocator/CPU-source heap before completion. Resources,
+shader-visible heaps, root signatures and PSOs remain alive through completion.
+An exploratory reference-only null dimension query faulted in the installed WARP
+JIT; the committed oracle queries dimensions from the live descriptor instead.
+Releasing the application's PSO/root while pending was also removed from the
+reference test; retained private compiler pipeline coverage remains separate.
+
+Focused native/image and eight OS selectors pass **10/10**, full FeMe **4428**
+/ **15** skipped / **10** unsupported, callbacks **65/65**, stock-runtime/
+coexistence **379/379**, with confirmed FeMe ICD identity and OS execution after
+shared DLL relinking. Full FeMe includes the native DDI constructor regression.
+Inventory **v22**, bridge5/artifact12, has **343** unique required OS gates and
+**14** existing native fixtures; no feature-level or CTS claim changes.
+Other dimensional/format execution coverage, sampler heaps/static samplers,
+texture UAVs, resource classes, root contracts and ordering remain W2 work.
+
 #### Immutable recorded binding identities before owned image preparation
 
 Recorded commands now store register namespace/space, table address, root

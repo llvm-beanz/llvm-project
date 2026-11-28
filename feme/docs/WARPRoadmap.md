@@ -43,16 +43,22 @@ Placed buffer-footprint copies additionally preserve independent row/depth
 pitches, partial regions, recording snapshots and ordered execution.
 Owned single-plane, single-sample linear texture storage now uses that shared
 geometry. Mipmapped 3D and 2D-array texture copies pass selected-subresource
-indexing, partial regions and held execution; shader views/samplers remain open.
+indexing, partial regions and held execution. Finite texture SRVs now resolve
+copied native views into live owned mip/layer layouts. Original DXIL executes
+divergent 2D-array and singleton-array views, mappings, live dimensions, null
+loads, replay and queue-held recording teardown against independent WARP.
+Sampler heaps/static samplers, texture UAVs and remaining image coverage stay open.
 Shared DXIL image/sampler bindings now use independent checked heap prefixes,
 qualified SRV/UAV image identity and artifact ABI 12. Native CPU JIT/scalar/AOT
 controls distinguish image namespaces and sampler arrays. Private Windows
 bridge 5 now prepares checked borrowed image views and finite sampler arrays,
 with copied mip layouts, SRV load mappings and explicit native-heap rejection.
-Owned DDI texture shader views/sampler heaps and static samplers remain open.
+Owned finite texture SRV preparation reuses this bridge; sampler heaps and
+static samplers remain open.
 Recorded binding identities are now separate from execution descriptors, retaining
-live descriptor updates and copied inline state before adding owned image views.
-The generated v21 inventory
+live descriptor updates and copied inline state. Buffer/image descriptors and
+copied mip layouts are now submission-local preparation, not recording storage.
+The generated v22 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -106,7 +112,7 @@ W2(b) operations, still remain.
 |---|---|
 | W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute. Disjoint conventional graphics-stage roots coexist while compute prepares only ALL-visible bindings; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |
 | W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, all 21 mapped typed SRV/UAV formats including the complete additional-format buffer set, typed SRV component mappings/live dimensions, Direct3D narrow-store saturation, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; other optional typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
-| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed placed footprints and linear texture storage reuse shared layouts; mipmapped 3D/2D-array copies pass selected-subresource indexing, pitched regions, guards and held lifetime. Texture shader views/samplers, remaining storage formats/planes/MSAA, footprints, reserved/shared resources and broader residency remain. |
+| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed placed footprints and linear texture storage reuse shared layouts; mipmapped 3D/2D-array copies pass selected-subresource indexing, pitched regions, guards and held lifetime. Finite texture SRVs now resolve copied native descriptions and live mip/layer metadata; owned/reference 2D-array and singleton-array execution passes mappings, dimensions, null loads, replay and held recording teardown. Sampler heaps/static samplers, texture UAVs, remaining dimensional/format/plane/MSAA coverage, footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, execution-time 64-bit predication, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, indirect root changes/draws and general removal wakeups remain. |
 
 ```text

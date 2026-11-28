@@ -651,6 +651,8 @@ struct DescriptorSlot {
   D3D12DDI_HRESOURCE CounterResource{};
   UINT64 CounterOffset = 0;
   UINT Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
+  bool Image = false;
+  D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 ImageView{};
 };
 
 struct DescriptorHeap {
@@ -891,25 +893,32 @@ createSRV(D3D12DDI_HDEVICE Device,
     reportError(Device, E_INVALIDARG);
     return;
   }
-  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER) {
-    reportError(Device, E_NOTIMPL);
-    return;
-  }
   if (!FeMeWarpValidComponentMapping(Desc->Shader4ComponentMapping)) {
     reportError(Device, E_INVALIDARG);
     return;
   }
   DescriptorSlot Value;
-  HRESULT Result = makeBufferView(
-      Owner, Desc->hDrvResource, Desc->Format, Desc->Buffer.FirstElement,
-      Desc->Buffer.NumElements, Desc->Buffer.StructureByteStride,
-      Desc->Buffer.Flags, 1, Value);
+  HRESULT Result;
+  if (Desc->ResourceDimension == D3D12DDI_RD_BUFFER) {
+    Result = makeBufferView(Owner, Desc->hDrvResource, Desc->Format,
+                            Desc->Buffer.FirstElement, Desc->Buffer.NumElements,
+                            Desc->Buffer.StructureByteStride,
+                            Desc->Buffer.Flags, 1, Value);
+  } else {
+    feme::probe::WarpBufferAccess Access(Owner);
+    FeMeWarpImageBinding Image;
+    std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> Layouts{};
+    Result = Access.imageView(*Desc, Image, Layouts);
+    Value.Image = true;
+    Value.ImageView = *Desc;
+    Value.Namespace = 1;
+  }
   if (FAILED(Result)) {
     reportError(Device, Result);
     return;
   }
   if (Desc->Shader4ComponentMapping != FeMeWarpDefaultComponentMapping &&
-      Value.Format == DXGI_FORMAT_UNKNOWN) {
+      !Value.Image && Value.Format == DXGI_FORMAT_UNKNOWN) {
     reportError(Device, E_NOTIMPL);
     return;
   }
@@ -1320,6 +1329,20 @@ struct RecordedBinding {
   UINT ConstantCount = 0;
 };
 
+struct DispatchBindings {
+  FeMeWarpDispatchDesc Dispatch;
+  std::array<FeMeWarpBufferBinding, MaxRootParameters> Buffers{};
+  std::array<FeMeWarpImageBinding, MaxRootParameters> Images{};
+  std::array<std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels>,
+             MaxRootParameters>
+      ImageLayouts{};
+
+  DispatchBindings() {
+    Dispatch.Buffers = Buffers.data();
+    Dispatch.Images = Images.data();
+  }
+};
+
 struct RecordedCommand {
   enum class Kind {
     Dispatch,
@@ -1332,7 +1355,6 @@ struct RecordedCommand {
   FeMeWarpDispatchDesc Dispatch;
   UINT BindingCount = 0;
   std::array<RecordedBinding, MaxRootParameters> Bindings{};
-  std::array<FeMeWarpBufferBinding, MaxRootParameters> Buffers{};
   std::array<UINT, MaxRootDwords> RootConstants{};
   D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
   D3D12DDIARG_BUFFER_PLACEMENT Destination{};
@@ -1989,7 +2011,6 @@ HRESULT prepareDispatch(CommandList *State,
       FeMeWarpRetainComputePipeline(State->Pipeline, &Command->Pipeline);
   if (FAILED(Result))
     return Result;
-  Command->Dispatch.Buffers = Command->Buffers.data();
   Command->RootConstants = State->RootConstants;
   Command->DescriptorHeap = State->DescriptorHeap;
   Command->Predicate = State->Predicate;
@@ -2537,12 +2558,34 @@ void APIENTRY setPredication(D3D12DDI_HCOMMANDLIST List,
 }
 
 HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
-                                feme::probe::WarpBufferAccess &Buffers) {
+                                feme::probe::WarpBufferAccess &Buffers,
+                                DispatchBindings &Prepared) {
   DescriptorAccess Descriptors;
-  Command->Dispatch.BufferCount = 0;
+  Prepared.Dispatch.BufferCount = Prepared.Dispatch.ImageCount = 0;
   for (UINT J = 0; J < Command->BindingCount; ++J) {
     const auto &Binding = Command->Bindings[J];
-    auto &Buffer = Command->Buffers[Command->Dispatch.BufferCount++];
+    DescriptorSlot *Slot = nullptr;
+    if (Binding.TableDescriptor) {
+      auto *Heap = *findDescriptorHeap(Command->DescriptorHeap);
+      if (!Heap || Heap->Owner != State->Owner)
+        return E_INVALIDARG;
+      Slot = descriptorTableSlot(Heap, Binding.TableDescriptor, 0);
+      if (!Slot || Slot->Namespace != Binding.Namespace)
+        return E_INVALIDARG;
+    }
+    if (Slot && Slot->Image) {
+      UINT Index = Prepared.Dispatch.ImageCount++;
+      auto &Image = Prepared.Images[Index];
+      HRESULT Result = Buffers.imageView(Slot->ImageView, Image,
+                                         Prepared.ImageLayouts[Index]);
+      if (FAILED(Result))
+        return Result;
+      Image.Namespace = Binding.Namespace;
+      Image.Space = Binding.Space;
+      Image.Register = Binding.Register;
+      continue;
+    }
+    auto &Buffer = Prepared.Buffers[Prepared.Dispatch.BufferCount++];
     Buffer = {};
     Buffer.Namespace = Binding.Namespace;
     Buffer.Space = Binding.Space;
@@ -2552,13 +2595,7 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
       Buffer.SizeInBytes = UINT64(Binding.ConstantCount) * sizeof(UINT);
       continue;
     }
-    if (Binding.TableDescriptor) {
-      auto *Heap = *findDescriptorHeap(Command->DescriptorHeap);
-      if (!Heap || Heap->Owner != State->Owner)
-        return E_INVALIDARG;
-      auto *Slot = descriptorTableSlot(Heap, Binding.TableDescriptor, 0);
-      if (!Slot || Slot->Namespace != Binding.Namespace)
-        return E_INVALIDARG;
+    if (Slot) {
       Buffer.Kind = Slot->Format != DXGI_FORMAT_UNKNOWN ? 2
                     : Slot->Stride                      ? 1
                                                         : 0;
@@ -2630,7 +2667,10 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
     }
     if (Command->Type == RecordedCommand::Kind::Dispatch ||
         Command->Type == RecordedCommand::Kind::IndirectDispatch) {
-      Result = resolveDispatchBindings(State, Command, Access);
+      DispatchBindings Prepared;
+      std::memcpy(Prepared.Dispatch.GroupCount, Command->Dispatch.GroupCount,
+                  sizeof(Prepared.Dispatch.GroupCount));
+      Result = resolveDispatchBindings(State, Command, Access, Prepared);
       UINT Count = 1;
       void *Arguments = nullptr;
       if (SUCCEEDED(Result) &&
@@ -2655,17 +2695,17 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
       }
       for (UINT I = 0; I < Count && SUCCEEDED(Result); ++I) {
         if (Arguments) {
-          std::memcpy(Command->Dispatch.GroupCount,
+          std::memcpy(Prepared.Dispatch.GroupCount,
                       static_cast<const char *>(Arguments) +
                           UINT64(I) * Command->ByteStride,
-                      sizeof(Command->Dispatch.GroupCount));
-          for (UINT Dimension : Command->Dispatch.GroupCount)
+                      sizeof(Prepared.Dispatch.GroupCount));
+          for (UINT Dimension : Prepared.Dispatch.GroupCount)
             if (Dimension > 65535)
               Result = E_INVALIDARG;
         }
         if (SUCCEEDED(Result))
           Result =
-              FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);
+              FeMeWarpDispatchCompute(Command->Pipeline, &Prepared.Dispatch);
         if (SUCCEEDED(Result))
           ++DispatchesExecuted;
       }
@@ -2786,7 +2826,6 @@ HRESULT snapshotSubmission(UINT Count, const D3D12DDI_HCOMMANDLIST *Lists,
         return E_OUTOFMEMORY;
       Copy->Next = nullptr;
       Copy->Pipeline = nullptr;
-      Copy->Dispatch.Buffers = Copy->Buffers.data();
       appendCommand(Submission.First, Submission.Last, Copy);
       if (Command->Pipeline) {
         HRESULT Result =

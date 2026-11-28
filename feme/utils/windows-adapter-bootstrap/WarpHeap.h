@@ -12,6 +12,11 @@
 
 #include "WarpDeviceState.h"
 
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+#include "WarpShaderCompilerABI.h"
+#include <array>
+#endif
+
 namespace feme {
 namespace probe {
 
@@ -45,6 +50,13 @@ public:
   HRESULT subresource(
       D3D12DDI_HRESOURCE Resource, UINT Index, D3D12DDI_SUBRESOURCE_INFO &Info,
       D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT *Layout = nullptr);
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  /// Resolve a selected SRV view without exposing texture storage as a buffer.
+  HRESULT imageView(
+      const D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 &View,
+      FeMeWarpImageBinding &Image,
+      std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> &Layouts);
+#endif
   HRESULT address(UINT64 Address, void *&Data, UINT64 &Size,
                   bool UnorderedAccess = false);
 };

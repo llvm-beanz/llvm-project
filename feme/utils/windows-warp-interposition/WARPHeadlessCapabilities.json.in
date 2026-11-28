@@ -13,7 +13,7 @@
   "artifact_abi_version": 12,
   "input_profiles": ["released SM 5.1", "released SM 6.0"],
   "shader_scope": ["application compute subset", "initialization vertex only"],
-  "compiler_image_scope": ["checked borrowed finite SRV/UAV images", "independent finite sampler bindings", "single-plane single-sample mapped uncompressed formats", "copied mip-layout metadata", "SRV load component mappings", "native image/sampler heap indexing rejected", "not owned DDI texture views or sampler heaps"],
+  "compiler_image_scope": ["checked borrowed finite SRV/UAV images", "independent finite sampler bindings", "single-plane single-sample mapped uncompressed formats", "copied mip-layout metadata", "SRV load component mappings", "native image/sampler heap indexing rejected", "owned finite texture SRV preparation; sampler heaps and static samplers remain open"],
   "wave_policy": {
     "min": 4,
     "max": 4,
@@ -41,9 +41,9 @@
     "dispatch_groups_per_dimension": 65535
   },
   "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "multiple inline constants", "finite CBV/SRV/UAV descriptor-table ranges", "non-uniform finite buffer-array selection", "all-stage compute visibility", "disjoint conventional graphics-stage root visibility", "compute preparation excludes non-compute-visible roots"],
-  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32/R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRV/UAVs", "R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT typed buffer SRV/UAVs", "complete fifteen-format additional typed-UAV buffer set", "Direct3D narrow integer store saturation", "typed SRV component mappings and constant/default channels", "non-uniform live typed-buffer dimension queries", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
+  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32/R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRV/UAVs", "R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT typed buffer SRV/UAVs", "complete fifteen-format additional typed-UAV buffer set", "Direct3D narrow integer store saturation", "typed SRV component mappings and constant/default channels", "non-uniform live typed-buffer dimension queries", "CPU-source descriptor copies", "execution-time finite buffer/image table preparation", "live CPU-metadata residency", "copied native texture SRV descriptions; checked mip/layer selection and null views", "owned/reference 2D-array and singleton-array SRV execution, mappings, live dimensions, replay and held recording teardown"],
   "typed_uav_load_additional_formats": true,
-  "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV", "single-plane single-sample uncompressed linear texture storage; checked mip/array metadata; no texture shader views"],
+  "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV", "single-plane single-sample uncompressed linear texture storage; checked mip/array metadata and finite SRVs; texture UAVs remain open"],
   "copy_scope": ["buffer byte regions", "exact-format uncompressed placed buffer footprints", "selected texture subresources translated from D3D mip/array indices", "pitched row/depth region copies", "recorded layout and box snapshots"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
@@ -78,6 +78,7 @@
     "Tools/warp-compiler-dxil.hlsl",
     "Tools/warp-compiler-images.hlsl",
     "Tools/warp-compiler-samplers.hlsl",
+    "Tools/warp-compiler-texture-views.hlsl",
     "Tools/feme-run/cbv-bounds.ll",
     "Transforms/DXIL/dxil-raise-raw-buffer-ops.ll",
     "Transforms/DXIL/dxil-raise-buffer-counter.ll",
@@ -87,6 +88,14 @@
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
+    "os-routed-warp-compiler-owned-texture-views",
+    "os-routed-warp-compiler-owned-ordered-texture-views",
+    "os-routed-warp-compiler-reference-texture-views",
+    "os-routed-warp-compiler-reference-ordered-texture-views",
+    "os-routed-warp-compiler-owned-single-layer-texture-views",
+    "os-routed-warp-compiler-owned-ordered-single-layer-texture-views",
+    "os-routed-warp-compiler-reference-single-layer-texture-views",
+    "os-routed-warp-compiler-reference-ordered-single-layer-texture-views",
     "os-routed-warp-compiler-owned-texture-array-copies",
     "os-routed-warp-compiler-owned-ordered-texture-array-copies",
     "os-routed-warp-compiler-reference-texture-array-copies",

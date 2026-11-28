@@ -1,5 +1,10 @@
 # Vulkan `KHR`/`EXT` extension inventory
 
+Owned finite texture SRV preparation passes 4428 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 379 stock-runtime/coexistence
+gates, including eight new owned/reference texture controls. FeMe ICD identity
+was confirmed. No inventory regeneration, advertisement change or CTS result.
+
 Bridge5 borrowed image/sampler execution passes 4427 full FeMe tests
 (15 skipped, 10 unsupported), 65 callbacks and 371 coexistence gates.
 Descriptor-opted Direct3D load mappings preserve ordinary Vulkan storage reads.

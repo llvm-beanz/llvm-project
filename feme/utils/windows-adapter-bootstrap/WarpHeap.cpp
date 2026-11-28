@@ -901,6 +901,118 @@ HRESULT WarpBufferAccess::subresource(
   return E_INVALIDARG;
 }
 
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+HRESULT WarpBufferAccess::imageView(
+    const D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 &View,
+    FeMeWarpImageBinding &Image,
+    std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> &Layouts) {
+  Image = {};
+  if (!Owner || !warpFormatElementSize(View.Format) ||
+      !FeMeWarpValidComponentMapping(View.Shader4ComponentMapping))
+    return E_INVALIDARG;
+  UINT FirstMip = 0, MipCount = 0, FirstLayer = 0, LayerCount = 1;
+  FLOAT Clamp = 0;
+  D3D12DDI_RESOURCE_TYPE Type = D3D12DDI_RT_TEXTURE2D;
+  switch (View.ResourceDimension) {
+  case D3D12DDI_RD_TEXTURE1D:
+    Type = D3D12DDI_RT_TEXTURE1D;
+    FirstMip = View.Tex1D.MostDetailedMip;
+    MipCount = View.Tex1D.MipLevels;
+    FirstLayer = View.Tex1D.FirstArraySlice;
+    LayerCount = View.Tex1D.ArraySize;
+    Clamp = View.Tex1D.ResourceMinLODClamp;
+    Image.Dimension = LayerCount > 1 ? FeMeWarpImageDimension::Texture1DArray
+                                     : FeMeWarpImageDimension::Texture1D;
+    break;
+  case D3D12DDI_RD_TEXTURE2D:
+    FirstMip = View.Tex2D.MostDetailedMip;
+    MipCount = View.Tex2D.MipLevels;
+    FirstLayer = View.Tex2D.FirstArraySlice;
+    LayerCount = View.Tex2D.ArraySize;
+    Clamp = View.Tex2D.ResourceMinLODClamp;
+    if (View.Tex2D.PlaneSlice)
+      return E_NOTIMPL;
+    Image.Dimension = LayerCount > 1 ? FeMeWarpImageDimension::Texture2DArray
+                                     : FeMeWarpImageDimension::Texture2D;
+    break;
+  case D3D12DDI_RD_TEXTURE3D:
+    Type = D3D12DDI_RT_TEXTURE3D;
+    FirstMip = View.Tex3D.MostDetailedMip;
+    MipCount = View.Tex3D.MipLevels;
+    Clamp = View.Tex3D.ResourceMinLODClamp;
+    Image.Dimension = FeMeWarpImageDimension::Texture3D;
+    break;
+  case D3D12DDI_RD_TEXTURECUBE:
+    FirstMip = View.TexCube.MostDetailedMip;
+    MipCount = View.TexCube.MipLevels;
+    FirstLayer = View.TexCube.First2DArrayFace;
+    if (!View.TexCube.NumCubes || View.TexCube.NumCubes > 2048 / 6 ||
+        FirstLayer % 6)
+      return E_INVALIDARG;
+    LayerCount = View.TexCube.NumCubes * 6;
+    Clamp = View.TexCube.ResourceMinLODClamp;
+    Image.Dimension = View.TexCube.NumCubes > 1
+                          ? FeMeWarpImageDimension::TextureCubeArray
+                          : FeMeWarpImageDimension::TextureCube;
+    break;
+  case D3D12DDI_RD_BUFFER:
+  case D3D12DDI_RD_RAYTRACING_ACCELERATION_STRUCTURE_0042:
+    return E_NOTIMPL;
+  }
+  if (View.ResourceDimension < D3D12DDI_RD_TEXTURE1D ||
+      View.ResourceDimension > D3D12DDI_RD_TEXTURECUBE ||
+      FirstMip >= FeMeWarpMaxImageMipLevels || !MipCount ||
+      (MipCount != UINT_MAX &&
+       MipCount > FeMeWarpMaxImageMipLevels - FirstMip) ||
+      !LayerCount || FirstLayer > 2048 || LayerCount > 2048 - FirstLayer)
+    return E_INVALIDARG;
+  if (Clamp != 0)
+    return E_NOTIMPL;
+  Image.Format = View.Format;
+  Image.Shader4ComponentMapping = View.Shader4ComponentMapping;
+  if (!View.hDrvResource.pDrvPrivate)
+    return S_OK;
+  for (auto *Entry = static_cast<ResourceState *>(Owner->ResourceList); Entry;
+       Entry = Entry->Next) {
+    if (Entry != View.hDrvResource.pDrvPrivate)
+      continue;
+    const auto &Desc = Entry->Desc;
+    bool Volume = Type == D3D12DDI_RT_TEXTURE3D;
+    UINT Layers = Volume ? 1 : Desc.DepthOrArraySize;
+    if (Desc.ResourceType != Type || Desc.Format != View.Format ||
+        !(Desc.Flags & D3D12DDI_RESOURCE_FLAG_0003_SHADER_RESOURCE) ||
+        !Entry->Heap->Locked || !Entry->Heap->Memory ||
+        FirstMip >= Desc.MipLevels || FirstLayer >= Layers ||
+        LayerCount > Layers - FirstLayer ||
+        Entry->Geometry.Mips.size() != Desc.MipLevels ||
+        (View.ResourceDimension == D3D12DDI_RD_TEXTURECUBE &&
+         Desc.Width != Desc.Height))
+      return E_INVALIDARG;
+    if (MipCount == UINT_MAX)
+      MipCount = Desc.MipLevels - FirstMip;
+    if (MipCount > Desc.MipLevels - FirstMip)
+      return E_INVALIDARG;
+    Image.Data =
+        static_cast<unsigned char *>(Entry->Heap->Memory) + Entry->Offset;
+    Image.SizeInBytes = Entry->Geometry.ByteSize;
+    Image.Width = std::max(1u, static_cast<UINT>(Desc.Width) >> FirstMip);
+    Image.Height = std::max(1u, Desc.Height >> FirstMip);
+    Image.Depth =
+        Volume ? std::max(1u, UINT(Desc.DepthOrArraySize) >> FirstMip) : 1;
+    Image.ArrayLayers = LayerCount;
+    Image.MipLevels = Image.MipLayoutCount = MipCount;
+    for (UINT I = 0; I < MipCount; ++I) {
+      const auto &Mip = Entry->Geometry.Mips[FirstMip + I];
+      Layouts[I] = {Mip.Offset + UINT64(FirstLayer) * Mip.SlicePitch,
+                    Mip.RowPitch, Mip.SlicePitch};
+    }
+    Image.MipLayouts = Layouts.data();
+    return S_OK;
+  }
+  return E_INVALIDARG;
+}
+#endif
+
 HRESULT WarpBufferAccess::address(UINT64 Address, void *&Data, UINT64 &Size,
                                   bool UnorderedAccess) {
   Data = nullptr;
