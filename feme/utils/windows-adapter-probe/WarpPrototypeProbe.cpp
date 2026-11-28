@@ -18,6 +18,11 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
+#ifdef FEME_WARP_COEXIST
+#include <dxcapi.h>
+#include <vulkan/vulkan.h>
+#endif
+
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -32,6 +37,227 @@ HRESULT report(const char *Name, HRESULT Result) {
   std::printf("%s: 0x%08lx\n", Name, static_cast<unsigned long>(Result));
   std::fflush(stdout);
   return Result;
+}
+
+template <size_t Count>
+HRESULT checkExports(HMODULE Module, const char *const (&Names)[Count]) {
+  auto *Base = reinterpret_cast<unsigned char *>(Module);
+  auto *DOS = reinterpret_cast<IMAGE_DOS_HEADER *>(Base);
+  auto *PE = reinterpret_cast<IMAGE_NT_HEADERS *>(Base + DOS->e_lfanew);
+  if (DOS->e_magic != IMAGE_DOS_SIGNATURE ||
+      PE->Signature != IMAGE_NT_SIGNATURE)
+    return report("Invalid owned module image", E_FAIL);
+  DWORD Offset = PE->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+                     .VirtualAddress;
+  if (!Offset)
+    return report("Missing owned export directory", E_FAIL);
+  auto *Exports = reinterpret_cast<IMAGE_EXPORT_DIRECTORY *>(Base + Offset);
+  if (Exports->NumberOfNames != Count || Exports->NumberOfFunctions != Count ||
+      GetProcAddress(Module, MAKEINTRESOURCEA(199)))
+    return report("Owned export set mismatch", E_FAIL);
+  for (auto *Name : Names) {
+    FARPROC Address = GetProcAddress(Module, Name);
+    MEMORY_BASIC_INFORMATION Memory{};
+    if (!Address ||
+        !VirtualQuery(reinterpret_cast<const void *>(Address), &Memory,
+                      sizeof(Memory)) ||
+        Memory.AllocationBase != Module) {
+      std::fprintf(stderr, "Missing or forwarded owned export: %s\n", Name);
+      return report("Owned export provenance mismatch", E_FAIL);
+    }
+  }
+  return S_OK;
+}
+
+constexpr const char *WarpExports[] = {
+    "FeMeBootstrapGetAudit",
+    "FeMeBootstrapGetAuditCapacity",
+    "FeMeBootstrapGetCallbackProbe",
+    "FeMeBootstrapGetCalls",
+    "FeMeBootstrapGetContractAudit",
+    "FeMeBootstrapGetGpuVirtualAddressProbe",
+    "FeMeBootstrapGetMonitoredFenceProbe",
+    "FeMeBootstrapGetPagingQueueProbe",
+    "FeMeBootstrapGetWarpContextProbe",
+    "FeMeBootstrapGetWarpDeviceContextProbe",
+    "FeMeBootstrapGetWarpPrivateAdapterInfoProbe",
+    "FeMeWarpGetApplicationHeapAudit",
+    "FeMeWarpGetCommandAudit",
+    "FeMeWarpGetLastUnsupportedDDI",
+    "FeMeWarpGetTableAudit",
+    "OpenAdapter10",
+    "OpenAdapter10_2",
+    "OpenAdapter12"};
+
+constexpr const char *CompilerExports[] = {
+    "?registerImplicitTypeID@FallbackTypeIDResolver@detail@mlir@@KA?AVTypeID@3@"
+    "VStringRef@llvm@@@Z",
+    "FeMeWarpCompileDXILProgram",
+    "FeMeWarpCompileRawDXBC",
+    "FeMeWarpCompilerRevision",
+    "FeMeWarpCreateComputePipeline",
+    "FeMeWarpCreateVertexPipeline",
+    "FeMeWarpDestroyCompiledShader",
+    "FeMeWarpDestroyComputePipeline",
+    "FeMeWarpDestroyVertexPipeline",
+    "FeMeWarpDispatchCompute",
+    "FeMeWarpRetainComputePipeline",
+    "__jit_debug_descriptor",
+    "__jit_debug_register_code"};
+
+#ifdef FEME_WARP_COEXIST
+struct CoexistState {
+  HMODULE DXCModule = nullptr;
+  HMODULE VulkanModule = nullptr;
+  ComPtr<IDxcCompiler3> Compiler;
+  ComPtr<IDxcBlob> Shader;
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice PhysicalDevice = VK_NULL_HANDLE;
+  PFN_vkDestroyInstance DestroyInstance = nullptr;
+  PFN_vkGetPhysicalDeviceProperties GetProperties = nullptr;
+
+  ~CoexistState() { close(); }
+
+  HRESULT compile() {
+    constexpr char Source[] = "[numthreads(1,1,1)] void main() {}";
+    DxcBuffer Buffer{Source, sizeof(Source) - 1, DXC_CP_UTF8};
+    const wchar_t *Args[] = {L"-T", L"cs_6_0", L"-E", L"main"};
+    ComPtr<IDxcResult> Output;
+    HRESULT Result = report("Compile coexistence DXIL",
+                            Compiler->Compile(&Buffer, Args, ARRAYSIZE(Args),
+                                              nullptr, IID_PPV_ARGS(&Output)));
+    if (FAILED(Result))
+      return Result;
+    HRESULT Status = E_FAIL;
+    Result = Output->GetStatus(&Status);
+    if (FAILED(Result))
+      return report("Get DXC compilation status", Result);
+    if (FAILED(Status)) {
+      ComPtr<IDxcBlobUtf8> Errors;
+      if (SUCCEEDED(Output->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&Errors),
+                                      nullptr)) &&
+          Errors)
+        std::fprintf(stderr, "%s\n", Errors->GetStringPointer());
+      return report("DXC coexistence compilation failed", Status);
+    }
+    Shader.Reset();
+    Result = report(
+        "Get coexistence DXIL",
+        Output->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&Shader), nullptr));
+    return SUCCEEDED(Result) && (!Shader || !Shader->GetBufferSize())
+               ? report("Missing coexistence DXIL", E_FAIL)
+               : Result;
+  }
+
+  HRESULT query() {
+    VkPhysicalDeviceProperties Properties{};
+    GetProperties(PhysicalDevice, &Properties);
+    if (std::strcmp(Properties.deviceName, "FeMe CPU Vulkan Device"))
+      return report("Coexistence Vulkan identity mismatch", E_FAIL);
+    std::printf("Coexisting Vulkan device: %s\n", Properties.deviceName);
+    return S_OK;
+  }
+
+  HRESULT initialize(const wchar_t *DXCPath, const wchar_t *VulkanPath) {
+    constexpr DWORD Flags =
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+    DXCModule = LoadLibraryExW(DXCPath, nullptr, Flags);
+    if (!DXCModule)
+      return report("Load coexistence DXC", HRESULT_FROM_WIN32(GetLastError()));
+    auto CreateCompiler = reinterpret_cast<DxcCreateInstanceProc>(
+        GetProcAddress(DXCModule, "DxcCreateInstance"));
+    if (!CreateCompiler)
+      return report("Missing DXC factory", E_FAIL);
+    HRESULT Result =
+        report("Create coexistence DXC",
+               CreateCompiler(CLSID_DxcCompiler, IID_PPV_ARGS(&Compiler)));
+    if (FAILED(Result))
+      return Result;
+    Result = compile();
+    if (FAILED(Result))
+      return Result;
+    VulkanModule = LoadLibraryExW(VulkanPath, nullptr, Flags);
+    if (!VulkanModule)
+      return report("Load coexistence Vulkan ICD",
+                    HRESULT_FROM_WIN32(GetLastError()));
+    auto GetProc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        GetProcAddress(VulkanModule, "vkGetInstanceProcAddr"));
+    if (!GetProc)
+      return report("Missing Vulkan ICD entry", E_FAIL);
+    auto CreateInstance = reinterpret_cast<PFN_vkCreateInstance>(
+        GetProc(VK_NULL_HANDLE, "vkCreateInstance"));
+    if (!CreateInstance)
+      return report("Missing Vulkan instance entry", E_FAIL);
+    VkApplicationInfo Application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    Application.apiVersion = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo Create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    Create.pApplicationInfo = &Application;
+    VkResult VulkanResult = CreateInstance(&Create, nullptr, &Instance);
+    if (VulkanResult != VK_SUCCESS) {
+      std::fprintf(stderr, "Coexistence Vulkan instance result: %d\n",
+                   VulkanResult);
+      return report("Create coexistence Vulkan instance", E_FAIL);
+    }
+    DestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(
+        GetProc(Instance, "vkDestroyInstance"));
+    GetProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        GetProc(Instance, "vkGetPhysicalDeviceProperties"));
+    auto Enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        GetProc(Instance, "vkEnumeratePhysicalDevices"));
+    if (!DestroyInstance || !GetProperties || !Enumerate)
+      return report("Missing coexistence Vulkan functions", E_FAIL);
+    uint32_t Count = 1;
+    VulkanResult = Enumerate(Instance, &Count, &PhysicalDevice);
+    if (VulkanResult != VK_SUCCESS || Count != 1 || !PhysicalDevice) {
+      std::fprintf(stderr,
+                   "Coexistence Vulkan enumeration: result=%d count=%u\n",
+                   VulkanResult, Count);
+      return report("Enumerate coexistence Vulkan device", E_FAIL);
+    }
+    return query();
+  }
+
+  HRESULT close() {
+    HRESULT Result = S_OK;
+    if (Instance) {
+      if (DestroyInstance)
+        DestroyInstance(Instance, nullptr);
+      else
+        Result = report("Missing coexistence Vulkan teardown", E_FAIL);
+      Instance = VK_NULL_HANDLE;
+    }
+    Shader.Reset();
+    Compiler.Reset();
+    for (auto *Module : {&DXCModule, &VulkanModule}) {
+      if (*Module && !FreeLibrary(*Module))
+        Result = report("Close coexistence module",
+                        HRESULT_FROM_WIN32(GetLastError()));
+      *Module = nullptr;
+    }
+    return Result;
+  }
+};
+#endif
+
+HRESULT queryWavePolicy(ID3D12Device *Device) {
+#ifdef FEME_WARP_PROFILE_VERSION
+  std::printf("W1 internal capability inventory: version=%u; product FL=none\n",
+              static_cast<unsigned>(FEME_WARP_PROFILE_VERSION));
+#endif
+  D3D12_FEATURE_DATA_D3D12_OPTIONS1 Options{};
+  HRESULT Result =
+      report("Query owned wave policy",
+             Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &Options,
+                                         sizeof(Options)));
+  if (FAILED(Result))
+    return Result;
+  std::printf("Owned wave policy: min=%u max=%u total=%u ops=%u\n",
+              Options.WaveLaneCountMin, Options.WaveLaneCountMax,
+              Options.TotalLaneCount, Options.WaveOps);
+  return Options.WaveLaneCountMin == 4 && Options.WaveLaneCountMax == 4 &&
+                 Options.TotalLaneCount == 4 && !Options.WaveOps
+             ? S_OK
+             : report("Owned wave policy mismatch", E_FAIL);
 }
 
 HRESULT exerciseBuffer(ID3D12Device *Device) {
@@ -649,6 +875,12 @@ bool printCaps(HMODULE Module, bool OwnedDevice) {
 } // namespace
 
 int wmain(int Argc, wchar_t **Argv) {
+#ifdef FEME_WARP_COEXIST
+  bool Coexist = Argc == 4 && std::wcscmp(Argv[1], L"--coexist") == 0;
+  CoexistState Coexistence;
+#else
+  constexpr bool Coexist = false;
+#endif
   bool ReferenceBufferCommands =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-buffer-commands") == 0;
   bool Reference = ReferenceBufferCommands ||
@@ -663,7 +895,7 @@ int wmain(int Argc, wchar_t **Argv) {
       (Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0);
   bool DXILCommands =
       Argc == 3 && std::wcscmp(Argv[1], L"--dxil-commands") == 0;
-  bool Commands = DXILCommands || BufferCommands ||
+  bool Commands = Coexist || DXILCommands || BufferCommands ||
                   (Argc == 2 && std::wcscmp(Argv[1], L"--commands") == 0);
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
@@ -674,11 +906,20 @@ int wmain(int Argc, wchar_t **Argv) {
                          "--buffer-commands|--dxil-commands FILE|"
                          "--dxil-buffer-commands FILE|--fences|"
                          "--ordered-buffer-commands|"
-                         "--reference-buffer-commands]\n");
+                         "--reference-buffer-commands|"
+                         "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
   std::vector<unsigned char> DXILBytes;
   D3D12_SHADER_BYTECODE DXIL{};
+#ifdef FEME_WARP_COEXIST
+  if (Coexist) {
+    if (FAILED(Coexistence.initialize(Argv[2], Argv[3])))
+      return 1;
+    DXIL = {Coexistence.Shader->GetBufferPointer(),
+            Coexistence.Shader->GetBufferSize()};
+  }
+#endif
   if (DXILCommands || DXILBufferCommands) {
     FILE *Input = nullptr;
     if (_wfopen_s(&Input, Argv[2], L"rb") || !Input) {
@@ -761,16 +1002,34 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = report("Unexpected reference WARP dependency", E_FAIL);
     ValidRejection = false;
   }
+  if (!Reference && SUCCEEDED(Result)) {
+    Result = checkExports(Module, WarpExports);
+    HMODULE Compiler = GetModuleHandleW(L"feme_warp_compiler.dll");
+    if (Compiler && SUCCEEDED(Result))
+      Result = checkExports(Compiler, CompilerExports);
+    else if (!ExpectShaderRejection && SUCCEEDED(Result))
+      Result = report("Missing owned compiler exports", E_FAIL);
+  }
   if (SUCCEEDED(Result))
     Result = exerciseBuffer(Device.Get());
   if (SUCCEEDED(Result) && Fences)
     Result = exerciseFences(Device.Get());
   if (SUCCEEDED(Result) && Commands)
-    Result = exerciseCommands(Device.Get(), DXILCommands ? &DXIL : nullptr);
+    if (!Reference)
+      Result = queryWavePolicy(Device.Get());
+  if (SUCCEEDED(Result) && Commands)
+    Result = exerciseCommands(Device.Get(),
+                              DXILCommands || Coexist ? &DXIL : nullptr);
   if (SUCCEEDED(Result) && BufferCommands)
     Result = exerciseBufferCommands(Device.Get(),
                                     DXILBufferCommands ? &DXIL : nullptr,
                                     OrderedBufferCommands);
+#ifdef FEME_WARP_COEXIST
+  if (SUCCEEDED(Result) && Coexist)
+    Result = Coexistence.compile();
+  if (SUCCEEDED(Result) && Coexist)
+    Result = Coexistence.query();
+#endif
   bool ValidOwned = !Reference && !ExpectShaderRejection &&
                     DeviceResult == S_OK && SUCCEEDED(Result);
   if (ValidOwned) {
@@ -946,6 +1205,15 @@ int wmain(int Argc, wchar_t **Argv) {
                     Copies == (BufferCommands ? 4u : 0u);
     }
   }
+#ifdef FEME_WARP_COEXIST
+  if (Coexist) {
+    HRESULT Cleanup = Coexistence.close();
+    if (FAILED(Cleanup))
+      Result = Cleanup;
+    if (SUCCEEDED(Result))
+      std::printf("DXC, FeMe Vulkan ICD and owned WARP coexistence PASS\n");
+  }
+#endif
   if (!FreeLibrary(Module)) {
     Result = report("FreeLibrary", HRESULT_FROM_WIN32(GetLastError()));
     ValidRejection = false;

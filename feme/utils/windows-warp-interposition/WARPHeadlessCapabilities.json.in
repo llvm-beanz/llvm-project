@@ -1,0 +1,77 @@
+{
+  "schema_version": @FEME_WARP_PROFILE_VERSION@,
+  "profile": "internal-headless-w1",
+  "complete_product_feature_level": null,
+  "pointer_bytes": @CMAKE_SIZEOF_VOID_P@,
+  "runtime": "stock D3D12/DXGI with the existing unmodified WARP KMD",
+  "ddi": {
+    "device_core": "D3D12DDI_SUPPORTED_0072",
+    "command_list": "D3D12DDI_COMMAND_LIST_FUNCS_3D_0062",
+    "command_queue": "D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001"
+  },
+  "compiler_bridge_version": 1,
+  "input_profiles": ["released SM 5.1", "released SM 6.0"],
+  "shader_scope": ["application compute subset", "initialization vertex only"],
+  "wave_policy": {
+    "min": 4,
+    "max": 4,
+    "total": 4,
+    "advertised_wave_ops": false,
+    "native_requested_wave_4": "accepted",
+    "native_requested_wave_8": "rejected",
+    "public_sm_6_6": "not advertised"
+  },
+  "limits": {
+    "nodes": 1,
+    "root_buffer_descriptors": 32,
+    "root_dwords": 64,
+    "root_gpuva_alignment": 16,
+    "buffer_allocation_alignment": 65536,
+    "max_buffer_allocation_bytes": 4294901760,
+    "dispatch_groups_per_dimension": 65535
+  },
+  "binding_scope": ["root raw SRV", "root raw UAV", "all-stage visibility"],
+  "resource_scope": ["committed L0 buffers", "upload", "readback", "default UAV"],
+  "synchronization": "runtime monitored fences and per-queue kernel Ready/Done gates",
+  "normative_requirements": [
+    "D3D12_MAX_ROOT_COST",
+    "D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION",
+    "D3D12DDI_ROOT_SIGNATURE_VERSION_1_1",
+    "D3D12DDI_SHADER_CAPS_0012",
+    "D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU",
+    "D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU",
+    "D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU",
+    "D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMCPU"
+  ],
+  "native_required_tests": [
+    "Tools/warp-compiler-compute.dxasm",
+    "Tools/warp-compiler-vertex.dxasm",
+    "Tools/warp-compiler-dispatch.dxasm",
+    "Tools/warp-compiler-dxil.hlsl",
+    "Transforms/CPU/simdize-groupshared-used-lists.ll"
+  ],
+  "os_required_gates": [
+    "os-routed-warp-compiler-owned-buffer",
+    "os-routed-warp-compiler-owned-commands",
+    "os-routed-warp-compiler-owned-buffer-commands",
+    "os-routed-warp-compiler-owned-fences",
+    "os-routed-warp-compiler-owned-ordered-buffer-commands",
+    "os-routed-warp-compiler-owned-dxil-commands",
+    "os-routed-warp-compiler-owned-dxil-buffer-commands",
+    "os-routed-warp-compiler-owned-coexistence",
+    "os-routed-warp-compiler-reference-buffer-commands"
+  ],
+  "configured_evidence": {
+    "original_dxc_inputs": @FEME_WARP_PROFILE_DXC_EVIDENCE@,
+    "same_process_coexistence": @FEME_WARP_PROFILE_COEXIST_EVIDENCE@
+  },
+  "unsupported": [
+    "complete graphics or feature-level conformance",
+    "descriptor tables and heaps",
+    "images and samplers",
+    "native fences and implicit multi-GPU",
+    "split, ranged, aliasing and enhanced barriers",
+    "presentation, DXR and advanced graphics"
+  ],
+  "evidence_policy": "Configured gates must actually pass; this inventory is not a conformance certificate."
+}

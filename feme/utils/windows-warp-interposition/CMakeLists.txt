@@ -500,6 +500,11 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
+  set(FEME_WARP_PROFILE_VERSION 1)
+  target_compile_definitions(warp-compiler-harness PRIVATE
+    FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
+  set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
+  set(FEME_WARP_PROFILE_COEXIST_EVIDENCE false)
   add_dependencies(warp-compiler-harness warp-compiler-shim)
   target_compile_options(warp-compiler-shim PRIVATE /W4 /WX /wd4201 /UNDEBUG)
   target_compile_options(warp-compiler-harness PRIVATE /W4 /WX /wd4201 /UNDEBUG)
@@ -518,6 +523,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   find_program(FEME_DXC_EXECUTABLE NAMES dxc
     DOC "DXC for original owned-DXIL execution fixtures")
   if(FEME_DXC_EXECUTABLE)
+    set(FEME_WARP_PROFILE_DXC_EVIDENCE true)
     set(WARP_DXIL_FIXTURE "${WARP_COMPILER_OUTPUT_DIR}/owned-compute.dxil")
     set(WARP_DXIL_BUFFER_FIXTURE
       "${WARP_COMPILER_OUTPUT_DIR}/owned-buffer-compute.dxil")
@@ -539,7 +545,30 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-buffer-commands
       COMMAND warp-compiler-harness --dxil-buffer-commands
         "${WARP_DXIL_BUFFER_FIXTURE}")
+    get_filename_component(FEME_DXC_DIRECTORY "${FEME_DXC_EXECUTABLE}" DIRECTORY)
+    find_file(FEME_DXCOMPILER_DLL NAMES dxcompiler.dll
+      HINTS "${FEME_DXC_DIRECTORY}")
+    find_path(FEME_VULKAN_HEADERS NAMES vulkan/vulkan.h
+      HINTS "$ENV{VULKAN_SDK}/Include" "$ENV{VULKAN_SDK}/include")
+    get_filename_component(FEME_COMPILER_DIRECTORY
+      "${FEME_WARP_COMPILER_DLL}" DIRECTORY)
+    set(FEME_WARP_COEXIST_VULKAN_DLL
+      "${FEME_COMPILER_DIRECTORY}/libfeme_vulkan.dll" CACHE FILEPATH
+      "FeMe Vulkan ICD for the same-process WARP coexistence gate")
+    if(FEME_DXCOMPILER_DLL AND FEME_VULKAN_HEADERS AND
+       EXISTS "${FEME_WARP_COEXIST_VULKAN_DLL}")
+      set(FEME_WARP_PROFILE_COEXIST_EVIDENCE true)
+      target_compile_definitions(warp-compiler-harness PRIVATE
+        FEME_WARP_COEXIST=1)
+      target_include_directories(warp-compiler-harness PRIVATE
+        "${FEME_VULKAN_HEADERS}")
+      feme_add_probe_test(NAME os-routed-warp-compiler-owned-coexistence
+        COMMAND warp-compiler-harness --coexist "${FEME_DXCOMPILER_DLL}"
+          "${FEME_WARP_COEXIST_VULKAN_DLL}")
+    endif()
   endif()
+  configure_file(WARPHeadlessCapabilities.json.in
+    "${WARP_COMPILER_OUTPUT_DIR}/warp-headless-capabilities.json" @ONLY)
   feme_add_probe_test(NAME os-routed-warp-compiler-reference-buffer
     COMMAND warp-compiler-harness --reference)
   feme_add_probe_test(NAME os-routed-warp-compiler-not-shader-rejection
