@@ -137718,3 +137718,33 @@ separately. No Vulkan advertisement, new CTS result or KMD change is claimed.
 
 Next: commit the tested Windows typed-UAV integration and continue the
 remaining W2 binding, image/resource and synchronization work. W2 remains open.
+
+# W2 progress: complete additional typed-UAV buffer set
+
+Commit 18e99a798910 admits all 21 mapped typed buffer formats as owned and
+borrowed UAVs. This includes the complete mandatory fifteen-format additional
+set and optional R32G32 FLOAT/UINT/SINT, so compiler-backed shader caps now
+enable TypedUAVLoadAdditionalFormats. The native format matrix still excludes
+texture/render-target support. Callback-only builds keep their existing caps.
+Bridge 4 sets the new integer-store flag for typed UAV bindings; artifact 11
+is explicit in the generated v16 inventory.
+
+The 84 controls exercise every format through owned DXBC, original DXIL,
+independent WARP and held execution. Each invocation owns one texel despite
+the aliased UAV views. Separate source storage and all-channel physical-byte
+oracles cover repeated conversion, descriptor copies/changes, null replacement,
+guards and pending lifetime. The first 76/84 result revealed the shared narrow
+integer mismatch, not vendor behavior to work around. The corrected clamping
+oracle and shared flag pass every control.
+
+Full FeMe passed 4413 with 15 skipped and 10 unsupported; callbacks passed
+65/65 and stock-runtime/coexistence passed 355/355 after shared DLL relinking.
+FeMe ICD identity was confirmed in the test-launching shell. The generated
+inventory has 319 unique required OS gates and 11 existing native fixtures;
+bridge 4, artifact 11, additional-format flag and no complete feature-level
+claim were checked. No driver installation, KMD modification, Vulkan
+advertisement or new CTS result is claimed.
+
+Next: continue W2 root visibility/compatibility and static samplers, images
+and resource classes, general counter payloads, residency and synchronization.
+The overall W2 closeout request remains open.
