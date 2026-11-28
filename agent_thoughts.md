@@ -138180,3 +138180,40 @@ Next prove selected3D UAV W-slice dimensions/addressing against stock WARP,
 then admit volume views. Broaden native narrow-format saturation/load/store,
 remaining dimensions and sampling operations, and complete general resources/
 roots/heaps/residency/barriers/queries/indirect/removal. W2 remains open.
+
+# W2 volume UAV origins and physical depth bounds
+
+Committed 6e18ff74632c. Reference volume execution disproved the initial WSize
+clamp hypothesis: mip1 of an8-deep texture reports depth4 with FirstW1/WSize2,
+and logical Z2 writes/reads physical slice3. Read-only reference inspection and
+the public functional specification informed the original implementation; no
+reference implementation was copied or system driver changed.
+
+The owned view constructor validates selected mip/FirstW/WSize, preserving
+unshifted full-resource layouts and full reported mip depth. Bridge6 carries a
+separate FirstDepthSlice origin; artifact13 invalidates helpers that would
+ignore it. The shared descriptor uses its last reserved word without changing
+its layout size. FP32/i32 loads/stores and3D atomic address calculation share
+subtraction-based physical-depth checks. WSize does not clip the verified
+in-resource compute access. Out-of-physical-mip reference behavior remains
+unproven; FeMe bounds those accesses even with available allocation padding.
+
+Four owned/reference volume gates verify selected writes including Z2,
+dimensions, live copied descriptors, every subresource/padding/guard, nulls,
+replay, held recording teardown and unchanged upload data. Native negatives
+preserve descriptors. The runtime fixture keeps all JIT entry points before
+resolving any and specifies actual texel pitches independently of guard bytes;
+the initial fixture failures exposed these test-harness mistakes, not a
+production addressing defect. The full suite also caught its existing
+artifact-version constant assertion, now updated to13.
+
+Focused controls11/11, full FeMe4433 passed/15 skipped/10 unsupported,
+callbacks65/65 and stock-runtime/coexistence395/395. FeMe ICD identity was
+confirmed and OS execution followed shared relinking/application-local
+refresh. Generated v25 inventory has359 unique existing required OS gates,
+18 existing native fixtures, bridge6/artifact13, complete product FL null.
+Vulkan advertisements and zero-origin addressing are unchanged; no CTS run.
+
+Next broaden native narrow-format image load/store saturation and dimensional
+execution, then remaining sampling/planes/MSAA and general resource/root/heap/
+residency/barrier/query/indirect/removal contracts. W2 is not complete.
