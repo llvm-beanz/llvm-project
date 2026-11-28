@@ -40,6 +40,7 @@
   "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32/R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRV/UAVs", "R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT typed buffer SRV/UAVs", "complete fifteen-format additional typed-UAV buffer set", "Direct3D narrow integer store saturation", "typed SRV component mappings and constant/default channels", "non-uniform live typed-buffer dimension queries", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
   "typed_uav_load_additional_formats": true,
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV"],
+  "copy_scope": ["buffer byte regions", "exact-format uncompressed placed buffer footprints", "pitched row/depth region copies", "recorded layout and box snapshots"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
   "indirect_scope": ["dispatch-only signatures", "four-byte-aligned padded strides", "execution-time arguments and optional clamped count"],
@@ -77,6 +78,10 @@
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
+    "os-routed-warp-compiler-owned-footprint-copies",
+    "os-routed-warp-compiler-owned-ordered-footprint-copies",
+    "os-routed-warp-compiler-reference-footprint-copies",
+    "os-routed-warp-compiler-reference-ordered-footprint-copies",
     "os-routed-warp-compiler-owned-visibility-commands",
     "os-routed-warp-compiler-owned-ordered-visibility-commands",
     "os-routed-warp-compiler-owned-dxil-visibility-commands",

@@ -16,4 +16,5 @@ add_llvm_executable(feme-warp-compiler-test PARTIAL_SOURCES_INTENDED
   ../../utils/windows-adapter-bootstrap/WarpHeap.cpp)
 target_compile_definitions(feme-warp-compiler-test PRIVATE
   NOMINMAX WIN32_LEAN_AND_MEAN FEME_BOOTSTRAP_WARP_COMPILER=1)
-target_link_libraries(feme-warp-compiler-test PRIVATE feme_warp_compiler LLVMObject)
+target_link_libraries(feme-warp-compiler-test PRIVATE
+  feme_warp_compiler FeMeImage LLVMObject)

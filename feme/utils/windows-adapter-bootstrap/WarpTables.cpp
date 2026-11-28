@@ -14,6 +14,7 @@
 
 #ifdef FEME_BOOTSTRAP_WARP_COMPILER
 #include "WarpShaderCompilerABI.h"
+#include "feme/Image/CopyWalk.h"
 #endif
 
 #include <array>
@@ -1357,6 +1358,12 @@ struct RecordedCommand {
   D3D12DDIARG_BUFFER_PLACEMENT Destination{};
   D3D12DDIARG_BUFFER_PLACEMENT Source{};
   UINT64 Bytes = 0;
+  UINT CopyRows = 1;
+  UINT CopySlices = 1;
+  UINT SourceRowPitch = 0;
+  UINT DestinationRowPitch = 0;
+  UINT SourceSlicePitch = 0;
+  UINT DestinationSlicePitch = 0;
   D3D12DDI_HRESOURCE BarrierResource{};
   D3D12DDIARG_BUFFER_PLACEMENT ArgumentBuffer{};
   D3D12DDIARG_BUFFER_PLACEMENT CountBuffer{};
@@ -2152,6 +2159,168 @@ void APIENTRY copyBuffer(D3D12DDI_HCOMMANDLIST List,
   State->append(Command);
 }
 
+struct PitchedCopyLayout {
+  DXGI_FORMAT Format;
+  UINT Width, Height, Depth, RowPitch, SlicePitch;
+};
+
+HRESULT normalizeCopyLayout(D3D12DDIARG_PLACED_RESOURCE Placed,
+                            PitchedCopyLayout &Layout) {
+  if (!Placed.pLayout)
+    return E_INVALIDARG;
+  if (Placed.Layout == D3D12DDI_RL_PLACED_PHYSICAL_SUBRESOURCE_PITCHED) {
+    const auto &Input =
+        *static_cast<const D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT *>(
+            Placed.pLayout);
+    Layout = {Input.Format,        Input.PhysicalWidth, Input.PhysicalHeight,
+              Input.PhysicalDepth, Input.Pitch,         Input.SlicePitch};
+  } else if (Placed.Layout == D3D12DDI_RL_PLACED_VIRTUAL_SUBRESOURCE_PITCHED) {
+    const auto &Input =
+        *static_cast<const D3D12DDIARG_VIRTUAL_SUBRESOURCE_PITCHED_LAYOUT *>(
+            Placed.pLayout);
+    if (Input.VirtualWidth != Input.PhysicalWidth ||
+        Input.VirtualHeight != Input.PhysicalHeight ||
+        Input.VirtualDepth != Input.PhysicalDepth)
+      return E_NOTIMPL;
+    Layout = {Input.Format,       Input.VirtualWidth, Input.VirtualHeight,
+              Input.VirtualDepth, Input.Pitch,        Input.SlicePitch};
+  } else
+    return E_NOTIMPL;
+  UINT ElementSize = typedBufferElementSize(Layout.Format);
+  if (!ElementSize)
+    return E_NOTIMPL;
+  if (!Layout.Width || !Layout.Height || !Layout.Depth ||
+      Layout.Width > static_cast<UINT>(std::numeric_limits<LONG>::max()) ||
+      Layout.Height > static_cast<UINT>(std::numeric_limits<LONG>::max()) ||
+      Layout.Depth > static_cast<UINT>(std::numeric_limits<LONG>::max()) ||
+      UINT64(Layout.Width) * ElementSize > Layout.RowPitch ||
+      UINT64(Layout.Height) * Layout.RowPitch > Layout.SlicePitch)
+    return E_INVALIDARG;
+  return S_OK;
+}
+
+void APIENTRY copyTextureRegion(D3D12DDI_HCOMMANDLIST List,
+                                const D3D12DDIARG_BUFFER_PLACEMENT *Destination,
+                                D3D12DDIARG_PLACED_RESOURCE DestinationLayout,
+                                UINT X, UINT Y, UINT Z,
+                                const D3D12DDIARG_BUFFER_PLACEMENT *Source,
+                                D3D12DDIARG_PLACED_RESOURCE SourceLayout,
+                                const D3D12DDI_BOX *Box) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  PitchedCopyLayout Src{}, Dst{};
+  HRESULT Result = Destination && Source
+                       ? normalizeCopyLayout(SourceLayout, Src)
+                       : E_INVALIDARG;
+  if (SUCCEEDED(Result))
+    Result = normalizeCopyLayout(DestinationLayout, Dst);
+  if (FAILED(Result)) {
+    reportObjectError(List, Result);
+    return;
+  }
+  if (Src.Format != Dst.Format) {
+    reportObjectError(List, E_NOTIMPL);
+    return;
+  }
+  D3D12DDI_BOX Region = Box ? *Box
+                            : D3D12DDI_BOX{0,
+                                           0,
+                                           0,
+                                           static_cast<LONG>(Src.Width),
+                                           static_cast<LONG>(Src.Height),
+                                           static_cast<LONG>(Src.Depth)};
+  if (Region.Left < 0 || Region.Top < 0 || Region.Front < 0 ||
+      Region.Left > Region.Right || Region.Top > Region.Bottom ||
+      Region.Front > Region.Back ||
+      static_cast<UINT>(Region.Right) > Src.Width ||
+      static_cast<UINT>(Region.Bottom) > Src.Height ||
+      static_cast<UINT>(Region.Back) > Src.Depth || X > Dst.Width ||
+      Y > Dst.Height || Z > Dst.Depth ||
+      static_cast<UINT>(Region.Right - Region.Left) > Dst.Width - X ||
+      static_cast<UINT>(Region.Bottom - Region.Top) > Dst.Height - Y ||
+      static_cast<UINT>(Region.Back - Region.Front) > Dst.Depth - Z) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  auto Walk = feme::image::computeImageCopyRegionWalk(
+      1, 1, 1, 1, typedBufferElementSize(Src.Format), 1, true, true,
+      static_cast<UINT>(Region.Right - Region.Left),
+      static_cast<UINT>(Region.Bottom - Region.Top),
+      static_cast<UINT>(Region.Back - Region.Front),
+      static_cast<UINT>(Region.Left), static_cast<UINT>(Region.Top), X, Y, 1);
+  feme::probe::WarpBufferAccess Access(State->Owner);
+  void *Data = nullptr;
+  Result = Access.range(
+      Source->BaseAddress.UMD.hResource, Source->BaseAddress.UMD.Offset,
+      UINT64(Src.Depth - 1) * Src.SlicePitch +
+          UINT64(Src.Height - 1) * Src.RowPitch +
+          UINT64(Src.Width) * typedBufferElementSize(Src.Format),
+      Data);
+  if (SUCCEEDED(Result))
+    Result =
+        Access.range(Destination->BaseAddress.UMD.hResource,
+                     Destination->BaseAddress.UMD.Offset,
+                     UINT64(Dst.Depth - 1) * Dst.SlicePitch +
+                         UINT64(Dst.Height - 1) * Dst.RowPitch +
+                         UINT64(Dst.Width) * typedBufferElementSize(Dst.Format),
+                     Data);
+  if (FAILED(Result)) {
+    reportObjectError(List, Result);
+    return;
+  }
+  if (!Walk.WidthUnits || !Walk.HeightUnits || !Walk.SliceCount)
+    return;
+  UINT64 SrcOffset =
+      UINT64(Region.Front) * Src.SlicePitch +
+      UINT64(Walk.SrcOffsetYUnits) * Src.RowPitch +
+      UINT64(Walk.SrcOffsetXUnits) * typedBufferElementSize(Src.Format);
+  UINT64 DstOffset =
+      UINT64(Z) * Dst.SlicePitch + UINT64(Walk.DstOffsetYUnits) * Dst.RowPitch +
+      UINT64(Walk.DstOffsetXUnits) * typedBufferElementSize(Dst.Format);
+  UINT64 SrcBytes = UINT64(Walk.SliceCount - 1) * Src.SlicePitch +
+                    UINT64(Walk.HeightUnits - 1) * Src.RowPitch + Walk.RowBytes;
+  UINT64 DstBytes = UINT64(Walk.SliceCount - 1) * Dst.SlicePitch +
+                    UINT64(Walk.HeightUnits - 1) * Dst.RowPitch + Walk.RowBytes;
+  if (SrcOffset >
+          std::numeric_limits<UINT64>::max() - Source->BaseAddress.UMD.Offset ||
+      DstOffset > std::numeric_limits<UINT64>::max() -
+                      Destination->BaseAddress.UMD.Offset)
+    Result = E_INVALIDARG;
+  else {
+    SrcOffset += Source->BaseAddress.UMD.Offset;
+    DstOffset += Destination->BaseAddress.UMD.Offset;
+    Result = Access.range(Source->BaseAddress.UMD.hResource, SrcOffset,
+                          SrcBytes, Data);
+    if (SUCCEEDED(Result))
+      Result = Access.range(Destination->BaseAddress.UMD.hResource, DstOffset,
+                            DstBytes, Data);
+  }
+  if (FAILED(Result)) {
+    reportObjectError(List, Result);
+    return;
+  }
+  auto *Command = new (std::nothrow) RecordedCommand;
+  if (!Command) {
+    reportObjectError(List, E_OUTOFMEMORY);
+    return;
+  }
+  Command->Type = RecordedCommand::Kind::Copy;
+  Command->Source = *Source;
+  Command->Destination = *Destination;
+  Command->Source.BaseAddress.UMD.Offset = SrcOffset;
+  Command->Destination.BaseAddress.UMD.Offset = DstOffset;
+  Command->Bytes = Walk.RowBytes;
+  Command->CopyRows = Walk.HeightUnits;
+  Command->CopySlices = Walk.SliceCount;
+  Command->SourceRowPitch = Src.RowPitch;
+  Command->DestinationRowPitch = Dst.RowPitch;
+  Command->SourceSlicePitch = Src.SlicePitch;
+  Command->DestinationSlicePitch = Dst.SlicePitch;
+  Command->Predicate = State->Predicate;
+  State->append(Command);
+}
+
 void APIENTRY
 resourceBarrier(D3D12DDI_HCOMMANDLIST List, UINT Count,
                 const D3D12DDIARG_RESOURCE_BARRIER_0022 *Barriers) {
@@ -2485,15 +2654,31 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
       continue;
     }
     void *Destination = nullptr, *Source = nullptr;
-    Result = Access.range(Command->Destination.BaseAddress.UMD.hResource,
-                          Command->Destination.BaseAddress.UMD.Offset,
-                          Command->Bytes, Destination);
+    Result = Access.range(
+        Command->Destination.BaseAddress.UMD.hResource,
+        Command->Destination.BaseAddress.UMD.Offset,
+        UINT64(Command->CopySlices - 1) * Command->DestinationSlicePitch +
+            UINT64(Command->CopyRows - 1) * Command->DestinationRowPitch +
+            Command->Bytes,
+        Destination);
     if (SUCCEEDED(Result))
-      Result = Access.range(Command->Source.BaseAddress.UMD.hResource,
-                            Command->Source.BaseAddress.UMD.Offset,
-                            Command->Bytes, Source);
+      Result = Access.range(
+          Command->Source.BaseAddress.UMD.hResource,
+          Command->Source.BaseAddress.UMD.Offset,
+          UINT64(Command->CopySlices - 1) * Command->SourceSlicePitch +
+              UINT64(Command->CopyRows - 1) * Command->SourceRowPitch +
+              Command->Bytes,
+          Source);
     if (SUCCEEDED(Result)) {
-      std::memmove(Destination, Source, static_cast<SIZE_T>(Command->Bytes));
+      for (UINT Slice = 0; Slice < Command->CopySlices; ++Slice)
+        for (UINT Row = 0; Row < Command->CopyRows; ++Row)
+          std::memmove(static_cast<unsigned char *>(Destination) +
+                           UINT64(Slice) * Command->DestinationSlicePitch +
+                           UINT64(Row) * Command->DestinationRowPitch,
+                       static_cast<const unsigned char *>(Source) +
+                           UINT64(Slice) * Command->SourceSlicePitch +
+                           UINT64(Row) * Command->SourceRowPitch,
+                       static_cast<SIZE_T>(Command->Bytes));
       ++CopiesExecuted;
     }
   }
@@ -2832,6 +3017,7 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnDispatch = dispatch;
     Table.pfnExecuteIndirect = executeIndirect;
     Table.pfnCopyBufferRegion = copyBuffer;
+    Table.pfnCopyTextureRegion = copyTextureRegion;
     Table.pfnResourceBarrier = resourceBarrier;
     Table.pfnSetMarker = setMarker;
     Table.pfnClearRootArguments = clearRootArguments;

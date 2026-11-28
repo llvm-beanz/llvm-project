@@ -14,6 +14,10 @@ full passes and unchanged Vulkan advertisements. Bridge ABI remains 4.
 The subsequent Windows root-visibility slice passes 359 stock-runtime/
 coexistence gates, with the same full/callback counts and unchanged bridge,
 artifact and Vulkan advertisements; this remains non-CTS regression evidence.
+The pitched WARP buffer-footprint slice passes 363 stock-runtime/coexistence
+gates, 65 callback gates and 4413 full FeMe tests (15 skipped, 10 unsupported).
+It reuses shared image-copy geometry without advertising textures or changing
+Vulkan capabilities. FeMe ICD identity was confirmed; this is not a CTS run.
 
 ## Packed WARP SRV and query regression scope, not CTS
 

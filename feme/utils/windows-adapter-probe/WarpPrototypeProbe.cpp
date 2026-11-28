@@ -701,6 +701,177 @@ enum class BufferCounterOperation {
   Consume
 };
 
+HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered) {
+  constexpr UINT Bytes = 20480, SourceOffset = 512, DestinationOffset = 1024;
+  constexpr UINT SourcePitch = 256, DestinationPitch = 512;
+  constexpr UINT SourceSlicePitch = SourcePitch * 13;
+  constexpr UINT DestinationSlicePitch = DestinationPitch * 17;
+  std::vector<unsigned char> SourceData(Bytes, 0xa5), Expected(Bytes, 0xcd);
+  for (UINT Z = 0; Z < 2; ++Z)
+    for (UINT Y = 0; Y < 13; ++Y)
+      for (UINT X = 0; X < 19; ++X)
+        for (UINT Channel = 0; Channel < 4; ++Channel)
+          SourceData[SourceOffset + Z * SourceSlicePitch + Y * SourcePitch +
+                     X * 4 + Channel] =
+              static_cast<unsigned char>(X * 17 + Y * 31 + Z * 113 +
+                                         Channel * 53);
+  D3D12_HEAP_PROPERTIES Heap{};
+  Heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  Heap.CreationNodeMask = Heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC Desc{};
+  Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  Desc.Width = Bytes;
+  Desc.Height = Desc.DepthOrArraySize = Desc.MipLevels = 1;
+  Desc.SampleDesc.Count = 1;
+  Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ComPtr<ID3D12Resource> Upload, Readback;
+  HRESULT Result =
+      report("Create footprint source",
+             Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                             D3D12_RESOURCE_STATE_GENERIC_READ,
+                                             nullptr, IID_PPV_ARGS(&Upload)));
+  if (FAILED(Result))
+    return Result;
+  Heap.Type = D3D12_HEAP_TYPE_READBACK;
+  Result =
+      report("Create footprint destination",
+             Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST,
+                                             nullptr, IID_PPV_ARGS(&Readback)));
+  if (FAILED(Result))
+    return Result;
+  D3D12_RANGE NoRead{0, 0}, Full{0, Bytes};
+  void *Memory = nullptr;
+  for (auto *Resource : {Upload.Get(), Readback.Get()}) {
+    Result = report("Map footprint seed", Resource->Map(0, &NoRead, &Memory));
+    if (FAILED(Result))
+      return Result;
+    if (Memory)
+      std::memcpy(Memory,
+                  Resource == Upload.Get() ? SourceData.data()
+                                           : Expected.data(),
+                  Bytes);
+    Resource->Unmap(0, &Full);
+    if (!Memory)
+      return report("Missing footprint seed mapping", E_FAIL);
+  }
+  ComPtr<ID3D12CommandQueue> Queue;
+  ComPtr<ID3D12CommandAllocator> Allocator;
+  ComPtr<ID3D12GraphicsCommandList> List;
+  D3D12_COMMAND_QUEUE_DESC QueueDesc{};
+  Result = report("Create footprint queue",
+                  Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
+  if (SUCCEEDED(Result))
+    Result =
+        report("Create footprint allocator",
+               Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&Allocator)));
+  if (SUCCEEDED(Result))
+    Result = report("Create footprint list",
+                    Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              Allocator.Get(), nullptr,
+                                              IID_PPV_ARGS(&List)));
+  if (FAILED(Result))
+    return Result;
+  D3D12_TEXTURE_COPY_LOCATION Source{}, Destination{};
+  Source.pResource = Upload.Get();
+  Destination.pResource = Readback.Get();
+  Source.Type = Destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  Source.PlacedFootprint.Offset = SourceOffset;
+  Destination.PlacedFootprint.Offset = DestinationOffset;
+  Source.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, 19, 13, 2,
+                                      SourcePitch};
+  Destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, 23, 17, 2,
+                                           DestinationPitch};
+  auto UpdateExpected = [&](UINT X, UINT Y, UINT Z, const D3D12_BOX &Box) {
+    for (UINT Slice = Box.front; Slice < Box.back; ++Slice)
+      for (UINT Row = Box.top; Row < Box.bottom; ++Row)
+        std::memcpy(Expected.data() + DestinationOffset +
+                        (Z + Slice - Box.front) * DestinationSlicePitch +
+                        (Y + Row - Box.top) * DestinationPitch + X * 4,
+                    SourceData.data() + SourceOffset +
+                        Slice * SourceSlicePitch + Row * SourcePitch +
+                        Box.left * 4,
+                    (Box.right - Box.left) * 4);
+  };
+  List->CopyTextureRegion(&Destination, 2, 3, 0, &Source, nullptr);
+  UpdateExpected(2, 3, 0, {0, 0, 0, 19, 13, 2});
+  D3D12_BOX Box{4, 2, 1, 11, 8, 2};
+  List->CopyTextureRegion(&Destination, 3, 5, 0, &Source, &Box);
+  UpdateExpected(3, 5, 0, Box);
+  Box = {};
+  Source.PlacedFootprint.Footprint = {};
+  Destination.PlacedFootprint.Footprint = {};
+  Result = report("Close footprint list", List->Close());
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12Fence> Completion, Gate;
+  Result = report(
+      "Create footprint completion",
+      Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Completion)));
+  if (Ordered && SUCCEEDED(Result))
+    Result = report(
+        "Create footprint gate",
+        Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Gate)));
+  if (FAILED(Result))
+    return Result;
+  if (Ordered) {
+    Result = report("Hold footprint queue", Queue->Wait(Gate.Get(), 1));
+    if (FAILED(Result))
+      return Result;
+  }
+  ID3D12CommandList *Lists[] = {List.Get()};
+  Queue->ExecuteCommandLists(1, Lists);
+  Result =
+      report("Signal footprint completion", Queue->Signal(Completion.Get(), 1));
+  if (Ordered) {
+    HRESULT MapResult =
+        report("Map held footprint output", Readback->Map(0, &Full, &Memory));
+    bool Untouched = SUCCEEDED(MapResult) && Memory;
+    if (Untouched)
+      for (UINT I = 0; I < Bytes; ++I)
+        Untouched &= static_cast<const unsigned char *>(Memory)[I] == 0xcd;
+    if (SUCCEEDED(MapResult))
+      Readback->Unmap(0, &NoRead);
+    List.Reset();
+    Allocator.Reset();
+    HRESULT Released = report("Release footprint gate", Gate->Signal(1));
+    if (FAILED(Released))
+      return Released;
+    if (FAILED(MapResult))
+      return MapResult;
+    if (!Untouched)
+      return report("Footprint copy ran before its queue gate", E_FAIL);
+  }
+  if (FAILED(Result))
+    return Result;
+  Result = waitFence(Completion.Get(), 1);
+  if (SUCCEEDED(Result))
+    Result =
+        report("Footprint removal status", Device->GetDeviceRemovedReason());
+  if (SUCCEEDED(Result))
+    Result = report("Map footprint output", Readback->Map(0, &Full, &Memory));
+  if (FAILED(Result))
+    return Result;
+  bool Valid = Memory && std::memcmp(Memory, Expected.data(), Bytes) == 0;
+  Readback->Unmap(0, &NoRead);
+  if (!Valid)
+    return report("Pitched footprint bytes or guards mismatch", E_FAIL);
+  if (Upload) {
+    Result =
+        report("Map footprint source check", Upload->Map(0, &Full, &Memory));
+    if (FAILED(Result))
+      return Result;
+    Valid = Memory && std::memcmp(Memory, SourceData.data(), Bytes) == 0;
+    Upload->Unmap(0, &NoRead);
+    if (!Valid)
+      return report("Pitched footprint copy modified source storage", E_FAIL);
+  }
+  std::printf(
+      "Pitched footprint rows/slices, regions, guards and lifetime PASS\n");
+  return S_OK;
+}
+
 HRESULT exerciseBufferCommands(
     ID3D12Device *Device, const D3D12_SHADER_BYTECODE *DXIL = nullptr,
     bool Ordered = false, bool Indirect = false, bool CBV = false,
@@ -2254,9 +2425,21 @@ int wmain(int Argc, wchar_t **Argv) {
   bool PlacedBuffers =
       ReferencePlacedBuffers ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
+  bool ReferenceFootprints =
+      Argc == 2 &&
+      (std::wcscmp(Argv[1], L"--reference-footprint-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-footprint-copies") == 0);
+  bool OrderedFootprints =
+      Argc == 2 &&
+      (std::wcscmp(Argv[1], L"--ordered-footprint-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-footprint-copies") == 0);
+  bool Footprints =
+      ReferenceFootprints || OrderedFootprints ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--footprint-copies") == 0);
   bool Reference = ReferenceViews || ReferenceTables || ReferenceConstants ||
                    ReferenceCBV || ReferenceIndirect || ReferencePredication ||
                    ReferenceBufferCommands || ReferencePlacedBuffers ||
+                   ReferenceFootprints ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
       OrderedViews || OrderedTables || OrderedConstants || OrderedCBV ||
@@ -2278,7 +2461,7 @@ int wmain(int Argc, wchar_t **Argv) {
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
   if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands &&
-      !Fences && !PlacedBuffers) {
+      !Fences && !PlacedBuffers && !Footprints) {
     std::fprintf(stderr,
                  "Usage: warp-prototype-harness "
                  "[--reference|--expect-shader-rejection|--commands|"
@@ -2323,6 +2506,9 @@ int wmain(int Argc, wchar_t **Argv) {
                  "--ordered-typed-{uint,sint,float}-commands|"
                  "--dxil-typed-{uint,sint,float}-commands FILE|"
                  "--placed-buffers|--reference-placed-buffers|"
+                 "--footprint-copies|--reference-footprint-copies|"
+                 "--ordered-footprint-copies|"
+                 "--reference-ordered-footprint-copies|"
                  "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
@@ -2430,6 +2616,8 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseBuffer(Device.Get());
   if (SUCCEEDED(Result) && PlacedBuffers)
     Result = exercisePlacedBuffers(Device.Get());
+  if (SUCCEEDED(Result) && Footprints)
+    Result = exerciseFootprintCopies(Device.Get(), OrderedFootprints);
   if (SUCCEEDED(Result) && Fences)
     Result = exerciseFences(Device.Get());
   if (SUCCEEDED(Result) && Commands)
@@ -2607,7 +2795,7 @@ int wmain(int Argc, wchar_t **Argv) {
       UINT ExpectedHeaps = CounterDelta                     ? 9
                            : CBV || Indirect || Predication ? 6
                            : BufferCommands                 ? 4
-                           : PlacedBuffers                  ? 3
+                           : PlacedBuffers || Footprints    ? 3
                                                             : 1;
       ValidOwned &=
           Data.Created == ExpectedHeaps && Data.Destroyed == ExpectedHeaps &&
@@ -2615,12 +2803,12 @@ int wmain(int Argc, wchar_t **Argv) {
           Data.MakeResidentCallbacks == (CounterDelta                     ? 10u
                                          : CBV || Indirect || Predication ? 7u
                                          : BufferCommands                 ? 5u
-                                         : PlacedBuffers                  ? 4u
-                                                         : 2u) &&
+                                         : PlacedBuffers || Footprints    ? 4u
+                                                                       : 2u) &&
           Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
-    if (Commands || PlacedBuffers) {
+    if (Commands || PlacedBuffers || Footprints) {
       using CommandAuditFn = void(APIENTRY *)(UINT *, UINT *);
       auto Audit = reinterpret_cast<CommandAuditFn>(
           GetProcAddress(Module, "FeMeWarpGetCommandAudit"));
@@ -2630,16 +2818,16 @@ int wmain(int Argc, wchar_t **Argv) {
       std::printf("Native command execution: dispatches=%u copies=%u\n",
                   Dispatches, Copies);
       ValidOwned &= Audit &&
-                    Dispatches == (Predication      ? 11u
-                                   : Indirect       ? 10u
-                                   : BufferCommands ? 9u
-                                   : PlacedBuffers  ? 0u
-                                                    : 6u) &&
-                    Copies == (CounterDelta              ? 10u
-                               : Indirect || Predication ? 7u
-                               : BufferCommands          ? 4u
-                               : PlacedBuffers           ? 2u
-                                                         : 0u);
+                    Dispatches == (Predication                   ? 11u
+                                   : Indirect                    ? 10u
+                                   : BufferCommands              ? 9u
+                                   : PlacedBuffers || Footprints ? 0u
+                                                                 : 6u) &&
+                    Copies == (CounterDelta                  ? 10u
+                               : Indirect || Predication     ? 7u
+                               : BufferCommands              ? 4u
+                               : PlacedBuffers || Footprints ? 2u
+                                                             : 0u);
     }
   }
 #ifdef FEME_WARP_COEXIST

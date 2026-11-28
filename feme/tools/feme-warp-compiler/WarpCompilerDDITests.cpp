@@ -423,6 +423,44 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Lists.pfnSetPredication(List, {}, 0,
                             D3D12DDI_PREDICATION_OP_NOT_EQUAL_ZERO);
     Good &= LastError == S_OK;
+    D3D12DDIARG_BUFFER_PLACEMENT CopyPlacement{};
+    D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT CopyLayout{
+        DXGI_FORMAT_R8G8B8A8_UINT, 4, 3, 2, 16, 48};
+    D3D12DDIARG_PLACED_RESOURCE PlacedCopy{
+        D3D12DDI_RL_PLACED_PHYSICAL_SUBRESOURCE_PITCHED, &CopyLayout};
+    LastError = S_OK;
+    Lists.pfnCopyTextureRegion(List, nullptr, PlacedCopy, 0, 0, 0,
+                               &CopyPlacement, PlacedCopy, nullptr);
+    Good &= LastError == E_INVALIDARG;
+    CopyLayout.Pitch = 15;
+    LastError = S_OK;
+    Lists.pfnCopyTextureRegion(List, &CopyPlacement, PlacedCopy, 0, 0, 0,
+                               &CopyPlacement, PlacedCopy, nullptr);
+    Good &= LastError == E_INVALIDARG;
+    CopyLayout.Pitch = 16;
+    CopyLayout.SlicePitch = 47;
+    LastError = S_OK;
+    Lists.pfnCopyTextureRegion(List, &CopyPlacement, PlacedCopy, 0, 0, 0,
+                               &CopyPlacement, PlacedCopy, nullptr);
+    Good &= LastError == E_INVALIDARG;
+    CopyLayout.SlicePitch = 48;
+    CopyLayout.Format = DXGI_FORMAT_UNKNOWN;
+    LastError = S_OK;
+    Lists.pfnCopyTextureRegion(List, &CopyPlacement, PlacedCopy, 0, 0, 0,
+                               &CopyPlacement, PlacedCopy, nullptr);
+    Good &= LastError == E_NOTIMPL;
+    CopyLayout.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+    D3D12DDI_BOX CopyBox{0, 0, 0, 5, 3, 2};
+    LastError = S_OK;
+    Lists.pfnCopyTextureRegion(List, &CopyPlacement, PlacedCopy, 0, 0, 0,
+                               &CopyPlacement, PlacedCopy, &CopyBox);
+    Good &= LastError == E_INVALIDARG;
+    CopyBox = {};
+    LastError = S_OK;
+    Lists.pfnCopyTextureRegion(List, &CopyPlacement, PlacedCopy, 0, 0, 0,
+                               &CopyPlacement, PlacedCopy, &CopyBox);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
     VertexViews[31].BufferLocation = 1;
     Lists.pfnIASetVertexBuffers(List, 0, 32, VertexViews);
     Good &= LastError == E_NOTIMPL;

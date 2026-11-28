@@ -809,6 +809,46 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Owned pitched buffer-footprint copies
+
+The typed `pfnCopyTextureRegion` entry now normalizes uncompressed exact-format
+physical pitched layouts and virtual layouts whose physical extents match.
+The shared `FeMeImage` copy walker supplies region geometry; the SDK-only shim
+compiles that same shared source. Signed DDI boxes, dimensions, row/slice
+pitches, full logical footprints, placement offsets and touched byte spans
+are checked. Empty regions still require valid full-footprint owners.
+Compressed formats, unequal formats and padded virtual layouts remain
+unsupported.
+
+Recorded commands retain scalar geometry rather than caller layout/box
+pointers. Ordered execution validates live owners and independently pitched
+source/destination spans, then copies rows and depth slices. Existing byte
+copies retain their single-row/slice behavior; predication and unconditional
+barrier behavior remain unchanged.
+
+Four stock-runtime controls cover owned/reference and held owned/reference
+execution. Different pitches and two depth slices exercise a full region
+followed by a partial overwrite. Poisoned recording-time layouts/boxes,
+exact full-buffer output, untouched source/padding/guards and pre-gate output
+checks verify snapshots and ordering. Held controls release recording lists
+and allocators while retaining resources through completion.
+
+The initial build caught the DDI box's signed uppercase LONG fields. An
+initial held probe incorrectly released its upload resource before completion;
+the owned registry rejected that invalid D3D12 lifetime. Correcting the probe,
+and adding a held reference control, yielded **4/4** focused passes without
+weakening resource ownership. Native malformed-layout controls reset errors
+before each assertion.
+
+Validation: full FeMe **4413** passed / **15** skipped / **10** unsupported,
+callbacks **65/65**, stock-runtime/coexistence **363/363**, with confirmed FeMe
+ICD identity and OS execution after shared DLL relinking. Inventory **v18**
+contains **327** unique required OS gates and **11** native fixtures; bridge
+4/artifact 11 remain unchanged. Resource scope remains buffers, without
+texture/image-view, complete feature-level, KMD or Vulkan advertisement changes
+or a new CTS result. W2 remains open for texture allocation/subresources/views,
+other resource classes, complete bindings and remaining synchronization.
+
 #### Shared Direct3D narrow integer store conversion
 
 Reference controls exposed a conversion mismatch: FeMe truncated out-of-range
@@ -824,7 +864,9 @@ typed-buffer entry points share one gated packer. Image stores, floats,
 32-bit integers, masks, bounds and UAV permissions are unchanged.
 A twelve-format unit matrix tests signed/unsigned endpoints and overflow,
 flag-clear truncation, exact packed bytes, guards and ignored inactive,
-out-of-range and read-only stores. Old artifact versions remain rejected.
+out-of-range and read-only stores. A separately committed test improvement
+uses distinct replacement values for ignored stores, so an erroneous write
+cannot preserve the expected bytes. Old artifact versions remain rejected.
 
 Validation: focused runtime/version selectors **5/5** and full FeMe
 **4413** passed / **15** skipped / **10** unsupported, with confirmed FeMe ICD
