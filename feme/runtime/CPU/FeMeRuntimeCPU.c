@@ -4046,6 +4046,27 @@ femeRTAtomicResourceAddressRaw(const FemeRTDescriptor *Heap,
   return (int32_t *)((unsigned char *)Desc.Data + ByteOffset);
 }
 
+int32_t femeCpuResourceAtomicUpdateCounter(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t Offset, int32_t Delta,
+    _Bool Mask) asm("feme.cpu.resource.atomic.updatecounter.i32");
+
+__attribute__((always_inline)) int32_t femeCpuResourceAtomicUpdateCounter(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t Offset, int32_t Delta, _Bool Mask) {
+  if (!Mask || Offset || (Delta != 1 && Delta != -1))
+    return 0;
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  // Structured UAV with FEME_DESCRIPTOR_UAV | FEME_DESCRIPTOR_HAS_COUNTER.
+  if (Desc.Kind != 2 || (Desc.Flags & 5u) != 5u)
+    return 0;
+  uint32_t *Counter = (uint32_t *)Heap[DescriptorIndex].Counter;
+  if (!Counter || (uintptr_t)Counter % sizeof(uint32_t))
+    return 0;
+  uint32_t Old = __atomic_fetch_add(Counter, (uint32_t)Delta, __ATOMIC_SEQ_CST);
+  return (int32_t)(Delta == 1 ? Old : Old - 1u);
+}
+
 // `feme.cpu.resource.atomic.add.raw.i32` (roadmap H8x): `OpAtomicIAdd`
 // against an ordinary storage buffer/direct-field storage block -- adds
 // \p Value to the word at \p ByteOffset through descriptor

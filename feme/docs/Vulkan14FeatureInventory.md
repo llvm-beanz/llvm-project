@@ -423,3 +423,9 @@ capability-manifest.test` for how its diff logic is tested.
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | yes | roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) |
 | extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | yes | roadmap F6: VkPipelineVertexInputDivisorStateCreateInfo's per-binding divisor, including the 0 ("every instance reads firstInstance") case (GraphicsPipeline.cpp's translateVertexInput, Executor.cpp's fetch-index formula) |
+## WARP shared-counter regression scope
+
+Vulkan feature advertisements are unchanged by the shared DirectX counter
+helper. Validation is the full FeMe gate (4408 passed, 15 skipped, 10
+unsupported) and 123 stock-runtime/coexistence gates with confirmed FeMe ICD
+identity, not a new CTS run; no historical Windows CTS executable is available.

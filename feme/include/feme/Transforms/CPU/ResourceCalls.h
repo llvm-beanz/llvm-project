@@ -189,6 +189,10 @@ enum class ResourceCallKind : uint8_t {
   /// `AllKinds` list for the same reason `GetDimensionsTyped` is: no
   /// known CTS case calls it from inside divergent control flow yet.
   GetDimensionsRaw,
+  /// Updates a structured UAV's associated counter by +1 or -1. The
+  /// increment returns the old value; the decrement returns the new value.
+  /// Uses the atomic call shape with a reserved zero byte offset.
+  AtomicUpdateCounter,
 };
 
 /// Returns whether \p Kind reads or writes through the resource.
@@ -332,6 +336,12 @@ llvm::CallInst *createRawStore(llvm::IRBuilderBase &Builder,
                                llvm::Value *DescriptorIndex,
                                llvm::Value *ByteOffset,
                                llvm::Value *StoredValue, llvm::Value *Mask);
+
+llvm::CallInst *createAtomicUpdateCounter(llvm::IRBuilderBase &Builder,
+                                          const ResourceCallEnv &Env,
+                                          llvm::Value *DescriptorIndex,
+                                          llvm::Value *Delta, llvm::Value *Mask,
+                                          const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.resource.atomic.add.typed.i32` call (roadmap H8w):
 /// performs `*element += Value` at \p ElementIndex through descriptor

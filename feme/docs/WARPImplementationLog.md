@@ -784,6 +784,35 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Shared structured-UAV counter prerequisite
+
+Opcode 70 now raises to `llvm.dx.resource.updatecounter`, with writable raw/
+structured handle and constant +1/-1 admission. CPU resource lowering emits
+an explicitly atomic masked counter call. The existing descriptor counter
+pointer and HAS_COUNTER bit are reused without a runtime/artifact ABI change.
+The helper requires a structured UAV, aligned non-null counter and zero
+reserved offset; inactive or invalid accesses return zero without touching it.
+Real sequentially consistent hardware atomics provide unsigned 32-bit wrapping.
+Increment returns the old value and decrement the new value, matching
+[the public HLSL contract](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sm5-object-rwstructuredbuffer-decrementcounter).
+Atomic classification makes even fully uniform calls execute once per active
+lane rather than once per wave.
+
+Two phase fixtures cover raising, bound normalization, lowering, rejected
+delta/read-only shapes and four-lane scalarization. Runtime tests check exact
+return values, wraparound, masks, missing flags, wrong kinds, null/out-of-range
+descriptors, misaligned/null counters and 512 concurrent updates with unique
+returned indices. A canonical-call unit checks memory effects and mask matching.
+The first lowering FileCheck assumed unchanged functions followed rewritten
+ones; it was corrected to match the pass's actual output ordering.
+
+Validation: **4408** full-suite passes, **15** skipped, **10** unsupported,
+and refreshed **123/123** stock-runtime passes with confirmed FeMe ICD identity.
+No Windows counter-view/bridge materialization or new capability is claimed:
+inventory remains **v11**, bridge **2**, and owned counter views remain open.
+No CTS executable is present at either configured historical Windows location;
+this is compiler/runtime/Vulkan-regression evidence, not a new CTS result.
+
 #### Owned two/four-component R32 buffer SRVs
 
 R32G32 and R32G32B32A32 UINT/SINT/FLOAT SRVs now retain their eight/sixteen-byte

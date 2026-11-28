@@ -67,6 +67,11 @@ not a device or runtime.
 
 W2 remaining work is tracked without deeper milestone nesting:
 
+The shared compiler/runtime now supports masked structured-UAV counter updates
+and per-active-lane atomic execution. Windows counter-view/bridge materialization
+and owned public counter controls are still required; this prerequisite does
+not close W2(b).
+
 | Step | Current boundary and remaining work |
 |---|---|
 | W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |

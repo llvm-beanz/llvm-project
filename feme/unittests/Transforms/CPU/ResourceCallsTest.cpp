@@ -87,6 +87,24 @@ TEST_F(ResourceCallsTest, CreateTypedLoadRoundTrips) {
   EXPECT_EQ(Matched->Env.ResourceHeap, Env.ResourceHeap);
 }
 
+TEST_F(ResourceCallsTest, CounterUpdateIsMaskedAtomic) {
+  IRBuilder<> Builder(BB);
+  ResourceCallEnv Env = makeEnv(Builder);
+  Value *Index = Builder.getInt32(1);
+  Value *Delta = Builder.getInt32(-1);
+  Value *Mask = Builder.getFalse();
+  CallInst *CI = createAtomicUpdateCounter(Builder, Env, Index, Delta, Mask);
+  auto Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_TRUE(isAtomic(Matched->Kind));
+  EXPECT_FALSE(isLoad(Matched->Kind));
+  EXPECT_EQ(Matched->DescriptorIndex, Index);
+  EXPECT_EQ(Matched->StoredValue, Delta);
+  EXPECT_EQ(Matched->Mask, Mask);
+  EXPECT_EQ(CI->getCalledFunction()->getMemoryEffects(),
+            MemoryEffects::argMemOnly(ModRefInfo::ModRef));
+}
+
 TEST_F(ResourceCallsTest, CreateTypedStoreRoundTrips) {
   IRBuilder<> Builder(BB);
   ResourceCallEnv Env = makeEnv(Builder);

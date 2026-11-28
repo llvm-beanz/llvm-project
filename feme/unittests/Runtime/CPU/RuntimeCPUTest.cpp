@@ -32,6 +32,9 @@
 #include "llvm/IR/Module.h"
 #include "gtest/gtest.h"
 
+#include <array>
+#include <thread>
+
 feme::cpu::RuntimeCPUJITTest::~RuntimeCPUJITTest() = default;
 
 using namespace feme::cpu;
@@ -184,6 +187,79 @@ protected:
     return resolve<RawGetDimensionsFn>(Target);
   }
 };
+
+TEST_F(RuntimeCPUTest, StructuredCounterSemanticsAndGuards) {
+  Function *Target =
+      getRuntimeFunction(*M, "feme.cpu.resource.atomic.updatecounter.i32");
+  ASSERT_TRUE(Target);
+  using CounterFn =
+      int32_t (*)(void *, uint32_t, uint32_t, uint64_t, int32_t, bool);
+  CounterFn Update = resolve<CounterFn>(Target);
+  uint32_t Counter = 7;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Structured);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV | FEME_DESCRIPTOR_HAS_COUNTER;
+  Heap[0].Counter = &Counter;
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, true), 7);
+  EXPECT_EQ(Counter, 8u);
+  EXPECT_EQ(Update(Heap, 1, 0, 0, -1, true), 7);
+  EXPECT_EQ(Counter, 7u);
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, false), 0);
+  EXPECT_EQ(Update(Heap, 1, 0, 4, 1, true), 0);
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 2, true), 0);
+  EXPECT_EQ(Update(nullptr, 0, 0, 0, 1, true), 0);
+  EXPECT_EQ(Update(Heap, 1, 1, 0, 1, true), 0);
+  Heap[0].Flags = FEME_DESCRIPTOR_HAS_COUNTER;
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, true), 0);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, true), 0);
+  Heap[0].Flags |= FEME_DESCRIPTOR_HAS_COUNTER;
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, true), 0);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Structured);
+  Heap[0].Counter = reinterpret_cast<unsigned char *>(&Counter) + 1;
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, true), 0);
+  Heap[0].Counter = nullptr;
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, true), 0);
+  EXPECT_EQ(Counter, 7u);
+  Heap[0].Counter = &Counter;
+  Counter = 0;
+  EXPECT_EQ(Update(Heap, 1, 0, 0, -1, true), -1);
+  EXPECT_EQ(Counter, UINT32_MAX);
+  EXPECT_EQ(Update(Heap, 1, 0, 0, 1, true), -1);
+  EXPECT_EQ(Counter, 0u);
+}
+
+TEST_F(RuntimeCPUTest, StructuredCounterConcurrentUpdates) {
+  Function *Target =
+      getRuntimeFunction(*M, "feme.cpu.resource.atomic.updatecounter.i32");
+  ASSERT_TRUE(Target);
+  using CounterFn =
+      int32_t (*)(void *, uint32_t, uint32_t, uint64_t, int32_t, bool);
+  CounterFn Update = resolve<CounterFn>(Target);
+  uint32_t Counter = 0;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Structured);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV | FEME_DESCRIPTOR_HAS_COUNTER;
+  Heap[0].Counter = &Counter;
+  std::array<std::array<uint32_t, 128>, 4> Results{};
+  std::array<std::thread, 4> Threads;
+  for (unsigned I = 0; I < Threads.size(); ++I)
+    Threads[I] = std::thread([&, I] {
+      for (auto &Result : Results[I])
+        Result = Update(Heap, 1, 0, 0, 1, true);
+    });
+  for (auto &Thread : Threads)
+    Thread.join();
+  EXPECT_EQ(Counter, 512u);
+  std::array<bool, 512> Seen{};
+  for (const auto &ThreadResults : Results)
+    for (auto Result : ThreadResults) {
+      ASSERT_LT(Result, Seen.size());
+      EXPECT_FALSE(Seen[Result]);
+      Seen[Result] = true;
+    }
+}
 
 TEST_F(RuntimeCPUTest, TypedLoadIdentityFormat) {
   float Storage[4] = {1.0f, 2.0f, 3.0f, 4.0f};

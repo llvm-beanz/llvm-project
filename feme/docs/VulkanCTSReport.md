@@ -1,5 +1,15 @@
 # Vulkan CTS status
 
+## Shared WARP counter prerequisite, not CTS
+
+The DirectX counter raising/lowering/runtime slice passes the full FeMe gate:
+4408 passed, 15 skipped, 10 unsupported. FeMe CPU Vulkan Device identity was
+confirmed before execution; refreshed stock-runtime/coexistence gates pass
+123/123. Vulkan advertisements and both inventories are unchanged. No CTS
+executable is available at the historical Windows build locations, so no new
+CTS result or Vulkan capability is claimed. The new counter helper reuses
+the existing CPU descriptor field; Windows counter views remain pending.
+
 ## W2(a)/W2(b) float dimension coverage, not CTS (2026-11-25)
 
 The [floating-point follow-up](W0WindowsIntegrationProbe.md#w2aw2b-floating-point-dimension-coverage-vm-2026-11-25)

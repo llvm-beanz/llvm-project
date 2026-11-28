@@ -2654,7 +2654,18 @@ general typed-format and owned-device closure remain open.
 
   Structured and raw-buffer calls carry byte offsets and alignment instead;
   constant-buffer calls are read-only. Counter UAV calls name the atomic
-  operation explicitly.
+  operation explicitly. `dx.op.bufferUpdateCounter` raises to
+  `llvm.dx.resource.updatecounter` and lowers to
+  `feme.cpu.resource.atomic.updatecounter.i32(heap, count, descriptor, 0,
+  delta, mask)`, where delta is +1 or -1. The increment returns the old
+  counter value; the decrement returns the new value, with unsigned 32-bit
+  wraparound. The reserved offset must be zero. The runtime requires a
+  structured UAV with `FEME_DESCRIPTOR_HAS_COUNTER` and an aligned non-null
+  counter pointer. Masked/invalid accesses are no-ops returning zero, as for
+  other resource helpers. Atomic classification preserves per-active-lane
+  execution even when every argument is uniform. This reuses the existing
+  descriptor counter field without changing the runtime ABI; Windows view/
+  bridge materialization is a separate prerequisite.
 - **The mask is a trailing `i1` operand**, as it is on the
   `feme.cpu.masked.*` intrinsics, rather than a second family of names. This
   pass emits `true` for it; Phase 3 replaces that with the governing mask

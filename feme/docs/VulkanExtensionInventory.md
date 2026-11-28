@@ -427,3 +427,9 @@ after any change that could affect either table.
 | `VK_KHR_xcb_surface` | Advertised | roadmap H10a (V8): the second surface this ICD implements, backed by libxcb against a real Xvfb-hosted X window (XcbSurface.cpp); only advertised when libxcb was found at configure time |
 | `VK_KHR_xlib_surface` | Not implemented |  |
 | `VK_KHR_zero_initialize_workgroup_memory` | Advertised |  |
+## WARP shared-counter regression scope
+
+Extension advertisements are unchanged by the shared DirectX counter helper.
+Validation is the full FeMe gate (4408 passed, 15 skipped, 10 unsupported) and
+123 stock-runtime/coexistence gates with confirmed FeMe ICD identity, not a new
+CTS run; no historical Windows CTS executable is available.

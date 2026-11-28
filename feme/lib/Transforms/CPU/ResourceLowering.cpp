@@ -174,6 +174,15 @@ bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
     if (!CI)
       return false;
     Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == Intrinsic::dx_resource_updatecounter) {
+      auto *RawType = dyn_cast<dxil::RawBufferExtType>(Handle.getType());
+      auto *Delta = dyn_cast<ConstantInt>(CI->getArgOperand(1));
+      if (Kind != Family::Raw || !RawType || !RawType->isWriteable() ||
+          CI->getArgOperand(0) != &Handle || !Delta ||
+          (!Delta->isOne() && !Delta->isMinusOne()))
+        return false;
+      continue;
+    }
     if (ID == Intrinsic::dx_resource_getdimensions_x) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
@@ -593,6 +602,15 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
     auto *Access = cast<CallInst>(U);
     IRBuilder<> Builder(Access);
     Intrinsic::ID ID = getIntrinsicID(Access);
+    if (ID == Intrinsic::dx_resource_updatecounter) {
+      Value *Delta =
+          Builder.CreateSExt(Access->getArgOperand(1), Builder.getInt32Ty());
+      Value *Result = createAtomicUpdateCounter(Builder, Env, DescriptorIndex,
+                                                Delta, Mask, Access->getName());
+      Access->replaceAllUsesWith(Result);
+      Access->eraseFromParent();
+      continue;
+    }
     if (ID == Intrinsic::dx_resource_getdimensions_x) {
       Value *Dimensions =
           Info.Kind == Family::Typed

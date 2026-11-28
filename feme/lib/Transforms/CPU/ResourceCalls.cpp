@@ -81,6 +81,8 @@ StringRef getNamePrefix(ResourceCallKind Kind) {
     return "feme.cpu.resource.getdimensions.typed.";
   case ResourceCallKind::GetDimensionsRaw:
     return "feme.cpu.resource.getdimensions.raw.";
+  case ResourceCallKind::AtomicUpdateCounter:
+    return "feme.cpu.resource.atomic.updatecounter.";
   }
   llvm_unreachable("unhandled ResourceCallKind");
 }
@@ -137,6 +139,7 @@ bool feme::cpu::isAtomic(ResourceCallKind Kind) {
   case ResourceCallKind::AtomicUMinRaw:
   case ResourceCallKind::AtomicExchangeRaw:
   case ResourceCallKind::AtomicCompareExchangeRaw:
+  case ResourceCallKind::AtomicUpdateCounter:
     return true;
   case ResourceCallKind::LoadTyped:
   case ResourceCallKind::StoreTyped:
@@ -320,6 +323,17 @@ CallInst *feme::cpu::createRawStore(IRBuilderBase &Builder,
                     ByteOffset, /*PrefixOffset=*/nullptr,
                     /*Comparator=*/nullptr, StoredValue, Mask,
                     StoredValue->getType(), "");
+}
+
+CallInst *feme::cpu::createAtomicUpdateCounter(IRBuilderBase &Builder,
+                                               const ResourceCallEnv &Env,
+                                               Value *DescriptorIndex,
+                                               Value *Delta, Value *Mask,
+                                               const Twine &Name) {
+  return createCall(Builder, ResourceCallKind::AtomicUpdateCounter, Env,
+                    DescriptorIndex, Builder.getInt64(0),
+                    /*PrefixOffset=*/nullptr, /*Comparator=*/nullptr, Delta,
+                    Mask, Builder.getInt32Ty(), Name);
 }
 
 /// Shared body for every `createAtomic*Typed` builder (roadmap H8w): they
@@ -578,6 +592,7 @@ feme::cpu::matchResourceCall(const CallInst &CI) {
       ResourceCallKind::AtomicUMinRaw,
       ResourceCallKind::AtomicExchangeRaw,
       ResourceCallKind::AtomicCompareExchangeRaw,
+      ResourceCallKind::AtomicUpdateCounter,
   };
 
   ResourceCallKind Kind;

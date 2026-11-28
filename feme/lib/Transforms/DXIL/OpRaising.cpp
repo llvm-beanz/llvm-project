@@ -2113,6 +2113,26 @@ std::optional<AtomicRMWInst::BinOp> getAtomicRMWOp(uint64_t BinOpCode) {
   return std::nullopt;
 }
 
+bool raiseBufferUpdateCounter(CallInst &CI) {
+  if (CI.arg_size() != 3 || !CI.getType()->isIntegerTy(32))
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<dxil::RawBufferExtType>(Handle->getType()) : nullptr;
+  auto *Delta = dyn_cast<ConstantInt>(CI.getArgOperand(2));
+  if (!HandleTy || !HandleTy->isWriteable() || !Delta ||
+      !Delta->getType()->isIntegerTy(8) ||
+      (!Delta->isOne() && !Delta->isMinusOne()))
+    return false;
+  IRBuilder<> Builder(&CI);
+  Value *Result = Builder.CreateIntrinsic(Builder.getInt32Ty(),
+                                          Intrinsic::dx_resource_updatecounter,
+                                          {Handle, Delta});
+  CI.replaceAllUsesWith(Result);
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Raises a `dx.op.atomicBinOp` (opcode 78) call on an already-raised
 /// raw/structured or typed buffer handle back into the target-independent
 /// `llvm.dx.resource.getpointer` plus `atomicrmw` pair Clang's own DXIL
@@ -2396,6 +2416,9 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(72, [](CallInst &CI) { // GetDimensions
     return raiseGetDimensions(CI);
+  });
+  Changed |= forEachDXOpCall(70, [](CallInst &CI) { // BufferUpdateCounter
+    return raiseBufferUpdateCounter(CI);
   });
   Changed |= forEachDXOpCall(78, [](CallInst &CI) { // AtomicBinOp
     return raiseAtomicBinOp(CI);
