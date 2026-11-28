@@ -38,10 +38,9 @@ regression gates, `WS3(a)`/`WS3(b)`) is also fully done and closed. `W0(c)`
 redistribution review, SM 5.1 input obligation, and focused public-contract
 tests are recorded in
 [W0DirectXTestCorpusClassification.md](W0DirectXTestCorpusClassification.md).
-Broader legacy-shader implementation and owned command execution remain
-separate W1-W4 gates. The fixed raw-UAV legacy
-oracle and grouped SM6 reference oracle are measured coverage, not complete
-all-stage compatibility or an owned D3D12 device.
+Broader legacy/all-stage compatibility remains W2-W4 work. The earlier fixed
+raw-UAV and grouped SM6 reference oracles were prerequisites, not owned-device
+proof. Owned headless execution now closes W1 as recorded below.
 
 This is the implementation checklist for [FeMeWARPDesign.md](FeMeWARPDesign.md),
 not a claim that the diagnostic device is a complete Direct3D adapter. The product remains a
@@ -85,12 +84,142 @@ malformed bytecode, stage mismatch, immutable descriptor copies, cross-device
 rejection, and pipeline retention after shader-handle destruction.
 See [exact evidence and reproduction](W0WindowsIntegrationProbe.md#w0-closure-compiler-backed-device-and-application-buffer).
 
-This closes feasibility, not W1-W7. Command queues/recording/execution, fences,
-general bindings/descriptors, textures, rendering, DXR, presentation and
-conformance remain unimplemented. The diagnostic FL 11_0 creation and SM 5.1
-enumeration are not feature-level or shader-model compliance claims. This new
-device evidence is native ARM64 on the current Windows VM; historical
-container/x64/Agility routing evidence is not a successful-device matrix.
+This was the W0 feasibility checkpoint, before the W1 implementation below.
+Its diagnostic FL 11_0 creation and SM 5.1 enumeration are not feature-level
+or shader-model compliance claims. This device evidence is native ARM64 on
+the current Windows VM; historical container/x64/Agility routing evidence is
+not a successful-device matrix.
+
+## W1 closure: owned kernel-ordered headless compute
+
+W1(a), W1(b), and W1(c) are complete for the selected single-adapter,
+single-node internal headless scope. W2-W7 and complete FL 12_2 remain open.
+The stock D3D12/DXGI runtime owns the public COM objects; FeMe owns the UMD
+objects, shader compiler, native code, recorded commands and CPU execution.
+No Microsoft implementation/shader fixture, ordinal 199 forwarding, substitute
+COM runtime, system-binary replacement or new driver was introduced.
+
+### Acceptance reconciliation
+
+| Step | Owned implementation and passing evidence |
+|---|---|
+| ~~W1(a)~~ | Optional compiler-backed Windows build, direct/compute/copy queues, allocator epochs, typed lists, heaps/buffers, monitored fence placements, native PSOs and accounting. Native `Tools/warp-compiler-compute.dxasm` exercises invalid sizes/owners, reset/close/replay, retained submissions, partial queue-creation OOM, incomplete positive callback results with returned handles, worker failure and canceled readiness events. `os-routed-warp-compiler-owned-ordered-buffer-commands` exercises pending teardown. Exact exports and same-process DXC/Vulkan coexistence pass. Runtime/DDI handles remain outside portable compiler/execution code. |
+| ~~W1(b)~~ | `os-routed-warp-compiler-owned-commands` and `os-routed-warp-compiler-owned-dxil-commands` execute resource-free application compute. The buffer and ordered-buffer gates execute 3-D IDs, partial waves, multi-wave groupshared exchange/barriers, repeated accumulation, copies and completed readback against a scalar oracle. `os-routed-warp-compiler-reference-buffer-commands` runs the same original grouped shader against system WARP as an independent control. Native dispatch/DXIL fixtures test concurrent PSOs, independent compilation contexts and retained code/pipeline lifetimes. |
+| ~~W1(c)~~ | CMake generates `warp-compiler/warp-headless-capabilities.json`, schema/profile version 1, from `utils/windows-warp-interposition/WARPHeadlessCapabilities.json.in`. It records SDK/DDI requirements, limits, named evidence, configured DXC/coexistence coverage and exclusions. `complete_product_feature_level` is null. Every owned public probe queries actual wave bounds; native DXIL tests separately accept requested width 4 and reject width 8. Generated evidence configuration is not a passing-test certificate. |
+
+### Capability inventory v1
+
+The inventory is build-generated beside the application-local UMD. Its version
+is also compiled into the public probe's diagnostic report. This establishes
+the generated subset-profile mechanism, not automatic product certification.
+Changing a declared contract requires updating its inventory and behavioral
+gates together. A build without DXC or the coexistence dependencies still
+generates the inventory but records the corresponding evidence as unavailable;
+such a configuration cannot reproduce the complete W1 exit evidence.
+
+| Contract | Normative boundary / implementation limit | Named evidence |
+|---|---|---|
+| Runtime/ABI | SDK 10.0.26100.0; `D3D12DDI_SUPPORTED_0072`, command-list table `0062`, command-queue table `0001`; WARP identity `1414:008c`, software flag and matching LUID. Application-local routing only. | All `os-routed-warp-compiler-owned-*` probes check device/module provenance and teardown. |
+| Exports | Exactly 18 UMD and 13 compiler exports; all addresses belong to their owned image; no ordinal 199. Compiler C ABI version 1; two JIT debugger exports and MLIR's fallback TypeID resolver are explicitly included. | Every owned public probe checks the complete PE export set. |
+| Shader inputs | Released SM 5.1/6.0 input profiles, bounded raw-DXBC or DXIL ProgramHeader import, application compute subset and initialization vertex only. Header/stage/model metadata must agree; full shader-model/all-stage conformance is not claimed. | `Tools/warp-compiler-compute.dxasm`, `warp-compiler-vertex.dxasm`, `warp-compiler-dxil.hlsl`; owned commands/DXIL commands gates. |
+| Wave policy | `D3D12DDI_SHADER_CAPS_0012` / public OPTIONS1: min=max=total=4, WaveOps=false. Native requested width 4 succeeds; 8 fails without an object. Public SM 6.6 is not advertised. | Every owned public wave query; `Tools/warp-compiler-dxil.hlsl` requested-width cases. |
+| Dispatch | `D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION` = 65535; group/wave/reflection validation reuses `FeMeDirect3D` and `CompiledStage`. Sequential groups in the bring-up executor, not a new stage ABI. | `Tools/warp-compiler-dispatch.dxasm`, DXIL fixture and owned buffer/ordered-buffer gates. |
+| Roots/bindings | DDI root signature 1.1; raw SRV/UAV root descriptors with namespace/space/register identity and all-stage visibility; 32 descriptors = `D3D12_MAX_ROOT_COST` 64 DWORDs; root GPUVA alignment 16. No constants, CBVs, tables or samplers in this public subset. | Native compute/DDI fixture; owned buffer commands test immutable bindings and malformed/missing/out-of-range bindings. |
+| Resources | Committed L0 upload/readback/default-UAV buffers, 64 KiB allocation alignment, maximum aligned allocation `0xffff0000` bytes from the current 32-bit WARP private allocation size. Kernel map/residency/eviction and logical resource bounds excluding padding. | Owned buffer and buffer-command gates; native resource/range and wrong-owner checks. |
+| Commands/lifetimes | Direct/compute/copy queue objects, checked list/recorder masks, immutable command snapshots, allocator generations and independently retained native pipelines. Queue destruction drains/joins pending CPU work. | Native compute/DDI replay/epoch/retention cases; owned commands and ordered-buffer teardown. |
+| Copies/barriers | Checked buffer ranges and `memmove`; buffer transition/UAV barriers order CPU memory. No split/ranged/aliasing/enhanced barriers or texture copies. | Owned buffer-command scalar/guard oracle; ordered-buffer gate; independent reference-buffer-commands control. |
+| Fences/order | Runtime-owned monitored synchronization objects; generic GPU/CPU wait/signal callbacks and per-queue Ready/Done gates. Native fences and implicit multi-GPU are excluded. | Owned fences and ordered-buffer-commands; native fence placement/ownership, callback and worker-failure cases. |
+| Error behavior | Invalid arguments/unsupported operations report errors; failed queue creation cleans partial handles; a worker failure latches once, skips later work and attempts Done signaling to release its ordered wait. No forced OS-wide removal test. | Native compute/DDI OOM, S_FALSE-with-handle, failed wait and canceled event cases; all positive public gates require no removal. |
+| Coexistence | A live native `IDxcCompiler3`/DXIL blob and real FeMe Vulkan instance/device coexist with owned D3D12 execution. DXC compiles and Vulkan identity is queried before and after. | `os-routed-warp-compiler-owned-coexistence`; FeMe Vulkan identity verified in its launching shell. |
+
+### Execution and ownership
+
+Each submitted immutable snapshot is queued on an owned frontend worker.
+The UMD queues a kernel GPU signal Ready=N after preceding runtime waits,
+then a GPU wait Done=N before returning Execute. The worker waits Ready
+through the CPU monitored-fence callback/event, executes FeMe's native
+dispatch/copy commands and CPU-signals Done=N. Later ordinary runtime queue
+signals therefore cannot pass incomplete CPU writes. Public monitored
+Signal/Wait go directly through the stock runtime/kernel callbacks; the UMD
+does not pretend those operations arrive at its native-fence DDI slots.
+The runtime CORE context handle is opaque and is passed to KT callbacks,
+not reinterpreted as a raw kernel handle.
+
+No WARP compute DMA packet decoder or reference shader execution is used in
+the owned path. The separately selected reference mode is only the control.
+The user-authorized reference checkout was inspected to establish callback
+and opaque-context ordering semantics, not copied into FeMe.
+
+Queue creation uses checked Win32 thread/event/fence allocation and explicit
+partial cleanup. This frontend deliberately does not construct the portable
+`feme::execution::TaskExecutor`, whose `std::thread`, `std::function` and
+deque allocations do not expose the checked creation/submission failure path
+needed at this no-exceptions DDI boundary. Both implement FIFO/drain semantics;
+the Windows worker additionally owns the kernel Ready/Done handshake.
+Prepared invocation, CPU stage ABI and JIT code still reuse `CompiledStage`.
+Windows handles and callbacks do not leak into that portable implementation.
+
+Submitted pipelines survive shader/PSO/list/allocator release or reset.
+Resource lookup checks the live owner registry before dereferencing private
+handles; shared registry guards hold mappings stable during CPU use. Buffers
+must still remain alive through their submitted use, as required by D3D12.
+The pending-teardown oracle releases recording objects and the consumer queue
+while a delayed separate queue releases its future gate; the buffers remain
+valid. An application that never satisfies its own wait can deadlock draining;
+no undocumented timeout, global process kill or system device reset is used.
+
+The original grouped oracle uses local `(5,3,2)`, groups `(3,2,1)`, 180 threads
+and 16 guard words. Thirty groupshared entries exchange the next local thread's
+global index across a barrier; three dispatches accumulate into the same UAV
+without reupload. A root UAV mutation after recording proves snapshotting.
+Completed readback checks every result and guard. The ordered mode additionally
+proves that a future cross-queue gate prevents early writes. Converted legacy
+DXIL exposed a groupshared global retained through `llvm.used`; removing only
+the transformed globals from both LLVM retention lists, then dead constant
+users, repaired shared CPU lowering. The portable regression preserves
+unrelated retained globals.
+
+### Commits and validation
+
+Implementation steps: `8c8fe8369498` (owned grouped CPU dispatch),
+`57b05d6bf98e` (typed queue/list frontend), `92c347353254` (root buffers and
+copy/readback), `2eef5a731515` (owned DXIL and retention-list repair),
+`d8f642f7700f` (monitored fence ownership), `31ac6e0896e4` (kernel-ordered
+asynchronous execution), and `6a834ae5cfba` (exports, wave inventory and
+DXC/Vulkan coexistence).
+
+On the native ARM64 Windows VM (OS 10.0.26300, inbox D3D12/WARP
+10.0.26100.9818, standalone SDK 10.0.26100.0):
+
+- Full assertions-enabled, cached, PCH-disabled `check-feme`: **4400 passed,
+  15 skipped, 10 unsupported**, 4425 total.
+- Native compiler/DDI selectors: **4/4 passed**, also included in the full
+  suite; portable retention-list regression included in that suite.
+- Callback probes: **64/64 passed**.
+- Final stock-runtime probes: **45/45 passed**, including owned original DXIL,
+  future kernel waits, delayed pending teardown, exact exports, queried wave
+  policy, independent system-WARP compute control and same-process coexistence.
+- Generated inventory parsed as JSON; all nine declared OS gates are
+  registered, all five native fixtures exist and both optional evidence
+  groups are configured. The public wave queries match the inventory.
+
+The main compiler/Vulkan DLLs were rebuilt by the full suite before the final
+OS package/gate run. `VK_DRIVER_FILES` and `VK_ICD_FILENAMES` selected the
+owned FeMe ICD and `vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device`
+in the test-launching shell. The missing `vswhere.exe` and duplicate
+driver-sorting-layer warnings were nonfatal.
+
+### Remaining product scope
+
+This closes headless W1, not even a complete FL 11_0 graphics adapter.
+The runtime's diagnostic creation profile and released shader-input
+enumeration are harness plumbing, not distribution/conformance claims.
+General roots/descriptors/CBVs, images/views/placed/reserved/shared resources,
+complete barrier/query/indirect semantics and broader buffer operations remain
+W2. Graphics, advanced FL 12_2 features, DXR, presentation and conformance
+remain W3-W7. Native/implicit-multi-GPU fences, multi-adapter table isolation,
+general removal wakeups, and broader OS/architecture/runtime matrices are
+not established by this single-node native evidence.
 
 ## Evaluation and source baseline
 
@@ -477,7 +606,7 @@ swap chain, or conformance result. W1 remains blocked on a real owned D3D12
 UMD/device contract and W3-W7 remain blocked on their API/device and execution
 frontends. The existing public-D3D matrix remains audit evidence only.
 
-### W1: Objects and first headless compute
+### ~~W1: Objects and first headless compute~~
 
 Depends on the selected W0 integration proof (W0(a)/W0(g)) and WS2; reuses
 existing `CompiledStage` and artifact reflection. Pending installed-driver,
@@ -486,9 +615,13 @@ user-mode headless W1 once the selected boundary is proven.
 
 | Step | Work and acceptance |
 |---|---|
-| W1(a) | Optional Windows build/export target, device and direct/compute/copy queues, allocators/lists, buffers/heaps, fences, PSOs, allocation accounting, and device-removal propagation. Keep runtime/DDI handles outside portable execution code. Check the export set and coexistence with DXC and the Vulkan ICD in one process. Test invalid handles/sizes, OOM, close/reset/replay, and teardown with pending work. |
-| W1(b) | Resource-free DXIL dispatch, then one structured/raw-buffer write, copy/readback and fence. Validate IDs, partial waves, multi-wave groupshared barriers, concurrent PSO compilation, context/code lifetime, and repeated execution against scalar expectations and WARP. |
-| W1(c) | Build a versioned capability inventory tied to named tests and normative SDK requirements. Early partial execution is an internal harness, not a falsely advertised lower feature level: even FL 11_0 requires graphics. Pin/query actual wave policy; test requested wave sizes separately. |
+| ~~W1(a)~~ | Complete: optional build/export target, owned headless objects, checked errors/lifetimes, pending teardown and DXC/Vulkan coexistence. See [closure evidence](#w1-closure-owned-kernel-ordered-headless-compute). |
+| ~~W1(b)~~ | Complete: owned resource-free and grouped DXIL/DXBC compute, raw-buffer accumulation, scalar/WARP controls, copies, fences, concurrent native PSOs and retained code. |
+| ~~W1(c)~~ | Complete: generated v1 internal inventory, SDK/test mapping, actual four-lane wave queries and separate native requested-width tests. No complete lower feature level is claimed. |
+
+The dated prerequisite entries below are historical. Their open-milestone
+and `CreateDevice = E_NOTIMPL` statements describe those checkpoints, not
+the current compiler-backed W0/W1 implementation.
 
 W1(b) prerequisite progress (2026-11-20): the
 [grouped SM6 oracle](W0WindowsIntegrationProbe.md#w1b-grouped-sm6-compute-oracle-vm-2026-11-20)

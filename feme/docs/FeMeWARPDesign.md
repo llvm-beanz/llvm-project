@@ -11,10 +11,13 @@ plans, heap/residency/placed-resource/image-copy plans, draw/mesh dispatch,
 viewport/scissor/IA layout, BLAS/TLAS
 build policy, enhanced barriers and conformance release gating. It is
 deliberately not itself a device implementation. A separate compiler-backed
-application-local prototype now closes W0 with real stock-runtime device
-creation, owned initialization shaders/pipelines and KMD-backed application
-buffers/map/residency/teardown. Queues/command execution, general bindings and
-resources, graphics, ray traversal, presentation and conformance remain open.
+application-local prototype now closes W0 and W1 with real stock-runtime
+device creation, owned initialization/application shaders and pipelines,
+KMD-backed buffers, typed queues/lists, asynchronous kernel-ordered compute
+and copies, monitored fences, completed readback and pending teardown.
+Generated capability inventory v1 records the internal headless subset and
+named evidence. General bindings/resources, graphics, ray traversal,
+presentation and conformance remain W2-W7 work.
 
 This design defines a full-featured Direct3D 12 software adapter using FeMe's
 CPU target as its shader execution engine. The completed adapter targets the
@@ -41,9 +44,9 @@ claim that arbitrary applications can transparently load FeMe through the
 Windows-owned `D3D_DRIVER_TYPE_WARP`/`IDXGIFactory4::EnumWarpAdapter` paths.
 The current probe demonstrates application-local routing into an owned UMD
 under WARP identity, but the loading boundary is not a documented general
-third-party provider registration mechanism. The buffer-only device/resource
-feasibility contract is now proven; a complete adapter and broad runtime
-compatibility remain W1-W7 work. The implementation and validation are now
+third-party provider registration mechanism. Device/resource feasibility and
+owned headless compute are now proven; a complete adapter and broad runtime
+compatibility remain W2-W7 work. The implementation and validation are now
 VM-first, per the 2026-11-17 development-flow change. System WARP binaries are not replaced,
 and no new kernel-mode driver is in scope. A separately implemented
 D3D12/DXGI COM runtime is not selected.
@@ -66,9 +69,10 @@ Direct3D mapping and Windows deployment.
 
 The local Direct3D source evaluation and concise W0-W7 status are recorded in
 [WARPRoadmap.md](WARPRoadmap.md); detailed progress and evidence are in
-[WARPImplementationLog.md](WARPImplementationLog.md). No Direct3D
-implementation milestone is complete.
-The original compute-only baseline is no longer current:
+[WARPImplementationLog.md](WARPImplementationLog.md). At this historical
+checkpoint no Direct3D implementation milestone was complete; W0 and W1
+have since closed as recorded above.
+The original compute-only compiler baseline is no longer current:
 
 - `feme::cpu::CompiledStage` supports compute, vertex, fragment, hull,
   patch-constant, domain, geometry, mesh, and task invocation. Reuse its
@@ -1452,6 +1456,39 @@ status. DRED-style breadcrumbs and page-fault information should be designed
 into the command stream and resource tracker early even if full OS reporting
 lands later.
 
+### W1 implemented scheduling boundary
+
+The single-node internal headless frontend records immutable dispatch/copy
+snapshots and retains native pipelines independently of the list, allocator,
+shader and PSO. Allocator epochs invalidate stale recording state. Runtime
+DDI contexts, monitored fence handles and events stay in the Windows UMD;
+prepared compute invocation and code reuse the portable `CompiledStage`.
+
+Ordinary public monitored queue Signal/Wait are performed by stock D3D12
+through kernel callbacks, not through the UMD's native-fence slots. Each owned
+queue inserts a GPU Ready signal after preceding waits and a GPU Done wait
+before returning Execute. Its worker CPU-waits Ready, executes FeMe commands,
+then CPU-signals Done. This orders later runtime signals after actual writes
+without decoding Microsoft compute packets or invoking reference WARP.
+Queue destruction drains and joins pending work. Buffers remain subject to
+the application's submitted-use lifetime obligation; live-registry guards
+prevent unmapping during active CPU access.
+
+The worker intentionally uses checked Win32 creation and no-throw submission
+storage rather than the extracted `feme::execution::TaskExecutor`.
+That generic runner uses `std::thread`, `std::function` and deque allocation
+without a checked DDI creation/enqueue error contract. The Windows worker
+preserves FIFO/drain semantics while owning its kernel readiness/completion
+handshake and partial-creation cleanup. This is a frontend scheduling
+specialization, not a second portable shader executor. Initial dispatch runs
+thread groups sequentially; parallel device-group scheduling is future work.
+
+Worker failures report through the runtime and skip subsequent owned work;
+native callback tests cover failed waits/canceled events and partial OOM.
+This is not evidence of complete removal/DRED or multi-adapter behavior.
+The generated v1 inventory and complete headless acceptance reconciliation
+are in [WARPImplementationLog.md](WARPImplementationLog.md#w1-closure-owned-kernel-ordered-headless-compute).
+
 ## Software Graphics Pipeline
 
 Graphics is a runtime subsystem around FeMe-compiled programmable stages:
@@ -1632,12 +1669,17 @@ This milestone gates all Windows-facing implementation. It should be a small
 throwaway-capable prototype because choosing the wrong integration boundary
 would invalidate most object-layer work.
 
-### W1: Full-architecture device and compute bring-up
+### ~~W1: Full-architecture device and compute bring-up~~
+
+Complete for the single-node internal headless subset. The following are
+bring-up requirements, not claims of complete graphics/feature-level support;
+the implementation log maps each to owned behavioral evidence.
 
 - Implement device, queue, command allocator/list, fence, heap, buffer, and
   pipeline objects with the ownership and extensibility required by the final
-  graphics adapter. Execute compute/copy commands first, but create the direct
-  queue and graphics-capable device through the W0 product boundary.
+  graphics adapter. Execute compute/copy commands first and create the direct
+  queue and owned device through the W0 product boundary. Actual graphics
+  execution remains W3.
 - Import and raise DXIL through the existing FeMe path.
 - ~~Factor reusable per-thread-group invocation and prepared-dispatch state
   out of `feme::cpu::JITEngine`, shared with the Vulkan design.~~ (closed by
@@ -1648,9 +1690,10 @@ would invalidate most object-layer work.
 - Verify workgroup barrier correctness for multi-wave groups under sequential
   wave execution within a group.
 - Implement device-removal propagation and balanced object/allocation tests.
-- Establish the generated capability-profile mechanism; the bring-up profile
-  truthfully reports less than 12_2 and is never distributed as the completed
-  adapter.
+- Establish the generated capability-profile mechanism. The v1 bring-up
+  inventory declares an internal subset with no complete product feature
+  level, not a falsely advertised lower FL; even FL 11_0 requires graphics.
+  It is never distributed as the completed adapter.
 
 ### W2: Complete resource, binding, and synchronization model
 

@@ -19,16 +19,19 @@ portable planning library is not a D3D12 runtime.
 
 ## Current status
 
-**W0 is complete (2026-11-27).** The compiler-backed application-local UMD
-creates an owned device through stock D3D12 and proves application buffer
-allocation, mapping, residency, and teardown through the existing WARP kernel
-services. W1-W7 remain open; no command execution or FL 12_2 conformance is claimed.
+**W0 and W1 are complete.** The compiler-backed application-local UMD creates
+an owned stock-runtime device and executes owned DXBC/DXIL compute, buffer
+copies/readback, and kernel-ordered asynchronous submissions through the
+existing WARP kernel services. Monitored fences, replay, retained code and
+pending teardown are tested. The generated v1 inventory is an internal
+headless subset, not complete graphics, shader-model or feature-level
+conformance. W2-W7 remain open.
 
 | Milestone | Status | Summary |
 |---|---|---|
 | ~~W0 — Integration feasibility~~ | **Complete** | Supported 0072 boundary, genuine FeMe initialization shaders/pipelines, owned device/build provenance, application KMD buffer lifecycle, and corpus audit are proven. |
-| W1 — Device and headless compute | **Open** | Buffer-only device and initialization objects exist. Queues, executable command lists, fences, application compute PSOs/dispatch and copy/readback remain. |
-| W2 — Binding, resources, synchronization | **Open** | Committed buffer allocation/map/residency is proven. General root signatures, descriptor heaps/views, images, barriers, queries and synchronization remain. |
+| ~~W1 — Device and headless compute~~ | **Complete** | Owned queues/lists/PSOs, grouped DXBC/DXIL dispatch, raw root buffers, copy/readback, monitored fences, pending teardown, exact exports and DXC/Vulkan coexistence; versioned internal capability inventory. |
+| W2 — Binding, resources, synchronization | **Open** | Committed buffers, raw SRV/UAV roots, buffer copies/barriers and monitored cross-queue ordering are proven. Complete roots/descriptors/views, images, resource classes, barriers, queries and synchronization semantics remain. |
 | W3 — Conventional graphics | **Open** | Portable graphics-state and draw plans exist; no D3D12 graphics execution or end-to-end rendering. |
 | W4 — FL 12_2 advanced graphics/resources | **Open** | Portable capability and mesh-dispatch plans exist; no advanced-feature implementation or conformance evidence. |
 | W5 — DXR 1.1 | **Open** | Portable acceleration-structure planning exists; no BVH/ray execution, DXR objects, or ray conformance evidence. |
@@ -46,7 +49,7 @@ not a device or runtime.
 | Milestone | Scope and exit condition |
 |---|---|
 | **~~W0: Integration feasibility~~** | Completed: supported Windows runtime/DDI boundary, truthful WARP identity, owned adapter/device lifecycle, feasible application resource path, corpus/compatibility audit, and exact configuration/provenance/teardown evidence. |
-| **W1: Device and headless compute** | Implement the device and object model, queues, allocators/lists, buffers/heaps, fences, and PSOs. Execute resource-free and buffer-writing compute, copy/readback, and fence synchronization against scalar and WARP oracles. |
+| **~~W1: Device and headless compute~~** | Completed: owned headless objects and asynchronous compute/copy/fence execution, original DXIL and converted legacy inputs, scalar/system-WARP controls, lifecycle/error gates and versioned subset inventory. |
 | **W2: Binding, resources, synchronization** | Implement root signatures, descriptors, resource creation/views/residency, memory safety, copy footprints, command ordering, barriers, queries, and cross-queue synchronization. |
 | **W3: Conventional graphics** | Map D3D12 graphics state and stages to the shared executor; validate rasterization, depth/stencil, blending, MSAA, tessellation/geometry, indirect drawing, and off-screen output. |
 | **W4: FL 12_2 advanced graphics/resources** | Implement and test mesh/amplification, VRS, sampler feedback, tiled resources, conservative rasterization, and remaining required FL 12_2 limits and formats. |
