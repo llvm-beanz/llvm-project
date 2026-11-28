@@ -138138,3 +138138,45 @@ the image flag, then add original DXIL owned/reference controls with mip/layer
 guards, null loads/stores, live descriptor copies, replay and held lifetime.
 Do not infer 3D W-slice semantics from an SRV's geometry: prove them against
 stock WARP before accepting selected volume UAV views. W2 remains open.
+
+# W2 owned texture UAV preparation and DXIL stores
+
+Commit da1a6a6502ed admits owned unordered-access texture storage and copied
+finite 1D/2D UAV descriptions. Selected mip/layer geometry and live ownership/
+permission checks reuse the SRV normalizer; qualified UAV image arrays stay
+separate from buffers. Buffer counter fields are not read from texture unions.
+Native UAV preparation sets the shared narrow-store saturation bit.
+
+Original DXIL first failed in SIMD vector preflight. The root cause was not
+missing vector-store decomposition: raised DXIL texture stores never reached
+the existing canonical image-store helpers. Resource lowering now handles
+writable non-ROV FP32/i32 1D/array, 2D/array and 3D full texels, with one shared
+admission predicate, narrow payload padding and early unsupported-shape errors.
+Tests cover all dimensions, payload types, idempotence, read-only/ROV/non-heap/
+coordinate/type rejection and actual divergent lane stores.
+
+The CLI passed after this fix while the stock-runtime path initially repeated
+the old failure. The application-local copied compiler was stale. Rebuilding
+the standalone harness triggers the shim LINK_DEPENDS/post-link copy; matching
+SHA256 hashes confirmed freshness. The required refresh is now codified in
+feme/.instructions.md rather than manually copying files or changing system
+WARP.
+
+Four owned/reference controls execute selected 2D-array mip/layer stores and
+loads, OOB/null accesses, live-view dimensions, post-record CPU descriptor
+copies, replay and held list/allocator/source-heap teardown. Readback verifies
+all twelve subresources, unaddressed texels, mips/layers, padding, output guards
+and unchanged upload storage. Normal executions have3 dispatches/52 copies;
+held executions have1/26. Exact KMD heap/residency provenance stays6/7.
+
+Focused controls pass8/8; full FeMe4432 passed/15 skipped/10 unsupported;
+callbacks65/65; stock-runtime/coexistence391/391. FeMe ICD identity was confirmed;
+OS launches followed shared DLL relinking and application-local refresh.
+Inventory v24 was parsed:355 unique existing required OS gates,18 native
+fixtures, bridge5/artifact12, complete product FL null. No CTS or Vulkan
+advertisement changes.
+
+Next prove selected3D UAV W-slice dimensions/addressing against stock WARP,
+then admit volume views. Broaden native narrow-format saturation/load/store,
+remaining dimensions and sampling operations, and complete general resources/
+roots/heaps/residency/barriers/queries/indirect/removal. W2 remains open.
