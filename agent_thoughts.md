@@ -137340,3 +137340,52 @@ to owned resources and views, implement reserved/shared resource/residency
 requirements, and finish transitions/promotion/decay/splits/ranges,
 queries/predication, indirect root changes/draws and removal wakeups.
 Do not close W2 from portable plan tests or the dispatch-only indirect slice.
+
+# W2 progress: CBVs, root constants and descriptor-backed buffer views
+
+This checkpoint adds independently tested compiler/root/view slices while
+keeping W2 open and the stock D3D12/DXGI/unmodified WARP KMD contract intact:
+300fe51c00f1 (bounded descriptor CBVs), 4b23b4b0760a (root CBVs),
+89b6df6e390e (inline constants), 91b6470bf813 (descriptor heaps/CBV tables),
+2a6b8cfa3375 (sparse legacy structured loads) and 7eca43e5be18
+(raw/structured SRV/UAV views and mixed scalar tables).
+
+The shared compiler keeps inferred single-CBV promotion for existing callers;
+owned WARP disables it. A canonical nonempty byte-array CBV extent is checked
+by one shared helper. Multiple inline blocks instead become register/space
+mapped CBV descriptors backed by immutable command/submission-owned bytes.
+Partial setters preserve other values, and cloning rebases copied pointers.
+All root parameters contribute to the aggregate 64-DWORD limit.
+
+Descriptor copies validate every range before writing and snapshot their
+sources. Commands retain heap identity, table bases and range mappings, not
+descriptor contents; execution resolves current bounded descriptors after
+kernel readiness. Null descriptors carry empty storage rather than fake
+buffers. Raw/structured views keep resource identity, first element, extent
+and stride; UAV access cannot inherit another overlapping alias's flags.
+
+A removed device after CPU descriptor creation was not a GPU-handle encoding
+failure. Stock D3D12 automatically pages descriptor metadata as object type 24.
+Validate its live per-device registration but omit it from KMD allocation
+lists; mixed lists still submit all real allocations. No padding workaround,
+fabricated allocation or reference-driver forwarding was used. This lesson
+is also recorded in feme/.instructions.md.
+
+Original DXC SM 6.0 uint2.y reads exposed sparse legacy bufferLoad extracts.
+Checked constant-offset structured cases now raise to scalar accesses for
+only the requested components, preserving per-component bounds instead of
+widening a packed read. Sparse raw/dynamic-offset/status cases remain explicit
+unsupported boundaries. Native tests cover integer/FP32 sparsity and overflow.
+
+Final checkpoint evidence is 4403 full-suite passes, 65/65 callback passes,
+71/71 stock-runtime passes, and validated inventory v7 with thirty-five OS
+gates. Eight view controls exercise owned DXBC/DXIL, independent system WARP,
+nonzero offsets, different strides, post-record copies, null SRV/CBV reads,
+all 180 scalar results/16 guards, and held cross-queue/pending teardown.
+Vulkan identity was verified in each full/coexistence launching shell.
+
+Next work remains finite/general descriptor arrays and non-uniform selection,
+typed/counter/image views, static samplers and complete root compatibility,
+image formats/planes/footprints and resource classes/residency, then complete
+barriers, queries/predication, indirect root changes and removal wakeups.
+Do not claim W2 or a complete feature level from these bounded scalar tables.
