@@ -137934,3 +137934,45 @@ prefixes with checked finite ranges and independently offset native heaps;
 admit qualified images in a versioned artifact, then wire owned descriptors
 and image/sampler dispatch through the compiler bridge. Reuse existing CPU
 image helpers and keep unsupported shapes explicit. W2 is not complete.
+
+# W2 prerequisite: DXIL image/sampler normalization and artifact12
+
+Commit 03daf3fa8a21 extends the shared normalizer rather than introducing a
+Windows-only image addressing path. Buffer, image and sampler prefixes are
+independent, and each native dynamic heap is rebased only by its own prefix.
+Image SRV/UAV identities remain distinct; samplers use their separate class.
+Finite ranges keep existing OOB sentinels. Register/prefix overflow, conflicts
+and unbounded extents remain unnormalized for admission to reject.
+
+Artifact12 admits qualified images while preserving invalid-namespace checks
+and rejecting old artifacts. Runner image bindings now carry/print namespace.
+Native DXIL controls distinguish divergent SRV/UAV arrays and nearest/linear
+samplers through SIMD/scalar JIT, repeated guarded output and physical AOT heaps.
+Normalizer tests pass 14/14, artifact/heap tests 49/49 and focused native
+controls 3/3.
+
+Full testing found a coupled regression in explicit static-root behavior:
+normalizing sampler handles must not silently substitute caller descriptors
+for fixed root state. CPU root preflight now rejects live static-sampler
+consumers after mode checking, including helpers and visibility. Default mode
+continues intentionally ignoring embedded roots. SIMD/scalar/AOT rejection
+controls were updated. The serialized visibility field is uint32, requiring
+an explicit enum conversion. The existing ABI-number assertion also needed
+updating; earlier failed runs are not completion evidence.
+
+Final full validation passes 4423, with 15 skipped/10 unsupported, callbacks
+65/65 and stock-runtime/coexistence 371/371 after shared DLL relinking.
+FeMe CPU Vulkan Device identity was confirmed before launches. v20 has
+335 unique OS gates and 11 existing fixtures, verified relative to feme/test
+(not the repository root). Bridge4 and shader argument layouts are unchanged;
+artifact12 and the null complete-FL claim are current. No fresh CTS result,
+Vulkan advertisement or KMD/system modification is claimed.
+
+Next: bridge5 needs explicit borrowed image/mip-layout PODs, validated view
+geometry and namespace-aware image materialization, without alias-casting CPU
+layouts. Driver descriptor slots currently hold buffers only, and recorded
+table bindings are buffer placeholders; execution must classify live slots
+without destroying immutable identities or replay/clone snapshots. Reuse
+WarpBufferAccess locking/live-owner checks and shared image layouts. Sampler
+heaps/static materialization, texture UAV stores and remaining W2 resource/
+ordering/root contracts still need implementation. W2 is not complete.
