@@ -693,7 +693,7 @@ HRESULT exerciseCommands(ID3D12Device *Device,
 
 HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                const D3D12_SHADER_BYTECODE *DXIL = nullptr,
-                               bool Ordered = false) {
+                               bool Ordered = false, bool Indirect = false) {
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
       "groupshared uint sharedValues[30];\n"
@@ -756,6 +756,28 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                              nullptr, IID_PPV_ARGS(&Readback)));
   if (FAILED(Result))
     return Result;
+  ComPtr<ID3D12Resource> ArgumentUpload, Arguments;
+  constexpr UINT ArgumentBytes = 64;
+  if (Indirect) {
+    D3D12_RESOURCE_DESC ArgumentDesc = Desc;
+    ArgumentDesc.Width = ArgumentBytes;
+    Heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    Result = report("Create indirect argument upload",
+                    Device->CreateCommittedResource(
+                        &Heap, D3D12_HEAP_FLAG_NONE, &ArgumentDesc,
+                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                        IID_PPV_ARGS(&ArgumentUpload)));
+    if (FAILED(Result))
+      return Result;
+    Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    Result = report("Create indirect arguments",
+                    Device->CreateCommittedResource(
+                        &Heap, D3D12_HEAP_FLAG_NONE, &ArgumentDesc,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                        IID_PPV_ARGS(&Arguments)));
+    if (FAILED(Result))
+      return Result;
+  }
   void *Memory = nullptr;
   D3D12_RANGE NoRead{0, 0}, Full{0, Bytes};
   Result = report("Map command upload", Upload->Map(0, &NoRead, &Memory));
@@ -822,6 +844,39 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       return report("Missing held readback memory", E_FAIL);
   }
   for (UINT Repeat = 0; Repeat < 3; ++Repeat) {
+    ComPtr<ID3D12CommandSignature> Signature;
+    if (Indirect) {
+      D3D12_INDIRECT_ARGUMENT_DESC Argument{};
+      Argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+      D3D12_COMMAND_SIGNATURE_DESC SignatureDesc{};
+      SignatureDesc.ByteStride = 16;
+      SignatureDesc.NumArgumentDescs = 1;
+      SignatureDesc.pArgumentDescs = &Argument;
+      Result = report("Create indirect dispatch signature",
+                      Device->CreateCommandSignature(&SignatureDesc, nullptr,
+                                                     IID_PPV_ARGS(&Signature)));
+      if (FAILED(Result))
+        return Result;
+      if (Repeat) {
+        D3D12_RESOURCE_BARRIER ToCopy{};
+        ToCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        ToCopy.Transition.pResource = Arguments.Get();
+        ToCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        ToCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+        ToCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        List->ResourceBarrier(1, &ToCopy);
+      }
+      List->CopyBufferRegion(Arguments.Get(), 0, ArgumentUpload.Get(), 0,
+                             ArgumentBytes);
+      D3D12_RESOURCE_BARRIER ToIndirect{};
+      ToIndirect.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      ToIndirect.Transition.pResource = Arguments.Get();
+      ToIndirect.Transition.Subresource =
+          D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      ToIndirect.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+      ToIndirect.Transition.StateAfter = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+      List->ResourceBarrier(1, &ToIndirect);
+    }
     if (!Repeat)
       List->CopyBufferRegion(Output.Get(), 0, Upload.Get(), 0, Bytes);
     D3D12_RESOURCE_BARRIER Barrier{};
@@ -835,7 +890,14 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     List->SetComputeRootSignature(Root.Get());
     List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress());
     List->SetComputeRootSignature(Root.Get());
-    List->Dispatch(3, 2, 1);
+    if (Indirect) {
+      List->ExecuteIndirect(Signature.Get(), 2, Arguments.Get(), 16,
+                            Arguments.Get(), 4);
+      if (!Repeat)
+        List->ExecuteIndirect(Signature.Get(), 1, Arguments.Get(), 16, nullptr,
+                              0);
+    } else
+      List->Dispatch(3, 2, 1);
     List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress() +
                                                    16);
     Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -845,6 +907,37 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Result = report("Close buffer command list", List->Close());
     if (FAILED(Result))
       return Result;
+    if (Indirect) {
+      Result = report("Map execution-time arguments",
+                      ArgumentUpload->Map(0, &NoRead, &Memory));
+      if (FAILED(Result))
+        return Result;
+      if (!Memory) {
+        ArgumentUpload->Unmap(0, &NoRead);
+        return report("Missing indirect argument upload memory", E_FAIL);
+      }
+      const UINT Values[16] = {0xabababab,
+                               Repeat == 0   ? 1u
+                               : Repeat == 1 ? 99u
+                                             : 0u,
+                               0,
+                               0,
+                               3,
+                               2,
+                               1,
+                               0xcdcdcdcd,
+                               Repeat == 0 ? 65536u : 3u,
+                               2,
+                               1,
+                               0xefefefef,
+                               0,
+                               0,
+                               0,
+                               0};
+      std::memcpy(Memory, Values, sizeof(Values));
+      D3D12_RANGE Written{0, ArgumentBytes};
+      ArgumentUpload->Unmap(0, &Written);
+    }
     ID3D12CommandList *Commands[] = {List.Get()};
     bool GatePending = false;
     Result = [&]() -> HRESULT {
@@ -930,7 +1023,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         UINT Peer = (X % 5 + 5 * (Y % 3 + 3 * Z) + 1) % 30;
         UINT PeerGlobal = X / 5 * 5 + Peer % 5 +
                           15 * (Y / 3 * 3 + Peer / 5 % 3 + 6 * (Peer / 15));
-        Expected += (Repeat + 1) * (PeerGlobal + 23);
+        UINT Executions = Indirect ? (Repeat ? 4u : 2u) : Repeat + 1;
+        Expected += Executions * (PeerGlobal + 23);
       }
       Valid = static_cast<const UINT *>(Memory)[I] == Expected;
       if (!Valid)
@@ -1029,20 +1123,33 @@ int wmain(int Argc, wchar_t **Argv) {
 #endif
   bool ReferenceBufferCommands =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-buffer-commands") == 0;
+  bool ReferenceIndirect =
+      Argc == 2 && std::wcscmp(Argv[1], L"--reference-indirect-commands") == 0;
+  bool OrderedIndirect =
+      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-indirect-commands") == 0;
+  bool DXILIndirect =
+      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-indirect-commands") == 0;
+  bool Indirect =
+      ReferenceIndirect || OrderedIndirect || DXILIndirect ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--indirect-commands") == 0);
   bool ReferencePlacedBuffers =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-placed-buffers") == 0;
   bool PlacedBuffers =
       ReferencePlacedBuffers ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
-  bool Reference = ReferenceBufferCommands || ReferencePlacedBuffers ||
+  bool Reference = ReferenceIndirect || ReferenceBufferCommands ||
+                   ReferencePlacedBuffers ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
-      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0;
+      OrderedIndirect ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0);
   bool Fences = Argc == 2 && std::wcscmp(Argv[1], L"--fences") == 0;
   bool DXILBufferCommands =
-      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0;
+      DXILIndirect ||
+      (Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0);
   bool BufferCommands =
-      DXILBufferCommands || OrderedBufferCommands || ReferenceBufferCommands ||
+      Indirect || DXILBufferCommands || OrderedBufferCommands ||
+      ReferenceBufferCommands ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0);
   bool DXILCommands =
       Argc == 3 && std::wcscmp(Argv[1], L"--dxil-commands") == 0;
@@ -1058,6 +1165,9 @@ int wmain(int Argc, wchar_t **Argv) {
                          "--dxil-buffer-commands FILE|--fences|"
                          "--ordered-buffer-commands|"
                          "--reference-buffer-commands|"
+                         "--indirect-commands|--reference-indirect-commands|"
+                         "--ordered-indirect-commands|"
+                         "--dxil-indirect-commands FILE|"
                          "--placed-buffers|--reference-placed-buffers|"
                          "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
@@ -1177,7 +1287,7 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result) && BufferCommands)
     Result = exerciseBufferCommands(Device.Get(),
                                     DXILBufferCommands ? &DXIL : nullptr,
-                                    OrderedBufferCommands);
+                                    OrderedBufferCommands, Indirect);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();
@@ -1338,13 +1448,17 @@ int wmain(int Argc, wchar_t **Argv) {
                   Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
                   Data.MakeResidentCallbacks, Data.EvictCallbacks,
                   Data.HasRuntimePagingQueue);
-      UINT ExpectedHeaps = BufferCommands ? 4 : PlacedBuffers ? 3 : 1;
+      UINT ExpectedHeaps = Indirect         ? 6
+                           : BufferCommands ? 4
+                           : PlacedBuffers  ? 3
+                                            : 1;
       ValidOwned &= Data.Created == ExpectedHeaps &&
                     Data.Destroyed == ExpectedHeaps && Data.Maps > 0 &&
                     Data.Maps == Data.Unmaps &&
-                    Data.MakeResidentCallbacks == (BufferCommands  ? 5u
-                                                   : PlacedBuffers ? 4u
-                                                                   : 2u) &&
+                    Data.MakeResidentCallbacks == (Indirect         ? 7u
+                                                   : BufferCommands ? 5u
+                                                   : PlacedBuffers  ? 4u
+                                                                    : 2u) &&
                     Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
@@ -1358,12 +1472,14 @@ int wmain(int Argc, wchar_t **Argv) {
       std::printf("Native command execution: dispatches=%u copies=%u\n",
                   Dispatches, Copies);
       ValidOwned &= Audit &&
-                    Dispatches == (BufferCommands  ? 9u
-                                   : PlacedBuffers ? 0u
-                                                   : 6u) &&
-                    Copies == (BufferCommands  ? 4u
-                               : PlacedBuffers ? 2u
-                                               : 0u);
+                    Dispatches == (Indirect         ? 10u
+                                   : BufferCommands ? 9u
+                                   : PlacedBuffers  ? 0u
+                                                    : 6u) &&
+                    Copies == (Indirect         ? 7u
+                               : BufferCommands ? 4u
+                               : PlacedBuffers  ? 2u
+                                                : 0u);
     }
   }
 #ifdef FEME_WARP_COEXIST

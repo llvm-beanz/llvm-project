@@ -743,7 +743,12 @@ struct CommandRecorder {
 };
 
 struct RecordedCommand {
-  enum class Kind { Dispatch, Copy, Barrier } Type = Kind::Dispatch;
+  enum class Kind {
+    Dispatch,
+    IndirectDispatch,
+    Copy,
+    Barrier
+  } Type = Kind::Dispatch;
   RecordedCommand *Next = nullptr;
   void *Pipeline = nullptr;
   FeMeWarpDispatchDesc Dispatch;
@@ -752,6 +757,10 @@ struct RecordedCommand {
   D3D12DDIARG_BUFFER_PLACEMENT Source{};
   UINT64 Bytes = 0;
   D3D12DDI_HRESOURCE BarrierResource{};
+  D3D12DDIARG_BUFFER_PLACEMENT ArgumentBuffer{};
+  D3D12DDIARG_BUFFER_PLACEMENT CountBuffer{};
+  UINT MaxCommandCount = 0;
+  UINT ByteStride = 0;
 
   ~RecordedCommand() {
     if (Pipeline)
@@ -810,6 +819,85 @@ struct CommandList {
 
   void append(RecordedCommand *Command) { appendCommand(First, Last, Command); }
 };
+
+struct CommandSignature {
+  CommandSignature *Next;
+  feme::probe::WarpDeviceState *Owner;
+  UINT ByteStride;
+};
+
+SRWLOCK CommandSignatureLock = SRWLOCK_INIT;
+CommandSignature *CommandSignatures = nullptr;
+
+class CommandSignatureAccess {
+public:
+  CommandSignatureAccess() { AcquireSRWLockExclusive(&CommandSignatureLock); }
+  ~CommandSignatureAccess() { ReleaseSRWLockExclusive(&CommandSignatureLock); }
+};
+
+CommandSignature **findCommandSignature(D3D12DDI_HCOMMANDSIGNATURE Handle) {
+  auto **Entry = &CommandSignatures;
+  while (*Entry && *Entry != Handle.pDrvPrivate)
+    Entry = &(*Entry)->Next;
+  return Entry;
+}
+
+HRESULT validateCommandSignature(
+    const D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001 *Args) {
+  if (!Args || Args->NodeMask != 1 || !Args->NumArgumentDescs ||
+      !Args->pArgumentDescs || Args->ByteStride < 3 * sizeof(UINT) ||
+      Args->ByteStride % sizeof(UINT))
+    return E_INVALIDARG;
+  if (Args->NumArgumentDescs != 1 ||
+      Args->pArgumentDescs[0].Type != D3D12DDI_INDIRECT_ARGUMENT_TYPE_DISPATCH)
+    return E_NOTIMPL;
+  return Args->hRootSignature.pDrvPrivate ? E_INVALIDARG : S_OK;
+}
+
+SIZE_T APIENTRY
+commandSignatureSize(D3D12DDI_HDEVICE Device,
+                     const D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001 *Args) {
+  HRESULT Result = validateCommandSignature(Args);
+  if (FAILED(Result)) {
+    reportError(Device, Result);
+    return 0;
+  }
+  return sizeof(CommandSignature);
+}
+
+HRESULT APIENTRY
+createCommandSignature(D3D12DDI_HDEVICE Device,
+                       const D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001 *Args,
+                       D3D12DDI_HCOMMANDSIGNATURE Handle) {
+  HRESULT Result = validateCommandSignature(Args);
+  if (FAILED(Result))
+    return Result;
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Handle.pDrvPrivate)
+    return E_INVALIDARG;
+  CommandSignatureAccess Access;
+  if (*findCommandSignature(Handle))
+    return E_INVALIDARG;
+  auto *Signature = new (Handle.pDrvPrivate)
+      CommandSignature{CommandSignatures, Owner, Args->ByteStride};
+  CommandSignatures = Signature;
+  ++Owner->LiveImmutableStates;
+  return S_OK;
+}
+
+void APIENTRY destroyCommandSignature(D3D12DDI_HDEVICE Device,
+                                      D3D12DDI_HCOMMANDSIGNATURE Handle) {
+  CommandSignatureAccess Access;
+  auto **Entry = findCommandSignature(Handle);
+  if (!*Entry || (*Entry)->Owner != Device.pDrvPrivate) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  auto *Signature = *Entry;
+  *Entry = Signature->Next;
+  --Signature->Owner->LiveImmutableStates;
+  Signature->~CommandSignature();
+}
 
 void reportObjectError(D3D12DDI_HCOMMANDQUEUE Queue, HRESULT Result) {
   auto *State = static_cast<CommandQueue *>(Queue.pDrvPrivate);
@@ -1238,29 +1326,18 @@ void APIENTRY setRootSRV(D3D12DDI_HCOMMANDLIST List, UINT Index,
   setRootBuffer(List, Index, Address, 1);
 }
 
-void APIENTRY dispatch(D3D12DDI_HCOMMANDLIST List, UINT X, UINT Y, UINT Z) {
-  auto *State = recordingList(List);
-  if (!State)
-    return;
-  if (!State->Pipeline || X > 65535 || Y > 65535 || Z > 65535) {
-    reportObjectError(List, E_INVALIDARG);
-    return;
-  }
-  auto Command =
-      std::unique_ptr<RecordedCommand>(new (std::nothrow) RecordedCommand);
+HRESULT prepareDispatch(CommandList *State,
+                        std::unique_ptr<RecordedCommand> &Command) {
+  if (!State->Pipeline)
+    return E_INVALIDARG;
+  Command.reset(new (std::nothrow) RecordedCommand);
   if (!Command) {
-    reportObjectError(List, E_OUTOFMEMORY);
-    return;
+    return E_OUTOFMEMORY;
   }
   HRESULT Result =
       FeMeWarpRetainComputePipeline(State->Pipeline, &Command->Pipeline);
-  if (FAILED(Result)) {
-    reportObjectError(List, Result);
-    return;
-  }
-  Command->Dispatch.GroupCount[0] = X;
-  Command->Dispatch.GroupCount[1] = Y;
-  Command->Dispatch.GroupCount[2] = Z;
+  if (FAILED(Result))
+    return Result;
   Command->Dispatch.BufferCount = State->RootCount;
   Command->Dispatch.Buffers = Command->Buffers.data();
   for (UINT I = 0; I < State->RootCount; ++I) {
@@ -1268,14 +1345,76 @@ void APIENTRY dispatch(D3D12DDI_HCOMMANDLIST List, UINT X, UINT Y, UINT Z) {
     Result = feme::probe::getWarpBufferAddress(
         State->Owner, State->RootAddresses[I], Buffer.Data, Buffer.SizeInBytes,
         State->RootParameters[I].Namespace == 2);
-    if (FAILED(Result)) {
-      reportObjectError(List, Result);
-      return;
-    }
+    if (FAILED(Result))
+      return Result;
     Buffer.Namespace = State->RootParameters[I].Namespace;
     Buffer.Space = State->RootParameters[I].Space;
     Buffer.Register = State->RootParameters[I].Register;
   }
+  return S_OK;
+}
+
+void APIENTRY dispatch(D3D12DDI_HCOMMANDLIST List, UINT X, UINT Y, UINT Z) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  std::unique_ptr<RecordedCommand> Command;
+  HRESULT Result = X > 65535 || Y > 65535 || Z > 65535
+                       ? E_INVALIDARG
+                       : prepareDispatch(State, Command);
+  if (FAILED(Result)) {
+    reportObjectError(List, Result);
+    return;
+  }
+  Command->Dispatch.GroupCount[0] = X;
+  Command->Dispatch.GroupCount[1] = Y;
+  Command->Dispatch.GroupCount[2] = Z;
+  State->append(Command.release());
+}
+
+void APIENTRY executeIndirect(D3D12DDI_HCOMMANDLIST List,
+                              D3D12DDI_HCOMMANDSIGNATURE Signature,
+                              UINT MaxCommandCount,
+                              D3D12DDIARG_BUFFER_PLACEMENT ArgumentBuffer,
+                              D3D12DDIARG_BUFFER_PLACEMENT CountBuffer) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  UINT ByteStride = 0;
+  {
+    CommandSignatureAccess Access;
+    auto *Object = *findCommandSignature(Signature);
+    if (Object && Object->Owner == State->Owner)
+      ByteStride = Object->ByteStride;
+  }
+  if (!ByteStride || ArgumentBuffer.BaseAddress.UMD.Offset % sizeof(UINT) ||
+      CountBuffer.BaseAddress.UMD.Offset % sizeof(UINT) ||
+      (!CountBuffer.BaseAddress.UMD.hResource.pDrvPrivate &&
+       CountBuffer.BaseAddress.UMD.Offset)) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  void *Data = nullptr;
+  HRESULT Result = feme::probe::getWarpBufferRange(
+      State->Owner, ArgumentBuffer.BaseAddress.UMD.hResource,
+      ArgumentBuffer.BaseAddress.UMD.Offset,
+      UINT64(MaxCommandCount) * ByteStride, Data);
+  if (SUCCEEDED(Result) && CountBuffer.BaseAddress.UMD.hResource.pDrvPrivate)
+    Result = feme::probe::getWarpBufferRange(
+        State->Owner, CountBuffer.BaseAddress.UMD.hResource,
+        CountBuffer.BaseAddress.UMD.Offset, sizeof(UINT), Data);
+  std::unique_ptr<RecordedCommand> Command;
+  if (SUCCEEDED(Result))
+    Result = prepareDispatch(State, Command);
+  if (FAILED(Result)) {
+    reportObjectError(List, Result);
+    return;
+  }
+  Command->Type = RecordedCommand::Kind::IndirectDispatch;
+  Command->ArgumentBuffer = ArgumentBuffer;
+  Command->CountBuffer = CountBuffer;
+  Command->MaxCommandCount = MaxCommandCount;
+  Command->ByteStride = ByteStride;
   State->append(Command.release());
 }
 
@@ -1479,7 +1618,8 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
         std::atomic_thread_fence(std::memory_order_seq_cst);
       continue;
     }
-    if (Command->Type == RecordedCommand::Kind::Dispatch) {
+    if (Command->Type == RecordedCommand::Kind::Dispatch ||
+        Command->Type == RecordedCommand::Kind::IndirectDispatch) {
       for (UINT J = 0; J < Command->Dispatch.BufferCount && SUCCEEDED(Result);
            ++J) {
         auto &Buffer = Command->Buffers[J];
@@ -1487,10 +1627,44 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
             Access.address(reinterpret_cast<UINT64>(Buffer.Data), Buffer.Data,
                            Buffer.SizeInBytes, Buffer.Namespace == 2);
       }
-      if (SUCCEEDED(Result))
-        Result = FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);
-      if (SUCCEEDED(Result))
-        ++DispatchesExecuted;
+      UINT Count = 1;
+      void *Arguments = nullptr;
+      if (SUCCEEDED(Result) &&
+          Command->Type == RecordedCommand::Kind::IndirectDispatch) {
+        Count = Command->MaxCommandCount;
+        Result = Access.range(Command->ArgumentBuffer.BaseAddress.UMD.hResource,
+                              Command->ArgumentBuffer.BaseAddress.UMD.Offset,
+                              UINT64(Count) * Command->ByteStride, Arguments);
+        if (SUCCEEDED(Result) &&
+            Command->CountBuffer.BaseAddress.UMD.hResource.pDrvPrivate) {
+          void *Data = nullptr;
+          Result = Access.range(Command->CountBuffer.BaseAddress.UMD.hResource,
+                                Command->CountBuffer.BaseAddress.UMD.Offset,
+                                sizeof(UINT), Data);
+          if (SUCCEEDED(Result)) {
+            UINT Requested = 0;
+            std::memcpy(&Requested, Data, sizeof(Requested));
+            if (Requested < Count)
+              Count = Requested;
+          }
+        }
+      }
+      for (UINT I = 0; I < Count && SUCCEEDED(Result); ++I) {
+        if (Arguments) {
+          std::memcpy(Command->Dispatch.GroupCount,
+                      static_cast<const char *>(Arguments) +
+                          UINT64(I) * Command->ByteStride,
+                      sizeof(Command->Dispatch.GroupCount));
+          for (UINT Dimension : Command->Dispatch.GroupCount)
+            if (Dimension > 65535)
+              Result = E_INVALIDARG;
+        }
+        if (SUCCEEDED(Result))
+          Result =
+              FeMeWarpDispatchCompute(Command->Pipeline, &Command->Dispatch);
+        if (SUCCEEDED(Result))
+          ++DispatchesExecuted;
+      }
       continue;
     }
     void *Destination = nullptr, *Source = nullptr;
@@ -1777,6 +1951,9 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnCalcPrivateFenceSize = fenceSize;
     Table.pfnCreateFence = createFence;
     Table.pfnDestroyFence = destroyFence;
+    Table.pfnCalcPrivateCommandSignatureSize = commandSignatureSize;
+    Table.pfnCreateCommandSignature = createCommandSignature;
+    Table.pfnDestroyCommandSignature = destroyCommandSignature;
 #endif
     return publish(Destination, Size, Table, 0);
   }
@@ -1818,6 +1995,7 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnSetComputeRootUnorderedAccessView = setRootUAV;
     Table.pfnSetComputeRootShaderResourceView = setRootSRV;
     Table.pfnDispatch = dispatch;
+    Table.pfnExecuteIndirect = executeIndirect;
     Table.pfnCopyBufferRegion = copyBuffer;
     Table.pfnResourceBarrier = resourceBarrier;
     Table.pfnSetMarker = setMarker;

@@ -413,6 +413,43 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Good &= LastError == E_NOTIMPL;
     LastError = S_OK;
     Lists.pfnSetPipelineState(List, Pipeline);
+    D3D12DDI_INDIRECT_ARGUMENT_DESC IndirectArgument{};
+    IndirectArgument.Type = D3D12DDI_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001 SignatureArgs{};
+    SignatureArgs.NodeMask = 1;
+    SignatureArgs.ByteStride = 16;
+    SignatureArgs.NumArgumentDescs = 1;
+    SignatureArgs.pArgumentDescs = &IndirectArgument;
+    Storage SignatureStorage(
+        Core.pfnCalcPrivateCommandSignatureSize(Device, &SignatureArgs));
+    D3D12DDI_HCOMMANDSIGNATURE Signature{SignatureStorage.data()};
+    Good &= Core.pfnCreateCommandSignature(Device, &SignatureArgs, Signature) ==
+            S_OK;
+    Good &= Core.pfnCreateCommandSignature(Device, &SignatureArgs, Signature) ==
+            E_INVALIDARG;
+    Core.pfnDestroyCommandSignature(OtherDevice, Signature);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnExecuteIndirect(List, Signature, 1, {}, {});
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Core.pfnDestroyCommandSignature(Device, Signature);
+    Lists.pfnExecuteIndirect(List, Signature, 1, {}, {});
+    Good &= LastError == E_INVALIDARG;
+    Core.pfnDestroyCommandSignature(Device, {&Other});
+    Good &= LastError == E_INVALIDARG;
+    SignatureArgs.ByteStride = 13;
+    Good &= !Core.pfnCalcPrivateCommandSignatureSize(Device, &SignatureArgs) &&
+            LastError == E_INVALIDARG;
+    SignatureArgs.ByteStride = 16;
+    SignatureArgs.hRootSignature = Root;
+    Good &= !Core.pfnCalcPrivateCommandSignatureSize(Device, &SignatureArgs) &&
+            LastError == E_INVALIDARG;
+    SignatureArgs.hRootSignature = {};
+    IndirectArgument.Type = D3D12DDI_INDIRECT_ARGUMENT_TYPE_DRAW;
+    Good &= !Core.pfnCalcPrivateCommandSignatureSize(Device, &SignatureArgs) &&
+            LastError == E_NOTIMPL;
+    LastError = S_OK;
     D3D12DDIARG_RESOURCE_BARRIER_0022 Alias{};
     Alias.Type = D3D12DDI_RESOURCE_BARRIER_TYPE_0022_RANGED;
     Alias.Flags = D3D12DDI_RESOURCE_BARRIER_FLAG_0022_ALIASING;
