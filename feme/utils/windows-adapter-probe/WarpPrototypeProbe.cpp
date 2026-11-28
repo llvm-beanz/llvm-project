@@ -699,7 +699,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                bool CBV = false, bool Inline = false,
                                bool Tables = false, bool Views = false,
                                bool Structured = false, bool Arrays = false,
-                               DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN) {
+                               DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN,
+                               bool Predication = false) {
   bool ConstantBindings = CBV || Inline;
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
@@ -984,7 +985,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
   }
   ComPtr<ID3D12Resource> ArgumentUpload, Arguments;
   constexpr UINT ArgumentBytes = 64;
-  if (Indirect) {
+  if (Indirect || Predication) {
     D3D12_RESOURCE_DESC ArgumentDesc = Desc;
     ArgumentDesc.Width = ArgumentBytes;
     Heap.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -1092,6 +1093,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                                      IID_PPV_ARGS(&Signature)));
       if (FAILED(Result))
         return Result;
+    }
+    if (Indirect || Predication) {
       if (Repeat) {
         D3D12_RESOURCE_BARRIER ToCopy{};
         ToCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1154,7 +1157,32 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       ValuesA[0] = ValuesB[0] = 0xefefefef;
     }
     List->SetComputeRootSignature(Root.Get());
-    if (Indirect) {
+    if (Predication) {
+      auto DispatchPredicated = [&]() {
+        if (Indirect)
+          List->ExecuteIndirect(Signature.Get(), 1, Arguments.Get(), 32,
+                                nullptr, 0);
+        else
+          List->Dispatch(3, 2, 1);
+      };
+      List->SetPredication(Arguments.Get(), 8, D3D12_PREDICATION_OP_EQUAL_ZERO);
+      DispatchPredicated();
+      List->SetPredication(Arguments.Get(), 16,
+                           D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
+      DispatchPredicated();
+      List->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+      DispatchPredicated();
+      Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+      List->ResourceBarrier(1, &Barrier);
+      List->SetPredication(Arguments.Get(), 24,
+                           D3D12_PREDICATION_OP_EQUAL_ZERO);
+      List->CopyBufferRegion(Output.Get(), 0, Upload.Get(), 0, Bytes);
+      Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+      Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      List->ResourceBarrier(1, &Barrier);
+      List->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    } else if (Indirect) {
       List->ExecuteIndirect(Signature.Get(), 2, Arguments.Get(), 16,
                             Arguments.Get(), 4);
       if (!Repeat)
@@ -1178,6 +1206,9 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     List->ResourceBarrier(1, &Barrier);
     List->CopyBufferRegion(Readback.Get(), 0, Output.Get(), 0, Bytes);
+    if (Predication)
+      List->SetPredication(Arguments.Get(), 16,
+                           D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
     Result = report("Close buffer command list", List->Close());
     if (FAILED(Result))
       return Result;
@@ -1282,7 +1313,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
       }
     }
-    if (Indirect) {
+    if (Indirect || Predication) {
       Result = report("Map execution-time arguments",
                       ArgumentUpload->Map(0, &NoRead, &Memory));
       if (FAILED(Result))
@@ -1291,25 +1322,38 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         ArgumentUpload->Unmap(0, &NoRead);
         return report("Missing indirect argument upload memory", E_FAIL);
       }
-      const UINT Values[16] = {0xabababab,
-                               Repeat == 0   ? 1u
-                               : Repeat == 1 ? 99u
-                                             : 0u,
-                               0,
-                               0,
-                               3,
-                               2,
-                               1,
-                               0xcdcdcdcd,
-                               Repeat == 0 ? 65536u : 3u,
-                               2,
-                               1,
-                               0xefefefef,
-                               0,
-                               0,
-                               0,
-                               0};
-      std::memcpy(Memory, Values, sizeof(Values));
+      if (Predication) {
+        const UINT64 HighBit = UINT64(1) << 40;
+        const UINT64 Values[8] = {0xabababab,
+                                  Repeat == 1 ? HighBit : 0,
+                                  Repeat ? HighBit : 0,
+                                  0,
+                                  UINT64(3) | (UINT64(2) << 32),
+                                  1,
+                                  0,
+                                  0};
+        std::memcpy(Memory, Values, sizeof(Values));
+      } else {
+        const UINT Values[16] = {0xabababab,
+                                 Repeat == 0   ? 1u
+                                 : Repeat == 1 ? 99u
+                                               : 0u,
+                                 0,
+                                 0,
+                                 3,
+                                 2,
+                                 1,
+                                 0xcdcdcdcd,
+                                 Repeat == 0 ? 65536u : 3u,
+                                 2,
+                                 1,
+                                 0xefefefef,
+                                 0,
+                                 0,
+                                 0,
+                                 0};
+        std::memcpy(Memory, Values, sizeof(Values));
+      }
       D3D12_RANGE Written{0, ArgumentBytes};
       ArgumentUpload->Unmap(0, &Written);
     }
@@ -1398,7 +1442,9 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         UINT Peer = (X % 5 + 5 * (Y % 3 + 3 * Z) + 1) % 30;
         UINT PeerGlobal = X / 5 * 5 + Peer % 5 +
                           15 * (Y / 3 * 3 + Peer / 5 % 3 + 6 * (Peer / 15));
-        UINT Executions = Indirect ? (Repeat ? 4u : 2u) : Repeat + 1;
+        UINT Executions = Predication ? (Repeat == 2 ? 5u : (Repeat + 1) * 2)
+                          : Indirect  ? (Repeat ? 4u : 2u)
+                                      : Repeat + 1;
         if (Arrays) {
           UINT Element = I % 2;
           UINT InputValue =
@@ -1630,25 +1676,54 @@ int wmain(int Argc, wchar_t **Argv) {
   bool Indirect =
       ReferenceIndirect || OrderedIndirect || DXILIndirect ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--indirect-commands") == 0);
+  bool ReferencePredication =
+      Argc == 2 && std::wcscmp(Argv[1], L"--reference-predicate-commands") == 0;
+  bool OrderedPredication =
+      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-predicate-commands") == 0;
+  bool DXILPredication =
+      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-predicate-commands") == 0;
+  bool Predication =
+      ReferencePredication || OrderedPredication || DXILPredication ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--predicate-commands") == 0);
+  bool ReferenceIndirectPredication =
+      Argc == 2 &&
+      std::wcscmp(Argv[1], L"--reference-predicate-indirect-commands") == 0;
+  bool OrderedIndirectPredication =
+      Argc == 2 &&
+      std::wcscmp(Argv[1], L"--ordered-predicate-indirect-commands") == 0;
+  bool DXILIndirectPredication =
+      Argc == 3 &&
+      std::wcscmp(Argv[1], L"--dxil-predicate-indirect-commands") == 0;
+  bool IndirectPredication =
+      ReferenceIndirectPredication || OrderedIndirectPredication ||
+      DXILIndirectPredication ||
+      (Argc == 2 &&
+       std::wcscmp(Argv[1], L"--predicate-indirect-commands") == 0);
+  Predication |= IndirectPredication;
+  Indirect |= IndirectPredication;
+  ReferencePredication |= ReferenceIndirectPredication;
+  OrderedPredication |= OrderedIndirectPredication;
+  DXILPredication |= DXILIndirectPredication;
   bool ReferencePlacedBuffers =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-placed-buffers") == 0;
   bool PlacedBuffers =
       ReferencePlacedBuffers ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
   bool Reference = ReferenceViews || ReferenceTables || ReferenceConstants ||
-                   ReferenceCBV || ReferenceIndirect ||
+                   ReferenceCBV || ReferenceIndirect || ReferencePredication ||
                    ReferenceBufferCommands || ReferencePlacedBuffers ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
       OrderedViews || OrderedTables || OrderedConstants || OrderedCBV ||
-      OrderedIndirect ||
+      OrderedIndirect || OrderedPredication ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0);
   bool Fences = Argc == 2 && std::wcscmp(Argv[1], L"--fences") == 0;
   bool DXILBufferCommands =
       DXILViews || DXILTables || DXILConstants || DXILCBV || DXILIndirect ||
+      DXILPredication ||
       (Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0);
   bool BufferCommands =
-      Inline || CBV || Indirect || DXILBufferCommands ||
+      Inline || CBV || Indirect || Predication || DXILBufferCommands ||
       OrderedBufferCommands || ReferenceBufferCommands ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0);
   bool DXILCommands =
@@ -1668,6 +1743,13 @@ int wmain(int Argc, wchar_t **Argv) {
                          "--indirect-commands|--reference-indirect-commands|"
                          "--ordered-indirect-commands|"
                          "--dxil-indirect-commands FILE|"
+                         "--predicate-commands|--reference-predicate-commands|"
+                         "--ordered-predicate-commands|"
+                         "--dxil-predicate-commands FILE|"
+                         "--predicate-indirect-commands|"
+                         "--reference-predicate-indirect-commands|"
+                         "--ordered-predicate-indirect-commands|"
+                         "--dxil-predicate-indirect-commands FILE|"
                          "--cbv-commands|--reference-cbv-commands|"
                          "--ordered-cbv-commands|--dxil-cbv-commands FILE|"
                          "--constant-commands|--reference-constant-commands|"
@@ -1811,7 +1893,7 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseBufferCommands(
         Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
         OrderedBufferCommands, Indirect, CBV, Inline, Tables, Views,
-        StructuredViews, Arrays, Typed);
+        StructuredViews, Arrays, Typed, Predication);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();
@@ -1972,18 +2054,18 @@ int wmain(int Argc, wchar_t **Argv) {
                   Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
                   Data.MakeResidentCallbacks, Data.EvictCallbacks,
                   Data.HasRuntimePagingQueue);
-      UINT ExpectedHeaps = CBV || Indirect  ? 6
-                           : BufferCommands ? 4
-                           : PlacedBuffers  ? 3
-                                            : 1;
-      ValidOwned &= Data.Created == ExpectedHeaps &&
-                    Data.Destroyed == ExpectedHeaps && Data.Maps > 0 &&
-                    Data.Maps == Data.Unmaps &&
-                    Data.MakeResidentCallbacks == (CBV || Indirect  ? 7u
-                                                   : BufferCommands ? 5u
-                                                   : PlacedBuffers  ? 4u
-                                                                    : 2u) &&
-                    Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
+      UINT ExpectedHeaps = CBV || Indirect || Predication ? 6
+                           : BufferCommands               ? 4
+                           : PlacedBuffers                ? 3
+                                                          : 1;
+      ValidOwned &=
+          Data.Created == ExpectedHeaps && Data.Destroyed == ExpectedHeaps &&
+          Data.Maps > 0 && Data.Maps == Data.Unmaps &&
+          Data.MakeResidentCallbacks == (CBV || Indirect || Predication ? 7u
+                                         : BufferCommands               ? 5u
+                                         : PlacedBuffers                ? 4u
+                                                                        : 2u) &&
+          Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
     if (Commands || PlacedBuffers) {
@@ -1996,14 +2078,15 @@ int wmain(int Argc, wchar_t **Argv) {
       std::printf("Native command execution: dispatches=%u copies=%u\n",
                   Dispatches, Copies);
       ValidOwned &= Audit &&
-                    Dispatches == (Indirect         ? 10u
+                    Dispatches == (Predication      ? 11u
+                                   : Indirect       ? 10u
                                    : BufferCommands ? 9u
                                    : PlacedBuffers  ? 0u
                                                     : 6u) &&
-                    Copies == (Indirect         ? 7u
-                               : BufferCommands ? 4u
-                               : PlacedBuffers  ? 2u
-                                                : 0u);
+                    Copies == (Indirect || Predication ? 7u
+                               : BufferCommands        ? 4u
+                               : PlacedBuffers         ? 2u
+                                                       : 0u);
     }
   }
 #ifdef FEME_WARP_COEXIST

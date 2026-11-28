@@ -784,6 +784,37 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned execution-time buffer predication
+
+Command lists now retain resource/offset/operation predication state, with
+disabled defaults and reset. Direct/indirect dispatch and buffer copies
+snapshot that state individually; submission clones preserve it independently
+of subsequent setters or list teardown. Ordered execution reads the exact
+eight-byte live resource range, then suppresses commands whose value matches
+the selected equal/not-equal-zero operation. Barriers remain unconditional.
+Offset alignment, live owner/range, operation and recording/queue eligibility
+are checked; failures use the existing recording or queue/device-error path.
+Predicate values are not frozen when recording.
+
+Eight controls cover direct and dispatch-only indirect execution through owned
+SM 5.0, original SM 6.0 DXIL, independent system WARP and held/pending teardown.
+Predicate uploads occur after recording and are copied by preceding commands.
+Values include zero and bit 40, proving a full 64-bit comparison. Each list
+changes both operation and offset, disables predication for another dispatch,
+and suppresses a clobbering buffer copy while its transition barriers execute.
+The oracle expects cumulative **2/4/5** dispatches over the three replays and
+checks every output/guard. A final enabled setter exercises disabled reset on
+the next recording. Native tests reject invalid operations, misalignment and
+unregistered resources, and admit disabling with either comparison operation.
+
+Final validation: **4403** full-suite passes, **65/65** callback passes and
+**99/99** stock-runtime passes. Inventory **v10** validates sixty-three unique
+OS gates and the unchanged bridge ABI 2. The first native compile warned about
+an omitted aggregate predicate initializer; explicit member initialization
+fixed it before the warning-as-error standalone build. Queries, full
+transitions/splits/ranges, indirect root changes/draws and general removal
+wakeups still remain open; this is not W2 closeout.
+
 #### Owned scalar R32 typed buffer views
 
 R32_UINT/R32_SINT/R32_FLOAT SRV/UAV descriptors retain the DXGI format beside

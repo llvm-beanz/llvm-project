@@ -408,6 +408,21 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Lists.pfnOMSetRenderTargets(List, 0, nullptr, TRUE, nullptr);
     Lists.pfnSetPredication(List, {}, 0, D3D12DDI_PREDICATION_OP_EQUAL_ZERO);
     Good &= LastError == S_OK;
+    Lists.pfnSetPredication(List, {}, 0,
+                            static_cast<D3D12DDI_PREDICATION_OP>(2));
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    D3D12DDI_HRESOURCE UnknownPredicate{reinterpret_cast<void *>(1)};
+    Lists.pfnSetPredication(List, UnknownPredicate, 1,
+                            D3D12DDI_PREDICATION_OP_EQUAL_ZERO);
+    Good &= LastError == E_INVALIDARG;
+    Lists.pfnSetPredication(List, UnknownPredicate, 0,
+                            D3D12DDI_PREDICATION_OP_NOT_EQUAL_ZERO);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnSetPredication(List, {}, 0,
+                            D3D12DDI_PREDICATION_OP_NOT_EQUAL_ZERO);
+    Good &= LastError == S_OK;
     VertexViews[31].BufferLocation = 1;
     Lists.pfnIASetVertexBuffers(List, 0, 32, VertexViews);
     Good &= LastError == E_NOTIMPL;

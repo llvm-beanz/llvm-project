@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 9)
+  set(FEME_WARP_PROFILE_VERSION 10)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -530,6 +530,18 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --reference-indirect-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-indirect-commands
     COMMAND warp-compiler-harness --ordered-indirect-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-predicate-commands
+    COMMAND warp-compiler-harness --predicate-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-predicate-commands
+    COMMAND warp-compiler-harness --reference-predicate-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-predicate-commands
+    COMMAND warp-compiler-harness --ordered-predicate-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-predicate-indirect-commands
+    COMMAND warp-compiler-harness --predicate-indirect-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-predicate-indirect-commands
+    COMMAND warp-compiler-harness --reference-predicate-indirect-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-predicate-indirect-commands
+    COMMAND warp-compiler-harness --ordered-predicate-indirect-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-cbv-commands
     COMMAND warp-compiler-harness --cbv-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-reference-cbv-commands
@@ -671,6 +683,12 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
         "${WARP_DXIL_BUFFER_FIXTURE}")
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-indirect-commands
       COMMAND warp-compiler-harness --dxil-indirect-commands
+        "${WARP_DXIL_BUFFER_FIXTURE}")
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-predicate-commands
+      COMMAND warp-compiler-harness --dxil-predicate-commands
+        "${WARP_DXIL_BUFFER_FIXTURE}")
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-predicate-indirect-commands
+      COMMAND warp-compiler-harness --dxil-predicate-indirect-commands
         "${WARP_DXIL_BUFFER_FIXTURE}")
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-cbv-commands
       COMMAND warp-compiler-harness --dxil-cbv-commands

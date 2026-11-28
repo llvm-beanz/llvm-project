@@ -19,7 +19,8 @@ The W1 v1 inventory records the completed internal headless subset. W2 now
 adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
 decreasing monitored fences, dispatch-only indirect commands and multiple
 root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
-R32_UINT/R32_SINT/R32_FLOAT typed buffer views; inventory v9
+R32_UINT/R32_SINT/R32_FLOAT typed buffer views and buffer-command predication;
+inventory v10
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1763,7 +1764,13 @@ it to FeMe's distinct format numbering; old compilation/dispatch versions
 are rejected. Only buffer and typed-UAV read/write format support is added,
 not texture/render-target support. Unbounded/general heaps, other typed
 formats, image/counter descriptors and broader residency remain open.
-See the implementation log and v9 inventory.
+Predication captures resource/offset/operation for each dispatch or buffer
+copy, then reads the exact 64-bit live buffer value at ordered execution.
+Both zero-comparison operations suppress matching commands; barriers remain
+unconditional. List reset disables predication, and pending submissions retain
+their captured state. Direct/indirect DXBC/DXIL, separate system-WARP and held
+teardown controls pass. Queries and remaining synchronization still stay open.
+See the implementation log and v10 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

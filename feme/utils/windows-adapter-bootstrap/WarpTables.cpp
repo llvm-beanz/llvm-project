@@ -1251,6 +1251,12 @@ struct CommandRecorder {
   bool InUse = false;
 };
 
+struct PredicationState {
+  D3D12DDI_HRESOURCE Resource{};
+  UINT64 Offset = 0;
+  D3D12DDI_PREDICATION_OP Operation = D3D12DDI_PREDICATION_OP_EQUAL_ZERO;
+};
+
 struct RecordedCommand {
   enum class Kind {
     Dispatch,
@@ -1275,6 +1281,7 @@ struct RecordedCommand {
   D3D12DDIARG_BUFFER_PLACEMENT CountBuffer{};
   UINT MaxCommandCount = 0;
   UINT ByteStride = 0;
+  PredicationState Predicate{};
 
   ~RecordedCommand() {
     if (Pipeline)
@@ -1324,6 +1331,7 @@ struct CommandList {
   std::array<BufferTableRange, MaxRootParameters> RootRanges{};
   std::array<UINT64, MaxRootParameters> RootTables{};
   D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
+  PredicationState Predicate{};
   UINT64 Marker = 0;
   RecordedCommand *First = nullptr;
   RecordedCommand *Last = nullptr;
@@ -1752,6 +1760,7 @@ void APIENTRY resetList(D3D12DDI_HCOMMANDLIST List,
   State->RootConstants.fill(0);
   State->RootTables.fill(0);
   State->DescriptorHeap = {};
+  State->Predicate = {};
 }
 
 void APIENTRY closeList(D3D12DDI_HCOMMANDLIST List) {
@@ -1915,6 +1924,7 @@ HRESULT prepareDispatch(CommandList *State,
   Command->Dispatch.Buffers = Command->Buffers.data();
   Command->RootConstants = State->RootConstants;
   Command->DescriptorHeap = State->DescriptorHeap;
+  Command->Predicate = State->Predicate;
   for (UINT I = 0; I < State->RootCount; ++I) {
     const auto &Parameter = State->RootParameters[I];
     if (Parameter.RangeCount) {
@@ -2055,6 +2065,7 @@ void APIENTRY copyBuffer(D3D12DDI_HCOMMANDLIST List,
   Command->Destination = Destination;
   Command->Source = Source;
   Command->Bytes = Bytes;
+  Command->Predicate = State->Predicate;
   State->append(Command);
 }
 
@@ -2233,9 +2244,30 @@ void APIENTRY setRenderTargets(D3D12DDI_HCOMMANDLIST List, UINT Count,
 void APIENTRY setPredication(D3D12DDI_HCOMMANDLIST List,
                              D3D12DDI_HRESOURCE Resource, UINT64 Offset,
                              D3D12DDI_PREDICATION_OP Operation) {
-  validateNeutralState(List,
-                       !Resource.pDrvPrivate && !Offset &&
-                           Operation == D3D12DDI_PREDICATION_OP_EQUAL_ZERO);
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  if (!(State->Flags & D3D12DDI_COMMAND_QUEUE_FLAG_COMPUTE) ||
+      (Operation != D3D12DDI_PREDICATION_OP_EQUAL_ZERO &&
+       Operation != D3D12DDI_PREDICATION_OP_NOT_EQUAL_ZERO)) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  if (!Resource.pDrvPrivate) {
+    State->Predicate = {};
+    return;
+  }
+  void *Data = nullptr;
+  HRESULT Result =
+      Offset % sizeof(UINT64)
+          ? E_INVALIDARG
+          : feme::probe::getWarpBufferRange(State->Owner, Resource, Offset,
+                                            sizeof(UINT64), Data);
+  if (FAILED(Result)) {
+    reportObjectError(List, Result);
+    return;
+  }
+  State->Predicate = {Resource, Offset, Operation};
 }
 
 HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
@@ -2299,6 +2331,21 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
       if (SUCCEEDED(Result))
         std::atomic_thread_fence(std::memory_order_seq_cst);
       continue;
+    }
+    if (Command->Predicate.Resource.pDrvPrivate) {
+      void *Data = nullptr;
+      Result = Access.range(Command->Predicate.Resource,
+                            Command->Predicate.Offset, sizeof(UINT64), Data);
+      if (FAILED(Result))
+        continue;
+      UINT64 Value = 0;
+      std::memcpy(&Value, Data, sizeof(Value));
+      bool Skip =
+          Command->Predicate.Operation == D3D12DDI_PREDICATION_OP_EQUAL_ZERO
+              ? Value == 0
+              : Value != 0;
+      if (Skip)
+        continue;
     }
     if (Command->Type == RecordedCommand::Kind::Dispatch ||
         Command->Type == RecordedCommand::Kind::IndirectDispatch) {
