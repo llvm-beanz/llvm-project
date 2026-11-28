@@ -137836,3 +137836,25 @@ Next: implement texture storage/subresource metadata with shared image layouts,
 preserving D3D mip/array indexing and the existing 96-byte WARP allocation ABI.
 Complete image views/samplers, other resources, root contracts and ordering
 still remain. W2 is not complete.
+
+# W2 prerequisite: aligned shared image storage
+
+Commit 27f7bec94097 extends the existing FeMeImage layout helper with optional
+independent row/slice alignment. Defaults remain one, so existing packed
+Vulkan and runner geometry is unchanged. Aligned slices preserve mip-major
+storage, fixed array layers and halving 3D depth while aligning mip/layer
+offsets. Frontends must still bound sizes before allocation.
+
+Two tests check non-power-of-two aligned array geometry and shrinking 3D
+mips, including exact pitches, offsets, final array extent and depth sizes.
+All 17 subresource-layout tests pass. Full FeMe passes 4415 with 15 skipped
+and 10 unsupported, callbacks pass 65/65 and stock-runtime/coexistence
+363/363 after shared DLL relinking. FeMe CPU Vulkan Device identity was
+confirmed in the launch shell. The v18 buffer-only inventory and bridge4/
+artifact11 are unchanged; there is no new texture advertisement or CTS result.
+Diff-scoped formatting was followed by preserving original line bytes for
+unchanged spans, avoiding incidental CRLF churn.
+
+Next: materialize owned texture storage and D3D subresource metadata using
+these shared layouts. Texture views/samplers, complete bindings, resource
+classes and ordering remain open. W2 is not complete.
