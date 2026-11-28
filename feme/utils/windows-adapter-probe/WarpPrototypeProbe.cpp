@@ -457,6 +457,134 @@ HRESULT waitQueue(ID3D12CommandQueue *Queue, ID3D12Fence *Fence, UINT64 Value) {
   return FAILED(Result) ? Result : waitFence(Fence, Value);
 }
 
+HRESULT exercisePlacedBuffers(ID3D12Device *Device) {
+  constexpr UINT64 Bytes = 4097;
+  D3D12_RESOURCE_DESC Desc{};
+  Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  Desc.Width = Bytes;
+  Desc.Height = 1;
+  Desc.DepthOrArraySize = 1;
+  Desc.MipLevels = 1;
+  Desc.SampleDesc.Count = 1;
+  Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  auto Info = Device->GetResourceAllocationInfo(0, 1, &Desc);
+  if (Info.SizeInBytes != 65536 || Info.Alignment != 65536)
+    return report("Placed buffer allocation footprint mismatch", E_FAIL);
+  D3D12_HEAP_DESC HeapDesc{};
+  HeapDesc.SizeInBytes = 3 * Info.SizeInBytes;
+  HeapDesc.Alignment = Info.Alignment;
+  HeapDesc.Properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+  HeapDesc.Properties.CreationNodeMask = 1;
+  HeapDesc.Properties.VisibleNodeMask = 1;
+  HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  ComPtr<ID3D12Heap> Heap;
+  HRESULT Result = report("Create placed-buffer heap",
+                          Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Heap)));
+  if (FAILED(Result))
+    return Result;
+  ComPtr<ID3D12Resource> Buffers[3];
+  for (UINT I = 0; I < 3; ++I) {
+    Result = report(
+        "CreatePlacedResource",
+        Device->CreatePlacedResource(Heap.Get(), I == 1 ? Info.SizeInBytes : 0,
+                                     &Desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                     nullptr, IID_PPV_ARGS(&Buffers[I])));
+    if (FAILED(Result))
+      return Result;
+  }
+  if (!Buffers[0]->GetGPUVirtualAddress() ||
+      Buffers[1]->GetGPUVirtualAddress() !=
+          Buffers[0]->GetGPUVirtualAddress() + Info.SizeInBytes ||
+      Buffers[2]->GetGPUVirtualAddress() != Buffers[0]->GetGPUVirtualAddress())
+    return report("Placed buffer GPUVA mismatch", E_FAIL);
+  D3D12_RANGE NoRead{0, 0}, Written{0, static_cast<SIZE_T>(Bytes)};
+  for (UINT I = 0; I < 2; ++I) {
+    void *Data = nullptr;
+    Result = report("Map placed buffer", Buffers[I]->Map(0, &NoRead, &Data));
+    if (FAILED(Result))
+      return Result;
+    if (!Data) {
+      Buffers[I]->Unmap(0, &NoRead);
+      return report("Missing placed buffer mapping", E_FAIL);
+    }
+    for (UINT64 J = 0; J < Bytes; ++J)
+      static_cast<unsigned char *>(Data)[J] =
+          static_cast<unsigned char>(J * (I ? 5 : 3) + (I ? 11 : 7));
+    Buffers[I]->Unmap(0, &Written);
+  }
+  void *Alias = nullptr;
+  Result =
+      report("Map overlapping placement", Buffers[2]->Map(0, &NoRead, &Alias));
+  if (FAILED(Result))
+    return Result;
+  if (!Alias) {
+    Buffers[2]->Unmap(0, &NoRead);
+    return report("Missing alias mapping", E_FAIL);
+  }
+  static_cast<unsigned char *>(Alias)[0] = 0x42;
+  Buffers[2]->Unmap(0, &Written);
+  Buffers[2].Reset();
+  D3D12_HEAP_PROPERTIES ReadbackHeap{};
+  ReadbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
+  ReadbackHeap.CreationNodeMask = 1;
+  ReadbackHeap.VisibleNodeMask = 1;
+  Desc.Width = 2 * Bytes;
+  ComPtr<ID3D12Resource> Readback;
+  Result = report(
+      "Create placed-buffer readback",
+      Device->CreateCommittedResource(&ReadbackHeap, D3D12_HEAP_FLAG_NONE,
+                                      &Desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                      nullptr, IID_PPV_ARGS(&Readback)));
+  if (FAILED(Result))
+    return Result;
+  D3D12_COMMAND_QUEUE_DESC QueueDesc{};
+  QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+  ComPtr<ID3D12CommandQueue> Queue;
+  ComPtr<ID3D12CommandAllocator> Allocator;
+  ComPtr<ID3D12GraphicsCommandList> List;
+  ComPtr<ID3D12Fence> Fence;
+  Result = Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue));
+  if (SUCCEEDED(Result))
+    Result = Device->CreateCommandAllocator(QueueDesc.Type,
+                                            IID_PPV_ARGS(&Allocator));
+  if (SUCCEEDED(Result))
+    Result = Device->CreateCommandList(0, QueueDesc.Type, Allocator.Get(),
+                                       nullptr, IID_PPV_ARGS(&List));
+  if (SUCCEEDED(Result))
+    Result =
+        Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
+  if (FAILED(Result))
+    return report("Create placed-buffer copy objects", Result);
+  List->CopyBufferRegion(Readback.Get(), 0, Buffers[0].Get(), 0, Bytes);
+  List->CopyBufferRegion(Readback.Get(), Bytes, Buffers[1].Get(), 0, Bytes);
+  Result = List->Close();
+  if (FAILED(Result))
+    return report("Close placed-buffer copy list", Result);
+  ID3D12CommandList *Lists[] = {List.Get()};
+  Queue->ExecuteCommandLists(1, Lists);
+  Result = waitQueue(Queue.Get(), Fence.Get(), 1);
+  if (FAILED(Result))
+    return Result;
+  void *Data = nullptr;
+  D3D12_RANGE Read{0, static_cast<SIZE_T>(Desc.Width)};
+  Result = Readback->Map(0, &Read, &Data);
+  if (FAILED(Result))
+    return report("Map placed-buffer readback", Result);
+  bool Valid = Data != nullptr;
+  if (Data)
+    for (UINT64 J = 0; J < Bytes; ++J) {
+      auto *Values = static_cast<const unsigned char *>(Data);
+      Valid &=
+          Values[J] == (J ? static_cast<unsigned char>(J * 3 + 7) : 0x42) &&
+          Values[Bytes + J] == static_cast<unsigned char>(J * 5 + 11);
+    }
+  Readback->Unmap(0, &NoRead);
+  if (!Valid)
+    return report("Placed-buffer alias/copy readback mismatch", E_FAIL);
+  return report("Placed-buffer removal status",
+                Device->GetDeviceRemovedReason());
+}
+
 struct DelayedFenceSignal {
   ID3D12CommandQueue *Queue;
   ID3D12Fence *Fence;
@@ -883,7 +1011,12 @@ int wmain(int Argc, wchar_t **Argv) {
 #endif
   bool ReferenceBufferCommands =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-buffer-commands") == 0;
-  bool Reference = ReferenceBufferCommands ||
+  bool ReferencePlacedBuffers =
+      Argc == 2 && std::wcscmp(Argv[1], L"--reference-placed-buffers") == 0;
+  bool PlacedBuffers =
+      ReferencePlacedBuffers ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
+  bool Reference = ReferenceBufferCommands || ReferencePlacedBuffers ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
       Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0;
@@ -900,13 +1033,14 @@ int wmain(int Argc, wchar_t **Argv) {
   bool ExpectShaderRejection =
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
   if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands &&
-      !Fences) {
+      !Fences && !PlacedBuffers) {
     std::fprintf(stderr, "Usage: warp-prototype-harness "
                          "[--reference|--expect-shader-rejection|--commands|"
                          "--buffer-commands|--dxil-commands FILE|"
                          "--dxil-buffer-commands FILE|--fences|"
                          "--ordered-buffer-commands|"
                          "--reference-buffer-commands|"
+                         "--placed-buffers|--reference-placed-buffers|"
                          "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
@@ -1012,6 +1146,8 @@ int wmain(int Argc, wchar_t **Argv) {
   }
   if (SUCCEEDED(Result))
     Result = exerciseBuffer(Device.Get());
+  if (SUCCEEDED(Result) && PlacedBuffers)
+    Result = exercisePlacedBuffers(Device.Get());
   if (SUCCEEDED(Result) && Fences)
     Result = exerciseFences(Device.Get());
   if (SUCCEEDED(Result) && Commands)
@@ -1184,15 +1320,17 @@ int wmain(int Argc, wchar_t **Argv) {
                   Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
                   Data.MakeResidentCallbacks, Data.EvictCallbacks,
                   Data.HasRuntimePagingQueue);
-      UINT ExpectedHeaps = BufferCommands ? 4 : 1;
+      UINT ExpectedHeaps = BufferCommands ? 4 : PlacedBuffers ? 3 : 1;
       ValidOwned &= Data.Created == ExpectedHeaps &&
                     Data.Destroyed == ExpectedHeaps && Data.Maps > 0 &&
                     Data.Maps == Data.Unmaps &&
-                    Data.MakeResidentCallbacks == (BufferCommands ? 5u : 2u) &&
+                    Data.MakeResidentCallbacks == (BufferCommands  ? 5u
+                                                   : PlacedBuffers ? 4u
+                                                                   : 2u) &&
                     Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
-    if (Commands) {
+    if (Commands || PlacedBuffers) {
       using CommandAuditFn = void(APIENTRY *)(UINT *, UINT *);
       auto Audit = reinterpret_cast<CommandAuditFn>(
           GetProcAddress(Module, "FeMeWarpGetCommandAudit"));
@@ -1201,8 +1339,13 @@ int wmain(int Argc, wchar_t **Argv) {
         Audit(&Dispatches, &Copies);
       std::printf("Native command execution: dispatches=%u copies=%u\n",
                   Dispatches, Copies);
-      ValidOwned &= Audit && Dispatches == (BufferCommands ? 9u : 6u) &&
-                    Copies == (BufferCommands ? 4u : 0u);
+      ValidOwned &= Audit &&
+                    Dispatches == (BufferCommands  ? 9u
+                                   : PlacedBuffers ? 0u
+                                                   : 6u) &&
+                    Copies == (BufferCommands  ? 4u
+                               : PlacedBuffers ? 2u
+                                               : 0u);
     }
   }
 #ifdef FEME_WARP_COEXIST

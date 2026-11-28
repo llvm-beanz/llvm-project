@@ -44,6 +44,8 @@ struct ResourceState {
   HeapState *Heap;
   D3D12DDIARG_CREATERESOURCE_0003 Desc;
   ResourceState *Next = nullptr;
+  UINT64 Offset = 0;
+  bool PlacementBacking = false;
 };
 
 WarpDeviceState *deviceState(D3D12DDI_HDEVICE Device) {
@@ -69,10 +71,11 @@ HRESULT validateResource(const D3D12DDIARG_CREATERESOURCE_0003 *Args,
   if (!Args)
     return E_INVALIDARG;
   if (Args->ResourceType != D3D12DDI_RT_BUFFER ||
-      Args->Layout != D3D12DDI_TL_ROW_MAJOR || Args->pRowMajorLayout ||
-      Args->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate ||
-      Args->ReuseBufferGPUVA.BaseAddress.UMD.Offset)
+      Args->Layout != D3D12DDI_TL_ROW_MAJOR || Args->pRowMajorLayout)
     return E_NOTIMPL;
+  if (!Args->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate &&
+      Args->ReuseBufferGPUVA.BaseAddress.UMD.Offset)
+    return E_INVALIDARG;
   constexpr UINT AllowedFlags =
       D3D12DDI_RESOURCE_FLAG_0003_SHADER_RESOURCE |
       D3D12DDI_RESOURCE_FLAG_0003_SIMULTANEOUS_ACCESS |
@@ -115,6 +118,16 @@ HRESULT validateCreation(const D3D12DDIARG_CREATEHEAP_0001 *Heap,
                          D3D12DDI_HPROTECTEDRESOURCESESSION_0030 Protected) {
   if (Protected.pDrvPrivate)
     return E_NOTIMPL;
+  if (!Heap) {
+    if (!Resource ||
+        !Resource->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate)
+      return E_NOTIMPL;
+    UINT64 Size = 0;
+    return validateResource(Resource, Size);
+  }
+  if (Resource &&
+      Resource->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate)
+    return E_INVALIDARG;
   HRESULT Result = validateHeap(Heap);
   if (FAILED(Result))
     return Result;
@@ -129,11 +142,50 @@ HRESULT validateCreation(const D3D12DDIARG_CREATEHEAP_0001 *Heap,
   return S_OK;
 }
 
+// The caller holds the resource registry lock throughout lookup and use.
+HRESULT validatePlacement(WarpDeviceState *Owner,
+                          const D3D12DDIARG_CREATERESOURCE_0003 *Args,
+                          ResourceState *&Backing, UINT64 &Offset) {
+  Backing = nullptr;
+  if (!Owner || !Args)
+    return E_INVALIDARG;
+  const auto &Placement = Args->ReuseBufferGPUVA.BaseAddress.UMD;
+  for (auto *Buffer = static_cast<ResourceState *>(Owner->ResourceList); Buffer;
+       Buffer = Buffer->Next)
+    if (Buffer == Placement.hResource.pDrvPrivate) {
+      Backing = Buffer;
+      break;
+    }
+  UINT64 Size = 0;
+  HRESULT Result = validateResource(Args, Size);
+  if (FAILED(Result))
+    return Result;
+  if (!Backing || !Backing->Heap->Locked || !Backing->Heap->Memory ||
+      Placement.Offset % BufferAlignment ||
+      Placement.Offset > Backing->Desc.Width ||
+      Size > Backing->Desc.Width - Placement.Offset)
+    return E_INVALIDARG;
+  Offset = Backing->Offset + Placement.Offset;
+  return S_OK;
+}
+
 D3D12DDI_HEAP_AND_RESOURCE_SIZES APIENTRY calcPrivateSizes(
     D3D12DDI_HDEVICE Device, const D3D12DDIARG_CREATEHEAP_0001 *Heap,
     const D3D12DDIARG_CREATERESOURCE_0003 *Resource,
     D3D12DDI_HPROTECTEDRESOURCESESSION_0030 Protected) {
   HRESULT Result = validateCreation(Heap, Resource, Protected);
+  if (SUCCEEDED(Result) && !Heap) {
+    auto *Owner = deviceState(Device);
+    if (!Owner)
+      Result = E_INVALIDARG;
+    else {
+      AcquireSRWLockShared(&Owner->ResourceLock);
+      ResourceState *Backing = nullptr;
+      UINT64 Offset = 0;
+      Result = validatePlacement(Owner, Resource, Backing, Offset);
+      ReleaseSRWLockShared(&Owner->ResourceLock);
+    }
+  }
   if (FAILED(Result)) {
     if (Heap)
       std::fprintf(stderr,
@@ -145,7 +197,7 @@ D3D12DDI_HEAP_AND_RESOURCE_SIZES APIENTRY calcPrivateSizes(
     reportError(deviceState(Device), Result);
     return {};
   }
-  return {sizeof(HeapState), Resource ? sizeof(ResourceState) : 0};
+  return {Heap ? sizeof(HeapState) : 0, Resource ? sizeof(ResourceState) : 0};
 }
 
 HRESULT releaseAllocation(HeapState *State) {
@@ -246,17 +298,48 @@ HRESULT APIENTRY createHeapAndResource(
     D3D12DDI_HPROTECTEDRESOURCESESSION_0030 Protected,
     D3D12DDI_HRESOURCE Resource) {
   auto *Owner = deviceState(Device);
-  if (!Owner || !Heap.pDrvPrivate || (ResourceArgs && !Resource.pDrvPrivate) ||
+  if (!Owner || (HeapArgs && !Heap.pDrvPrivate) ||
+      (ResourceArgs && !Resource.pDrvPrivate) ||
       (!ResourceArgs && Resource.pDrvPrivate) || ClearValues)
     return E_INVALIDARG;
+  HRESULT Result = validateCreation(HeapArgs, ResourceArgs, Protected);
+  if (FAILED(Result))
+    return Result;
+  if (!HeapArgs) {
+    AcquireSRWLockExclusive(&Owner->ResourceLock);
+    ResourceState *Backing = nullptr;
+    UINT64 Offset = 0;
+    Result = validatePlacement(Owner, ResourceArgs, Backing, Offset);
+    if (SUCCEEDED(Result) &&
+        (Resource.pDrvPrivate == ResourceArgs->ReuseBufferGPUVA.BaseAddress.UMD
+                                     .hResource.pDrvPrivate ||
+         (Heap.pDrvPrivate && Heap.pDrvPrivate != Backing->Heap)))
+      Result = E_INVALIDARG;
+    if (SUCCEEDED(Result))
+      for (auto *Buffer = static_cast<ResourceState *>(Owner->ResourceList);
+           Buffer; Buffer = Buffer->Next)
+        if (Buffer == Resource.pDrvPrivate) {
+          Result = E_INVALIDARG;
+          break;
+        }
+    if (SUCCEEDED(Result)) {
+      auto *Buffer = ::new (Resource.pDrvPrivate)
+          ResourceState{Owner, Backing->Heap, *ResourceArgs};
+      Buffer->Offset = Offset;
+      Buffer->Next = static_cast<ResourceState *>(Owner->ResourceList);
+      Owner->ResourceList = Buffer;
+      Backing->PlacementBacking = true;
+      ++Buffer->Heap->ResourceCount;
+      ++Owner->LiveResources;
+    }
+    ReleaseSRWLockExclusive(&Owner->ResourceLock);
+    return Result;
+  }
   if (!Owner->RTDevice || !Owner->KTCallbacks ||
       !Owner->KTCallbacks->pfnLockCb || !Owner->KTCallbacks->pfnUnlockCb ||
       !Owner->UMCallbacks || !Owner->UMCallbacks->pfnAllocateCb ||
       !Owner->UMCallbacks->pfnDeallocateCb)
     return E_NOINTERFACE;
-  HRESULT Result = validateCreation(HeapArgs, ResourceArgs, Protected);
-  if (FAILED(Result))
-    return Result;
   auto *State = ::new (Heap.pDrvPrivate) HeapState{
       Owner, RTResource.handle, static_cast<SIZE_T>(HeapArgs->ByteSize),
       HeapArgs->CPUPageProperty};
@@ -425,7 +508,7 @@ checkVirtualAddress(D3D12DDI_HDEVICE Device, D3D12DDI_HRESOURCE Resource) {
     reportError(deviceState(Device), E_INVALIDARG);
     return 0;
   }
-  return reinterpret_cast<ULONG_PTR>(Buffer->Heap->Memory);
+  return reinterpret_cast<ULONG_PTR>(Buffer->Heap->Memory) + Buffer->Offset;
 }
 
 D3DKMT_HANDLE APIENTRY checkAllocationHandle(D3D12DDI_HDEVICE Device,
@@ -567,7 +650,8 @@ HRESULT WarpBufferAccess::range(D3D12DDI_HRESOURCE Resource, UINT64 Offset,
     if (!Buffer->Heap->Locked || !Buffer->Heap->Memory ||
         Offset > Buffer->Desc.Width || Size > Buffer->Desc.Width - Offset)
       return E_INVALIDARG;
-    Data = static_cast<unsigned char *>(Buffer->Heap->Memory) + Offset;
+    Data = static_cast<unsigned char *>(Buffer->Heap->Memory) + Buffer->Offset +
+           Offset;
     return S_OK;
   }
   return E_INVALIDARG;
@@ -581,16 +665,21 @@ HRESULT WarpBufferAccess::address(UINT64 Address, void *&Data, UINT64 &Size,
     return E_INVALIDARG;
   for (auto *Buffer = static_cast<ResourceState *>(Owner->ResourceList); Buffer;
        Buffer = Buffer->Next) {
-    UINT64 Base = reinterpret_cast<UINT64>(Buffer->Heap->Memory);
-    if (!Buffer->Heap->Locked || !Base || Address < Base ||
-        Address - Base >= Buffer->Desc.Width)
+    UINT64 Base =
+        reinterpret_cast<UINT64>(Buffer->Heap->Memory) + Buffer->Offset;
+    if (Buffer->PlacementBacking || !Buffer->Heap->Locked || !Base ||
+        Address < Base || Address - Base >= Buffer->Desc.Width)
       continue;
     if (UnorderedAccess &&
         !(Buffer->Desc.Flags & D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS))
-      break;
-    Data = reinterpret_cast<void *>(Address);
-    Size = Buffer->Desc.Width - (Address - Base);
-    break;
+      continue;
+    // A root GPUVA has no resource identity. Bound overlapping aliases by the
+    // largest live logical extent, never by the implicit backing allocation.
+    UINT64 Extent = Buffer->Desc.Width - (Address - Base);
+    if (Extent > Size) {
+      Data = reinterpret_cast<void *>(Address);
+      Size = Extent;
+    }
   }
   return Data ? S_OK : E_INVALIDARG;
 }

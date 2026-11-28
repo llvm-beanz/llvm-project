@@ -43,7 +43,7 @@ if(MSVC)
   feme_add_probe_test(NAME warp-table-contract COMMAND feme-warp-table-tests)
   add_executable(feme-warp-heap-tests WarpHeap.cpp WarpHeapTests.cpp)
   target_compile_options(feme-warp-heap-tests PRIVATE /W4 /WX /wd4201 /UNDEBUG)
-  foreach(SCENARIO lifecycle validation residency)
+  foreach(SCENARIO lifecycle validation residency placement)
     feme_add_probe_test(NAME "warp-heap-${SCENARIO}"
       COMMAND feme-warp-heap-tests "${SCENARIO}")
   endforeach()

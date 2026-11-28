@@ -1470,7 +1470,7 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
         UINT64 Size = 0;
         Result = Access.address(reinterpret_cast<UINT64>(Buffer.Data), Data,
                                 Size, Buffer.Namespace == 2);
-        if (SUCCEEDED(Result) && Size != Buffer.SizeInBytes)
+        if (SUCCEEDED(Result) && Size < Buffer.SizeInBytes)
           Result = E_INVALIDARG;
       }
       if (SUCCEEDED(Result))

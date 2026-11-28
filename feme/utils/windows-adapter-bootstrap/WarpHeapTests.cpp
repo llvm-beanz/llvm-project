@@ -32,6 +32,7 @@ struct ErrorState {
   HRESULT LockResult = S_OK;
   HRESULT ResidentResult = S_OK;
   HRESULT EvictResult = S_OK;
+  UINT32 ExpectedSize = 65536;
   UINT32 ResidentFlags = 0;
 };
 
@@ -54,8 +55,8 @@ HRESULT APIENTRY allocate(D3D12DDI_HRTDEVICE Device,
   auto *Info = static_cast<feme::probe::WarpKmdAllocationInfo *>(
       Args->pAllocationInfo->pPrivateDriverData);
   if (!Info || Info->ResourceDimension != D3D10DDIRESOURCE_BUFFER ||
-      Info->TotalSize != 65536 || Info->Height != 1 || Info->Depth != 1 ||
-      Info->ArraySize != 1 || Info->MipLevels != 1 ||
+      Info->TotalSize != State->ExpectedSize || Info->Height != 1 ||
+      Info->Depth != 1 || Info->ArraySize != 1 || Info->MipLevels != 1 ||
       !(Info->Flags & feme::probe::WarpAllocationFlagShared) ||
       !(Info->Flags & feme::probe::WarpAllocationFlagInAperture)) {
     State->ValidCallbacks = false;
@@ -477,6 +478,117 @@ bool residency() {
                  "only validated heap handles reach KMD paging callbacks");
   return Valid;
 }
+
+bool placement() {
+  Fixture F;
+  F.HeapArgs.ByteSize = 3 * 65536;
+  F.ResourceArgs.Width = F.HeapArgs.ByteSize;
+  F.Errors.ExpectedSize = static_cast<UINT32>(F.HeapArgs.ByteSize);
+  bool Valid = check(F.create() == S_OK, "create placement backing buffer");
+  if (!F.Created)
+    return false;
+  auto Args = F.ResourceArgs;
+  Args.Width = 4097;
+  Args.Flags = D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS;
+  Args.ReuseBufferGPUVA.BaseAddress.UMD = {F.Resource, 65536};
+  auto Sizes =
+      F.Table.pfnCalcPrivateHeapAndResourceSizes(F.Device, nullptr, &Args, {});
+  Valid &= check(!Sizes.Heap && Sizes.Resource,
+                 "placed buffer requires no new heap storage");
+  D3D12DDI_HRESOURCE Placed{};
+  Placed.pDrvPrivate =
+      HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Sizes.Resource);
+  if (!Placed.pDrvPrivate)
+    return false;
+  auto Create = [&](const D3D12DDIARG_CREATERESOURCE_0003 &Desc,
+                    D3D12DDI_HDEVICE Device) {
+    return F.Table.pfnCreateHeapAndResource(Device, nullptr, {}, {}, &Desc,
+                                            nullptr, {}, Placed);
+  };
+  Args.ReuseBufferGPUVA.BaseAddress.UMD.Offset = 1;
+  Valid &= check(Create(Args, F.Device) == E_INVALIDARG,
+                 "reject misaligned buffer placement");
+  Args.ReuseBufferGPUVA.BaseAddress.UMD.Offset = 2 * 65536;
+  Args.Width = 65537;
+  Valid &= check(Create(Args, F.Device) == E_INVALIDARG,
+                 "placement includes rounded allocation extent");
+  Args.Width = 4097;
+  Args.ReuseBufferGPUVA.BaseAddress.UMD.Offset = 65536;
+  Fixture Other;
+  Valid &= check(Create(Args, Other.Device) == E_INVALIDARG,
+                 "reject a foreign placement backing handle");
+  bool Created = Create(Args, F.Device) == S_OK;
+  Valid &= check(Created && F.Errors.Allocations == 1 &&
+                     F.State.LiveHeaps == 1 && F.State.LiveResources == 2,
+                 "placement shares the existing allocation");
+  if (Created) {
+    Valid &= check(Create(Args, F.Device) == E_INVALIDARG &&
+                       F.State.LiveResources == 2,
+                   "reject creation over an existing placed resource");
+    auto *Expected = static_cast<unsigned char *>(F.Errors.Memory) + 65536;
+    void *Data = nullptr;
+    UINT64 Bytes = 0;
+    UINT64 Address = F.Table.pfnCheckResourceVirtualAddress(F.Device, Placed);
+    Valid &= check(Address == reinterpret_cast<UINT64>(Expected) &&
+                       feme::probe::getWarpBufferRange(&F.State, Placed, 4096,
+                                                       1, Data) == S_OK &&
+                       Data == Expected + 4096,
+                   "placed ranges and GPUVA include the heap offset");
+    Valid &= check(feme::probe::getWarpBufferAddress(&F.State, Address, Data,
+                                                     Bytes, true) == S_OK &&
+                       Data == Expected && Bytes == 4097,
+                   "placed root addresses use logical buffer bounds");
+    Valid &= check(feme::probe::getWarpBufferAddress(
+                       &F.State, Address + 4097, Data, Bytes) == E_INVALIDARG,
+                   "backing buffer does not expose placement padding");
+    auto AliasArgs = Args;
+    AliasArgs.Width = 1;
+    D3D12DDI_HRESOURCE Alias{};
+    Alias.pDrvPrivate =
+        HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Sizes.Resource);
+    if (!Alias.pDrvPrivate)
+      Valid = false;
+    else {
+      bool AliasCreated = F.Table.pfnCreateHeapAndResource(
+                              F.Device, nullptr, {}, {}, &AliasArgs, nullptr,
+                              {}, Alias) == S_OK;
+      Valid &=
+          check(AliasCreated &&
+                    feme::probe::getWarpBufferAddress(&F.State, Address, Data,
+                                                      Bytes, true) == S_OK &&
+                    Bytes == 4097,
+                "a smaller alias does not shadow a valid root buffer extent");
+      if (AliasCreated) {
+        Valid &= check(feme::probe::getWarpBufferRange(&F.State, Alias, 0, 2,
+                                                       Data) == E_INVALIDARG,
+                       "resource-handle bounds remain alias-specific");
+        F.Table.pfnDestroyHeapAndResource(F.Device, {}, Alias);
+      }
+      HeapFree(GetProcessHeap(), 0, Alias.pDrvPrivate);
+    }
+    Expected[4096] = 0x93;
+    F.Table.pfnDestroyHeapAndResource(F.Device, F.Heap, F.Resource);
+    Valid &= check(F.State.LiveResources == 2 && F.State.LiveHeaps == 1 &&
+                       F.Errors.Deallocations == 0 &&
+                       F.Errors.Result == E_INVALIDARG,
+                   "reject heap destruction with a live placement");
+    F.Table.pfnDestroyHeapAndResource(F.Device, {}, Placed);
+    Valid &= check(F.State.LiveResources == 1 && F.Errors.Deallocations == 0 &&
+                       Expected[4096] == 0x93,
+                   "placed destruction retains backing memory");
+    auto Stale = Args;
+    Stale.ReuseBufferGPUVA.BaseAddress.UMD.hResource = Placed;
+    Valid &= check(Create(Stale, F.Device) == E_INVALIDARG,
+                   "reject stale placement handles before dereferencing");
+  }
+  HeapFree(GetProcessHeap(), 0, Placed.pDrvPrivate);
+  F.destroy();
+  Valid &= check(F.Errors.ValidCallbacks && F.Errors.Unlocks == 1 &&
+                     F.Errors.Deallocations == 1 && !F.State.LiveHeaps &&
+                     !F.State.LiveResources,
+                 "placed resources release one physical allocation");
+  return Valid;
+}
 } // namespace
 
 int wmain(int Argc, wchar_t **Argv) {
@@ -489,6 +601,8 @@ int wmain(int Argc, wchar_t **Argv) {
     Passed = validation();
   else if (std::wcscmp(Argv[1], L"residency") == 0)
     Passed = residency();
+  else if (std::wcscmp(Argv[1], L"placement") == 0)
+    Passed = placement();
   else {
     std::fprintf(stderr, "Unknown WARP heap fixture scenario.\n");
     return 1;

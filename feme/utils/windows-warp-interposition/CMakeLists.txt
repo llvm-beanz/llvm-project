@@ -510,6 +510,10 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   target_compile_options(warp-compiler-harness PRIVATE /W4 /WX /wd4201 /UNDEBUG)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-buffer
     COMMAND warp-compiler-harness)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-placed-buffers
+    COMMAND warp-compiler-harness --placed-buffers)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-placed-buffers
+    COMMAND warp-compiler-harness --reference-placed-buffers)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-commands
     COMMAND warp-compiler-harness --commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-buffer-commands

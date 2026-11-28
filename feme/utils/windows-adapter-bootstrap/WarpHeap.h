@@ -15,9 +15,9 @@
 namespace feme {
 namespace probe {
 
-/// Populate the committed-buffer heap entries, not a complete device table.
+/// Populate committed and placed buffer entries, not a complete device table.
 /// These callbacks use the existing WARP KMD allocation ABI. Shared-resource
-/// opening, protected heaps and placed resources are not supported.
+/// opening, protected heaps and non-buffer resources are not supported.
 /// Publication through FillDDITable remains
 /// gated on the complete device contract.
 void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table);
