@@ -784,6 +784,39 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned typed SRV component mappings
+
+Bridge ABI **4** adds a checked D3D shader-component encoding for borrowed buffer
+bindings; versions 1/2/3 are rejected at compilation and dispatch. The required
+always-set bit, reserved bits and all four channel sources are validated. The
+compiler explicitly converts D3D's encoding into the shared runtime swizzle.
+Non-default mappings require typed SRVs; raw/structured views and borrowed UAVs
+remain rejected rather than silently ignoring them.
+
+Owned descriptors retain the mapping through copies; ordered execution refreshes
+it from live heap metadata alongside resource/format/counter state. Default
+mapping preserves prior behavior. Native controls check malformed encodings,
+old bridges and rejection without descriptor writes. Runtime artifact ABI **10**
+is unchanged from the preceding shared prerequisite.
+
+Thirty-six controls cover all nine admitted R32 scalar/two/four-component SRV
+formats through owned DXBC, original DXIL, independent system WARP and held
+execution. The identical shaders are reused: post-record descriptor changes
+select memory channels, missing alpha/defaults and constant zero/one. The final
+null SRV selects forced one but must still contribute zero to a live output;
+the other null UAV preserves prior output. Source/destination copies, replay,
+non-uniform selection and pending ownership retain their existing audits.
+The first harness build caught a shadowed shader-source variable; renaming the
+mapping-source local resolved it before running the new controls.
+
+Validation: native selectors **4/4**, new mapping controls **36/36**,
+full **4410** passed / **15** skipped / **10** unsupported, callbacks **65/65**,
+stock-runtime **175/175**. FeMe ICD identity was confirmed before full/coexistence
+launches. Inventory **v14** records **139** unique required OS gates, bridge **4**
+and no complete feature-level claim. The KMD, format advertisements and Vulkan
+advertisements are unchanged; no new CTS run is claimed. Full W2 still remains
+open for other formats, images/resources/bindings and synchronization.
+
 #### Shared typed-buffer component-mapping prerequisite
 
 `FemeDescriptor::Swizzle` now carries the existing image component-mapping

@@ -88,6 +88,21 @@ std::uint32_t typedBufferElementSize(feme::cpu::ResourceFormat Format) {
   }
 }
 
+std::uint32_t bufferSwizzle(std::uint32_t Mapping) {
+  if (Mapping == FeMeWarpDefaultComponentMapping)
+    return 0;
+  std::uint32_t Swizzle = 0;
+  for (unsigned I = 0; I != 4; ++I) {
+    auto Source = (Mapping >> (I * 3)) & 7;
+    auto Channel =
+        Source < 4 ? static_cast<feme::cpu::ImageComponentSwizzle>(Source + 3)
+        : Source == 4 ? feme::cpu::ImageComponentSwizzle::Zero
+                      : feme::cpu::ImageComponentSwizzle::One;
+    Swizzle |= static_cast<std::uint32_t>(Channel) << (I * 8);
+  }
+  return Swizzle;
+}
+
 struct CompiledShader {
   std::shared_ptr<feme::cpu::CompiledStage> Stage;
 };
@@ -380,6 +395,9 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
     auto Format = typedBufferFormat(Buffer.Format);
     auto ElementSize = typedBufferElementSize(Format);
     if ((!Buffer.Data != !Buffer.SizeInBytes) ||
+        !FeMeWarpValidComponentMapping(Buffer.Shader4ComponentMapping) ||
+        (Buffer.Shader4ComponentMapping != FeMeWarpDefaultComponentMapping &&
+         (Buffer.Kind != 2 || Buffer.Namespace != 1)) ||
         (!Buffer.CounterData != !Buffer.CounterSizeInBytes) ||
         (Buffer.CounterData &&
          (Buffer.Kind != 1 || Buffer.Namespace != 2 || !Buffer.Data ||
@@ -445,6 +463,7 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
       Descriptor.Stride = Matched->Stride;
       Descriptor.Format =
           static_cast<std::uint32_t>(typedBufferFormat(Matched->Format));
+      Descriptor.Swizzle = bufferSwizzle(Matched->Shader4ComponentMapping);
       Descriptor.Flags =
           Matched->Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
       Descriptor.Counter = Matched->CounterData;

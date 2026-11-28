@@ -125,6 +125,8 @@ void APIENTRY queryNodeMap(D3D12DDI_HDEVICE Device, UINT Count, UINT *Map) {
 UINT APIENTRY implicitAdapterMask(D3D12DDI_HDEVICE) { return 0; }
 
 #ifdef FEME_BOOTSTRAP_WARP_COMPILER
+static_assert(FeMeWarpDefaultComponentMapping ==
+              D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING);
 UINT typedBufferElementSize(DXGI_FORMAT Format) {
   switch (Format) {
   case DXGI_FORMAT_R32_FLOAT:
@@ -646,6 +648,7 @@ struct DescriptorSlot {
   UINT64 Address = 0;
   D3D12DDI_HRESOURCE CounterResource{};
   UINT64 CounterOffset = 0;
+  UINT Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
 };
 
 struct DescriptorHeap {
@@ -886,10 +889,12 @@ createSRV(D3D12DDI_HDEVICE Device,
     reportError(Device, E_INVALIDARG);
     return;
   }
-  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER ||
-      Desc->Shader4ComponentMapping !=
-          D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING) {
+  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER) {
     reportError(Device, E_NOTIMPL);
+    return;
+  }
+  if (!FeMeWarpValidComponentMapping(Desc->Shader4ComponentMapping)) {
+    reportError(Device, E_INVALIDARG);
     return;
   }
   DescriptorSlot Value;
@@ -901,6 +906,12 @@ createSRV(D3D12DDI_HDEVICE Device,
     reportError(Device, Result);
     return;
   }
+  if (Desc->Shader4ComponentMapping != FeMeWarpDefaultComponentMapping &&
+      Value.Format == DXGI_FORMAT_UNKNOWN) {
+    reportError(Device, E_NOTIMPL);
+    return;
+  }
+  Value.Shader4ComponentMapping = Desc->Shader4ComponentMapping;
   DescriptorAccess Access;
   auto *Slot = descriptorRange(Owner, Destination.ptr, 1);
   if (!Slot) {
@@ -2331,6 +2342,7 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
                                                         : 0;
       Buffer.Stride = Slot->Stride;
       Buffer.Format = Slot->Format;
+      Buffer.Shader4ComponentMapping = Slot->Shader4ComponentMapping;
       if (Slot->Namespace == 3) {
         if (!Slot->Address)
           continue;

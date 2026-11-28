@@ -2706,8 +2706,9 @@ padding and before narrowing the shader result. Zero preserves identity.
 Masked, null and out-of-bounds accesses still return zero before swizzling,
 so a forced-one component cannot turn an invalid access into a nonzero result.
 Stores, raw/structured accesses and counter operations are unchanged.
-Artifacts from earlier descriptor layouts are rejected. Windows view/bridge
-materialization remains a separate prerequisite.
+Artifacts from earlier descriptor layouts are rejected. Windows bridge ABI 4
+validates D3D component encodings for typed SRVs and materializes this mapping
+from live owned descriptors at ordered execution.
 
 This is the one place where bindless makes the CPU target's job harder
 rather than easier, so it is worth taking apart.

@@ -707,7 +707,8 @@ HRESULT exerciseBufferCommands(
     bool Inline = false, bool Tables = false, bool Views = false,
     bool Structured = false, bool Arrays = false,
     DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN, bool Predication = false,
-    BufferCounterOperation CounterOperation = BufferCounterOperation::None) {
+    BufferCounterOperation CounterOperation = BufferCounterOperation::None,
+    bool MappedTyped = false) {
   bool Append = CounterOperation == BufferCounterOperation::Append;
   bool Consume = CounterOperation == BufferCounterOperation::Consume;
   int CounterDelta =
@@ -1414,6 +1415,15 @@ HRESULT exerciseBufferCommands(
                                  : D3D12_BUFFER_SRV_FLAG_RAW;
         UINT InputCount = Arrays ? 2 : 1;
         for (UINT I = 0; I < InputCount; ++I) {
+          if (MappedTyped) {
+            UINT MappingSource = Repeat == 0   ? (Components == 1 ? 3 : 0)
+                                 : Repeat == 1 ? (I ? 5 : 4)
+                                               : 5;
+            Input.Shader4ComponentMapping =
+                D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
+                    Components == 1 ? MappingSource : 0,
+                    Components > 1 ? MappingSource : 1, 2, 3);
+          }
           Input.Buffer.FirstElement =
               (Structured ? 2 : 4) + I * (Structured ? 2 : 4);
           bool Null = Repeat == 2 && I == 0;
@@ -1684,7 +1694,12 @@ HRESULT exerciseBufferCommands(
             UINT Bias = 23 + Step * 5 + Element * 30;
             if (Step == 2)
               Bias -= X % 2 ? 10 : 16;
-            Expected += PeerGlobal + Bias + (Step == 2 ? 0 : InputValue);
+            UINT Value = Step == 2 ? 0 : InputValue;
+            if (MappedTyped && Step != 2)
+              Value = Step == 0
+                          ? (Components == 1 ? 1 : InitialValue(InputWord - 1))
+                          : (Element ? 1 : 0);
+            Expected += PeerGlobal + Bias + Value;
           }
         } else {
           Expected += Executions * (PeerGlobal + 23);
@@ -1892,6 +1907,7 @@ int wmain(int Argc, wchar_t **Argv) {
                 (Argc == 2 && std::wcscmp(Argv[1], L"--array-commands") == 0);
   DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN;
   bool ReferenceTyped = false, OrderedTyped = false, DXILTyped = false;
+  bool MappedTyped = false;
   const wchar_t *TypedModes[][4] = {
       {L"--typed-uint-commands", L"--reference-typed-uint-commands",
        L"--ordered-typed-uint-commands", L"--dxil-typed-uint-commands"},
@@ -1918,14 +1934,20 @@ int wmain(int Argc, wchar_t **Argv) {
       DXGI_FORMAT_R32G32B32A32_UINT, DXGI_FORMAT_R32G32B32A32_SINT,
       DXGI_FORMAT_R32G32B32A32_FLOAT};
   for (UINT I = 0; I < ARRAYSIZE(TypedModes); ++I)
-    for (UINT J = 0; J < 4; ++J)
+    for (UINT J = 0; J < 4; ++J) {
+      std::wstring MappedMode =
+          L"--mapped-" + std::wstring(TypedModes[I][J] + 2);
+      bool Mapped = Argc == (J == 3 ? 3 : 2) &&
+                    std::wcscmp(Argv[1], MappedMode.c_str()) == 0;
       if (Argc == (J == 3 ? 3 : 2) &&
-          std::wcscmp(Argv[1], TypedModes[I][J]) == 0) {
+          (std::wcscmp(Argv[1], TypedModes[I][J]) == 0 || Mapped)) {
         Typed = TypedFormats[I];
         ReferenceTyped = J == 1;
         OrderedTyped = J == 2;
         DXILTyped = J == 3;
+        MappedTyped = Mapped;
       }
+    }
   int CounterDelta = 0;
   BufferCounterOperation CounterOperation = BufferCounterOperation::None;
   const BufferCounterOperation CounterOperations[] = {
@@ -2192,7 +2214,8 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseBufferCommands(
         Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
         OrderedBufferCommands, Indirect, CBV, Inline, Tables, Views,
-        StructuredViews, Arrays, Typed, Predication, CounterOperation);
+        StructuredViews, Arrays, Typed, Predication, CounterOperation,
+        MappedTyped);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();

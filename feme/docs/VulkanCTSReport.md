@@ -8,7 +8,10 @@ gates. FeMe CPU Vulkan Device identity was confirmed before these launches.
 Artifact ABI 10 invalidates older buffer descriptor layouts; default-zero
 mappings preserve existing Vulkan behavior. Advertisements are unchanged.
 Historical Windows CTS executables remain unavailable; no new CTS result or
-Windows component-mapping capability is claimed.
+Windows component-mapping capability is claimed by this prerequisite.
+The subsequent owned typed SRV mapping slice passes 175/175 stock-runtime/
+coexistence gates, with the same 4410 full passes and unchanged Vulkan
+advertisements; it uses bridge ABI 4. This is still not a new CTS run.
 
 ## Shared WARP counter prerequisite, not CTS
 

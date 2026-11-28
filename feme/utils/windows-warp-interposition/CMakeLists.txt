@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 13)
+  set(FEME_WARP_PROFILE_VERSION 14)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -599,6 +599,12 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       COMMAND warp-compiler-harness --reference-typed-${scalar}-commands)
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-typed-${scalar}-commands
       COMMAND warp-compiler-harness --ordered-typed-${scalar}-commands)
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-mapped-typed-${scalar}-commands
+      COMMAND warp-compiler-harness --mapped-typed-${scalar}-commands)
+    feme_add_probe_test(NAME os-routed-warp-compiler-reference-mapped-typed-${scalar}-commands
+      COMMAND warp-compiler-harness --mapped-reference-typed-${scalar}-commands)
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-mapped-typed-${scalar}-commands
+      COMMAND warp-compiler-harness --mapped-ordered-typed-${scalar}-commands)
   endforeach()
   find_program(FEME_DXC_EXECUTABLE NAMES dxc
     DOC "DXC for original owned-DXIL execution fixtures")
@@ -658,6 +664,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
         VERBATIM)
       feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-typed-${scalar}-commands
         COMMAND warp-compiler-harness --dxil-typed-${scalar}-commands "${fixture}")
+      feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-mapped-typed-${scalar}-commands
+        COMMAND warp-compiler-harness --mapped-dxil-typed-${scalar}-commands "${fixture}")
     endforeach()
     set(WARP_DXIL_FIXTURE "${WARP_COMPILER_OUTPUT_DIR}/owned-compute.dxil")
     set(WARP_DXIL_BUFFER_FIXTURE

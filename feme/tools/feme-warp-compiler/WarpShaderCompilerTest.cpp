@@ -28,7 +28,7 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   void *Shader = nullptr, *Pipeline = nullptr;
   FeMeWarpCompiledShaderInfo Info;
   auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
-  for (auto Version : {1u, 2u}) {
+  for (auto Version : {1u, 2u, 3u}) {
     auto OldInfo = Info;
     OldInfo.BridgeVersion = Version;
     if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()),
@@ -73,6 +73,17 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
   Bad.Version = 2;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  Bad.Version = 3;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  for (auto Mapping : {0u, 0x1006u, 0x1007u, 0x3000u, 0x168du}) {
+    Buffer.Shader4ComponentMapping = Mapping;
+    Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  }
+  Buffer.Kind = 2;
+  Buffer.Format = DXGI_FORMAT_R32_UINT;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.Kind = Buffer.Format = 0;
+  Buffer.Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
   std::uint32_t Counter = 0;
   Buffer.CounterData = &Counter;
   Buffer.CounterSizeInBytes = sizeof(Counter);

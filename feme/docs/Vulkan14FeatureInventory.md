@@ -427,6 +427,6 @@ capability-manifest.test` for how its diff logic is tested.
 
 Vulkan feature advertisements are unchanged by the shared DirectX counter
 helper and typed-buffer component mappings. Validation is the full FeMe gate
-(4410 passed, 15 skipped, 10 unsupported) and 139 stock-runtime/coexistence
+(4410 passed, 15 skipped, 10 unsupported) and 175 stock-runtime/coexistence
 gates with confirmed FeMe ICD
 identity, not a new CTS run; no historical Windows CTS executable is available.

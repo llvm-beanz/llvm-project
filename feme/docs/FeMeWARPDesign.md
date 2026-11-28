@@ -21,7 +21,7 @@ decreasing monitored fences, dispatch-only indirect commands and multiple
 root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
 R32_UINT/R32_SINT/R32_FLOAT typed buffer views, two/four-component R32 SRVs
 and buffer-command predication, plus checked structured-UAV counters and bounded
-uint append/consume; inventory v13
+uint append/consume and typed SRV component mappings; inventory v14
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1760,7 +1760,7 @@ spans. Register/offset endpoints, aggregate limits and overlaps are checked.
 Finite-array support did not require a bridge-layout change. Scalar
 R32_UINT/R32_SINT/R32_FLOAT typed SRV/UAV tables now execute through the
 existing typed CPU helpers, including non-uniform selection, nulls and
-post-record copies. Bridge ABI 2 explicitly carries a DXGI format and maps
+post-record copies. Bridge ABI 4 explicitly carries a DXGI format and maps
 it to FeMe's distinct format numbering; old compilation/dispatch versions
 are rejected. Two/four-component R32 UINT/SINT/FLOAT SRVs additionally use
 their actual eight/sixteen-byte element geometry and sparse component loads.
@@ -1774,13 +1774,16 @@ descriptors and broader residency remain open.
 The shared typed-buffer runtime additionally applies descriptor-backed
 component mappings after format decoding and before narrowing, including
 constant zero/one and absent-format-component defaults. Invalid accesses still
-return zero before mapping. Artifact ABI 10 invalidates older descriptor layouts;
-Windows view/bridge materialization remains open.
+return zero before mapping. Artifact ABI 10 invalidates older descriptor layouts.
+Owned typed SRV descriptors retain checked D3D component encodings through copies
+and execution-time bridge 4 preparation. Original DXBC/DXIL, reference WARP and
+held controls cover reordering, zero/one, absent-channel defaults and nulls
+without shader recompilation. Non-default raw/structured mappings remain rejected.
 Structured UAV views may associate a live UAV counter resource at a
 4096-byte-aligned offset. Descriptor creation and ordered execution validate
 the exact four-byte counter extent and owner; descriptors/copies retain the
 resource identity rather than a stale host pointer. Null replacement clears
-counter metadata. Bridge ABI 3 carries optional checked counter storage and
+counter metadata. Bridge ABI 4 retains optional checked counter storage and
 rejects old compilation/dispatch versions and malformed/non-structured
 counter bindings. The existing CPU descriptor field and masked atomic
 helper execute per-active-lane increments/decrements. Divergent fixed-counter
@@ -1798,7 +1801,7 @@ Both zero-comparison operations suppress matching commands; barriers remain
 unconditional. List reset disables predication, and pending submissions retain
 their captured state. Direct/indirect DXBC/DXIL, separate system-WARP and held
 teardown controls pass. Queries and remaining synchronization still stay open.
-See the implementation log and v13 inventory.
+See the implementation log and v14 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

@@ -828,7 +828,32 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
         Good &= std::memcmp(Before.data(), reinterpret_cast<void *>(Fourth.ptr),
                             Stride) == 0;
     }
+    for (UINT Mapping : {0x168du, 0x1684u, 0x1680u}) {
+      SRV.Shader4ComponentMapping = Mapping;
+      LastError = S_OK;
+      Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+      Good &= LastError == S_OK;
+    }
     std::memcpy(Before.data(), reinterpret_cast<void *>(Third.ptr), Stride);
+    for (UINT Mapping : {0u, 0x1006u, 0x1007u, 0x3000u}) {
+      SRV.Shader4ComponentMapping = Mapping;
+      LastError = S_OK;
+      Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+      Good &= LastError == E_INVALIDARG &&
+              std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                          Stride) == 0;
+    }
+    SRV.Shader4ComponentMapping = 0x1684;
+    SRV.Format = DXGI_FORMAT_R32_TYPELESS;
+    SRV.Buffer.Flags = D3D12DDI_BUFFER_SRV_FLAG_RAW;
+    LastError = S_OK;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == E_NOTIMPL &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                        Stride) == 0;
+    SRV.Format = DXGI_FORMAT_R32G32B32A32_SINT;
+    SRV.Buffer.Flags = D3D12DDI_BUFFER_SRV_FLAG_NONE;
+    SRV.Shader4ComponentMapping = D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     SRV.Buffer.FirstElement = std::numeric_limits<UINT64>::max() / 16;
     LastError = S_OK;
     Core.pfnCreateShaderResourceView(Device, &SRV, Third);

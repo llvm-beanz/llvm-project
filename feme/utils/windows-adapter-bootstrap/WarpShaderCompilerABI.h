@@ -12,7 +12,18 @@
 
 #include <cstdint>
 
-inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 3;
+inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 4;
+/// D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, 3), without SDK headers.
+inline constexpr std::uint32_t FeMeWarpDefaultComponentMapping = 0x1688;
+
+constexpr bool FeMeWarpValidComponentMapping(std::uint32_t Mapping) {
+  if (!(Mapping & 0x1000) || (Mapping & ~0x1fffu))
+    return false;
+  for (unsigned I = 0; I != 4; ++I)
+    if (((Mapping >> (I * 3)) & 7) > 5)
+      return false;
+  return true;
+}
 
 #ifdef FEME_WARP_COMPILER_EXPORTS
 #define FEME_WARP_COMPILER_API __declspec(dllexport)
@@ -48,6 +59,7 @@ struct FeMeWarpVertexPipelineDesc {
 /// not a FeMe runtime format, and must be zero for other kinds.
 /// Register identifies an individual descriptor, including array elements.
 /// Counter storage is an optional aligned four-byte extent for structured UAVs.
+/// Non-default D3D component mappings are supported only for typed SRVs.
 struct FeMeWarpBufferBinding {
   void *Data = nullptr;
   std::uint64_t SizeInBytes = 0;
@@ -59,6 +71,7 @@ struct FeMeWarpBufferBinding {
   std::uint32_t Format = 0;
   void *CounterData = nullptr;
   std::uint64_t CounterSizeInBytes = 0;
+  std::uint32_t Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
 };
 
 struct FeMeWarpDispatchDesc {
