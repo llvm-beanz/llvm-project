@@ -9,6 +9,7 @@
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
 
 #include "feme/Target/CPU/ResourceInfo.h"
+#include "feme/Transforms/CPU/RootConstantLowering.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -34,14 +35,14 @@ using namespace feme::cpu;
 
 namespace {
 
-/// Which of the two resource kinds `feme::cpu::ResourceLoweringPass`
+/// Which buffer family `feme::cpu::ResourceLoweringPass`
 /// canonicalizes a bound handle belongs to (see its own `Family`); needed
 /// here only to reject a conflicting re-declaration of the same binding,
 /// never surfaced beyond that.
-enum class Family { Typed, Raw };
+enum class Family { Typed, Raw, Constant };
 
 /// A bound handle's identity, per "Bound-resource normalization": source
-/// model (always DXIL for now, see the header comment), SRV/UAV namespace,
+/// model (always DXIL for now, see the header comment), CBV/SRV/UAV namespace,
 /// register space,
 /// base register, and the resource kind/array length recovered from the
 /// call itself.
@@ -77,7 +78,7 @@ struct RangeEntry {
 
 /// Classifies \p Handle's resource kind from its `target("dx.")` handle
 /// type, mirroring `classifyHandle` in ResourceLowering.cpp -- only the
-/// same two kinds that pass canonicalizes are normalized here (see the
+/// same buffer kinds that pass canonicalizes are normalized here (see the
 /// header comment).
 std::optional<Family> classifyFamily(const CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
@@ -87,6 +88,8 @@ std::optional<Family> classifyFamily(const CallInst &Handle) {
     return Family::Typed;
   if (HandleTy->getName() == "dx.RawBuffer")
     return Family::Raw;
+  if (getCBufferElementSize(HandleTy))
+    return Family::Constant;
   return std::nullopt;
 }
 
@@ -95,7 +98,13 @@ std::optional<Family> classifyFamily(const CallInst &Handle) {
 /// unbounded (zero or UINT32_MAX) or mutually-inconsistent identities are
 /// marked `Conflicting` so `rewriteBoundHandles` leaves them alone.
 void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
-                         std::map<RangeKey, RangeEntry> &Ranges) {
+                         std::map<RangeKey, RangeEntry> &Ranges,
+                         bool PromoteInferredRootConstants) {
+  SmallPtrSet<CallInst *, 4> RootConstants;
+  for (Function &F : M)
+    if (PromoteInferredRootConstants || getExplicitRootConstantBinding(F))
+      if (auto Access = matchRootConstantAccess(F))
+        RootConstants.insert(Access->Handle);
   for (Function &F : M) {
     if (F.getIntrinsicID() != Intrinsic::dx_resource_handlefrombinding)
       continue;
@@ -105,9 +114,12 @@ void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
         continue;
       std::optional<Family> Kind = classifyFamily(*CI);
       if (!Kind)
-        continue; // Not one of the two kinds this milestone normalizes.
+        continue;
+      if (*Kind == Family::Constant && RootConstants.contains(CI))
+        continue;
       auto *Ty = cast<TargetExtType>(CI->getType());
-      if (!Ty->getNumIntParameters() || Ty->getIntParameter(0) > 1)
+      if (*Kind != Family::Constant &&
+          (!Ty->getNumIntParameters() || Ty->getIntParameter(0) > 1))
         continue; // Leave malformed types for admission to reject.
 
       auto *SpaceC = dyn_cast<ConstantInt>(CI->getArgOperand(0));
@@ -118,8 +130,9 @@ void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
 
       RangeKey Key{static_cast<uint32_t>(SpaceC->getZExtValue()),
                    static_cast<uint32_t>(LowerBoundC->getZExtValue()),
-                   Ty->getIntParameter(0) ? BoundResourceNamespace::UAV
-                                          : BoundResourceNamespace::SRV};
+                   *Kind == Family::Constant ? BoundResourceNamespace::CBV
+                   : Ty->getIntParameter(0)  ? BoundResourceNamespace::UAV
+                                             : BoundResourceNamespace::SRV};
       uint32_t RangeSize = static_cast<uint32_t>(RangeSizeC->getZExtValue());
 
       auto It = Ranges.find(Key);
@@ -225,7 +238,7 @@ void rewriteBoundHandles(const SmallVectorImpl<BoundHandle> &Handles,
 /// Adds \p PrefixSize to every *native* (not created by this pass)
 /// `handlefromheap` call's index operand, so a shader mixing traditional
 /// and bindless resources keeps its own dynamic heap indices unambiguous
-/// (see "Bound-resource normalization"'s step 4). Only the same two
+/// (see "Bound-resource normalization"'s step 4). Only the same buffer
 /// resource kinds this pass normalizes are offset, matching scope.
 void offsetNativeDynamicIndices(Module &M, uint32_t PrefixSize,
                                 SmallPtrSetImpl<Function *> &TouchedFunctions) {
@@ -297,7 +310,7 @@ PreservedAnalyses BoundResourceNormalizationPass::run(Module &M,
                                                       ModuleAnalysisManager &) {
   SmallVector<BoundHandle, 4> Handles;
   std::map<RangeKey, RangeEntry> Ranges;
-  collectBoundHandles(M, Handles, Ranges);
+  collectBoundHandles(M, Handles, Ranges, PromoteInferredRootConstants);
   if (Handles.empty())
     return PreservedAnalyses::all();
 

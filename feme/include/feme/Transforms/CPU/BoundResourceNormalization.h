@@ -18,10 +18,10 @@
 // Scope (roadmap milestone 11):
 //
 //  - Only `llvm.dx.resource.handlefrombinding` calls whose handle is one of
-//    the two resource kinds `feme::cpu::ResourceLoweringPass` itself
-//    canonicalizes -- `dx.TypedBuffer`/`dx.RawBuffer` -- are normalized,
-//    matching that pass's own narrowing (see its header comment). A call
-//    with any other handle kind is left untouched.
+//    buffer kinds `feme::cpu::ResourceLoweringPass` canonicalizes:
+//    `dx.TypedBuffer`, `dx.RawBuffer`, and descriptor-backed `dx.CBuffer`.
+//    The selected explicit or sole inferred inline-constant binding stays
+//    for RootConstantLoweringPass. Other handle kinds are left untouched.
 //  - `llvm.dx.resource.handlefromimplicitbinding` and SPIR-V's
 //    `llvm.spv.resource.handlefrombinding`/`...handlefromimplicitbinding`
 //    are not normalized: no in-tree raiser currently produces the DXIL
@@ -30,7 +30,7 @@
 //    all yet (see "Resource Model"'s SPIR-V bullet). Both remain rejected
 //    by `feme::cpu::checkSupportedRaisedOps`, unchanged from before this
 //    pass existed.
-//  - DXIL SRV and UAV register namespaces remain distinct, even when their
+//  - DXIL CBV, SRV and UAV register namespaces remain distinct, even when their
 //    space/register numbers coincide. An unbounded range (range size 0 or
 //    UINT32_MAX), an overflowing total prefix, or two bindings that disagree
 //    about a shared (namespace, space, register) identity's family or range
@@ -52,7 +52,13 @@ namespace feme::cpu {
 /// file comment above for current scope.
 class BoundResourceNormalizationPass
     : public llvm::OptionalPassInfoMixin<BoundResourceNormalizationPass> {
+  bool PromoteInferredRootConstants;
+
 public:
+  explicit BoundResourceNormalizationPass(
+      bool PromoteInferredRootConstants = true)
+      : PromoteInferredRootConstants(PromoteInferredRootConstants) {}
+
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 
   static llvm::StringRef name() { return "feme-cpu-normalize-bound-resources"; }

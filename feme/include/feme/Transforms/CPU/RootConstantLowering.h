@@ -75,6 +75,7 @@ namespace llvm {
 class CallInst;
 class Function;
 class Module;
+class Type;
 class Value;
 } // namespace llvm
 
@@ -101,6 +102,9 @@ struct ExplicitRootConstantBinding {
 std::optional<ExplicitRootConstantBinding>
 getExplicitRootConstantBinding(const llvm::Function &F);
 
+/// Returns a canonical constant-buffer element's bounded byte extent.
+std::optional<uint32_t> getCBufferElementSize(llvm::Type *HandleType);
+
 /// One `llvm.dx.resource.load.cbufferrow.{2,4,8}.*` call reading a row of the
 /// recognized root-constant binding. \p Row is the load's own row-index
 /// operand, kept as a `Value` rather than a resolved constant: roadmap R25
@@ -112,6 +116,10 @@ struct RootConstantRowLoad {
   llvm::CallInst *Load;
   llvm::Value *Row;
 };
+
+/// Matches supported homogeneous 128-bit constant-buffer row loads.
+std::optional<llvm::SmallVector<RootConstantRowLoad, 4>>
+collectCBufferRowLoads(llvm::CallInst &Handle);
 
 /// A single function's complete, supported root-constant access: the one
 /// recognized `dx.CBuffer` handle, every `cbufferrow` load through it, and

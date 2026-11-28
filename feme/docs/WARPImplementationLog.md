@@ -708,6 +708,27 @@ compiler prerequisites, not work that a DDI wrapper can hide.
 | W2(c) | Committed/placed/reserved resources, residency/budgets, typeless view compatibility, planes/subresources, texture copy footprints and shared image/sampler preparation. Test D3D row/placement alignment separately from internal storage; exercise BC, sRGB, integer, depth/stencil and multisample operations individually. |
 | W2(d) | Queue-ordered copies/dispatch/indirect commands, legacy transitions including promotion/decay and split/alias/UAV barriers, queries/predication, and host/queue fence events. Preserve the dependency model needed by enhanced barriers. Test cross-queue progress, decreasing fence values, replay, timeout/removal wakeup, and indirect argument overflow. |
 
+#### Shared descriptor-backed CBV prerequisite
+
+The shared CPU compiler now lowers finite byte-array-backed CBVs independently
+of inline constants. CBV register namespace 3 preserves distinct b/t/u identities;
+artifact ABI 9 admits that namespace and rejects older artifacts. Existing
+callers retain single-CBV inline inference by default, while a compile option
+allows descriptor-driven frontends to disable inference. Explicit inline
+selection is still preserved.
+
+Each homogeneous 128-bit row is reconstructed from independently bounded
+16/32/64-bit components. Declared element extents, runtime descriptor extents,
+dynamic row indices and finite descriptor-array indices are all checked.
+Unsupported layout-backed CBVs and unsupported handle uses remain unchanged.
+The new execution fixture compares scalar, JIT widths 4/8 and native AOT
+results, including partial rows, short descriptors, doubles and output guards.
+
+Full assertions-enabled, cached, PCH-disabled `check-feme`: **4403 passed,
+15 skipped, 10 unsupported**. The launching shell verified the owned FeMe
+Vulkan identity. This is a compiler prerequisite, not yet owned D3D12 root-CBV
+or complete W2 acceptance.
+
 #### Owned W2 buffer and indirect progress (2026-11-27)
 
 W2 is **not closed**. Four tested implementation steps extend the owned

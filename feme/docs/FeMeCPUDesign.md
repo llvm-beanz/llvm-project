@@ -3654,8 +3654,14 @@ is unchanged.
 The inline block starts at byte zero regardless of preceding descriptor
 parameters; it contains constants only, not serialized descriptor/table
 arguments. Cbuffer arrays, other bindings and descriptor-backed CBVs are
-not promoted. They retain unsupported-operation diagnostics rather than
-falling back to inferred constants. Compiler-generated
+not promoted. Finite descriptor-backed CBVs instead normalize into their own
+CBV register namespace in the shared resource heap, preserving independently
+numbered SRV/UAV registers. Each homogeneous 128-bit row lowers into
+16/32/64-bit component reads bounded by both its declared element and the
+runtime descriptor; dynamic array indices cannot borrow a neighboring
+descriptor, and invalid row/component accesses read zero. The selected
+explicit or sole inferred inline binding remains on its existing root path.
+Compiler-generated
 `!feme.cpu.rootconstantbinding` metadata records space/register/byte size,
 is validated during admission, and survives function replacement so normal,
 reference and mixed heap/root lowering share the same selection.
@@ -3666,8 +3672,12 @@ takes precedence. This shares extraction with root-plan inspection and
 retains owned bytes instead of container pointers. The opt-in mode is
 verified on real DXC and original FXC inputs and native AOT output, with no
 artifact ABI change. The inferred default is intentionally unchanged.
-Multiple inline parameters, general CBVs, descriptor preparation and full
-shader/root compatibility remain outside this subset.
+Artifact ABI v9 admits the separate CBV namespace and rejects older artifact
+versions rather than interpreting CBVs as SRVs or UAVs. Multi-CBV, dynamic
+array/row, wide component and partial/short descriptor reads have normal,
+scalar-reference and native AOT tests. Multiple inline parameters, general
+descriptor preparation and full shader/root compatibility remain outside
+this subset.
 
 The block is untyped bytes on the ABI side. Accesses into it keep the
 layout the source model already fixed (HLSL `cbuffer` packing rules for

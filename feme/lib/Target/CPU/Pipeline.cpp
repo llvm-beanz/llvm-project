@@ -420,7 +420,8 @@ Expected<PipelineResult> runPipeline(Module &M,
 #endif
     Normalize.addPass(PreparePass(Opts.EntryPoint, Opts.Stage));
     Normalize.addPass(dxil::IntrinsicExpansionPass());
-    Normalize.addPass(BoundResourceNormalizationPass());
+    Normalize.addPass(
+        BoundResourceNormalizationPass(Opts.PromoteInferredRootConstants));
     // Lowers the one register-bound constant buffer "Root constants" in
     // feme/docs/FeMeCPUDesign.md carves out an exception for, before
     // `checkSupportedRaisedOps` below would otherwise reject its

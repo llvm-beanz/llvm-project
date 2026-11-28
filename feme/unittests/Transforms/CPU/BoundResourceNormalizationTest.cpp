@@ -258,7 +258,7 @@ TEST(BoundResourceNormalizationTest, LeavesConflictingDeclarationUnchanged) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
 }
 
-TEST(BoundResourceNormalizationTest, LeavesUnsupportedResourceKindUnchanged) {
+TEST(BoundResourceNormalizationTest, PreservesInferredInlineConstantBinding) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() {
@@ -276,6 +276,60 @@ TEST(BoundResourceNormalizationTest, LeavesUnsupportedResourceKindUnchanged) {
   ASSERT_TRUE(F);
   EXPECT_FALSE(hasHandleFromHeapCall(*F));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
+}
+
+TEST(BoundResourceNormalizationTest, KeepsCBVSRVAndUAVNamespacesDistinct) {
+  LLVMContext C;
+  auto M = parseIR(C, R"(
+    define void @main(i32 %idx) {
+      %a = call target("dx.CBuffer", [16 x i8])
+        @llvm.dx.resource.handlefrombinding.cb(i32 7, i32 3, i32 2, i32 %idx, ptr null)
+      %b = call target("dx.CBuffer", [16 x i8])
+        @llvm.dx.resource.handlefrombinding.cb(i32 7, i32 4, i32 1, i32 0, ptr null)
+      %srv = call target("dx.RawBuffer", i8, 0, 0)
+        @llvm.dx.resource.handlefrombinding.srv(i32 7, i32 3, i32 1, i32 0, ptr null)
+      %uav = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefrombinding.uav(i32 7, i32 3, i32 1, i32 0, ptr null)
+      ret void
+    }
+    declare target("dx.CBuffer", [16 x i8])
+      @llvm.dx.resource.handlefrombinding.cb(i32, i32, i32, i32, ptr)
+    declare target("dx.RawBuffer", i8, 0, 0)
+      @llvm.dx.resource.handlefrombinding.srv(i32, i32, i32, i32, ptr)
+    declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefrombinding.uav(i32, i32, i32, i32, ptr)
+    !feme.cpu.resources = !{!0}
+    !0 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  auto Info = ResourceInfo::fromModule(*M, "main");
+  ASSERT_TRUE(Info);
+  ASSERT_EQ(Info->BoundRanges.size(), 4u);
+  EXPECT_EQ(Info->ReservedResourceHeapSize, 5u);
+  EXPECT_EQ(Info->BoundRanges[0].Namespace, BoundResourceNamespace::SRV);
+  EXPECT_EQ(Info->BoundRanges[1].Namespace, BoundResourceNamespace::UAV);
+  EXPECT_EQ(Info->BoundRanges[2].Namespace, BoundResourceNamespace::CBV);
+  EXPECT_EQ(Info->BoundRanges[2].RangeSize, 2u);
+  EXPECT_EQ(Info->BoundRanges[3].Namespace, BoundResourceNamespace::CBV);
+  EXPECT_TRUE(hasHandleFromHeapCall(*M->getFunction("main")));
+}
+
+TEST(BoundResourceNormalizationTest, DescriptorModeDoesNotInferInlineCBV) {
+  LLVMContext C;
+  auto M = parseIR(C, R"(
+    define void @main() {
+      %h = call target("dx.CBuffer", [16 x i8])
+        @llvm.dx.resource.handlefrombinding(i32 7, i32 3, i32 1, i32 0, ptr null)
+      ret void
+    }
+    declare target("dx.CBuffer", [16 x i8])
+      @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  ModuleAnalysisManager Analyses;
+  BoundResourceNormalizationPass(false).run(*M, Analyses);
+  EXPECT_TRUE(hasHandleFromHeapCall(*M->getFunction("main")));
 }
 
 } // namespace

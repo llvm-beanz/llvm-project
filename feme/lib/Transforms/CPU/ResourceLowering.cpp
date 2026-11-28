@@ -34,10 +34,10 @@ using namespace feme::cpu;
 
 namespace {
 
-/// The two resource kinds this pass canonicalizes, distinguished by the
+/// The buffer kinds this pass canonicalizes, distinguished by the
 /// `target("dx.")` handle type's name (see the header comment for the
 /// kinds this milestone doesn't yet cover).
-enum class Family { Typed, Raw };
+enum class Family { Typed, Raw, Constant };
 
 /// One `llvm.dx.resource.handlefromheap` call this pass will rewrite,
 /// together with everything needed to rewrite its accesses.
@@ -45,8 +45,8 @@ struct HandleInfo {
   CallInst *Handle;
   Family Kind;
   /// The stride (in bytes) of a `Raw`-family structured buffer's element, or
-  /// 0 for an unstructured `ByteAddressBuffer` (see "Descriptor heaps" in
-  /// feme/docs/FeMeCPUDesign.md for the distinction). Unused for `Typed`.
+  /// 0 for an unstructured `ByteAddressBuffer`. Constant buffers use the
+  /// declared element byte size instead. Unused for `Typed`.
   uint64_t Stride = 0;
 };
 
@@ -213,7 +213,7 @@ bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
 
 /// Classifies \p Handle's resource kind from its `target("dx.")` handle
 /// type, returning `std::nullopt` for a kind this pass doesn't canonicalize
-/// (see the header comment): constant buffers, and anything
+/// (see the header comment): anything
 /// `feme::dxil::OpRaisingPass` doesn't reconstruct a `handlefromheap` for in
 /// the first place (textures, samplers).
 std::optional<HandleInfo> classifyHandle(CallInst &Handle,
@@ -221,6 +221,12 @@ std::optional<HandleInfo> classifyHandle(CallInst &Handle,
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
   if (!HandleTy)
     return std::nullopt;
+
+  if (auto Size = getCBufferElementSize(HandleTy)) {
+    if (!collectCBufferRowLoads(Handle))
+      return std::nullopt;
+    return HandleInfo{&Handle, Family::Constant, *Size};
+  }
 
   if (HandleTy->getName() == "dx.TypedBuffer") {
     if (!hasOnlySupportedUses(Handle, Family::Typed))
@@ -242,7 +248,7 @@ std::optional<HandleInfo> classifyHandle(CallInst &Handle,
     return HandleInfo{&Handle, Family::Raw, Stride};
   }
 
-  return std::nullopt; // Constant buffer, texture, sampler: not yet covered.
+  return std::nullopt; // Textures and samplers use the separate image path.
 }
 
 /// Returns whether \p HandleTy is one of the texture/sampler handle kinds
@@ -549,6 +555,39 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
   LLVMContext &Ctx = Info.Handle->getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
   Value *Mask = ConstantInt::getTrue(Ctx);
+
+  if (Info.Kind == Family::Constant) {
+    auto Loads = collectCBufferRowLoads(*Info.Handle);
+    assert(Loads && "constant-buffer rows were validated before mutation");
+    for (const auto &Row : *Loads) {
+      IRBuilder<> Builder(Row.Load);
+      auto *RowType = cast<StructType>(Row.Load->getType());
+      unsigned Count = RowType->getNumElements();
+      Type *ComponentType = RowType->getElementType(0);
+      Type *LoadType = ComponentType->isDoubleTy() ? I64Ty : ComponentType;
+      Value *Offset =
+          Builder.CreateMul(Builder.CreateZExt(Row.Row, I64Ty),
+                            Builder.getInt64(16), "cbuffer.row_offset");
+      Value *Result = PoisonValue::get(RowType);
+      for (unsigned I = 0; I < Count; ++I) {
+        Value *ComponentOffset =
+            Builder.CreateAdd(Offset, Builder.getInt64(I * (16 / Count)));
+        Value *End =
+            Builder.CreateAdd(ComponentOffset, Builder.getInt64(16 / Count));
+        Value *InBounds =
+            Builder.CreateICmpULE(End, Builder.getInt64(Info.Stride));
+        Value *Loaded = createRawLoad(Builder, Env, DescriptorIndex,
+                                      ComponentOffset, InBounds, LoadType);
+        if (Loaded->getType() != ComponentType)
+          Loaded = Builder.CreateBitCast(Loaded, ComponentType);
+        Result = Builder.CreateInsertValue(Result, Loaded, {I});
+      }
+      Row.Load->replaceAllUsesWith(Result);
+      Row.Load->eraseFromParent();
+    }
+    Info.Handle->eraseFromParent();
+    return;
+  }
 
   for (User *U : llvm::make_early_inc_range(Info.Handle->users())) {
     auto *Access = cast<CallInst>(U);

@@ -41,7 +41,7 @@
 # AOT-NEXT: heap[2]: 159 0 177 123456789 987654321{{$}}
 # AOT-NEXT: heap[3]: 0 195 0 123456789 987654321{{$}}
 # AOT-NOT: heap[
-# AMBIGUOUS: ambiguous buffer binding space=7 register=3: specify srv or uav
+# AMBIGUOUS: ambiguous buffer binding space=7 register=3: specify srv, uav or cbv
 # INVALID: unknown enumerated scalar
 
 #--- shader.hlsl
@@ -107,4 +107,4 @@ bindings:
 bindings:
   - space: 7
     register: 3
-    register-class: cbv
+    register-class: invalid

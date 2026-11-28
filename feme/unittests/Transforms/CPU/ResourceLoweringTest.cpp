@@ -139,18 +139,18 @@ TEST(ResourceLoweringTest, RecordsStaticHeapIndexMetadata) {
             5u);
 }
 
-TEST(ResourceLoweringTest, LeavesUnsupportedResourceKindUnchanged) {
-  // A constant buffer reached through the heap isn't canonicalized yet (see
-  // ResourceLowering.h's Scope note): the function is left entirely alone.
+TEST(ResourceLoweringTest, LeavesUnsupportedConstantBufferUsesUnchanged) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() {
       %h = call target("dx.CBuffer", [16 x i8])
           @llvm.dx.resource.handlefromheap(i32 0)
+      %value = call i32 @unsupported(target("dx.CBuffer", [16 x i8]) %h)
       ret void
     }
     declare target("dx.CBuffer", [16 x i8])
         @llvm.dx.resource.handlefromheap(i32)
+    declare i32 @unsupported(target("dx.CBuffer", [16 x i8]))
   )");
   ASSERT_TRUE(M);
   runPass(*M);

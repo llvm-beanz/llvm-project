@@ -17,16 +17,11 @@
 //
 // Scope (roadmap milestone 3):
 //
-//  - Only the two resource kinds `feme::dxil::OpRaisingPass` currently
-//    reconstructs handles for -- `TypedBuffer` and `RawBuffer` (which covers
-//    both `ByteAddressBuffer` and `StructuredBuffer`; see the "Descriptor
-//    heaps" section for how they differ) -- are rewritten. A function using
-//    any other resource kind through the heap (a constant buffer, texture or
-//    sampler) is left entirely unmodified rather than partially rewritten:
-//    constant-buffer canonicalization needs the same multi-return-value
-//    `extractvalue` reconstruction mechanism the Status section's Deviation
-//    note defers for `WaveActiveBallot` et al., and sampling is a non-goal
-//    (see "Goals"/"Non-Goals" in feme/docs/FeMeCPUDesign.md).
+//  - Typed, raw/structured and constant-buffer handles lower through shared
+//    buffer helpers. Homogeneous 128-bit cbuffer rows use independently
+//    bounded 16/32/64-bit component loads, clipped against both the declared
+//    cbuffer element and the runtime descriptor. Image/sampler operations
+//    use the separately checked image path described below.
 //  - Only DXIL produces `llvm.dx.resource.handlefromheap` today --
 //    SPIR-V's bindless counterpart (`SPV_EXT_descriptor_heap`, see "Resource
 //    Model") has no raised-IR representation yet, so this pass has nothing

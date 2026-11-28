@@ -74,7 +74,7 @@ materializeHeap(llvm::ArrayRef<BoundResourceRange> Ranges,
 Error validateBoundResourceBindings(const ResourceInfo &Info,
                                     ArrayRef<BoundResourceBinding> Bindings) {
   for (auto [Index, Binding] : llvm::enumerate(Bindings)) {
-    if (uint32_t(Binding.Namespace) > uint32_t(BoundResourceNamespace::UAV))
+    if (uint32_t(Binding.Namespace) > uint32_t(BoundResourceNamespace::CBV))
       return createStringError(inconvertibleErrorCode(),
                                "invalid buffer binding register namespace");
     std::optional<BoundResourceNamespace> Namespace;
@@ -91,7 +91,8 @@ Error validateBoundResourceBindings(const ResourceInfo &Info,
       if (Namespace && *Namespace != Range.Namespace)
         return createStringError(
             inconvertibleErrorCode(),
-            "ambiguous buffer binding space=%u register=%u: specify srv or uav",
+            "ambiguous buffer binding space=%u register=%u: specify srv, uav "
+            "or cbv",
             Binding.Space, Binding.BaseRegister);
       Namespace = Range.Namespace;
     }

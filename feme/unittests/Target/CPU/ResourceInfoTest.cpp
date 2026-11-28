@@ -269,9 +269,10 @@ TEST(ResourceInfoTest, ReadsVersionedNamespacesAndLegacyEntriesTogether) {
     !1 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 0}
     !2 = !{!"legacy", i32 1, i32 0, i32 0,
            i32 7, i32 3, i32 1, i32 0, i32 0}
-    !3 = !{!"main", i32 2, i32 0, i32 0,
+    !3 = !{!"main", i32 3, i32 0, i32 0,
            i32 7, i32 3, i32 1, i32 0, i32 0, i32 1,
-           i32 7, i32 3, i32 1, i32 1, i32 0, i32 2}
+           i32 7, i32 3, i32 1, i32 1, i32 0, i32 2,
+           i32 7, i32 3, i32 1, i32 2, i32 0, i32 3}
   )");
   ASSERT_TRUE(M);
   auto Legacy = ResourceInfo::fromModule(*M, "legacy");
@@ -281,27 +282,29 @@ TEST(ResourceInfoTest, ReadsVersionedNamespacesAndLegacyEntriesTogether) {
   ASSERT_EQ(Legacy->BoundRanges.size(), 1u);
   EXPECT_EQ(Legacy->BoundRanges[0].Namespace,
             BoundResourceNamespace::Unspecified);
-  ASSERT_EQ(Info->BoundRanges.size(), 2u);
+  ASSERT_EQ(Info->BoundRanges.size(), 3u);
   EXPECT_EQ(Info->BoundRanges[0].Namespace, BoundResourceNamespace::SRV);
   EXPECT_EQ(Info->BoundRanges[1].Namespace, BoundResourceNamespace::UAV);
+  EXPECT_EQ(Info->BoundRanges[2].Namespace, BoundResourceNamespace::CBV);
   auto Artifact = StageArtifactInfo::fromResourceInfo(*Info);
   auto Parsed = parseArtifact(serializeArtifact(Artifact));
   ASSERT_THAT_EXPECTED(Parsed, Succeeded());
-  ASSERT_EQ(Parsed->BoundRanges.size(), 2u);
+  ASSERT_EQ(Parsed->BoundRanges.size(), 3u);
   EXPECT_EQ(Parsed->BoundRanges[0].Namespace, BoundResourceNamespace::SRV);
   EXPECT_EQ(Parsed->BoundRanges[1].Namespace, BoundResourceNamespace::UAV);
+  EXPECT_EQ(Parsed->BoundRanges[2].Namespace, BoundResourceNamespace::CBV);
 }
 
 TEST(ResourceInfoTest, RejectsInvalidNamespacesAndPreviousArtifactVersion) {
   StageArtifactInfo Info;
   Info.BoundRanges = {{0, 0, 1, 0, BoundResourceClass::Buffer,
-                       static_cast<BoundResourceNamespace>(3)}};
+                       static_cast<BoundResourceNamespace>(4)}};
   EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
   Info.BoundRanges[0].Namespace = BoundResourceNamespace::SRV;
   Info.BoundRanges[0].Class = BoundResourceClass::Image;
   EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
   auto Bytes = serializeArtifact(StageArtifactInfo{});
-  Bytes[0] = 7;
+  Bytes[0] = 8;
   EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
 }
 
@@ -344,8 +347,8 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsEight) {
-  EXPECT_EQ(ArtifactAbiVersion, 8u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsNine) {
+  EXPECT_EQ(ArtifactAbiVersion, 9u);
 }
 
 TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {

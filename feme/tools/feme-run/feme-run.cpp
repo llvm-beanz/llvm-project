@@ -313,6 +313,7 @@ template <> struct ScalarEnumerationTraits<BoundResourceNamespace> {
     Io.enumCase(Namespace, "unspecified", BoundResourceNamespace::Unspecified);
     Io.enumCase(Namespace, "srv", BoundResourceNamespace::SRV);
     Io.enumCase(Namespace, "uav", BoundResourceNamespace::UAV);
+    Io.enumCase(Namespace, "cbv", BoundResourceNamespace::CBV);
   }
 };
 
@@ -1257,8 +1258,9 @@ void printHeapContents(
     for (const HeapEntry &Entry : BindingFile.Entries) {
       OS << "binding[";
       if (Binding.Namespace != BoundResourceNamespace::Unspecified)
-        OS << (Binding.Namespace == BoundResourceNamespace::SRV ? "srv:"
-                                                                : "uav:");
+        OS << (Binding.Namespace == BoundResourceNamespace::SRV   ? "srv:"
+               : Binding.Namespace == BoundResourceNamespace::UAV ? "uav:"
+                                                                  : "cbv:");
       OS << Binding.Space << ":" << Binding.Register << "][" << Entry.Index
          << "]:";
       PrintBuffer(Binding.Entries.Buffers[Entry.Index]);

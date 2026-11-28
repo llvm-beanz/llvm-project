@@ -126,6 +126,7 @@ enum class BoundResourceNamespace : uint32_t {
   Unspecified = 0,
   SRV = 1,
   UAV = 2,
+  CBV = 3,
 };
 
 /// One traditionally-bound resource range's assignment in the reserved heap
@@ -264,7 +265,8 @@ struct ResourceInfo {
 ///
 /// Version 8 adds a register namespace to each bound range, so DXIL SRVs
 /// and UAVs with equal register numbers cannot alias in host preparation.
-constexpr uint32_t ArtifactAbiVersion = 8;
+/// Version 9 admits descriptor-backed CBVs in their separate namespace.
+constexpr uint32_t ArtifactAbiVersion = 9;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.

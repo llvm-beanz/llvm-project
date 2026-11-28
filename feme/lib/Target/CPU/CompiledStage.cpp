@@ -153,7 +153,8 @@ Expected<std::unique_ptr<CompiledStage>>
 createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
             StringRef EntryPoint, unsigned RequestedWaveSize,
             CodeGenOptLevel OptLevel, bool Reference,
-            bool UseRootSignatureForConstants) {
+            bool UseRootSignatureForConstants,
+            bool PromoteInferredRootConstants = true) {
   static llvm::once_flag InitFlag;
   llvm::call_once(InitFlag, [] {
     InitializeNativeTarget();
@@ -264,7 +265,8 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
     ModulePassManager Normalize;
     Normalize.addPass(PreparePass(EntryPoint, Stage));
     Normalize.addPass(dxil::IntrinsicExpansionPass());
-    Normalize.addPass(BoundResourceNormalizationPass());
+    Normalize.addPass(
+        BoundResourceNormalizationPass(PromoteInferredRootConstants));
     // (Roadmap L319) `BoundResourceNormalizationPass` above only matches
     // `llvm.dx.resource.handlefrombinding` (DXIL): a SPIR-V-sourced
     // module's own `llvm.spv.resource.handlefrombinding` calls survive it
@@ -320,6 +322,7 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
     PipeOpts.WaveSize = WaveSize;
     PipeOpts.OptLevel = OptLevel;
     PipeOpts.UseRootSignatureForConstants = UseRootSignatureForConstants;
+    PipeOpts.PromoteInferredRootConstants = PromoteInferredRootConstants;
     Expected<PipelineResult> Result = runPipeline(Mod, PipeOpts);
     if (!Result)
       return Result.takeError();
@@ -446,7 +449,8 @@ CompiledStage::create(Context &Ctx, feme::Module M,
                       const StageCompileOptions &Opts) {
   return createStage(Ctx, std::move(M), Opts.Stage, Opts.EntryPoint,
                      Opts.WaveSize, Opts.OptLevel, /*Reference=*/false,
-                     Opts.UseRootSignatureForConstants);
+                     Opts.UseRootSignatureForConstants,
+                     Opts.PromoteInferredRootConstants);
 }
 
 Error CompiledStage::invokeGroup(const PreparedDispatch &Prepared,

@@ -80,7 +80,7 @@ The original compute-only compiler baseline is no longer current:
 - `feme::cpu::CompiledStage` supports compute, vertex, fragment, hull,
   patch-constant, domain, geometry, mesh, and task invocation. Reuse its
   prepared resource and stage ABIs rather than inventing a Direct3D variant.
-- `StageArtifactInfo` uses artifact ABI version 8 and populated wave,
+- `StageArtifactInfo` uses artifact ABI version 9 and populated wave,
   workgroup, and groupshared reflection. Divergent groupshared indexing has
   lowering and regression coverage; remaining barrier and masking limitations
   must be assessed against individual shaders, not treated as blanket gaps.

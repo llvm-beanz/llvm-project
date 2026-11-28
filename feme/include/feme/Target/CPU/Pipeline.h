@@ -82,9 +82,12 @@ struct StageCompileOptions {
   /// pipeline phase consults it yet.
   bool EnableRobustness = true;
   /// Opt in to the sole visible root-signature constant parameter instead
-  /// of promoting a cbuffer from its uses. Descriptor-backed CBVs stay
-  /// unsupported.
+  /// of promoting a cbuffer from its uses.
   bool UseRootSignatureForConstants = false;
+  /// Compatibility mode for hosts supplying one inferred inline block.
+  /// Descriptor-driven frontends disable this; explicit inline selections
+  /// still take precedence over descriptor-backed CBV normalization.
+  bool PromoteInferredRootConstants = true;
 };
 
 /// The two symbol names `runPipeline` produces or consumes, needed by

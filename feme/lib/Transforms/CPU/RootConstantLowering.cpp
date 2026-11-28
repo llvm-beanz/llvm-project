@@ -107,10 +107,10 @@ std::optional<RootConstantAccess> matchRootConstantHandle(CallInst &Handle) {
   // The handle type's own array-of-bytes type parameter (e.g. `[32 x i8]`
   // for `target("dx.CBuffer", [32 x i8])`) is one array element's declared
   // byte size.
-  auto *ElemArrayTy = dyn_cast<ArrayType>(HandleTy->getTypeParameter(0));
-  if (!ElemArrayTy || !ElemArrayTy->getElementType()->isIntegerTy(8))
+  auto Size = getCBufferElementSize(HandleTy);
+  if (!Size)
     return std::nullopt;
-  uint64_t ElementSize = ElemArrayTy->getNumElements();
+  uint64_t ElementSize = *Size;
   if (ElementSize > std::numeric_limits<uint32_t>::max() / RangeSize)
     return std::nullopt;
 
@@ -271,6 +271,24 @@ namespace feme::cpu {
 std::optional<ExplicitRootConstantBinding>
 getExplicitRootConstantBinding(const Function &F) {
   return getExplicitBinding(F);
+}
+
+std::optional<uint32_t> getCBufferElementSize(Type *HandleType) {
+  auto *Handle = dyn_cast<TargetExtType>(HandleType);
+  if (!Handle || Handle->getName() != "dx.CBuffer" ||
+      Handle->getNumTypeParameters() != 1)
+    return std::nullopt;
+  auto *Bytes = dyn_cast<ArrayType>(Handle->getTypeParameter(0));
+  if (!Bytes || !Bytes->getElementType()->isIntegerTy(8) ||
+      !Bytes->getNumElements() ||
+      Bytes->getNumElements() > std::numeric_limits<uint32_t>::max())
+    return std::nullopt;
+  return Bytes->getNumElements();
+}
+
+std::optional<SmallVector<RootConstantRowLoad, 4>>
+collectCBufferRowLoads(CallInst &Handle) {
+  return collectRowLoads(Handle);
 }
 
 Error selectRootSignatureConstants(Function &F, ShaderStage Stage) {

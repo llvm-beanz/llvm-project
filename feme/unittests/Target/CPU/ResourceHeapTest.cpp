@@ -136,21 +136,25 @@ TEST(ResourceHeapTest, MultipleRangesFillTheirOwnHeapBase) {
 
 TEST(ResourceHeapTest, QualifiedNamespacesFillDistinctArrayRanges) {
   ResourceInfo Info;
-  Info.ReservedResourceHeapSize = 4;
+  Info.ReservedResourceHeapSize = 5;
   Info.BoundRanges = {
       {7, 3, 2, 0, BoundResourceClass::Buffer, BoundResourceNamespace::SRV},
-      {7, 3, 2, 2, BoundResourceClass::Buffer, BoundResourceNamespace::UAV}};
-  int A = 1, B = 2, C = 3;
+      {7, 3, 2, 2, BoundResourceClass::Buffer, BoundResourceNamespace::UAV},
+      {7, 3, 1, 4, BoundResourceClass::Buffer, BoundResourceNamespace::CBV}};
+  int A = 1, B = 2, C = 3, D = 4;
   std::vector<FemeDescriptor> Read = {makeDescriptor(&A), makeDescriptor(&B)};
   std::vector<FemeDescriptor> Write = {makeDescriptor(&C)};
+  std::vector<FemeDescriptor> Constant = {makeDescriptor(&D)};
   BoundResourceBinding SRV{7, 3, Read, BoundResourceNamespace::SRV};
   BoundResourceBinding UAV{7, 3, Write, BoundResourceNamespace::UAV};
-  auto Heap = materializeResourceHeap(Info, {UAV, SRV}, {});
-  ASSERT_EQ(Heap.size(), 4u);
+  BoundResourceBinding CBV{7, 3, Constant, BoundResourceNamespace::CBV};
+  auto Heap = materializeResourceHeap(Info, {CBV, UAV, SRV}, {});
+  ASSERT_EQ(Heap.size(), 5u);
   EXPECT_EQ(Heap[0].Data, &A);
   EXPECT_EQ(Heap[1].Data, &B);
   EXPECT_EQ(Heap[2].Data, &C);
   EXPECT_EQ(Heap[3].Data, nullptr);
+  EXPECT_EQ(Heap[4].Data, &D);
   EXPECT_THAT_ERROR(validateBoundResourceBindings(Info, {{7, 3, Read}}),
                     Failed());
   EXPECT_THAT_ERROR(validateBoundResourceBindings(Info, {SRV, SRV}), Failed());
@@ -159,7 +163,7 @@ TEST(ResourceHeapTest, QualifiedNamespacesFillDistinctArrayRanges) {
                     Failed());
   EXPECT_THAT_ERROR(
       validateBoundResourceBindings(
-          Info, {{7, 3, Read, static_cast<BoundResourceNamespace>(3)}}),
+          Info, {{7, 3, Read, static_cast<BoundResourceNamespace>(4)}}),
       Failed());
 }
 
