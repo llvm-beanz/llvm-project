@@ -137452,3 +137452,36 @@ support, then images/samplers, full root compatibility/unbounded heaps,
 reserved/shared resources/residency, queries, complete legacy barriers and
 remaining indirect/removal semantics. Existing CPU/image conversions should
 be reused rather than cloned into a Windows-only implementation.
+
+# W2 progress: wider R32 buffer SRVs and truthful UAV capabilities
+
+0f1f91de42b6 extends owned typed SRVs to two/four-component R32 UINT/SINT/
+FLOAT while retaining scalar R32 UAV outputs. Geometry must use the actual
+eight/sixteen-byte element size in both DDI views and borrowed bindings.
+The explicit DXGI-to-FeMe format mapping remains essential; bridge ABI 2
+already contains sufficient metadata and does not need another layout change.
+
+The first wider-UAV attempt failed eighteen owned public controls while six
+reference controls passed. Do not solve that by setting the additional-format
+flag: its normative contract requires the entire fifteen-format set, with
+individually optional formats gated separately. Wider SRVs can be implemented
+truthfully now; wider UAV creation and borrowed UAV bindings stay rejected.
+The repository instructions record this all-or-nothing capability requirement.
+
+Native tests independently assert SRV success before checking wider UAV
+rejection, preserve destination bytes on rejection/overflow, and use a valid
+scalar format for foreign-owner rejection. The initial generic failure came
+from carrying the last unsupported wide UAV format into an ownership test,
+not from broken ownership handling; valid arguments restore the intended test.
+The shader fixtures select the second vector component and write scalar
+outputs, with non-uniform arrays, signed/float initialization, offsets, nulls,
+post-record copies and retained asynchronous replay.
+
+Final evidence: 4403 full-suite passes, 15 skipped, 10 unsupported; callback
+65/65; stock-runtime 123/123; inventory v11 with 87 unique required gates,
+bridge 2 and no complete feature-level claim. FeMe ICD identity was verified
+before full/coexistence runs. No system binaries or drivers were modified.
+
+W2 is not closed. Continue with component mapping and remaining typed/
+counter/atomic operations, then image/sampler preparation, complete roots/
+resources, residency, barriers, queries and indirect/removal behavior.
