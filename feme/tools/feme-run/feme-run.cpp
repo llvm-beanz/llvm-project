@@ -252,6 +252,7 @@ struct ImageBindingFile {
   uint32_t Space = 0;
   uint32_t Register = 0;
   std::vector<ImageEntry> Entries;
+  BoundResourceNamespace Namespace = BoundResourceNamespace::Unspecified;
 };
 
 /// The same, for a traditionally-bound sampler range
@@ -382,6 +383,8 @@ template <> struct MappingTraits<ImageBindingFile> {
     Io.mapRequired("space", Binding.Space);
     Io.mapRequired("register", Binding.Register);
     Io.mapOptional("entries", Binding.Entries);
+    Io.mapOptional("register-class", Binding.Namespace,
+                   BoundResourceNamespace::Unspecified);
   }
 };
 
@@ -1152,6 +1155,7 @@ struct ImageBindingStorage {
   uint32_t Space = 0;
   uint32_t Register = 0;
   ImageStorage Entries;
+  BoundResourceNamespace Namespace = BoundResourceNamespace::Unspecified;
 };
 
 Expected<std::vector<ImageBindingStorage>>
@@ -1163,7 +1167,8 @@ buildImageBindingStorage(const HeapFile &File) {
     if (!Entries)
       return Entries.takeError();
     Storage.push_back(ImageBindingStorage{Binding.Space, Binding.Register,
-                                          std::move(*Entries)});
+                                          std::move(*Entries),
+                                          Binding.Namespace});
   }
   return Storage;
 }
@@ -1177,7 +1182,8 @@ toBoundImageBindings(const std::vector<ImageBindingStorage> &Storage) {
   Bindings.reserve(Storage.size());
   for (const ImageBindingStorage &Binding : Storage)
     Bindings.push_back(BoundImageBinding{Binding.Space, Binding.Register,
-                                         Binding.Entries.Descriptors});
+                                         Binding.Entries.Descriptors,
+                                         Binding.Namespace});
   return Bindings;
 }
 
@@ -1249,6 +1255,12 @@ void printHeapContents(
     memcpy(Bytes.data(), &Desc, sizeof(Desc));
     PrintBuffer(Bytes);
   };
+  auto PrintNamespace = [&](BoundResourceNamespace Namespace) {
+    if (Namespace != BoundResourceNamespace::Unspecified)
+      OS << (Namespace == BoundResourceNamespace::SRV   ? "srv:"
+             : Namespace == BoundResourceNamespace::UAV ? "uav:"
+                                                        : "cbv:");
+  };
 
   for (const HeapEntry &Entry : File.ResourceHeap) {
     OS << "heap[" << Entry.Index << "]:";
@@ -1257,10 +1269,7 @@ void printHeapContents(
   for (auto [Binding, BindingFile] : zip(BindingsStorage, File.Bindings)) {
     for (const HeapEntry &Entry : BindingFile.Entries) {
       OS << "binding[";
-      if (Binding.Namespace != BoundResourceNamespace::Unspecified)
-        OS << (Binding.Namespace == BoundResourceNamespace::SRV   ? "srv:"
-               : Binding.Namespace == BoundResourceNamespace::UAV ? "uav:"
-                                                                  : "cbv:");
+      PrintNamespace(Binding.Namespace);
       OS << Binding.Space << ":" << Binding.Register << "][" << Entry.Index
          << "]:";
       PrintBuffer(Binding.Entries.Buffers[Entry.Index]);
@@ -1277,8 +1286,10 @@ void printHeapContents(
   for (auto [Binding, BindingFile] :
        zip(ImageBindingsStorage, File.ImageBindings)) {
     for (const ImageEntry &Entry : BindingFile.Entries) {
-      OS << "image-binding[" << Binding.Space << ":" << Binding.Register
-         << "][" << Entry.Index << "]:";
+      OS << "image-binding[";
+      PrintNamespace(Binding.Namespace);
+      OS << Binding.Space << ":" << Binding.Register << "][" << Entry.Index
+         << "]:";
       PrintBuffer(Binding.Entries.Buffers[Entry.Index]);
     }
   }

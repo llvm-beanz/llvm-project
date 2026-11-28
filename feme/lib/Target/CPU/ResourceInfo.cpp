@@ -421,7 +421,10 @@ Expected<StageArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
     Range.Class = static_cast<BoundResourceClass>(ClassValue);
     uint32_t NamespaceValue = ReadNext();
     if (NamespaceValue > static_cast<uint32_t>(BoundResourceNamespace::CBV) ||
-        (Range.Class != BoundResourceClass::Buffer && NamespaceValue != 0))
+        (Range.Class == BoundResourceClass::Image &&
+         NamespaceValue ==
+             static_cast<uint32_t>(BoundResourceNamespace::CBV)) ||
+        (Range.Class == BoundResourceClass::Sampler && NamespaceValue != 0))
       return createStringError(inconvertibleErrorCode(),
                                "FeMe CPU artifact's bound range names an "
                                "invalid register namespace (%u)",

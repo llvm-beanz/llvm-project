@@ -24,7 +24,7 @@ and buffer-command predication, plus checked structured-UAV counters and bounded
 uint append/consume, typed SRV component mappings and narrow/packed SRVs;
 pitched buffer-footprint copies and single-plane linear texture storage with
 mip/array subresource copies;
-inventory v19
+inventory v20
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -87,7 +87,7 @@ The original compute-only compiler baseline is no longer current:
 - `feme::cpu::CompiledStage` supports compute, vertex, fragment, hull,
   patch-constant, domain, geometry, mesh, and task invocation. Reuse its
   prepared resource and stage ABIs rather than inventing a Direct3D variant.
-- `StageArtifactInfo` uses artifact ABI version 9 and populated wave,
+- `StageArtifactInfo` uses artifact ABI version 12 and populated wave,
   workgroup, and groupshared reflection. Divergent groupshared indexing has
   lowering and regression coverage; remaining barrier and masking limitations
   must be assessed against individual shaders, not treated as blanket gaps.
@@ -1845,7 +1845,10 @@ Eight owned/reference and held controls execute exact mipmapped 3D/2D-array
 copy/readback, with distinct layers/mips, partial regions, padding/guards,
 source preservation and recording-object release. Texture shader views,
 samplers, compressed/depth/stencil/planar/MS storage and broader resource classes
-remain open. See the implementation log and v19 inventory.
+remain open. Shared DXIL image/sampler bindings now normalize into independent
+checked heap prefixes with qualified image namespaces and artifact ABI 12.
+Native CPU SIMD/scalar/AOT controls exercise those bindings; Windows bridge 4
+still accepts buffers only. See the implementation log and v20 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

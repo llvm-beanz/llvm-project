@@ -18,8 +18,9 @@
 // Scope (roadmap milestone 11):
 //
 //  - Only `llvm.dx.resource.handlefrombinding` calls whose handle is one of
-//    buffer kinds `feme::cpu::ResourceLoweringPass` canonicalizes:
-//    `dx.TypedBuffer`, `dx.RawBuffer`, and descriptor-backed `dx.CBuffer`.
+//    kinds `feme::cpu::ResourceLoweringPass` canonicalizes: `dx.TypedBuffer`,
+//    `dx.RawBuffer`, descriptor-backed `dx.CBuffer`, `dx.Texture`,
+//    `dx.MSTexture`, and `dx.Sampler`. Each physical heap has its own prefix.
 //    The selected explicit or sole inferred inline-constant binding stays
 //    for RootConstantLoweringPass. Other handle kinds are left untouched.
 //  - `llvm.dx.resource.handlefromimplicitbinding` and SPIR-V's
@@ -32,7 +33,8 @@
 //    pass existed.
 //  - DXIL CBV, SRV and UAV register namespaces remain distinct, even when their
 //    space/register numbers coincide. An unbounded range (range size 0 or
-//    UINT32_MAX), an overflowing total prefix, or two bindings that disagree
+//    UINT32_MAX), an overflowing register extent or class-specific prefix,
+//    or two bindings that disagree
 //    about a shared (namespace, space, register) identity's family or range
 //    size are left as `handlefrombinding` calls rather than
 //    normalized, so `feme::cpu::checkSupportedRaisedOps` still rejects them

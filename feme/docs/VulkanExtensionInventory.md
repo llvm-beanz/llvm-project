@@ -1,5 +1,11 @@
 # Vulkan `KHR`/`EXT` extension inventory
 
+Shared DXIL image/sampler normalization passes 4423 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 371 stock-runtime/coexistence
+gates with confirmed FeMe ICD identity. Artifact ABI 12 changes image binding
+admission, not extension advertisements; this table was not regenerated and
+no new CTS or owned D3D12 texture-view result is claimed.
+
 This inventory lists every non-disabled `VK_KHR_*` and `VK_EXT_*` extension
 in the Vulkan registry used by the tested VK-GL-CTS checkout. Status is
 derived from the FeMe Vulkan ICD manifests:

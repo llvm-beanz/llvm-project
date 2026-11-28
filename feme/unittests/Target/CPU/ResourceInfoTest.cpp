@@ -300,14 +300,32 @@ TEST(ResourceInfoTest, RejectsInvalidNamespacesAndPreviousArtifactVersion) {
   Info.BoundRanges = {{0, 0, 1, 0, BoundResourceClass::Buffer,
                        static_cast<BoundResourceNamespace>(4)}};
   EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
-  Info.BoundRanges[0].Namespace = BoundResourceNamespace::SRV;
+  Info.BoundRanges[0].Namespace = BoundResourceNamespace::CBV;
   Info.BoundRanges[0].Class = BoundResourceClass::Image;
   EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
+  Info.BoundRanges[0].Namespace = BoundResourceNamespace::SRV;
+  Info.BoundRanges[0].Class = BoundResourceClass::Sampler;
+  EXPECT_THAT_EXPECTED(parseArtifact(serializeArtifact(Info)), Failed());
   auto Bytes = serializeArtifact(StageArtifactInfo{});
-  for (uint8_t Version : {8, 9, 10}) {
+  for (uint8_t Version : {8, 9, 10, 11}) {
     Bytes[0] = Version;
     EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
   }
+}
+
+TEST(ResourceInfoTest, QualifiedImageRangesRoundTripThroughArtifact) {
+  StageArtifactInfo Info;
+  Info.ReservedImageHeapSize = 5;
+  Info.BoundRanges = {
+      {7, 3, 2, 0, BoundResourceClass::Image, BoundResourceNamespace::SRV},
+      {7, 3, 3, 2, BoundResourceClass::Image, BoundResourceNamespace::UAV}};
+  auto Parsed = parseArtifact(serializeArtifact(Info));
+  ASSERT_THAT_EXPECTED(Parsed, Succeeded());
+  ASSERT_EQ(Parsed->BoundRanges.size(), 2u);
+  EXPECT_EQ(Parsed->ReservedImageHeapSize, 5u);
+  EXPECT_EQ(Parsed->BoundRanges[0].Namespace, BoundResourceNamespace::SRV);
+  EXPECT_EQ(Parsed->BoundRanges[1].Namespace, BoundResourceNamespace::UAV);
+  EXPECT_EQ(Parsed->BoundRanges[1].HeapBase, 2u);
 }
 
 TEST(ResourceInfoTest, UnreadExplicitContractOverridesUseBasedReflection) {
@@ -349,8 +367,8 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsEleven) {
-  EXPECT_EQ(ArtifactAbiVersion, 11u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsTwelve) {
+  EXPECT_EQ(ArtifactAbiVersion, 12u);
 }
 
 TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {

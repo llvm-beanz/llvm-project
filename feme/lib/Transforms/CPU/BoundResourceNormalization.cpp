@@ -15,6 +15,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/DXILResource.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -25,6 +26,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
+#include <array>
 #include <limits>
 #include <map>
 #include <optional>
@@ -35,11 +37,28 @@ using namespace feme::cpu;
 
 namespace {
 
-/// Which buffer family `feme::cpu::ResourceLoweringPass`
-/// canonicalizes a bound handle belongs to (see its own `Family`); needed
+/// Which resource family `feme::cpu::ResourceLoweringPass`
+/// canonicalizes a bound handle belongs to; needed
 /// here only to reject a conflicting re-declaration of the same binding,
 /// never surfaced beyond that.
-enum class Family { Typed, Raw, Constant };
+enum class Family { Typed, Raw, Constant, Image, MultisampleImage, Sampler };
+
+BoundResourceClass resourceClass(Family Kind) {
+  switch (Kind) {
+  case Family::Typed:
+  case Family::Raw:
+  case Family::Constant:
+    return BoundResourceClass::Buffer;
+  case Family::Image:
+  case Family::MultisampleImage:
+    return BoundResourceClass::Image;
+  case Family::Sampler:
+    return BoundResourceClass::Sampler;
+  }
+  llvm_unreachable("unknown resource family");
+}
+
+using HeapPrefixes = std::array<uint32_t, 3>;
 
 /// A bound handle's identity, per "Bound-resource normalization": source
 /// model (always DXIL for now, see the header comment), CBV/SRV/UAV namespace,
@@ -78,8 +97,7 @@ struct RangeEntry {
 
 /// Classifies \p Handle's resource kind from its `target("dx.")` handle
 /// type, mirroring `classifyHandle` in ResourceLowering.cpp -- only the
-/// same buffer kinds that pass canonicalizes are normalized here (see the
-/// header comment).
+/// buffer and image/sampler kinds that pass canonicalizes are normalized here.
 std::optional<Family> classifyFamily(const CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
   if (!HandleTy)
@@ -90,6 +108,15 @@ std::optional<Family> classifyFamily(const CallInst &Handle) {
     return Family::Raw;
   if (getCBufferElementSize(HandleTy))
     return Family::Constant;
+  if (isa<dxil::TextureExtType, dxil::MSTextureExtType>(HandleTy) &&
+      HandleTy->getNumTypeParameters() == 1 &&
+      HandleTy->getNumIntParameters() == 4 && HandleTy->getIntParameter(0) <= 1)
+    return isa<dxil::TextureExtType>(HandleTy) ? Family::Image
+                                               : Family::MultisampleImage;
+  if (isa<dxil::SamplerExtType>(HandleTy) &&
+      HandleTy->getNumTypeParameters() == 0 &&
+      HandleTy->getNumIntParameters() == 1 && HandleTy->getIntParameter(0) <= 1)
+    return Family::Sampler;
   return std::nullopt;
 }
 
@@ -131,15 +158,19 @@ void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
       RangeKey Key{static_cast<uint32_t>(SpaceC->getZExtValue()),
                    static_cast<uint32_t>(LowerBoundC->getZExtValue()),
                    *Kind == Family::Constant ? BoundResourceNamespace::CBV
-                   : Ty->getIntParameter(0)  ? BoundResourceNamespace::UAV
-                                             : BoundResourceNamespace::SRV};
+                   : *Kind == Family::Sampler
+                       ? BoundResourceNamespace::Unspecified
+                   : Ty->getIntParameter(0) ? BoundResourceNamespace::UAV
+                                            : BoundResourceNamespace::SRV};
       uint32_t RangeSize = static_cast<uint32_t>(RangeSizeC->getZExtValue());
 
       auto It = Ranges.find(Key);
       if (It == Ranges.end()) {
-        Ranges.emplace(Key, RangeEntry{*Kind, RangeSize,
-                                       /*Conflicting=*/RangeSize == 0 ||
-                                           RangeSize == UINT32_MAX});
+        Ranges.emplace(
+            Key, RangeEntry{*Kind, RangeSize,
+                            /*Conflicting=*/RangeSize == 0 ||
+                                RangeSize == UINT32_MAX ||
+                                Key.LowerBound > UINT32_MAX - (RangeSize - 1)});
       } else if (It->second.Kind != *Kind ||
                  It->second.RangeSize != RangeSize) {
         It->second.Conflicting = true;
@@ -154,25 +185,26 @@ void collectBoundHandles(Module &M, SmallVectorImpl<BoundHandle> &Handles,
 /// reserved heap prefix, sorted by space, register and namespace for a
 /// deterministic (if not itself ABI-guaranteed) layout -- see
 /// "Bound-resource normalization"'s step 2. Returns the total reserved
-/// prefix size.
-uint32_t assignHeapBases(std::map<RangeKey, RangeEntry> &Ranges) {
-  uint64_t Total = 0;
+/// prefix sizes, independently for buffers, images and samplers.
+HeapPrefixes assignHeapBases(std::map<RangeKey, RangeEntry> &Ranges) {
+  std::array<uint64_t, 3> Totals{};
   for (const auto &[Key, Entry] : Ranges)
-    if (!Entry.Conflicting)
-      Total += Entry.RangeSize;
-  if (Total > std::numeric_limits<uint32_t>::max()) {
-    for (auto &[Key, Entry] : Ranges)
-      Entry.Conflicting = true;
-    return 0;
-  }
-  uint32_t Base = 0;
+    if (!Entry.Conflicting) {
+      auto &Total = Totals[uint32_t(resourceClass(Entry.Kind))];
+      if (Total <= std::numeric_limits<uint32_t>::max())
+        Total += Entry.RangeSize;
+    }
+  HeapPrefixes Prefixes{};
   for (auto &[Key, Entry] : Ranges) {
+    auto Class = uint32_t(resourceClass(Entry.Kind));
+    if (Totals[Class] > std::numeric_limits<uint32_t>::max())
+      Entry.Conflicting = true;
     if (Entry.Conflicting)
       continue;
-    Entry.HeapBase = Base;
-    Base += Entry.RangeSize;
+    Entry.HeapBase = Prefixes[Class];
+    Prefixes[Class] += Entry.RangeSize;
   }
-  return Base;
+  return Prefixes;
 }
 
 /// Builds `select(Base + Index > UINT32_MAX, UINT32_MAX, Base + Index)`,
@@ -235,14 +267,14 @@ void rewriteBoundHandles(const SmallVectorImpl<BoundHandle> &Handles,
   }
 }
 
-/// Adds \p PrefixSize to every *native* (not created by this pass)
+/// Adds the class-specific \p Prefixes entry to every *native*
+/// (not created by this pass)
 /// `handlefromheap` call's index operand, so a shader mixing traditional
-/// and bindless resources keeps its own dynamic heap indices unambiguous
-/// (see "Bound-resource normalization"'s step 4). Only the same buffer
-/// resource kinds this pass normalizes are offset, matching scope.
-void offsetNativeDynamicIndices(Module &M, uint32_t PrefixSize,
+/// and bindless resources keeps its own dynamic heap indices unambiguous.
+/// Each resource class uses only its own prefix.
+void offsetNativeDynamicIndices(Module &M, const HeapPrefixes &Prefixes,
                                 SmallPtrSetImpl<Function *> &TouchedFunctions) {
-  if (PrefixSize == 0)
+  if (Prefixes == HeapPrefixes{})
     return;
 
   for (Function &F : M) {
@@ -252,7 +284,11 @@ void offsetNativeDynamicIndices(Module &M, uint32_t PrefixSize,
       auto *CI = dyn_cast<CallInst>(U);
       if (!CI || CI->getCalledFunction() != &F)
         continue;
-      if (!classifyFamily(*CI))
+      auto Kind = classifyFamily(*CI);
+      if (!Kind)
+        continue;
+      uint32_t PrefixSize = Prefixes[uint32_t(resourceClass(*Kind))];
+      if (!PrefixSize)
         continue;
 
       IRBuilder<> Builder(CI);
@@ -268,21 +304,16 @@ void offsetNativeDynamicIndices(Module &M, uint32_t PrefixSize,
 /// (see the design doc's "Bound-resource normalization"/"Descriptor
 /// heaps" sections) describes for \p F: its name, the reserved resource-,
 /// image- and sampler-heap prefix sizes, then each accepted range as a
-/// (space, register, range-size, heap-base, class) tuple, sorted the same
-/// deterministic way `assignHeapBases` assigned them. Every range this
-/// DXIL-side pass accepts is a buffer -- a bound texture/sampler is not one
-/// of the handle kinds it normalizes -- so the image/sampler prefixes are
-/// always 0 here and every class is `Buffer`; the SPIR-V-side
-/// `feme::cpu::SPIRVResourceLoweringPass` is what populates the other two.
-void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
+/// (space, register, range-size, heap-base, class, namespace) tuple, sorted
+/// the same deterministic way `assignHeapBases` assigned them.
+void attachBoundResourceMetadata(Function &F, const HeapPrefixes &Prefixes,
                                  const std::map<RangeKey, RangeEntry> &Ranges) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Metadata *, 8> Ops;
   Ops.push_back(MDString::get(Ctx, F.getName()));
-  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, PrefixSize)));
-  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)));
-  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)));
+  for (uint32_t Prefix : Prefixes)
+    Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, Prefix)));
   for (const auto &[Key, Entry] : Ranges) {
     if (Entry.Conflicting)
       continue;
@@ -294,7 +325,7 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
     Ops.push_back(
         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.HeapBase)));
     Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(
-        I32Ty, static_cast<uint32_t>(feme::cpu::BoundResourceClass::Buffer))));
+        I32Ty, static_cast<uint32_t>(resourceClass(Entry.Kind)))));
     Ops.push_back(ConstantAsMetadata::get(
         ConstantInt::get(I32Ty, static_cast<uint32_t>(Key.Namespace))));
   }
@@ -314,20 +345,20 @@ PreservedAnalyses BoundResourceNormalizationPass::run(Module &M,
   if (Handles.empty())
     return PreservedAnalyses::all();
 
-  uint32_t PrefixSize = assignHeapBases(Ranges);
+  HeapPrefixes Prefixes = assignHeapBases(Ranges);
 
   SmallPtrSet<Function *, 4> TouchedFunctions;
   // Offset every *native* `handlefromheap` call first, while it is still
   // unambiguous which calls those are -- `rewriteBoundHandles` below creates
   // new `handlefromheap` calls of its own, which must not be offset again.
-  offsetNativeDynamicIndices(M, PrefixSize, TouchedFunctions);
+  offsetNativeDynamicIndices(M, Prefixes, TouchedFunctions);
   rewriteBoundHandles(Handles, Ranges, TouchedFunctions);
 
   if (TouchedFunctions.empty())
     return PreservedAnalyses::all(); // Every identity conflicted/unbounded.
 
   for (Function *F : TouchedFunctions)
-    attachBoundResourceMetadata(*F, PrefixSize, Ranges);
+    attachBoundResourceMetadata(*F, Prefixes, Ranges);
 
   // An unused `handlefrombinding` declaration is left behind once its last
   // (accepted) caller is rewritten away; a conflicting/unbounded one may

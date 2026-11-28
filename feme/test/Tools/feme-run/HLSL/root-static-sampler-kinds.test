@@ -26,15 +26,21 @@
 # RUN: not feme-run --root-signature-constants %t/comparison-maximum.dxil 2>&1 | FileCheck %s --check-prefix=MAXIMUM
 # RUN: not feme-run --root-signature-constants --reference %t/comparison-maximum.dxil 2>&1 | FileCheck %s --check-prefix=MAXIMUM
 # RUN: not feme --root-signature-constants --target=%feme_host_triple %t/comparison-maximum.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=MAXIMUM
-# RUN: not feme-run --root-signature-constants %t/comparison.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
-# RUN: not feme-run --root-signature-constants %t/ordinary.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
-# RUN: not feme-run %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
-# RUN: not feme-run --reference %t/ordinary-comparison.dxil 2>&1 | FileCheck %s --check-prefix=BOUND
-# RUN: not feme --target=%feme_host_triple %t/ordinary-comparison.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=BOUND
+# RUN: not feme-run --root-signature-constants %t/comparison.dxil 2>&1 | FileCheck %s --check-prefix=STATIC
+# RUN: not feme-run --root-signature-constants --reference %t/comparison.dxil 2>&1 | FileCheck %s --check-prefix=STATIC
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/comparison.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=STATIC
+# RUN: not feme-run --root-signature-constants %t/ordinary.dxil 2>&1 | FileCheck %s --check-prefix=STATIC
+# RUN: not feme-run --root-signature-constants --reference %t/ordinary.dxil 2>&1 | FileCheck %s --check-prefix=STATIC
+# RUN: not feme --root-signature-constants --target=%feme_host_triple %t/ordinary.dxil -o %t/rejected.o 2>&1 | FileCheck %s --check-prefix=STATIC
+# RUN: feme-run %t/ordinary-comparison.dxil
+# RUN: feme-run --reference %t/ordinary-comparison.dxil
+# RUN: feme --target=%feme_host_triple %t/ordinary-comparison.dxil -o %t/default.o
 #
 # DXC accepts mismatched states without /Vd. Legacy sampler handle raising
 # now exposes their declared mode to real shader preflight. Valid comparison
-# linkage still reaches unsupported bound descriptors, not execution.
+# linkage now rejects missing static materialization explicitly, rather than
+# treating a static sampler as a caller-provided descriptor. Default mode
+# ignores the root signature and accepts normalized image/sampler bindings.
 # This does not test materialization or execution of static sampler descriptors.
 # LAYOUT: static-sampler[0]: space=7 register=3 visibility=0 filter=128
 # DEFAULT: static sampler mismatch: sampler space=7 register=3 in 'main' declares mode=0 but filter=128 requires mode=1
@@ -42,8 +48,8 @@
 # MAXIMUM: static sampler mismatch: sampler space=7 register=3 in 'main' declares mode=1 but filter=384 requires mode=0
 # CMP-IR: call float @llvm.dx.resource.samplecmplevelzero
 # CMP-IR-SAME: float 5.000000e-01
-# BOUND: unsupported raised operation: 'llvm.dx.resource.handlefrombinding
-# BOUND-NOT: static sampler mismatch
+# STATIC: static sampler materialization is unsupported: space=7 register=3
+# STATIC-NOT: static sampler mismatch
 
 #--- shader.hlsl
 cbuffer Constants : register(b3, space7) { uint A; };

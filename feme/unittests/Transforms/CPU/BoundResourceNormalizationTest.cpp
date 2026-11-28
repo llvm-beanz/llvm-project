@@ -180,6 +180,165 @@ TEST(BoundResourceNormalizationTest, RejectsOverflowingCombinedPrefix) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources.v2"));
 }
 
+TEST(BoundResourceNormalizationTest, SeparatesImageSamplerAndBufferPrefixes) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %buffer = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefrombinding.buffer(i32 7, i32 0, i32 4, i32 %idx, ptr null)
+      %srv = call target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefrombinding.srv(i32 7, i32 3, i32 2, i32 %idx, ptr null)
+      %uav = call target("dx.Texture", <4 x i32>, 1, 0, 0, 2)
+        @llvm.dx.resource.handlefrombinding.uav(i32 7, i32 3, i32 3, i32 %idx, ptr null)
+      %sampler = call target("dx.Sampler", 0)
+        @llvm.dx.resource.handlefrombinding.sampler(i32 7, i32 3, i32 6, i32 %idx, ptr null)
+      %native_buffer = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap.buffer(i32 5)
+      %native_image = call target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefromheap.image(i32 5)
+      %native_sampler = call target("dx.Sampler", 0)
+        @llvm.dx.resource.handlefromheap.sampler(i32 5)
+      ret void
+    }
+    declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefrombinding.buffer(i32, i32, i32, i32, ptr)
+    declare target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+      @llvm.dx.resource.handlefrombinding.srv(i32, i32, i32, i32, ptr)
+    declare target("dx.Texture", <4 x i32>, 1, 0, 0, 2)
+      @llvm.dx.resource.handlefrombinding.uav(i32, i32, i32, i32, ptr)
+    declare target("dx.Sampler", 0)
+      @llvm.dx.resource.handlefrombinding.sampler(i32, i32, i32, i32, ptr)
+    declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefromheap.buffer(i32)
+    declare target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+      @llvm.dx.resource.handlefromheap.image(i32)
+    declare target("dx.Sampler", 0)
+      @llvm.dx.resource.handlefromheap.sampler(i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  auto *MD = M->getNamedMetadata("feme.cpu.bound_resources.v2");
+  ASSERT_TRUE(MD);
+  auto *Entry = MD->getOperand(0);
+  ASSERT_EQ(Entry->getNumOperands(), 28u);
+  auto Get = [&](unsigned I) {
+    return mdconst::extract<ConstantInt>(Entry->getOperand(I))->getZExtValue();
+  };
+  EXPECT_EQ(Get(1), 4u);
+  EXPECT_EQ(Get(2), 5u);
+  EXPECT_EQ(Get(3), 6u);
+  EXPECT_EQ(Get(8), uint32_t(BoundResourceClass::Buffer));
+  EXPECT_EQ(Get(14), uint32_t(BoundResourceClass::Sampler));
+  EXPECT_EQ(Get(15), uint32_t(BoundResourceNamespace::Unspecified));
+  EXPECT_EQ(Get(20), uint32_t(BoundResourceClass::Image));
+  EXPECT_EQ(Get(21), uint32_t(BoundResourceNamespace::SRV));
+  EXPECT_EQ(Get(25), 2u);
+  EXPECT_EQ(Get(26), uint32_t(BoundResourceClass::Image));
+  EXPECT_EQ(Get(27), uint32_t(BoundResourceNamespace::UAV));
+  unsigned HeapCalls = 0;
+  for (Instruction &I : instructions(M->getFunction("main"))) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    EXPECT_NE(CI->getCalledFunction()->getIntrinsicID(),
+              Intrinsic::dx_resource_handlefrombinding);
+    if (CI->getCalledFunction()->getIntrinsicID() !=
+        Intrinsic::dx_resource_handlefromheap)
+      continue;
+    ++HeapCalls;
+    if (CI->getName() == "native_buffer")
+      EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(), 9u);
+    if (CI->getName() == "native_image")
+      EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(), 10u);
+    if (CI->getName() == "native_sampler")
+      EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(), 11u);
+  }
+  EXPECT_EQ(HeapCalls, 7u);
+}
+
+TEST(BoundResourceNormalizationTest, ImageOverflowDoesNotConsumeBufferPrefix) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %buffer = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefrombinding.buffer(i32 0, i32 0, i32 2, i32 %idx, ptr null)
+      %srv = call target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefrombinding.srv(i32 0, i32 3, i32 2147483648, i32 %idx, ptr null)
+      %uav = call target("dx.Texture", <4 x i32>, 1, 0, 0, 2)
+        @llvm.dx.resource.handlefrombinding.uav(i32 0, i32 3, i32 2147483648, i32 %idx, ptr null)
+      %bad_registers = call target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefrombinding.srv(i32 1, i32 -1, i32 2, i32 %idx, ptr null)
+      ret void
+    }
+    declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefrombinding.buffer(i32, i32, i32, i32, ptr)
+    declare target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+      @llvm.dx.resource.handlefrombinding.srv(i32, i32, i32, i32, ptr)
+    declare target("dx.Texture", <4 x i32>, 1, 0, 0, 2)
+      @llvm.dx.resource.handlefrombinding.uav(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  auto *MD = M->getNamedMetadata("feme.cpu.bound_resources.v2");
+  ASSERT_TRUE(MD);
+  auto *Entry = MD->getOperand(0);
+  ASSERT_EQ(Entry->getNumOperands(), 10u);
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue(),
+            2u);
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(2))->getZExtValue(),
+            0u);
+  unsigned BoundCalls = 0;
+  for (Instruction &I : instructions(M->getFunction("main")))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      BoundCalls += CI->getCalledFunction()->getIntrinsicID() ==
+                    Intrinsic::dx_resource_handlefrombinding;
+  EXPECT_EQ(BoundCalls, 3u);
+}
+
+TEST(BoundResourceNormalizationTest,
+     RegisterOverflowDoesNotConsumeImagePrefix) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define void @main(i32 %idx) {
+      %image = call target("dx.MSTexture", <4 x float>, 0, 4, 0, 3)
+        @llvm.dx.resource.handlefrombinding.ms(i32 0, i32 0, i32 2, i32 %idx, ptr null)
+      %sampler = call target("dx.Sampler", 1)
+        @llvm.dx.resource.handlefrombinding.sampler(i32 0, i32 3, i32 1, i32 %idx, ptr null)
+      %bad_registers = call target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefrombinding.srv(i32 0, i32 -1, i32 2, i32 %idx, ptr null)
+      ret void
+    }
+    declare target("dx.MSTexture", <4 x float>, 0, 4, 0, 3)
+      @llvm.dx.resource.handlefrombinding.ms(i32, i32, i32, i32, ptr)
+    declare target("dx.Sampler", 1)
+      @llvm.dx.resource.handlefrombinding.sampler(i32, i32, i32, i32, ptr)
+    declare target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+      @llvm.dx.resource.handlefrombinding.srv(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  auto *MD = M->getNamedMetadata("feme.cpu.bound_resources.v2");
+  ASSERT_TRUE(MD);
+  auto *Entry = MD->getOperand(0);
+  ASSERT_EQ(Entry->getNumOperands(), 16u);
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue(),
+            0u);
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(2))->getZExtValue(),
+            2u);
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(3))->getZExtValue(),
+            1u);
+  unsigned BoundCalls = 0, HeapCalls = 0;
+  for (Instruction &I : instructions(M->getFunction("main")))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      BoundCalls += CI->getCalledFunction()->getIntrinsicID() ==
+                    Intrinsic::dx_resource_handlefrombinding;
+      HeapCalls += CI->getCalledFunction()->getIntrinsicID() ==
+                   Intrinsic::dx_resource_handlefromheap;
+    }
+  EXPECT_EQ(BoundCalls, 1u);
+  EXPECT_EQ(HeapCalls, 2u);
+}
+
 TEST(BoundResourceNormalizationTest, OffsetsNativeDynamicHeapIndex) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -222,10 +381,18 @@ TEST(BoundResourceNormalizationTest, LeavesUnboundedRangeUnchanged) {
     define void @main(i32 %idx) {
       %h = call target("dx.RawBuffer", i8, 1, 0)
           @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 0, i32 %idx, ptr null)
+      %image = call target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+          @llvm.dx.resource.handlefrombinding.image(i32 0, i32 0, i32 0, i32 %idx, ptr null)
+      %sampler = call target("dx.Sampler", 0)
+          @llvm.dx.resource.handlefrombinding.sampler(i32 0, i32 0, i32 -1, i32 %idx, ptr null)
       ret void
     }
     declare target("dx.RawBuffer", i8, 1, 0)
         @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare target("dx.Texture", <4 x i32>, 0, 0, 0, 2)
+        @llvm.dx.resource.handlefrombinding.image(i32, i32, i32, i32, ptr)
+    declare target("dx.Sampler", 0)
+        @llvm.dx.resource.handlefrombinding.sampler(i32, i32, i32, i32, ptr)
   )");
   ASSERT_TRUE(M);
   runPass(*M);

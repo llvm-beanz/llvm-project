@@ -11,6 +11,7 @@
 #include "feme/Transforms/DXIL/RootBindingPlan.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -373,6 +374,43 @@ Error selectRootSignatureConstants(Function &F, ShaderStage Stage) {
                              "visible to the selected stage");
   if (Error E = (*Plan)->checkShaderBindings(F, Visible))
     return E;
+  SmallVector<const Function *, 8> Worklist{&F};
+  SmallPtrSet<const Function *, 8> Seen;
+  while (!Worklist.empty()) {
+    const Function *Current = Worklist.pop_back_val();
+    if (!Seen.insert(Current).second)
+      continue;
+    for (const Instruction &I : instructions(Current)) {
+      const auto *Call = dyn_cast<CallBase>(&I);
+      if (!Call)
+        continue;
+      const auto *Callee = dyn_cast<Function>(
+          Call->getCalledOperand()->stripPointerCastsAndAliases());
+      assert(Callee && "shader binding preflight validated direct calls");
+      if (!Callee->isDeclaration())
+        Worklist.push_back(Callee);
+      if (Call->use_empty() ||
+          Callee->getIntrinsicID() != Intrinsic::dx_resource_handlefrombinding)
+        continue;
+      const auto *Ty = dyn_cast<TargetExtType>(Call->getType());
+      if (!Ty || Ty->getName() != "dx.Sampler")
+        continue;
+      uint32_t Space =
+          cast<ConstantInt>(Call->getArgOperand(0))->getZExtValue();
+      uint32_t Register =
+          cast<ConstantInt>(Call->getArgOperand(1))->getZExtValue();
+      for (const auto &Sampler : (*Plan)->getStaticSamplers())
+        if (Sampler.RegisterSpace == Space &&
+            Sampler.ShaderRegister == Register &&
+            (Sampler.ShaderVisibility == uint32_t(Visibility::All) ||
+             Sampler.ShaderVisibility == uint32_t(Visible)))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "static sampler materialization is unsupported: space=%u "
+              "register=%u",
+              Space, Register);
+    }
+  }
   const auto &Binding = Selected->Bindings.front();
   LLVMContext &C = F.getContext();
   auto Word = [&](uint32_t Value) {

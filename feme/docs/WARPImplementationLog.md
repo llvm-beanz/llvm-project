@@ -809,6 +809,39 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Shared DXIL image/sampler normalization and artifact identity
+
+The DXIL normalizer now assigns independent buffer/image/sampler heap prefixes,
+preserves SRV/UAV image namespaces, and offsets each native heap only by its own
+prefix. Finite ranges retain per-range OOB/overflow sentinels; register overflow,
+unbounded ranges, conflicts and class-specific prefix overflow remain rejected.
+Artifact ABI **12** admits qualified images while retaining rejection of CBV
+image and qualified sampler namespaces. Earlier objects require recompilation;
+shader argument layouts and Windows bridge 4 are unchanged.
+
+The runner forwards optional image `register-class` qualification and prints it.
+Native DXIL SIMD/scalar JIT and AOT controls distinguish divergent SRV/UAV arrays
+at equal registers, unchanged image storage, exact output guards and nearest/
+linear sampler arrays. Normalizer tests pass **14/14**, artifact/heap tests
+**49/49**, and focused native controls **3/3**.
+
+Full validation exposed a dependent static-sampler regression: normalizing its
+handle would incorrectly turn fixed root state into a caller-provided descriptor.
+Explicit root-signature mode now rejects live static-sampler consumers until
+materialization exists, after preserving precise mode-mismatch diagnostics.
+Default mode intentionally ignores embedded root signatures. SIMD/scalar/AOT
+rejection controls pass; an unsigned visibility comparison was corrected during
+the build.
+
+Final full FeMe passes **4423** / **15** skipped / **10** unsupported, callbacks
+**65/65**, stock-runtime/coexistence **371/371**, with confirmed FeMe ICD identity
+and OS execution after relinking. Generated **v20**, bridge4/artifact12 has
+**335** unique OS gates and **11** existing native fixtures checked relative
+to the FeMe test-suite root; no complete FL claim or new CTS result.
+Owned Windows image/sampler descriptors and bridge dispatch, static sampler
+materialization, other resource formats/classes, roots and ordering remain open.
+W2 is not complete.
+
 #### Shared image-binding identity prerequisite
 
 `BoundImageBinding` now carries the same explicit register namespace as buffer

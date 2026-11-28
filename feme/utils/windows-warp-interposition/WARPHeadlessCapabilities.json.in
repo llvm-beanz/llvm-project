@@ -10,7 +10,7 @@
     "command_queue": "D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001"
   },
   "compiler_bridge_version": 4,
-  "artifact_abi_version": 11,
+  "artifact_abi_version": 12,
   "input_profiles": ["released SM 5.1", "released SM 6.0"],
   "shader_scope": ["application compute subset", "initialization vertex only"],
   "wave_policy": {

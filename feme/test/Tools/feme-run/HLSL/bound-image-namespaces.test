@@ -1,0 +1,120 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# REQUIRES: system-dxc-dxil
+# RUN: split-file %s %t
+# RUN: %dxil_dxc /nologo /WX /T cs_6_0 /E main /Fo %t/shader.dxil %t/shader.hlsl
+# RUN: feme-run --wave-size=4 --repeat=2 --heap=%t/bound.yaml %t/shader.dxil | FileCheck %s --check-prefixes=JIT,IMAGES
+# RUN: feme-run --reference --repeat=2 --heap=%t/bound.yaml %t/shader.dxil | FileCheck %s --check-prefixes=JIT,IMAGES
+# RUN: feme --wave-size=4 --target=%feme_host_triple %t/shader.dxil -o %t/shader.o
+# RUN: feme-run --object --repeat=2 --heap=%t/physical.yaml %t/shader.o | FileCheck %s --check-prefix=AOT
+# RUN: not feme-run --wave-size=4 --heap=%t/ambiguous.yaml %t/shader.dxil 2>&1 | FileCheck %s --check-prefix=AMBIGUOUS
+# JIT: binding[uav:0:0][0]: 42 112 114 116 118 222 224 226 228 152 154 156 158 262 264 266 268 42
+# AOT: heap[0]: 42 112 114 116 118 222 224 226 228 152 154 156 158 262 264 266 268 42
+# IMAGES: image-binding[uav:7:3][0]: 101 102 103 104 111 112 113 114 121 122 123 124 131 132 133 134
+# IMAGES: image-binding[uav:7:3][1]: 151 152 153 154 161 162 163 164 171 172 173 174 181 182 183 184
+# IMAGES: image-binding[srv:7:3][0]: 11 12 13 14 21 22 23 24 31 32 33 34 41 42 43 44
+# IMAGES: image-binding[srv:7:3][1]: 51 52 53 54 61 62 63 64 71 72 73 74 81 82 83 84
+# AMBIGUOUS: ambiguous image binding space=7 register=3: specify srv or uav
+# Native DXIL plus owned CPU execution, not D3D12 texture-view admission.
+# Divergent array indices, equal SRV/UAV identities and exact guards distinguish
+# the four views. Physical AOT heaps are ordered by register and namespace.
+
+#--- shader.hlsl
+Texture2D<uint4> Read[2] : register(t3, space7);
+RWTexture2D<uint4> Write[2] : register(u3, space7);
+RWByteAddressBuffer Out : register(u0);
+[numthreads(4, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+  uint index = NonUniformResourceIndex(tid.x & 1);
+  uint4 value = Read[index].Load(int3(tid.x, 0, 0)) +
+                Write[index].Load(int2(tid.x, 0));
+  Out.Store4(4 + tid.x * 16, value);
+}
+
+#--- bound.yaml
+bindings:
+  - space: 0
+    register: 0
+    register-class: uav
+    entries:
+      - index: 0
+        size: 72
+        data: [42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42]
+image-bindings:
+  - space: 7
+    register: 3
+    register-class: uav
+    entries:
+      - index: 0
+        dimension: 2d
+        extent: [4, 1]
+        format: r32g32b32a32_uint
+        sampled: false
+        storage: true
+        data: [101, 102, 103, 104, 111, 112, 113, 114,
+               121, 122, 123, 124, 131, 132, 133, 134]
+      - index: 1
+        dimension: 2d
+        extent: [4, 1]
+        format: r32g32b32a32_uint
+        sampled: false
+        storage: true
+        data: [151, 152, 153, 154, 161, 162, 163, 164,
+               171, 172, 173, 174, 181, 182, 183, 184]
+  - space: 7
+    register: 3
+    register-class: srv
+    entries:
+      - index: 0
+        dimension: 2d
+        extent: [4, 1]
+        format: r32g32b32a32_uint
+        data: [11, 12, 13, 14, 21, 22, 23, 24,
+               31, 32, 33, 34, 41, 42, 43, 44]
+      - index: 1
+        dimension: 2d
+        extent: [4, 1]
+        format: r32g32b32a32_uint
+        data: [51, 52, 53, 54, 61, 62, 63, 64,
+               71, 72, 73, 74, 81, 82, 83, 84]
+
+#--- physical.yaml
+resource-heap:
+  - index: 0
+    size: 72
+    data: [42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42]
+images:
+  - index: 0
+    dimension: 2d
+    extent: [4, 1]
+    format: r32g32b32a32_uint
+    data: [11, 12, 13, 14, 21, 22, 23, 24,
+           31, 32, 33, 34, 41, 42, 43, 44]
+  - index: 1
+    dimension: 2d
+    extent: [4, 1]
+    format: r32g32b32a32_uint
+    data: [51, 52, 53, 54, 61, 62, 63, 64,
+           71, 72, 73, 74, 81, 82, 83, 84]
+  - index: 2
+    dimension: 2d
+    extent: [4, 1]
+    format: r32g32b32a32_uint
+    sampled: false
+    storage: true
+    data: [101, 102, 103, 104, 111, 112, 113, 114,
+           121, 122, 123, 124, 131, 132, 133, 134]
+  - index: 3
+    dimension: 2d
+    extent: [4, 1]
+    format: r32g32b32a32_uint
+    sampled: false
+    storage: true
+    data: [151, 152, 153, 154, 161, 162, 163, 164,
+           171, 172, 173, 174, 181, 182, 183, 184]
+
+#--- ambiguous.yaml
+image-bindings:
+  - space: 7
+    register: 3

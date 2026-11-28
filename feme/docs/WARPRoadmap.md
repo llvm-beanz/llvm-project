@@ -44,10 +44,11 @@ pitches, partial regions, recording snapshots and ordered execution.
 Owned single-plane, single-sample linear texture storage now uses that shared
 geometry. Mipmapped 3D and 2D-array texture copies pass selected-subresource
 indexing, partial regions and held execution; shader views/samplers remain open.
-Shared host image bindings now preserve qualified SRV/UAV identity and reject
-ambiguous bindings; compiler image normalization/serialization and the Windows
-image bridge remain open.
-The generated v19 inventory
+Shared DXIL image/sampler bindings now use independent checked heap prefixes,
+qualified SRV/UAV image identity and artifact ABI 12. Native CPU JIT/scalar/AOT
+controls distinguish image namespaces and sampler arrays; the Windows image
+bridge and owned texture shader views/samplers remain open.
+The generated v20 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -86,7 +87,7 @@ not a device or runtime.
 W2 remaining work is tracked without deeper milestone nesting:
 
 The shared typed-buffer runtime and Windows bridge 4 execute descriptor-backed
-typed SRV component mappings (artifact ABI 11), including post-record updates,
+typed SRV component mappings (artifact ABI 12), including post-record updates,
 nulls and held execution. Twelve additional narrow SRV formats reuse existing
 decoders with exact physical element geometry. All 21 mapped formats execute
 typed UAV loads/stores; descriptor-gated saturation preserves existing Vulkan

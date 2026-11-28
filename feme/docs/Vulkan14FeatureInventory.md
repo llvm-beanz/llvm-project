@@ -1,5 +1,11 @@
 # Vulkan core mandatory-feature/limit/extension inventory
 
+Shared DXIL image/sampler normalization passes 4423 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 371 stock-runtime/coexistence
+gates with confirmed FeMe ICD identity. Artifact ABI 12 changes image binding
+admission, not Vulkan advertisements; this table was not regenerated and no
+new CTS or owned D3D12 texture-view result is claimed.
+
 This inventory is generated from the Vulkan registry used by the tested
 VK-GL-CTS checkout and cross-checked against the feature and extension
 manifests maintained beside the FeMe Vulkan ICD. It covers every core feature

@@ -268,7 +268,8 @@ struct ResourceInfo {
 /// Version 9 admits descriptor-backed CBVs in their separate namespace.
 /// Version 10 adds component mappings to the buffer descriptor layout.
 /// Version 11 admits descriptor-controlled saturating integer stores.
-constexpr uint32_t ArtifactAbiVersion = 11;
+/// Version 12 admits SRV/UAV namespaces on image ranges.
+constexpr uint32_t ArtifactAbiVersion = 12;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.

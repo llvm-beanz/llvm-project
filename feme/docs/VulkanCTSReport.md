@@ -1,5 +1,13 @@
 # Vulkan CTS status
 
+## Shared DXIL image-binding regression scope, not CTS
+
+Qualified image/sampler normalization passes 4423 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 371 stock-runtime/coexistence
+gates, with confirmed FeMe ICD identity. Artifact ABI 12 requires older objects
+to be rebuilt; shader argument layouts and Vulkan advertisements are unchanged.
+Native CPU image/sampler controls are not owned D3D12 texture-view or CTS evidence.
+
 ## Owned WARP texture-storage regression scope, not CTS
 
 Linear texture storage and selected mip/array copies pass 4415 full FeMe

@@ -2085,7 +2085,7 @@ through heap emulation.
 `feme::cpu::BoundResourceNormalizationPass`
 (`feme-cpu-normalize-bound-resources`) runs immediately before
 `feme::cpu::ResourceLoweringPass`. It performs the following independently
-for the resource and sampler heaps:
+for the resource, image and sampler heaps:
 
 1. Collect each finite bound range used by the selected entry point and its
    retained call graph. A range is identified by source model, register
@@ -2115,6 +2115,15 @@ dynamic-resource operation. Resource kinds that `ResourceLoweringPass` does
 not yet canonicalize remain unsupported regardless of whether their source
 handle was bound or dynamic; normalization changes addressing, not the set of
 implemented resource operations.
+
+DXIL normalization now covers `dx.Texture`, `dx.MSTexture` and `dx.Sampler`
+alongside buffers. SRV/UAV image namespaces remain separate, while samplers
+occupy their own class with an unspecified namespace. Prefix accumulation and
+native dynamic-index rebasing are class-specific. Zero/UINT32_MAX ranges,
+overflowing register extents, conflicting declarations and overflowing
+class-specific prefixes remain unnormalized for admission to reject. An
+overflowing image prefix does not consume buffer or sampler slots. The
+normalizer changes addressing, not which texture operations are executable.
 
 `feme::cpu::BoundResourceNormalizationPass` itself implements this shape for
 DXIL only (SPIR-V has no raised bindless-heap counterpart to rewrite
@@ -3989,24 +3998,26 @@ Notes and constraints:
   inputs and CBV/unknown qualification are rejected. JIT dispatch propagates
   these errors before preparation; low-level callers must validate first.
   Existing unambiguous unqualified inputs, including Vulkan's bindings, retain
-  their behavior. This is a shared host-binding prerequisite: image namespace
-  serialization/normalization and the Windows image bridge remain open, so
-  artifact ABI 11 and Windows bridge 4 are unchanged.
+  their behavior. DXIL image/sampler normalization and image namespace
+  serialization now supply this identity end-to-end. The Windows image bridge
+  and owned texture shader views/samplers remain open.
 
   DXIL normalization publishes six-field ranges in
   `!feme.cpu.bound_resources.v2`; legacy/SPIR-V five-field
   `!feme.cpu.bound_resources` remains readable with the shared/unspecified
-  namespace. Physical buffer slots are assigned by space, register and
-  namespace, and native dynamic indices are shifted by the complete prefix.
+  namespace. Physical slots are assigned by space, register and namespace
+  within each class, and native dynamic indices are shifted by that class's
+  complete prefix.
   Conflicting declarations are isolated within a namespace; zero/UINT32_MAX
   unbounded ranges and an overflowing combined prefix remain unnormalized
   for admission to reject.
 
-  Artifact ABI **8** serializes namespace as the sixth bound-range field.
-  Version-7 objects must be recompiled; parsing rejects older versions,
-  unknown namespaces and SRV/UAV namespaces on image/sampler ranges. Shader
-  argument ABI layouts are unchanged. This supplies buffer binding identity,
-  not D3D12 table materialization, general CBVs or descriptor promises.
+  Artifact ABI **12** retains the sixth namespace field added in version 8
+  and admits SRV/UAV image ranges. Earlier objects must be recompiled; parsing
+  still rejects unknown namespaces, CBV image namespaces and any qualified
+  sampler namespace. Shader argument ABI layouts and Windows bridge 4 are
+  unchanged. This supplies shared binding identity, not owned D3D12 image
+  table materialization or complete descriptor promises.
 - **Object-file path**: the same helper-bitcode link and optimization
   pipeline minus the JIT, through
   `feme::TargetMachineBackend` with the host triple, producing a relocatable
@@ -4261,6 +4272,13 @@ because it is a separate project that happens to reuse this one.
   ResourceHeap.h) builds the physical heap from `ResourceInfo`'s
   `BoundRanges` and the YAML's `bindings`/`resource-heap` lists, so a test
   never encodes a compiler-assigned prefix slot.
+
+  `image-bindings` likewise accepts optional `register-class: srv` or `uav`,
+  passed through owned storage into `BoundImageBinding`. Unqualified images
+  retain their meaning only when the reflected identity is unambiguous;
+  qualified image dumps include the namespace. Native DXIL tests distinguish
+  same-space/register SRV/UAV arrays and nearest/linear sampler arrays through
+  SIMD/scalar JIT, guarded repeated output and versioned AOT physical heaps.
 
   Roadmap step R8 fills in `kind`/`format`/`stride` on both `resource-heap`
   and `bindings`' `entries` (still not `class`: every entry remains a UAV,
