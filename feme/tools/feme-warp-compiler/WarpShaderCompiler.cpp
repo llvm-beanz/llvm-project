@@ -36,10 +36,25 @@
 #include <limits>
 #include <new>
 
+#include <dxgiformat.h>
+
 namespace {
 constexpr std::int32_t InvalidArgument = static_cast<std::int32_t>(0x80070057u);
 constexpr std::int32_t CompileFailure = static_cast<std::int32_t>(0x80004005u);
 constexpr std::int32_t OutOfMemory = static_cast<std::int32_t>(0x8007000eu);
+
+feme::cpu::ResourceFormat typedBufferFormat(std::uint32_t Format) {
+  switch (Format) {
+  case DXGI_FORMAT_R32_FLOAT:
+    return feme::cpu::ResourceFormat::R32_FLOAT;
+  case DXGI_FORMAT_R32_UINT:
+    return feme::cpu::ResourceFormat::R32_UINT;
+  case DXGI_FORMAT_R32_SINT:
+    return feme::cpu::ResourceFormat::R32_SINT;
+  default:
+    return feme::cpu::ResourceFormat::Unknown;
+  }
+}
 
 struct CompiledShader {
   std::shared_ptr<feme::cpu::CompiledStage> Stage;
@@ -101,8 +116,8 @@ std::int32_t FeMeWarpCompileRawDXBC(const std::uint32_t *Tokens,
   if (Compiled)
     *Compiled = nullptr;
   if (!Tokens || !Compiled || !Info || Info->Size != sizeof(*Info) ||
-      Info->BridgeVersion != 1 || Count < 2 || Count > 4 * 1024 * 1024 ||
-      Tokens[1] != Count) {
+      Info->BridgeVersion != FeMeWarpCompilerBridgeVersion || Count < 2 ||
+      Count > 4 * 1024 * 1024 || Tokens[1] != Count) {
     llvm::errs() << "FeMe WARP shader compiler: invalid token buffer or ABI\n";
     return InvalidArgument;
   }
@@ -163,7 +178,8 @@ std::int32_t FeMeWarpCompileDXILProgram(const std::uint32_t *Program,
   if (Compiled)
     *Compiled = nullptr;
   if (!Program || !Compiled || !Info || Info->Size != sizeof(*Info) ||
-      Info->BridgeVersion != 1 || Count < 6 || Count > 4 * 1024 * 1024) {
+      Info->BridgeVersion != FeMeWarpCompilerBridgeVersion || Count < 6 ||
+      Count > 4 * 1024 * 1024) {
     llvm::errs() << "FeMe WARP DXIL compiler: invalid program buffer or ABI\n";
     return InvalidArgument;
   }
@@ -294,7 +310,8 @@ void FeMeWarpDestroyComputePipeline(void *Pipeline) {
 
 std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
                                      const FeMeWarpDispatchDesc *Desc) {
-  if (!Pipeline || !Desc || Desc->Size != sizeof(*Desc) || Desc->Version != 1 ||
+  if (!Pipeline || !Desc || Desc->Size != sizeof(*Desc) ||
+      Desc->Version != FeMeWarpCompilerBridgeVersion ||
       Desc->BufferCount > 64 || (Desc->BufferCount && !Desc->Buffers)) {
     llvm::errs() << "FeMe WARP dispatch: invalid descriptor or ABI\n";
     return InvalidArgument;
@@ -328,10 +345,14 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
   std::array<feme::cpu::BoundResourceBinding, 64> Bindings{};
   for (std::uint32_t I = 0; I < Desc->BufferCount; ++I) {
     const auto &Buffer = Desc->Buffers[I];
-    if ((!Buffer.Data != !Buffer.SizeInBytes) || Buffer.Kind > 1 ||
+    if ((!Buffer.Data != !Buffer.SizeInBytes) || Buffer.Kind > 2 ||
         (Buffer.Namespace < 1 || Buffer.Namespace > 3) ||
         (Buffer.Namespace == 3 && Buffer.Kind != 0) ||
         (Buffer.Kind == 0 && Buffer.Stride) ||
+        (Buffer.Kind != 2 && Buffer.Format) ||
+        (Buffer.Kind == 2 && (Buffer.Stride || Buffer.SizeInBytes % 4 ||
+                              typedBufferFormat(Buffer.Format) ==
+                                  feme::cpu::ResourceFormat::Unknown)) ||
         (Buffer.Kind == 1 && (!Buffer.Stride || Buffer.Stride % 4 ||
                               Buffer.SizeInBytes % Buffer.Stride))) {
       llvm::errs() << "FeMe WARP dispatch: invalid buffer binding\n";
@@ -378,9 +399,12 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
       Descriptor.Data = Matched->Data;
       Descriptor.SizeInBytes = Matched->SizeInBytes;
       Descriptor.Kind = static_cast<std::uint32_t>(
-          Matched->Kind ? feme::cpu::ResourceKind::Structured
-                        : feme::cpu::ResourceKind::Raw);
+          Matched->Kind == 2   ? feme::cpu::ResourceKind::Typed
+          : Matched->Kind == 1 ? feme::cpu::ResourceKind::Structured
+                               : feme::cpu::ResourceKind::Raw);
       Descriptor.Stride = Matched->Stride;
+      Descriptor.Format =
+          static_cast<std::uint32_t>(typedBufferFormat(Matched->Format));
       Descriptor.Flags =
           Matched->Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
     }

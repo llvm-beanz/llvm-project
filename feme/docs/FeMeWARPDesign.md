@@ -18,7 +18,8 @@ and copies, monitored fences, completed readback and pending teardown.
 The W1 v1 inventory records the completed internal headless subset. W2 now
 adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
 decreasing monitored fences, dispatch-only indirect commands and multiple
-root CBVs, inline constants and finite CBV/raw/structured descriptor tables; inventory v8
+root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
+R32_UINT/R32_SINT/R32_FLOAT typed buffer views; inventory v9
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1754,10 +1755,15 @@ individually bounded scalar accesses, without widening unused components.
 Finite buffer arrays expand immutable table plans into individual register
 bindings, then regroup complete reflected ranges into contiguous descriptor
 spans. Register/offset endpoints, aggregate limits and overlaps are checked.
-Non-uniform CBV/SRV/UAV selection executes without changing the bridge ABI;
-unbounded ranges and general heap indexing remain unsupported.
-Typed/image/counter descriptors and broader residency remain open.
-See the implementation log and v8 inventory.
+Finite-array support did not require a bridge-layout change. Scalar
+R32_UINT/R32_SINT/R32_FLOAT typed SRV/UAV tables now execute through the
+existing typed CPU helpers, including non-uniform selection, nulls and
+post-record copies. Bridge ABI 2 explicitly carries a DXGI format and maps
+it to FeMe's distinct format numbering; old compilation/dispatch versions
+are rejected. Only buffer and typed-UAV read/write format support is added,
+not texture/render-target support. Unbounded/general heaps, other typed
+formats, image/counter descriptors and broader residency remain open.
+See the implementation log and v9 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

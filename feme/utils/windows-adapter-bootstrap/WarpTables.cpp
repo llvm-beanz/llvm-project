@@ -124,13 +124,28 @@ void APIENTRY queryNodeMap(D3D12DDI_HDEVICE Device, UINT Count, UINT *Map) {
 
 UINT APIENTRY implicitAdapterMask(D3D12DDI_HDEVICE) { return 0; }
 
-void APIENTRY checkFormat(D3D12DDI_HDEVICE Device, DXGI_FORMAT, UINT *Support) {
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+bool isTypedBufferFormat(DXGI_FORMAT Format) {
+  return Format == DXGI_FORMAT_R32_FLOAT || Format == DXGI_FORMAT_R32_UINT ||
+         Format == DXGI_FORMAT_R32_SINT;
+}
+#endif
+
+void APIENTRY checkFormat(D3D12DDI_HDEVICE Device, DXGI_FORMAT Format,
+                          UINT *Support) {
   if (!Support) {
     reportError(Device, E_INVALIDARG);
     return;
   }
-  // The buffer-only diagnostic profile advertises no texture/view formats.
   *Support = 0;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  if (isTypedBufferFormat(Format))
+    *Support = D3D12DDI_FORMAT_SUPPORT_BUFFER |
+               D3D12DDI_FORMAT_SUPPORT_UAV_READS |
+               D3D12DDI_FORMAT_SUPPORT_UAV_WRITES;
+#else
+  (void)Format;
+#endif
 }
 
 void APIENTRY checkMultisample(D3D12DDI_HDEVICE Device, DXGI_FORMAT, UINT,
@@ -608,6 +623,7 @@ void APIENTRY resetCommandPool(D3D12DDI_HDEVICE Device,
 struct DescriptorSlot {
   UINT Namespace = 0;
   UINT Stride = 0;
+  DXGI_FORMAT Format = DXGI_FORMAT_UNKNOWN;
   D3D12DDI_HRESOURCE Resource{};
   UINT64 ByteOffset = 0;
   UINT64 ByteSize = 0;
@@ -819,8 +835,11 @@ HRESULT makeBufferView(feme::probe::WarpDeviceState *Owner,
       (Stride &&
        (Format != DXGI_FORMAT_UNKNOWN || Stride % 4 || Stride > 2048 || Flags)))
     return E_INVALIDARG;
-  if (!Flags && !Stride)
-    return E_NOTIMPL;
+  if (!Flags && !Stride) {
+    if (!isTypedBufferFormat(Format))
+      return E_NOTIMPL;
+    Value.Format = Format;
+  }
   UINT ElementSize = Stride ? Stride : 4;
   if (First > std::numeric_limits<UINT64>::max() / ElementSize)
     return E_INVALIDARG;
@@ -2235,8 +2254,11 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
         return E_INVALIDARG;
       Buffer.Data = nullptr;
       Buffer.SizeInBytes = 0;
-      Buffer.Kind = Slot->Stride ? 1 : 0;
+      Buffer.Kind = Slot->Format != DXGI_FORMAT_UNKNOWN ? 2
+                    : Slot->Stride                      ? 1
+                                                        : 0;
       Buffer.Stride = Slot->Stride;
+      Buffer.Format = Slot->Format;
       if (Slot->Namespace == 3) {
         if (!Slot->Address)
           continue;

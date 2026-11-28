@@ -18,6 +18,8 @@
 #include <thread>
 #include <vector>
 
+#include <dxgiformat.h>
+
 bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens);
 
 static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
@@ -26,6 +28,12 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   void *Shader = nullptr, *Pipeline = nullptr;
   FeMeWarpCompiledShaderInfo Info;
   auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
+  auto OldInfo = Info;
+  OldInfo.BridgeVersion = 1;
+  if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()), &Shader,
+              &OldInfo) >= 0 ||
+      Shader)
+    return false;
   if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()), &Shader,
               &Info) ||
       FeMeWarpCreateComputePipeline(Shader, &Pipeline))
@@ -59,8 +67,17 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   Desc.Buffers = Buffers.data();
   bool Good = true;
   auto Bad = Desc;
-  Bad.Version = 2;
+  Bad.Version = 1;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  Buffer.Kind = 3;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.Kind = 0;
+  Buffer.Format = DXGI_FORMAT_R32_UINT;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.Kind = 2;
+  Buffer.Format = DXGI_FORMAT_R32_TYPELESS;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.Kind = Buffer.Format = 0;
   Bad = Desc;
   Bad.BufferCount = 0;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
@@ -220,7 +237,8 @@ int main(int Argc, char **Argv) {
       }
       continue;
     }
-    if (Result || !Compiled || Info.BridgeVersion != 1 ||
+    if (Result || !Compiled ||
+        Info.BridgeVersion != FeMeWarpCompilerBridgeVersion ||
         !Info.ArtifactVersion || Info.WaveSize != 4 || !Info.HasNativeEntry) {
       std::fprintf(stderr, "No valid owned native shader: 0x%08x\n",
                    static_cast<unsigned>(Result));

@@ -784,6 +784,40 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned scalar R32 typed buffer views
+
+R32_UINT/R32_SINT/R32_FLOAT SRV/UAV descriptors retain the DXGI format beside
+their exact live resource identity, offset and extent. The existing checked
+element arithmetic, copies, owner lookup, UAV-flag validation and null handling
+are reused. Dispatch now materializes `ResourceKind::Typed` and explicitly maps
+DXGI values to FeMe's independently numbered runtime formats. Existing typed
+CPU load/store helpers execute the shader; no raw reinterpretation shortcut or
+new conversion implementation was introduced.
+
+Bridge ABI **2** deliberately adds the format field and typed kind. Both
+compilation and dispatch reject version 1; raw/structured/CBV inputs must not
+carry a typed format, and typed bindings reject stride, partial elements and
+unsupported formats. The format callback advertises buffer and typed-UAV
+reads/writes for precisely these three formats, without adding texture,
+sampling or attachment capabilities.
+
+Twelve public controls cover all three formats through owned SM 5.1, original
+SM 6.0 DXIL, independent system WARP and held/pending teardown. Each uses
+non-uniform two-element typed SRV/UAV arrays alongside the two CBV arrays.
+Signed data starts negative; float data is initialized numerically rather
+than with integer bit patterns. The scalar oracle checks every output and
+guard, post-record copies, distinct element offsets/values and selective final
+null reads/ignored writes. Native tests cover nullable typed creation, exact
+format support, unsupported-format non-mutation and old/malformed bridge
+rejection. An initial native build exposed a missing DXGI header in the test
+driver; adding that explicit include resolved it.
+
+Final validation: **4403** full-suite passes, **65/65** callback passes and
+**91/91** stock-runtime passes. Inventory **v9** validates fifty-five unique
+OS gates and bridge version 2, with complete feature level still null. Other
+typed formats, counters/atomic breadth, image/sampler views, full root/resource
+compatibility and remaining synchronization still prevent W2 closeout.
+
 #### Owned finite and non-uniform buffer descriptor arrays
 
 Finite CBV/SRV/UAV table ranges now expand into checked individual register

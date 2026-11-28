@@ -698,7 +698,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                bool Ordered = false, bool Indirect = false,
                                bool CBV = false, bool Inline = false,
                                bool Tables = false, bool Views = false,
-                               bool Structured = false, bool Arrays = false) {
+                               bool Structured = false, bool Arrays = false,
+                               DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN) {
   bool ConstantBindings = CBV || Inline;
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
@@ -713,7 +714,15 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       "output.Store(index * 4, output.Load(index * 4) + peer + 23);\n"
       "}\n";
   constexpr char CBVSource[] =
-      "#ifdef STRUCTURED_VIEWS\n"
+      "#ifdef TYPED_VIEWS\n"
+      "#ifdef DESCRIPTOR_ARRAYS\n"
+      "RWBuffer<TYPED_SCALAR> output[2] : register(u3);\n"
+      "Buffer<TYPED_SCALAR> input[2] : register(t3);\n"
+      "#else\n"
+      "RWBuffer<TYPED_SCALAR> output : register(u3);\n"
+      "Buffer<TYPED_SCALAR> input : register(t3);\n"
+      "#endif\n"
+      "#elif defined(STRUCTURED_VIEWS)\n"
       "#ifdef DESCRIPTOR_ARRAYS\n"
       "RWStructuredBuffer<uint> output[2] : register(u3);\n"
       "#else\n"
@@ -771,7 +780,15 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       "uint bias = valuesA[id.x % 2] + valuesB[id.x % 2];\n"
       "#endif\n"
       "#endif\n"
-      "#ifdef STRUCTURED_VIEWS\n"
+      "#ifdef TYPED_VIEWS\n"
+      "#ifdef DESCRIPTOR_ARRAYS\n"
+      "OUTPUT[index] = uint(OUTPUT[index]) + peer + bias + "
+      "uint(input[NonUniformResourceIndex(index % 2)][index]);\n"
+      "#else\n"
+      "OUTPUT[index] = uint(OUTPUT[index]) + peer + bias + "
+      "uint(input[index]);\n"
+      "#endif\n"
+      "#elif defined(STRUCTURED_VIEWS)\n"
       "#ifdef DESCRIPTOR_ARRAYS\n"
       "OUTPUT[index] = OUTPUT[index] + peer + bias + "
       "input[NonUniformResourceIndex(index % 2)][index].y;\n"
@@ -841,7 +858,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
   RootDesc.pParameters = Parameters.data();
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
-  std::array<D3D_SHADER_MACRO, 5> Defines{};
+  std::array<D3D_SHADER_MACRO, 6> Defines{};
   UINT DefineCount = 0;
   if (Inline)
     Defines[DefineCount++] = {"INLINE_CONSTANTS", "1"};
@@ -851,6 +868,24 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Defines[DefineCount++] = {"STRUCTURED_VIEWS", "1"};
   if (Arrays)
     Defines[DefineCount++] = {"DESCRIPTOR_ARRAYS", "1"};
+  if (Typed != DXGI_FORMAT_UNKNOWN) {
+    Defines[DefineCount++] = {"TYPED_VIEWS", "1"};
+    Defines[DefineCount++] = {"TYPED_SCALAR",
+                              Typed == DXGI_FORMAT_R32_FLOAT  ? "float"
+                              : Typed == DXGI_FORMAT_R32_SINT ? "int"
+                                                              : "uint"};
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT Support{Typed};
+    HRESULT Status =
+        report("Check typed buffer format",
+               Device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                           &Support, sizeof(Support)));
+    if (FAILED(Status))
+      return Status;
+    if (!(Support.Support1 & D3D12_FORMAT_SUPPORT1_BUFFER) ||
+        !(Support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) ||
+        !(Support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE))
+      return report("Missing typed buffer load/store support", E_FAIL);
+  }
   HRESULT Result = createComputePipeline(
       Device, ConstantBindings ? CBVSource : Source,
       ConstantBindings ? sizeof(CBVSource) - 1 : sizeof(Source) - 1, RootDesc,
@@ -978,8 +1013,16 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Upload->Unmap(0, &NoRead);
     return report("Missing command upload memory", E_FAIL);
   }
-  for (UINT I = 0; I < Words * (Structured ? 2 : 1); ++I)
-    static_cast<UINT *>(Memory)[I] = I * 7 + 5;
+  auto InitialValue = [Typed](UINT I) {
+    UINT Value = I * 7 + 5;
+    return Typed == DXGI_FORMAT_R32_SINT ? 0u - Value : Value;
+  };
+  for (UINT I = 0; I < Words * (Structured ? 2 : 1); ++I) {
+    if (Typed == DXGI_FORMAT_R32_FLOAT)
+      static_cast<float *>(Memory)[I] = static_cast<float>(InitialValue(I));
+    else
+      static_cast<UINT *>(Memory)[I] = InitialValue(I);
+  }
   D3D12_RANGE UploadWritten{0, Structured ? 2 * Bytes : Bytes};
   Upload->Unmap(0, &UploadWritten);
   D3D12_COMMAND_QUEUE_DESC QueueDesc{};
@@ -1175,16 +1218,18 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       }
       if (Views) {
         D3D12_SHADER_RESOURCE_VIEW_DESC Input{};
-        Input.Format =
-            Structured ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+        Input.Format = Typed != DXGI_FORMAT_UNKNOWN ? Typed
+                       : Structured                 ? DXGI_FORMAT_UNKNOWN
+                                                    : DXGI_FORMAT_R32_TYPELESS;
         Input.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         Input.Shader4ComponentMapping =
             D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         Input.Buffer.FirstElement = Structured ? 2 : 4;
         Input.Buffer.NumElements = Threads;
         Input.Buffer.StructureByteStride = Structured ? 8 : 0;
-        Input.Buffer.Flags =
-            Structured ? D3D12_BUFFER_SRV_FLAG_NONE : D3D12_BUFFER_SRV_FLAG_RAW;
+        Input.Buffer.Flags = Structured || Typed != DXGI_FORMAT_UNKNOWN
+                                 ? D3D12_BUFFER_SRV_FLAG_NONE
+                                 : D3D12_BUFFER_SRV_FLAG_RAW;
         UINT InputCount = Arrays ? 2 : 1;
         for (UINT I = 0; I < InputCount; ++I) {
           Input.Buffer.FirstElement =
@@ -1199,8 +1244,9 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         OutputView.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         OutputView.Buffer.NumElements = Threads;
         OutputView.Buffer.StructureByteStride = Structured ? 4 : 0;
-        OutputView.Buffer.Flags =
-            Structured ? D3D12_BUFFER_UAV_FLAG_NONE : D3D12_BUFFER_UAV_FLAG_RAW;
+        OutputView.Buffer.Flags = Structured || Typed != DXGI_FORMAT_UNKNOWN
+                                      ? D3D12_BUFFER_UAV_FLAG_NONE
+                                      : D3D12_BUFFER_UAV_FLAG_RAW;
         UINT OutputCount = Arrays ? 2 : 1;
         for (UINT I = 0; I < OutputCount; ++I)
           Device->CreateUnorderedAccessView(
@@ -1346,7 +1392,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     if (Memory)
       std::memcpy(Previous.data(), Memory, Bytes);
     for (UINT I = 0; Valid && I < Words; ++I) {
-      UINT Expected = I * 7 + 5;
+      UINT Expected = InitialValue(I);
       if (I < Threads) {
         UINT X = I % 15, Y = I / 15 % 6, Z = I / 90;
         UINT Peer = (X % 5 + 5 * (Y % 3 + 3 * Z) + 1) % 30;
@@ -1356,7 +1402,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         if (Arrays) {
           UINT Element = I % 2;
           UINT InputValue =
-              ((Structured ? 2 * I + 5 : I + 4) + 4 * Element) * 7 + 5;
+              InitialValue((Structured ? 2 * I + 5 : I + 4) + 4 * Element);
           for (UINT Step = 0; Step <= Repeat; ++Step) {
             if (Step == 2 && Element == 1)
               continue;
@@ -1373,8 +1419,12 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
             Expected -= X % 2 ? 10 : 16;
           if (Views)
             Expected += (Repeat == 2 ? Executions - 1 : Executions) *
-                        ((Structured ? 2 * I + 5 : I + 4) * 7 + 5);
+                        InitialValue(Structured ? 2 * I + 5 : I + 4);
         }
+      }
+      if (Typed == DXGI_FORMAT_R32_FLOAT) {
+        float Value = static_cast<float>(Expected);
+        std::memcpy(&Expected, &Value, sizeof(Expected));
       }
       Valid = static_cast<const UINT *>(Memory)[I] == Expected;
       if (!Valid)
@@ -1540,6 +1590,30 @@ int wmain(int Argc, wchar_t **Argv) {
   bool Arrays = StructuredArrays || ReferenceArrays || OrderedArrays ||
                 DXILArrays ||
                 (Argc == 2 && std::wcscmp(Argv[1], L"--array-commands") == 0);
+  DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN;
+  bool ReferenceTyped = false, OrderedTyped = false, DXILTyped = false;
+  const wchar_t *TypedModes[][4] = {
+      {L"--typed-uint-commands", L"--reference-typed-uint-commands",
+       L"--ordered-typed-uint-commands", L"--dxil-typed-uint-commands"},
+      {L"--typed-sint-commands", L"--reference-typed-sint-commands",
+       L"--ordered-typed-sint-commands", L"--dxil-typed-sint-commands"},
+      {L"--typed-float-commands", L"--reference-typed-float-commands",
+       L"--ordered-typed-float-commands", L"--dxil-typed-float-commands"}};
+  const DXGI_FORMAT TypedFormats[] = {
+      DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT, DXGI_FORMAT_R32_FLOAT};
+  for (UINT I = 0; I < ARRAYSIZE(TypedModes); ++I)
+    for (UINT J = 0; J < 4; ++J)
+      if (Argc == (J == 3 ? 3 : 2) &&
+          std::wcscmp(Argv[1], TypedModes[I][J]) == 0) {
+        Typed = TypedFormats[I];
+        ReferenceTyped = J == 1;
+        OrderedTyped = J == 2;
+        DXILTyped = J == 3;
+      }
+  Arrays |= Typed != DXGI_FORMAT_UNKNOWN;
+  ReferenceArrays |= ReferenceTyped;
+  OrderedArrays |= OrderedTyped;
+  DXILArrays |= DXILTyped;
   StructuredViews |= StructuredArrays;
   ReferenceViews |= ReferenceArrays;
   OrderedViews |= OrderedArrays;
@@ -1613,6 +1687,10 @@ int wmain(int Argc, wchar_t **Argv) {
                          "--reference-structured-array-commands|"
                          "--ordered-structured-array-commands|"
                          "--dxil-structured-array-commands FILE|"
+                         "--typed-{uint,sint,float}-commands|"
+                         "--reference-typed-{uint,sint,float}-commands|"
+                         "--ordered-typed-{uint,sint,float}-commands|"
+                         "--dxil-typed-{uint,sint,float}-commands FILE|"
                          "--placed-buffers|--reference-placed-buffers|"
                          "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
@@ -1733,7 +1811,7 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseBufferCommands(
         Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
         OrderedBufferCommands, Indirect, CBV, Inline, Tables, Views,
-        StructuredViews, Arrays);
+        StructuredViews, Arrays, Typed);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();

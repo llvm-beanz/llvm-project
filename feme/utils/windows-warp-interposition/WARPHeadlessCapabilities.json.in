@@ -9,7 +9,7 @@
     "command_list": "D3D12DDI_COMMAND_LIST_FUNCS_3D_0062",
     "command_queue": "D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001"
   },
-  "compiler_bridge_version": 1,
+  "compiler_bridge_version": 2,
   "input_profiles": ["released SM 5.1", "released SM 6.0"],
   "shader_scope": ["application compute subset", "initialization vertex only"],
   "wave_policy": {
@@ -36,7 +36,7 @@
     "dispatch_groups_per_dimension": 65535
   },
   "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "multiple inline constants", "finite CBV/SRV/UAV descriptor-table ranges", "non-uniform finite buffer-array selection", "all-stage visibility"],
-  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
+  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32_UINT/R32_SINT/R32_FLOAT typed buffer SRV/UAVs", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
@@ -106,6 +106,18 @@
     "os-routed-warp-compiler-owned-ordered-structured-array-commands",
     "os-routed-warp-compiler-owned-dxil-structured-array-commands",
     "os-routed-warp-compiler-reference-structured-array-commands",
+    "os-routed-warp-compiler-owned-typed-uint-commands",
+    "os-routed-warp-compiler-owned-ordered-typed-uint-commands",
+    "os-routed-warp-compiler-owned-dxil-typed-uint-commands",
+    "os-routed-warp-compiler-reference-typed-uint-commands",
+    "os-routed-warp-compiler-owned-typed-sint-commands",
+    "os-routed-warp-compiler-owned-ordered-typed-sint-commands",
+    "os-routed-warp-compiler-owned-dxil-typed-sint-commands",
+    "os-routed-warp-compiler-reference-typed-sint-commands",
+    "os-routed-warp-compiler-owned-typed-float-commands",
+    "os-routed-warp-compiler-owned-ordered-typed-float-commands",
+    "os-routed-warp-compiler-owned-dxil-typed-float-commands",
+    "os-routed-warp-compiler-reference-typed-float-commands",
     "os-routed-warp-compiler-owned-coexistence",
     "os-routed-warp-compiler-reference-buffer-commands",
     "os-routed-warp-compiler-reference-placed-buffers"
@@ -117,7 +129,7 @@
   },
   "unsupported": [
     "complete graphics or feature-level conformance",
-    "typed buffer views, UAV counters, component remapping and unbounded ranges",
+    "other typed buffer formats, UAV counters, component remapping and unbounded ranges",
     "images and samplers",
     "native fences and implicit multi-GPU",
     "split transitions, finite ranged/atomic-copy barriers, texture aliasing and enhanced barriers",

@@ -12,6 +12,8 @@
 
 #include <cstdint>
 
+inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 2;
+
 #ifdef FEME_WARP_COMPILER_EXPORTS
 #define FEME_WARP_COMPILER_API __declspec(dllexport)
 #else
@@ -22,7 +24,7 @@
 /// The compiler owns and releases its opaque CompiledStage, including its JIT.
 struct FeMeWarpCompiledShaderInfo {
   std::uint32_t Size = sizeof(FeMeWarpCompiledShaderInfo);
-  std::uint32_t BridgeVersion = 1;
+  std::uint32_t BridgeVersion = FeMeWarpCompilerBridgeVersion;
   std::uint32_t ArtifactVersion = 0;
   std::uint32_t Stage = 0;
   std::uint32_t WaveSize = 0;
@@ -41,7 +43,9 @@ struct FeMeWarpVertexPipelineDesc {
 };
 
 /// Borrowed buffer storage; namespaces 1/2/3 are SRV/UAV/CBV.
-/// Kind 0 is raw and kind 1 is structured. Storage must outlive dispatch.
+/// Kind 0 is raw, kind 1 is structured and kind 2 is typed.
+/// Storage must outlive dispatch. Format is a DXGI format for typed buffers,
+/// not a FeMe runtime format, and must be zero for other kinds.
 /// Register identifies an individual descriptor, including array elements.
 struct FeMeWarpBufferBinding {
   void *Data = nullptr;
@@ -51,11 +55,12 @@ struct FeMeWarpBufferBinding {
   std::uint32_t Namespace = 2;
   std::uint32_t Kind = 0;
   std::uint32_t Stride = 0;
+  std::uint32_t Format = 0;
 };
 
 struct FeMeWarpDispatchDesc {
   std::uint32_t Size = sizeof(FeMeWarpDispatchDesc);
-  std::uint32_t Version = 1;
+  std::uint32_t Version = FeMeWarpCompilerBridgeVersion;
   std::uint32_t GroupCount[3] = {1, 1, 1};
   std::uint32_t BufferCount = 0;
   const FeMeWarpBufferBinding *Buffers = nullptr;

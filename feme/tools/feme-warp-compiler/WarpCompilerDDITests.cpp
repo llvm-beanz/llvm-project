@@ -778,6 +778,27 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
     Good &= LastError == E_NOTIMPL;
     UAV.Buffer.hDrvCounterResource = {};
+    SRV.Buffer.StructureByteStride = 0;
+    for (auto Format :
+         {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT}) {
+      UINT Support = 0;
+      Core.pfnCheckFormatSupport(Device, Format, &Support);
+      Good &= Support == (D3D12DDI_FORMAT_SUPPORT_BUFFER |
+                          D3D12DDI_FORMAT_SUPPORT_UAV_READS |
+                          D3D12DDI_FORMAT_SUPPORT_UAV_WRITES);
+      SRV.Format = UAV.Format = Format;
+      UAV.Buffer.Flags = D3D12DDI_BUFFER_UAV_FLAG_NONE;
+      LastError = S_OK;
+      Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+      Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
+      Good &= LastError == S_OK;
+    }
+    std::memcpy(Before.data(), reinterpret_cast<void *>(Third.ptr), Stride);
+    SRV.Format = DXGI_FORMAT_R32G32_UINT;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == E_NOTIMPL &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                        Stride) == 0;
     LastError = S_OK;
     Core.pfnCreateUnorderedAccessView(OtherDevice, &UAV, Fourth);
     Good &= LastError == E_INVALIDARG;

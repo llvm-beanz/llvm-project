@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 8)
+  set(FEME_WARP_PROFILE_VERSION 9)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -572,10 +572,37 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --reference-structured-array-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-structured-array-commands
     COMMAND warp-compiler-harness --ordered-structured-array-commands)
+  foreach(scalar IN ITEMS uint sint float)
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-typed-${scalar}-commands
+      COMMAND warp-compiler-harness --typed-${scalar}-commands)
+    feme_add_probe_test(NAME os-routed-warp-compiler-reference-typed-${scalar}-commands
+      COMMAND warp-compiler-harness --reference-typed-${scalar}-commands)
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-typed-${scalar}-commands
+      COMMAND warp-compiler-harness --ordered-typed-${scalar}-commands)
+  endforeach()
   find_program(FEME_DXC_EXECUTABLE NAMES dxc
     DOC "DXC for original owned-DXIL execution fixtures")
   if(FEME_DXC_EXECUTABLE)
     set(FEME_WARP_PROFILE_DXC_EVIDENCE true)
+    set(WARP_DXIL_TYPED_FIXTURES)
+    foreach(scalar IN ITEMS uint sint float)
+      set(shader_scalar "${scalar}")
+      if(scalar STREQUAL "sint")
+        set(shader_scalar int)
+      endif()
+      set(fixture "${WARP_COMPILER_OUTPUT_DIR}/owned-typed-${scalar}-compute.dxil")
+      list(APPEND WARP_DXIL_TYPED_FIXTURES "${fixture}")
+      add_custom_command(OUTPUT "${fixture}"
+        COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
+          -DBUFFER=1 -DCBV=1 -DBUFFER_VIEWS=1 -DTYPED_VIEWS=1
+          -DTYPED_SCALAR=${shader_scalar} -DDESCRIPTOR_ARRAYS=1
+          -DROOT_REGISTER=u3 -Fo "${fixture}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-dxil.hlsl"
+        DEPENDS ../../test/Tools/warp-compiler-dxil.hlsl
+        VERBATIM)
+      feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-typed-${scalar}-commands
+        COMMAND warp-compiler-harness --dxil-typed-${scalar}-commands "${fixture}")
+    endforeach()
     set(WARP_DXIL_FIXTURE "${WARP_COMPILER_OUTPUT_DIR}/owned-compute.dxil")
     set(WARP_DXIL_BUFFER_FIXTURE
       "${WARP_COMPILER_OUTPUT_DIR}/owned-buffer-compute.dxil")
@@ -630,7 +657,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       DEPENDS ../../test/Tools/warp-compiler-dxil.hlsl
       VERBATIM)
     add_custom_target(warp-owned-dxil-fixture
-      DEPENDS "${WARP_DXIL_FIXTURE}" "${WARP_DXIL_BUFFER_FIXTURE}"
+      DEPENDS ${WARP_DXIL_TYPED_FIXTURES}
+        "${WARP_DXIL_FIXTURE}" "${WARP_DXIL_BUFFER_FIXTURE}"
         "${WARP_DXIL_CBV_FIXTURE}"
         "${WARP_DXIL_CONSTANT_FIXTURE}" "${WARP_DXIL_VIEW_FIXTURE}"
         "${WARP_DXIL_STRUCTURED_VIEW_FIXTURE}" "${WARP_DXIL_ARRAY_FIXTURE}"
