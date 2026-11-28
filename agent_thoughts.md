@@ -137419,3 +137419,36 @@ compatibility and unbounded/general heaps. Then complete resource classes and
 residency plus remaining barriers, queries/predication, indirect root changes
 and removal wakeups. Preserve ABI versioning when adding new descriptor
 fields; no unmodified-KMD or complete-feature-level claim has changed.
+
+# W2 progress: scalar typed views and execution-time predication
+
+171971fd4f8a adds R32_UINT/R32_SINT/R32_FLOAT buffer SRV/UAVs. Do not pass
+DXGI numeric values straight into ResourceFormat: those are different enums.
+Bridge ABI 2 deliberately carries DXGI format metadata and maps it inside
+the compiler to existing typed CPU helpers. Old compilation/dispatch
+versions and malformed typed/raw metadata are rejected. Negative signed and
+numerically initialized float arrays pass the scalar oracle, original DXBC/
+DXIL, separate system WARP and pending teardown. Native admission and the
+operation-specific format callback agree; no texture capabilities were added.
+Evidence: full 4403, callback 65/65, OS 91/91 and v9's 55 unique gates.
+
+f01744a58d59 adds predication to buffer copies and direct/indirect dispatch.
+Snapshot predicate state per command, but read its value only at ordered
+execution. Equal/not-equal-zero mean suppress on a match, not execute on a
+match. Preserve unconditional barriers and disabled reset; checked live
+resource handles prevent a broader alias or stale foreign pointer from
+standing in for the predicate. Submission cloning carries the state across
+pending teardown.
+
+Eight controls upload predicates after recording, include bit 40, switch
+offsets/comparison operations, suppress a clobbering copy, and check 2/4/5
+cumulative dispatches. An enabled final setter checks next-recording reset.
+The initial aggregate-initializer warning was fixed before the standalone
+warning-as-error build. Final evidence: full 4403, callback 65/65, OS 99/99,
+v10's 63 unique gates and bridge ABI 2. Neither WARP nor its KMD was changed.
+
+W2 remains open. Next extend typed format/view coverage and counter/atomic
+support, then images/samplers, full root compatibility/unbounded heaps,
+reserved/shared resources/residency, queries, complete legacy barriers and
+remaining indirect/removal semantics. Existing CPU/image conversions should
+be reused rather than cloned into a Windows-only implementation.
