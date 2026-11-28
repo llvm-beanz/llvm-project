@@ -137748,3 +137748,35 @@ advertisement or new CTS result is claimed.
 Next: continue W2 root visibility/compatibility and static samplers, images
 and resource classes, general counter payloads, residency and synchronization.
 The overall W2 closeout request remains open.
+
+# W2 progress: stage-specific root visibility
+
+Commit bd66be64e584 retains conventional graphics-stage visibility in root
+metadata. Identical namespace/register/space bindings are accepted only for
+disjoint stages; ALL and same-stage collisions remain errors across both
+root descriptors and descriptor-table ranges. Compute preparation ignores
+non-ALL-visible parameters before resolving heaps or materializing constants.
+Root costs and existing finite limits do not change.
+
+The native matrix covers all five conventional graphics stages and
+table/root overlap cases. Four public controls add duplicate b99/space999
+constants in separate vertex/pixel roots with different recorded values.
+These parameters must not become duplicate borrowed compute bindings.
+Owned DXBC, original DXIL, independent WARP and held execution all retain
+the existing byte/guard/snapshot/replay/lifetime oracle.
+
+Native selectors passed 4/4, new controls passed 4/4, full FeMe passed 4413
+with 15 skipped and 10 unsupported, callbacks passed 65/65, and the final
+stock-runtime/coexistence suite passed 359/359 after shared DLL relinking.
+FeMe ICD identity was confirmed in the launch shell. Inventory v17 has
+323 unique required OS gates and 11 existing native fixtures; bridge 4,
+artifact 11 and the null complete-feature-level claim were checked.
+
+Next: image allocation/copy/view preparation should reuse FeMeImage's packed
+mip-major layout helpers while preserving D3D subresource indexing. Inspection
+of the authorized reference checkout confirms row/slice pitch overrides,
+linear allocation metadata and the existing 96-byte KMD ABI are relevant;
+no reference implementation or test shader is copied. Shared layout queries
+must not advertise texture/UAV execution before its owned path is tested.
+Static samplers, full root compatibility, other resource classes, counters
+and synchronization still remain. W2 is not complete.
