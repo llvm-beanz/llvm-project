@@ -137976,3 +137976,42 @@ without destroying immutable identities or replay/clone snapshots. Reuse
 WarpBufferAccess locking/live-owner checks and shared image layouts. Sampler
 heaps/static materialization, texture UAV stores and remaining W2 resource/
 ordering/root contracts still need implementation. W2 is not complete.
+
+# W2 prerequisite: checked borrowed image and sampler bridge
+
+Commit 9d18fc4b7e6c adds private bridge5 image/mip-layout and sampler PODs,
+checked preparation and independent finite-class binding materialization.
+Old bridge versions are rejected. Image layouts are copied field by field,
+not aliased across ABI structs. Pitches, touched spans, mips, dimensions,
+formats, namespace and sampler encodings are checked before execution.
+Native image/sampler heap inputs are rejected explicitly, with that policy
+preserved across retained pipelines; StaticHeapIndices remains buffer-only.
+
+Original native image and sampler fixtures exercise divergent arrays,
+same-register SRV/UAV identities, pitched mip/layer data, nulls, repeated
+dispatch and concurrent/retained PSOs. Sampling checks distinguish point,
+linear, minimum/maximum, repeat and custom border behavior. Invalid geometry,
+namespace, ABI, pointers/counts, duplicate bindings and state fail explicitly.
+
+These tests exposed two coupled bugs. DXIL UAV texture loads carry an unused
+undefined mip operand, which must normalize to the selected view's mip zero.
+SRV addressed loads must apply component mapping, unlike Vulkan storage reads.
+A descriptor opt-in enables that mapping without changing existing storage
+semantics or mapping OOB zero results into constant-one channels. Focused
+raising/native tests pass 3/3; load mapping/storage controls pass 4/4.
+
+Full FeMe passes 4427 with 15 skipped/10 unsupported, callback probes 65/65
+and stock-runtime/coexistence 371/371. FeMe CPU Vulkan Device identity was
+confirmed before full/coexistence launches, and shared DLL relinking preceded
+OS execution. Generated v21 is bridge5/artifact12, with 335 unique OS gates,
+13 existing native fixture paths and no complete FL claim. No fresh CTS
+evidence, advertisement or KMD/system modification is claimed.
+
+Next implement owned texture SRVs and sampler heaps using live owner checks.
+Recorded table identities must remain immutable while execution classifies
+current slots into separate prepared arrays. Keep metadata/storage lifetimes
+and replay/clone/inline-constant retargeting intact. Native DDI SRV dimensions
+erase the single/array distinction but preserve slice counts; normalize them
+against owned resource geometry and the shader's dimension-specific helpers.
+Static samplers, texture UAV stores and remaining W2 resource/root/ordering
+contracts remain open. W2 is not complete.
