@@ -24,6 +24,7 @@
   "limits": {
     "nodes": 1,
     "root_buffer_descriptors": 32,
+    "root_parameters": 64,
     "root_dwords": 64,
     "root_gpuva_alignment": 16,
     "root_cbv_gpuva_alignment": 256,
@@ -31,7 +32,7 @@
     "max_buffer_allocation_bytes": 4294901760,
     "dispatch_groups_per_dimension": 65535
   },
-  "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "all-stage visibility"],
+  "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "multiple inline constants", "all-stage visibility"],
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
@@ -76,6 +77,10 @@
     "os-routed-warp-compiler-owned-ordered-cbv-commands",
     "os-routed-warp-compiler-owned-dxil-cbv-commands",
     "os-routed-warp-compiler-reference-cbv-commands",
+    "os-routed-warp-compiler-owned-constant-commands",
+    "os-routed-warp-compiler-owned-ordered-constant-commands",
+    "os-routed-warp-compiler-owned-dxil-constant-commands",
+    "os-routed-warp-compiler-reference-constant-commands",
     "os-routed-warp-compiler-owned-coexistence",
     "os-routed-warp-compiler-reference-buffer-commands",
     "os-routed-warp-compiler-reference-placed-buffers"

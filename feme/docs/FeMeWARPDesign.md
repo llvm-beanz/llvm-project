@@ -18,7 +18,7 @@ and copies, monitored fences, completed readback and pending teardown.
 The W1 v1 inventory records the completed internal headless subset. W2 now
 adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
 decreasing monitored fences, dispatch-only indirect commands and multiple
-root CBVs; inventory v4 explicitly marks W2 in progress.
+root CBVs and inline constants; inventory v5 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
 
@@ -1335,11 +1335,14 @@ now provides portable, owned 1.0/1.1 binding plans and a non-dispatch
 inspection path. It preserves serialized promises and resolves table
 offsets, but does not implement the runtime mapping below, enforce every
 SDK semantic rule or replace use-inferred cbuffer promotion. Explicit
-root-driven tables, inline constants and general descriptor preparation
-remain pending. Owned raw SRV/UAV and CBV roots now map to bounded CPU
+root-driven tables and general descriptor preparation remain pending.
+Owned raw SRV/UAV and CBV roots now map to bounded CPU
 descriptors; the owned compiler disables inferred single-CBV promotion.
 
-- Root constants become a submission-local root-constant byte block.
+- Root constants become submission-local byte blocks, separately mapped to
+  CBV descriptors by register/space. Partial updates affect the recording
+  state; each command and each submission owns its copied bytes. This reuses
+  descriptor-backed cbuffer lowering rather than inferring one inline block.
 - Root CBV/SRV/UAV descriptors become bounds-checked `FemeDescriptor` records.
   A root descriptor is a bare GPU virtual address with no size, so the runtime
   must recover the owning resource's range to fill `SizeInBytes`. It must not
@@ -1383,7 +1386,8 @@ mapping: it infers one binding from shader use rather than accepting a D3D
 root layout. W2 must supply an explicit binding map for multiple constants,
 CBVs, tables, and static samplers. Finite descriptor-backed CBV rows now use
 the shared bounded lowering, including independent 16/32/64-bit components.
-Inline constants and complete descriptor/table mappings remain separate work.
+Multiple inline parameters now map through those same bounded descriptors;
+complete descriptor/table mappings remain separate work.
 
 ## Memory, Resources, and Residency
 
@@ -1728,7 +1732,11 @@ valid bindings absent from shader reflection. Required shader ranges still
 must be bound. Native tests cover one/multiple CBVs, short descriptors and
 concurrent pipelines; stock-runtime gates cover DXBC/DXIL, dynamic rows,
 register-space separation, post-record writes, root snapshots, guards and
-held cross-queue execution. See the implementation log and v4 inventory.
+held cross-queue execution. Inline constants additionally validate partial
+updates, source-storage independence and rebased submission-local pointers
+after recording objects are released. Root layouts enforce the aggregate
+64-DWORD cost, allowing up to 64 one-DWORD parameters or 32 root descriptors.
+See the implementation log and v5 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

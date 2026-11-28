@@ -143,18 +143,35 @@ void APIENTRY checkMultisample(D3D12DDI_HDEVICE Device, DXGI_FORMAT, UINT,
   *QualityLevels = 0;
 }
 
-constexpr UINT MaxBufferRootParameters = 32;
+constexpr UINT MaxRootParameters = 64;
+constexpr UINT MaxRootDwords = 64;
 struct BufferRootParameter {
   UINT Namespace = 0;
   UINT Space = 0;
   UINT Register = 0;
+  UINT ConstantOffset = 0;
+  UINT ConstantCount = 0;
 };
+
+BufferRootParameter
+getRootParameter(const D3D12DDI_ROOT_PARAMETER_0013 &Parameter) {
+  bool Constants =
+      Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  return {Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_SRV   ? 1u
+          : Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_UAV ? 2u
+                                                                        : 3u,
+          Constants ? Parameter.Constants.RegisterSpace
+                    : Parameter.Descriptor.RegisterSpace,
+          Constants ? Parameter.Constants.ShaderRegister
+                    : Parameter.Descriptor.ShaderRegister,
+          0, Constants ? Parameter.Constants.Num32BitValues : 0};
+}
 
 struct RootSignature {
   feme::probe::WarpDeviceState *Owner;
   D3D12DDI_ROOT_SIGNATURE_FLAGS Flags;
   UINT Count = 0;
-  std::array<BufferRootParameter, MaxBufferRootParameters> Parameters{};
+  std::array<BufferRootParameter, MaxRootParameters> Parameters{};
 };
 
 template <typename Descriptor, typename Handle> struct ImmutableState {
@@ -225,17 +242,28 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
   if (Root.NumParameters)
     return E_NOTIMPL;
 #else
-  if (Root.NumParameters > MaxBufferRootParameters ||
+  if (Root.NumParameters > MaxRootParameters ||
       (Root.NumParameters && !Root.pRootParameters))
     return E_INVALIDARG;
+  UINT Cost = 0;
   for (UINT I = 0; I < Root.NumParameters; ++I) {
     const auto &Parameter = Root.pRootParameters[I];
     if ((Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_SRV &&
          Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_UAV &&
-         Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_CBV) ||
+         Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_CBV &&
+         Parameter.ParameterType !=
+             D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) ||
         Parameter.ShaderVisibility != D3D12DDI_SHADER_VISIBILITY_ALL)
       return E_NOTIMPL;
-    auto Flags = Parameter.Descriptor.Flags;
+    bool Constants =
+        Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    const auto Binding = getRootParameter(Parameter);
+    UINT ParameterCost = Constants ? Binding.ConstantCount : 2;
+    if (!ParameterCost || ParameterCost > MaxRootDwords - Cost)
+      return E_INVALIDARG;
+    Cost += ParameterCost;
+    auto Flags = Constants ? D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_NONE
+                           : Parameter.Descriptor.Flags;
     if (Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_NONE &&
         Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_VOLATILE &&
         Flags !=
@@ -243,12 +271,9 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
         Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_STATIC)
       return E_INVALIDARG;
     for (UINT J = 0; J < I; ++J) {
-      const auto &Other = Root.pRootParameters[J];
-      if (Parameter.ParameterType == Other.ParameterType &&
-          Parameter.Descriptor.RegisterSpace ==
-              Other.Descriptor.RegisterSpace &&
-          Parameter.Descriptor.ShaderRegister ==
-              Other.Descriptor.ShaderRegister)
+      const auto Other = getRootParameter(Root.pRootParameters[J]);
+      if (Binding.Namespace == Other.Namespace &&
+          Binding.Space == Other.Space && Binding.Register == Other.Register)
         return E_INVALIDARG;
     }
   }
@@ -278,14 +303,14 @@ HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
   auto *State = new (Root.pDrvPrivate)
       RootSignature{Owner, Args->pRootSignature_1_1->Flags};
   State->Count = Args->pRootSignature_1_1->NumParameters;
+  UINT ConstantOffset = 0;
   for (UINT I = 0; I < State->Count; ++I) {
     const auto &Parameter = Args->pRootSignature_1_1->pRootParameters[I];
-    State->Parameters[I] = {
-        Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_SRV   ? 1u
-        : Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_UAV ? 2u
-                                                                      : 3u,
-        Parameter.Descriptor.RegisterSpace,
-        Parameter.Descriptor.ShaderRegister};
+    State->Parameters[I] = getRootParameter(Parameter);
+    if (State->Parameters[I].ConstantCount) {
+      State->Parameters[I].ConstantOffset = ConstantOffset;
+      ConstantOffset += Parameter.Constants.Num32BitValues;
+    }
   }
   ++Owner->LiveRootSignatures;
   return S_OK;
@@ -755,7 +780,10 @@ struct RecordedCommand {
   RecordedCommand *Next = nullptr;
   void *Pipeline = nullptr;
   FeMeWarpDispatchDesc Dispatch;
-  std::array<FeMeWarpBufferBinding, MaxBufferRootParameters> Buffers{};
+  std::array<FeMeWarpBufferBinding, MaxRootParameters> Buffers{};
+  std::array<UINT, MaxRootDwords> RootConstants{};
+  std::array<bool, MaxRootParameters> InlineBuffers{};
+  std::array<UINT, MaxRootParameters> InlineOffsets{};
   D3D12DDIARG_BUFFER_PLACEMENT Destination{};
   D3D12DDIARG_BUFFER_PLACEMENT Source{};
   UINT64 Bytes = 0;
@@ -807,8 +835,9 @@ struct CommandList {
   void *Pipeline = nullptr;
   const void *RootIdentity = nullptr;
   UINT RootCount = 0;
-  std::array<BufferRootParameter, MaxBufferRootParameters> RootParameters{};
-  std::array<UINT64, MaxBufferRootParameters> RootAddresses{};
+  std::array<BufferRootParameter, MaxRootParameters> RootParameters{};
+  std::array<UINT64, MaxRootParameters> RootAddresses{};
+  std::array<UINT, MaxRootDwords> RootConstants{};
   UINT64 Marker = 0;
   RecordedCommand *First = nullptr;
   RecordedCommand *Last = nullptr;
@@ -1234,6 +1263,7 @@ void APIENTRY resetList(D3D12DDI_HCOMMANDLIST List,
   State->RootIdentity = nullptr;
   State->RootCount = 0;
   State->RootAddresses.fill(0);
+  State->RootConstants.fill(0);
 }
 
 void APIENTRY closeList(D3D12DDI_HCOMMANDLIST List) {
@@ -1300,6 +1330,7 @@ void APIENTRY setComputeRoot(D3D12DDI_HCOMMANDLIST List,
   if (Signature)
     State->RootParameters = Signature->Parameters;
   State->RootAddresses.fill(0);
+  State->RootConstants.fill(0);
 }
 
 void setRootBuffer(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT64 Address,
@@ -1312,7 +1343,8 @@ void setRootBuffer(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT64 Address,
   HRESULT Result = feme::probe::getWarpBufferAddress(
       State->Owner, Address, Data, Size, Namespace == 2);
   if (Index >= State->RootCount || Address % (Namespace == 3 ? 256 : 16) ||
-      State->RootParameters[Index].Namespace != Namespace || FAILED(Result)) {
+      State->RootParameters[Index].Namespace != Namespace ||
+      State->RootParameters[Index].ConstantCount || FAILED(Result)) {
     reportObjectError(List, E_INVALIDARG);
     return;
   }
@@ -1334,6 +1366,32 @@ void APIENTRY setRootCBV(D3D12DDI_HCOMMANDLIST List, UINT Index,
   setRootBuffer(List, Index, Address, 3);
 }
 
+void APIENTRY setRootConstants(D3D12DDI_HCOMMANDLIST List, UINT Index,
+                               UINT Count, const void *Data, UINT Offset) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  if (Index >= State->RootCount ||
+      !State->RootParameters[Index].ConstantCount || (Count && !Data)) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  const auto &Parameter = State->RootParameters[Index];
+  if (Offset > Parameter.ConstantCount ||
+      Count > Parameter.ConstantCount - Offset) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  if (Count)
+    std::memcpy(State->RootConstants.data() + Parameter.ConstantOffset + Offset,
+                Data, Count * sizeof(UINT));
+}
+
+void APIENTRY setRootConstant(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT Data,
+                              UINT Offset) {
+  setRootConstants(List, Index, 1, &Data, Offset);
+}
+
 HRESULT prepareDispatch(CommandList *State,
                         std::unique_ptr<RecordedCommand> &Command) {
   if (!State->Pipeline)
@@ -1347,18 +1405,28 @@ HRESULT prepareDispatch(CommandList *State,
   if (FAILED(Result))
     return Result;
   Command->Dispatch.Buffers = Command->Buffers.data();
+  Command->RootConstants = State->RootConstants;
   for (UINT I = 0; I < State->RootCount; ++I) {
-    if (!State->RootAddresses[I])
+    const auto &Parameter = State->RootParameters[I];
+    if (!Parameter.ConstantCount && !State->RootAddresses[I])
       continue;
-    auto &Buffer = Command->Buffers[Command->Dispatch.BufferCount++];
-    Result = feme::probe::getWarpBufferAddress(
-        State->Owner, State->RootAddresses[I], Buffer.Data, Buffer.SizeInBytes,
-        State->RootParameters[I].Namespace == 2);
-    if (FAILED(Result))
-      return Result;
-    Buffer.Namespace = State->RootParameters[I].Namespace;
-    Buffer.Space = State->RootParameters[I].Space;
-    Buffer.Register = State->RootParameters[I].Register;
+    UINT Binding = Command->Dispatch.BufferCount++;
+    auto &Buffer = Command->Buffers[Binding];
+    if (Parameter.ConstantCount) {
+      Command->InlineBuffers[Binding] = true;
+      Command->InlineOffsets[Binding] = Parameter.ConstantOffset;
+      Buffer.Data = Command->RootConstants.data() + Parameter.ConstantOffset;
+      Buffer.SizeInBytes = UINT64(Parameter.ConstantCount) * sizeof(UINT);
+    } else {
+      Result = feme::probe::getWarpBufferAddress(
+          State->Owner, State->RootAddresses[I], Buffer.Data,
+          Buffer.SizeInBytes, Parameter.Namespace == 2);
+      if (FAILED(Result))
+        return Result;
+    }
+    Buffer.Namespace = Parameter.Namespace;
+    Buffer.Space = Parameter.Space;
+    Buffer.Register = Parameter.Register;
   }
   return S_OK;
 }
@@ -1532,8 +1600,10 @@ void APIENTRY setMarker(D3D12DDI_HCOMMANDLIST List, UINT64 Marker) {
 }
 
 void APIENTRY clearRootArguments(D3D12DDI_HCOMMANDLIST List) {
-  if (auto *State = recordingList(List))
+  if (auto *State = recordingList(List)) {
     State->RootAddresses.fill(0);
+    State->RootConstants.fill(0);
+  }
 }
 
 // Direct-list initialization clears graphics bindings even for compute-only
@@ -1632,6 +1702,8 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
       for (UINT J = 0; J < Command->Dispatch.BufferCount && SUCCEEDED(Result);
            ++J) {
         auto &Buffer = Command->Buffers[J];
+        if (Command->InlineBuffers[J])
+          continue;
         Result =
             Access.address(reinterpret_cast<UINT64>(Buffer.Data), Buffer.Data,
                            Buffer.SizeInBytes, Buffer.Namespace == 2);
@@ -1776,6 +1848,10 @@ HRESULT snapshotSubmission(UINT Count, const D3D12DDI_HCOMMANDLIST *Lists,
       Copy->Next = nullptr;
       Copy->Pipeline = nullptr;
       Copy->Dispatch.Buffers = Copy->Buffers.data();
+      for (UINT J = 0; J < Copy->Dispatch.BufferCount; ++J)
+        if (Copy->InlineBuffers[J])
+          Copy->Buffers[J].Data =
+              Copy->RootConstants.data() + Copy->InlineOffsets[J];
       appendCommand(Submission.First, Submission.Last, Copy);
       if (Command->Pipeline) {
         HRESULT Result =
@@ -2004,6 +2080,8 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnSetComputeRootUnorderedAccessView = setRootUAV;
     Table.pfnSetComputeRootShaderResourceView = setRootSRV;
     Table.pfnSetComputeRootConstantBufferView = setRootCBV;
+    Table.pfnSetComputeRoot32BitConstant = setRootConstant;
+    Table.pfnSetComputeRoot32BitConstants = setRootConstants;
     Table.pfnDispatch = dispatch;
     Table.pfnExecuteIndirect = executeIndirect;
     Table.pfnCopyBufferRegion = copyBuffer;

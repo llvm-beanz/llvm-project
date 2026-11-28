@@ -755,6 +755,35 @@ level remains null. Inline constants, tables/static samplers, complete
 shader/root compatibility and the other W2 resource/synchronization work
 remain open.
 
+#### Owned inline constants and root-cost enforcement
+
+Multiple inline parameters now use explicit b-register/space mappings into
+the shared descriptor-backed CBV lowering. Each command owns its constant
+bytes; submission cloning rebases all corresponding descriptor pointers into
+the submission's own storage. This preserves replay and pending teardown
+without borrowing recording-state or application setter memory. Single and
+bulk setters validate indices, offsets, null inputs and subtraction-checked
+ranges; partial writes preserve the other recorded values.
+
+Root layouts enforce the aggregate 64-DWORD cost: each buffer root costs two,
+and inline parameters cost their declared count. Up to 64 one-DWORD parameters
+are accepted, while empty inline parameters, over-budget layouts and overlapping
+CBV/inline register identities are rejected. The tests use named cbuffer fields,
+not dynamically indexed cbuffer arrays, for the root-constant contract.
+
+Native DDI tests exercise setter failure boundaries, a legal no-op setter,
+64-parameter admission, root-cost overflow and same-b-register rejection.
+Four more stock-runtime gates cover owned SM 5.1/DXIL, independent system WARP,
+and held cross-queue execution with recording-object release. Two five-DWORD
+blocks in different spaces use bulk/partial writes and poisoned source storage;
+post-dispatch root writes must not modify the recorded command.
+
+Validation: **4403** full-suite passes, **65/65** callback passes and **59/59**
+stock-runtime passes. Inventory **v5** records twenty-three OS gates, 64 root
+parameters and multiple inline constants. Full W2 remains open for descriptor
+heaps/tables/static samplers, complete root compatibility, images/resource
+classes and the remaining synchronization/query/indirect contract.
+
 #### Owned W2 buffer and indirect progress (2026-11-27)
 
 W2 is **not closed**. Four tested implementation steps extend the owned

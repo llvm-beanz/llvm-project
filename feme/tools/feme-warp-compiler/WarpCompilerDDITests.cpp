@@ -413,6 +413,45 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Good &= LastError == E_NOTIMPL;
     LastError = S_OK;
     Lists.pfnSetPipelineState(List, Pipeline);
+    D3D12DDI_ROOT_PARAMETER_0013 ConstantParameter{};
+    ConstantParameter.ParameterType =
+        D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    ConstantParameter.ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_ALL;
+    ConstantParameter.Constants.Num32BitValues = 5;
+    D3D12DDI_ROOT_SIGNATURE_0013 ConstantDesc{};
+    ConstantDesc.NumParameters = 1;
+    ConstantDesc.pRootParameters = &ConstantParameter;
+    auto ConstantArgs = RootArgs;
+    ConstantArgs.pRootSignature_1_1 = &ConstantDesc;
+    Storage ConstantStorage(
+        Core.pfnCalcPrivateRootSignatureSize(Device, &ConstantArgs));
+    D3D12DDI_HROOTSIGNATURE ConstantRoot{ConstantStorage.data()};
+    Good &= Core.pfnCreateRootSignature(Device, &ConstantArgs, ConstantRoot) ==
+            S_OK;
+    Lists.pfnSetComputeRootSignature(List, ConstantRoot);
+    Lists.pfnSetComputeRoot32BitConstant(List, 0, 23, 4);
+    Good &= LastError == S_OK;
+    Lists.pfnSetComputeRoot32BitConstants(List, 0, 0, nullptr, 5);
+    Good &= LastError == S_OK;
+    Lists.pfnSetComputeRoot32BitConstant(List, 0, 23, 5);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnSetComputeRoot32BitConstants(List, 0, 1, nullptr, 0);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    UINT Values[2] = {7, 13};
+    Lists.pfnSetComputeRoot32BitConstants(List, 0, 2, Values, 4);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnSetComputeRoot32BitConstant(List, 0, 23,
+                                         std::numeric_limits<UINT>::max());
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnSetComputeRoot32BitConstant(List, 1, 23, 0);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Lists.pfnSetComputeRootSignature(List, Root);
+    Core.pfnDestroyRootSignature(Device, ConstantRoot);
     D3D12DDI_INDIRECT_ARGUMENT_DESC IndirectArgument{};
     IndirectArgument.Type = D3D12DDI_INDIRECT_ARGUMENT_TYPE_DISPATCH;
     D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001 SignatureArgs{};
@@ -512,13 +551,13 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Good &= LastError == E_INVALIDARG && Owner.LiveCommandPools == 1;
   Core.pfnDestroyCommandPool(Device, Pool);
   Good &= Owner.LiveCommandPools == 0;
-  D3D12DDI_ROOT_PARAMETER_0013 Parameters[2] = {};
+  D3D12DDI_ROOT_PARAMETER_0013 Parameters[64] = {};
   for (auto &Parameter : Parameters) {
     Parameter.ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_UAV;
     Parameter.ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_ALL;
     Parameter.Descriptor.ShaderRegister = 3;
   }
-  RootDesc.NumParameters = 33;
+  RootDesc.NumParameters = 65;
   RootDesc.pRootParameters = Parameters;
   Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
   RootDesc.NumParameters = 2;
@@ -539,6 +578,25 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Good &= Core.pfnCreateRootSignature(Device, &RootArgs, CBVRoot) == S_OK;
   Core.pfnDestroyRootSignature(Device, CBVRoot);
   Parameters[0].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_CBV;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
+  Good &= Owner.LiveRootSignatures == 0;
+  Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  Parameters[1].Constants.Num32BitValues = 5;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
+  RootDesc.NumParameters = 64;
+  for (UINT I = 0; I < 64; ++I) {
+    Parameters[I].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    Parameters[I].Constants.ShaderRegister = I;
+    Parameters[I].Constants.Num32BitValues = 1;
+  }
+  Storage FullRootStorage(
+      Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs));
+  D3D12DDI_HROOTSIGNATURE FullRoot{FullRootStorage.data()};
+  Good &= Core.pfnCreateRootSignature(Device, &RootArgs, FullRoot) == S_OK;
+  Core.pfnDestroyRootSignature(Device, FullRoot);
+  Parameters[0].Constants.Num32BitValues = 2;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
+  Parameters[0].Constants.Num32BitValues = 0;
   Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
   Good &= Owner.LiveRootSignatures == 0;
   Good &= testQueueWorkerFailure(Device, Core);

@@ -320,12 +320,13 @@ HRESULT createComputePipeline(ID3D12Device *Device, const char *Source,
                               ComPtr<ID3D12RootSignature> &Root,
                               ComPtr<ID3D12PipelineState> &Pipeline,
                               const D3D12_SHADER_BYTECODE *DXIL = nullptr,
-                              const char *LegacyProfile = "cs_5_0") {
+                              const char *LegacyProfile = "cs_5_0",
+                              const D3D_SHADER_MACRO *Defines = nullptr) {
   ComPtr<ID3DBlob> Shader, Errors, RootBlob;
   HRESULT Result = S_OK;
   if (!DXIL) {
     Result = report("Compile application compute shader",
-                    D3DCompile(Source, SourceSize, "FeMe command test", nullptr,
+                    D3DCompile(Source, SourceSize, "FeMe command test", Defines,
                                nullptr, "main", LegacyProfile, 0, 0, &Shader,
                                &Errors));
     if (FAILED(Result)) {
@@ -695,7 +696,8 @@ HRESULT exerciseCommands(ID3D12Device *Device,
 HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                const D3D12_SHADER_BYTECODE *DXIL = nullptr,
                                bool Ordered = false, bool Indirect = false,
-                               bool CBV = false) {
+                               bool CBV = false, bool Inline = false) {
+  bool ConstantBindings = CBV || Inline;
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
       "groupshared uint sharedValues[30];\n"
@@ -710,8 +712,13 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       "}\n";
   constexpr char CBVSource[] =
       "RWByteAddressBuffer output : register(u3);\n"
+      "#ifdef INLINE_CONSTANTS\n"
+      "cbuffer A : register(b3) { uint4 firstA; uint lastA; };\n"
+      "cbuffer B : register(b3, space7) { uint4 firstB; uint lastB; };\n"
+      "#else\n"
       "cbuffer A : register(b3) { uint valuesA[2]; };\n"
       "cbuffer B : register(b3, space7) { uint valuesB[2]; };\n"
+      "#endif\n"
       "groupshared uint sharedValues[30];\n"
       "[numthreads(5,3,2)] void main(uint3 id : SV_DispatchThreadID,\n"
       "uint3 local : SV_GroupThreadID) {\n"
@@ -720,26 +727,41 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       "sharedValues[slot] = index;\n"
       "GroupMemoryBarrierWithGroupSync();\n"
       "uint peer = sharedValues[slot == 29 ? 0 : slot + 1];\n"
+      "#ifdef INLINE_CONSTANTS\n"
+      "uint bias = id.x % 2 ? lastA + lastB : firstA.x + firstB.x;\n"
+      "#else\n"
       "uint bias = valuesA[id.x % 2] + valuesB[id.x % 2];\n"
+      "#endif\n"
       "output.Store(index * 4, output.Load(index * 4) + peer + bias);\n"
       "}\n";
   std::array<D3D12_ROOT_PARAMETER, 4> Parameters{};
   for (UINT I = 0; I < Parameters.size(); ++I) {
     Parameters[I].ParameterType =
-        I ? D3D12_ROOT_PARAMETER_TYPE_CBV : D3D12_ROOT_PARAMETER_TYPE_UAV;
-    Parameters[I].Descriptor.ShaderRegister = I == 3 ? 9 : 3;
-    Parameters[I].Descriptor.RegisterSpace = I == 2 ? 7 : 0;
+        !I       ? D3D12_ROOT_PARAMETER_TYPE_UAV
+        : Inline ? D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS
+                 : D3D12_ROOT_PARAMETER_TYPE_CBV;
+    if (I && Inline) {
+      Parameters[I].Constants.ShaderRegister = I == 3 ? 9 : 3;
+      Parameters[I].Constants.RegisterSpace = I == 2 ? 7 : 0;
+      Parameters[I].Constants.Num32BitValues = I == 3 ? 1 : 5;
+    } else {
+      Parameters[I].Descriptor.ShaderRegister = I == 3 ? 9 : 3;
+      Parameters[I].Descriptor.RegisterSpace = I == 2 ? 7 : 0;
+    }
     Parameters[I].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   }
   D3D12_ROOT_SIGNATURE_DESC RootDesc{};
-  RootDesc.NumParameters = CBV ? 4 : 1;
+  RootDesc.NumParameters = ConstantBindings ? 4 : 1;
   RootDesc.pParameters = Parameters.data();
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
+  const D3D_SHADER_MACRO Defines[] = {{"INLINE_CONSTANTS", "1"},
+                                      {nullptr, nullptr}};
   HRESULT Result = createComputePipeline(
-      Device, CBV ? CBVSource : Source,
-      CBV ? sizeof(CBVSource) - 1 : sizeof(Source) - 1, RootDesc, Root,
-      Pipeline, DXIL, CBV ? "cs_5_1" : "cs_5_0");
+      Device, ConstantBindings ? CBVSource : Source,
+      ConstantBindings ? sizeof(CBVSource) - 1 : sizeof(Source) - 1, RootDesc,
+      Root, Pipeline, DXIL, ConstantBindings ? "cs_5_1" : "cs_5_0",
+      Inline ? Defines : nullptr);
   if (FAILED(Result))
     return Result;
   constexpr UINT Threads = 180, Words = Threads + 16;
@@ -935,6 +957,16 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         List->SetComputeRootConstantBufferView(
             3, Constants[0]->GetGPUVirtualAddress());
     }
+    if (Inline) {
+      UINT ValuesA[] = {7 + Repeat * 5, 0xab, 0xab, 0xab, 0xab};
+      UINT ValuesB[] = {16, 0xcd, 0xcd, 0xcd, 10};
+      List->SetComputeRoot32BitConstants(1, 5, ValuesA, 0);
+      List->SetComputeRoot32BitConstant(1, 13 + Repeat * 5, 4);
+      List->SetComputeRoot32BitConstants(2, 5, ValuesB, 0);
+      if (Repeat == 1)
+        List->SetComputeRoot32BitConstant(3, 0xabababab, 0);
+      ValuesA[0] = ValuesB[0] = 0xefefefef;
+    }
     List->SetComputeRootSignature(Root.Get());
     if (Indirect) {
       List->ExecuteIndirect(Signature.Get(), 2, Arguments.Get(), 16,
@@ -949,6 +981,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     if (CBV)
       List->SetComputeRootConstantBufferView(
           1, Constants[0]->GetGPUVirtualAddress());
+    if (Inline)
+      List->SetComputeRoot32BitConstant(1, 0xeeeeeeee, 0);
     Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     List->ResourceBarrier(1, &Barrier);
@@ -1092,7 +1126,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                           15 * (Y / 3 * 3 + Peer / 5 % 3 + 6 * (Peer / 15));
         UINT Executions = Indirect ? (Repeat ? 4u : 2u) : Repeat + 1;
         Expected += Executions * (PeerGlobal + 23);
-        if (CBV)
+        if (ConstantBindings)
           Expected += 5 * Repeat * (Repeat + 1) / 2;
       }
       Valid = static_cast<const UINT *>(Memory)[I] == Expected;
@@ -1199,6 +1233,15 @@ int wmain(int Argc, wchar_t **Argv) {
   bool DXILCBV = Argc == 3 && std::wcscmp(Argv[1], L"--dxil-cbv-commands") == 0;
   bool CBV = ReferenceCBV || OrderedCBV || DXILCBV ||
              (Argc == 2 && std::wcscmp(Argv[1], L"--cbv-commands") == 0);
+  bool ReferenceConstants =
+      Argc == 2 && std::wcscmp(Argv[1], L"--reference-constant-commands") == 0;
+  bool OrderedConstants =
+      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-constant-commands") == 0;
+  bool DXILConstants =
+      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-constant-commands") == 0;
+  bool Inline =
+      ReferenceConstants || OrderedConstants || DXILConstants ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--constant-commands") == 0);
   bool ReferenceIndirect =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-indirect-commands") == 0;
   bool OrderedIndirect =
@@ -1213,19 +1256,19 @@ int wmain(int Argc, wchar_t **Argv) {
   bool PlacedBuffers =
       ReferencePlacedBuffers ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
-  bool Reference = ReferenceCBV || ReferenceIndirect ||
+  bool Reference = ReferenceConstants || ReferenceCBV || ReferenceIndirect ||
                    ReferenceBufferCommands || ReferencePlacedBuffers ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
-      OrderedCBV || OrderedIndirect ||
+      OrderedConstants || OrderedCBV || OrderedIndirect ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0);
   bool Fences = Argc == 2 && std::wcscmp(Argv[1], L"--fences") == 0;
   bool DXILBufferCommands =
-      DXILCBV || DXILIndirect ||
+      DXILConstants || DXILCBV || DXILIndirect ||
       (Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0);
   bool BufferCommands =
-      CBV || Indirect || DXILBufferCommands || OrderedBufferCommands ||
-      ReferenceBufferCommands ||
+      Inline || CBV || Indirect || DXILBufferCommands ||
+      OrderedBufferCommands || ReferenceBufferCommands ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--buffer-commands") == 0);
   bool DXILCommands =
       Argc == 3 && std::wcscmp(Argv[1], L"--dxil-commands") == 0;
@@ -1246,6 +1289,9 @@ int wmain(int Argc, wchar_t **Argv) {
                          "--dxil-indirect-commands FILE|"
                          "--cbv-commands|--reference-cbv-commands|"
                          "--ordered-cbv-commands|--dxil-cbv-commands FILE|"
+                         "--constant-commands|--reference-constant-commands|"
+                         "--ordered-constant-commands|"
+                         "--dxil-constant-commands FILE|"
                          "--placed-buffers|--reference-placed-buffers|"
                          "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
@@ -1363,9 +1409,9 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseCommands(Device.Get(),
                               DXILCommands || Coexist ? &DXIL : nullptr);
   if (SUCCEEDED(Result) && BufferCommands)
-    Result = exerciseBufferCommands(Device.Get(),
-                                    DXILBufferCommands ? &DXIL : nullptr,
-                                    OrderedBufferCommands, Indirect, CBV);
+    Result = exerciseBufferCommands(
+        Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
+        OrderedBufferCommands, Indirect, CBV, Inline);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();

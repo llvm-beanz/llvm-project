@@ -27,9 +27,14 @@
 #endif
 RWByteAddressBuffer output : register(ROOT_REGISTER);
 #ifdef CBV
+#ifdef INLINE_CONSTANTS
+cbuffer A : register(b3) { uint4 firstA; uint lastA; };
+cbuffer B : register(b3, space7) { uint4 firstB; uint lastB; };
+#else
 cbuffer A : register(b3) { uint valuesA[2]; };
 #ifndef SINGLE_CBV
 cbuffer B : register(b3, space7) { uint valuesB[2]; };
+#endif
 #endif
 #endif
 groupshared uint sharedValues[30];
@@ -45,9 +50,13 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
   uint peer = sharedValues[slot == 29 ? 0 : slot + 1];
   uint bias = 23;
 #ifdef CBV
+#ifdef INLINE_CONSTANTS
+  bias = id.x % 2 ? lastA + lastB : firstA.x + firstB.x;
+#else
   bias = valuesA[id.x % 2];
 #ifndef SINGLE_CBV
   bias += valuesB[id.x % 2];
+#endif
 #endif
 #endif
   output.Store(index * 4, output.Load(index * 4) + peer + bias);
