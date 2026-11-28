@@ -8,8 +8,9 @@
 ; `RWStructuredBuffer`/`RWByteAddressBuffer` access in real HLSL (e.g.
 ; `Out[tid.x] = tid.x;`) lowers to -- see feme/test/Tools/feme-run/HLSL for
 ; this raised end-to-end through `feme-run`. Contiguous two/three/four-
-; component i32/FP32 loads/stores also raise. Legacy loads require complete
-; leading-component uses; isolated later components and status stay unraised.
+; component i32/FP32 loads/stores also raise. Sparse legacy structured loads
+; use scalar accesses at checked constant byte offsets. Sparse raw loads,
+; dynamic sparse offsets and status stay unraised.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-ms-dx"
@@ -118,6 +119,52 @@ define void @store_legacy_multi_component(i32 %idx, i32 %x, i32 %y) {
   %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 1, i32 1, i1 false)
   call void @dx.op.bufferStore.i32(i32 69, %dx.types.Handle %h, i32 %idx, i32 undef, i32 %x, i32 %y, i32 undef, i32 undef, i8 3)
   ret void
+}
+
+; CHECK-LABEL: define i32 @load_legacy_structured_second_component(
+define i32 @load_legacy_structured_second_component(i32 %idx) {
+  ; CHECK: [[H:%.*]] = call target("dx.RawBuffer", [20 x i8], 1, 0) @llvm.dx.resource.handlefrombinding
+  ; CHECK: [[LOAD:%.*]] = call { i32, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", [20 x i8], 1, 0) [[H]], i32 %idx, i32 8)
+  ; CHECK: [[VALUE:%.*]] = extractvalue { i32, i1 } [[LOAD]], 0
+  ; CHECK: ret i32 [[VALUE]]
+  ; CHECK-NOT: casthandle
+  %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 2, i32 3, i1 false)
+  %v = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %h, i32 %idx, i32 4)
+  %r = extractvalue %dx.types.ResRet.i32 %v, 1
+  ret i32 %r
+}
+
+; CHECK-LABEL: define float @load_legacy_structured_sparse(
+define float @load_legacy_structured_sparse(i32 %idx) {
+  ; CHECK-DAG: call { float, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", [20 x i8], 1, 0) {{%.*}}, i32 %idx, i32 4)
+  ; CHECK-DAG: call { float, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", [20 x i8], 1, 0) {{%.*}}, i32 %idx, i32 12)
+  ; CHECK-NOT: dx.op.bufferLoad
+  %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 2, i32 3, i1 false)
+  %v = call %dx.types.ResRet.f32 @dx.op.bufferLoad.f32(i32 68, %dx.types.Handle %h, i32 %idx, i32 4)
+  %x = extractvalue %dx.types.ResRet.f32 %v, 0
+  %z = extractvalue %dx.types.ResRet.f32 %v, 2
+  %sum = fadd float %x, %z
+  ret float %sum
+}
+
+; CHECK-LABEL: define i32 @load_legacy_structured_overflow(
+define i32 @load_legacy_structured_overflow(i32 %idx) {
+  ; CHECK: [[LOAD:%.*]] = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68,
+  ; CHECK: extractvalue %dx.types.ResRet.i32 [[LOAD]], 1
+  %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 2, i32 3, i1 false)
+  %v = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %h, i32 %idx, i32 4294967292)
+  %r = extractvalue %dx.types.ResRet.i32 %v, 1
+  ret i32 %r
+}
+
+; CHECK-LABEL: define i32 @load_legacy_structured_dynamic_offset(
+define i32 @load_legacy_structured_dynamic_offset(i32 %idx, i32 %offset) {
+  ; CHECK: [[LOAD:%.*]] = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68,
+  ; CHECK: extractvalue %dx.types.ResRet.i32 [[LOAD]], 1
+  %h = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 2, i32 3, i1 false)
+  %v = call %dx.types.ResRet.i32 @dx.op.bufferLoad.i32(i32 68, %dx.types.Handle %h, i32 %idx, i32 %offset)
+  %r = extractvalue %dx.types.ResRet.i32 %v, 1
+  ret i32 %r
 }
 
 ; CHECK-LABEL: define i32 @load_legacy_second_component(

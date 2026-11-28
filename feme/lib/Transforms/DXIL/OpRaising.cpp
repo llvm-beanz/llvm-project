@@ -21,6 +21,9 @@
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/DXILABI.h"
+#include "llvm/Support/MathExtras.h"
+#include <array>
+#include <limits>
 #include <optional>
 
 using namespace llvm;
@@ -2219,10 +2222,11 @@ bool raiseAtomicCompareExchange(CallInst &CI) {
 /// `dx.op.bufferLoad` (opcode 68), on an already-raised raw/structured
 /// buffer handle into `llvm.dx.resource.load.rawbuffer`,
 /// mirroring `raiseTypedBufferLoad`. Modern contiguous masks determine the
-/// width; legacy calls require a complete leading run of component extracts
-/// to infer it. Packed i32/FP32 loads retain one vector access through the
-/// existing CPU helpers. Status/aggregate uses and unsupported masks/types
-/// remain unraised; scalar type support is unchanged.
+/// width; legacy calls infer it from component extracts. Sparse legacy
+/// structured loads with constant byte offsets use individually bounded scalar
+/// accesses, rather than widening a load to include unused components.
+/// Packed i32/FP32 loads retain one vector access through the existing CPU
+/// helpers. Status/aggregate uses and unsupported masks/types remain unraised.
 bool raiseRawBufferLoad(CallInst &CI, bool Legacy) {
   if (CI.arg_size() != (Legacy ? 4 : 6))
     return false;
@@ -2237,11 +2241,22 @@ bool raiseRawBufferLoad(CallInst &CI, bool Legacy) {
     return false;
 
   unsigned Width;
+  bool SparseStructured = false;
+  uint64_t ByteOffset = 0;
   if (Legacy) {
     unsigned Seen = 0;
     for (ExtractValueInst *EV : *Extracts)
       Seen |= 1u << EV->getIndices()[0];
     Width = getContiguousMaskWidth(Seen);
+    if (!Width) {
+      auto Offset = getConstInt(CI.getArgOperand(3));
+      Width = llvm::bit_width(Seen);
+      if (!cast<dxil::RawBufferExtType>(HandleTy)->isStructured() || !Offset ||
+          *Offset > std::numeric_limits<uint32_t>::max() - 4 * (Width - 1))
+        return false;
+      ByteOffset = *Offset;
+      SparseStructured = true;
+    }
   } else {
     std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(4));
     if (!Mask || *Mask > 15)
@@ -2266,6 +2281,25 @@ bool raiseRawBufferLoad(CallInst &CI, bool Legacy) {
   Type *LoadedTy = Width == 1 ? ElemTy : FixedVectorType::get(ElemTy, Width);
 
   IRBuilder<> Builder(&CI);
+  if (SparseStructured) {
+    Function *LoadFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(), Intrinsic::dx_resource_load_rawbuffer,
+        {ElemTy, HandleTy});
+    std::array<Value *, 4> Components{};
+    for (ExtractValueInst *EV : *Extracts) {
+      unsigned Component = EV->getIndices()[0];
+      if (!Components[Component]) {
+        Value *Loaded = Builder.CreateCall(
+            LoadFn, {Handle, CI.getArgOperand(2),
+                     Builder.getInt32(ByteOffset + 4 * Component)});
+        Components[Component] = Builder.CreateExtractValue(Loaded, 0);
+      }
+      EV->replaceAllUsesWith(Components[Component]);
+      EV->eraseFromParent();
+    }
+    CI.eraseFromParent();
+    return true;
+  }
   Function *LoadFn = Intrinsic::getOrInsertDeclaration(
       CI.getModule(), Intrinsic::dx_resource_load_rawbuffer,
       {LoadedTy, HandleTy});
