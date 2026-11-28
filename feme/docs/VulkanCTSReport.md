@@ -1,5 +1,14 @@
 # Vulkan CTS status
 
+## Direct3D integer-store conversion regression scope, not CTS
+
+Descriptor-gated narrow integer saturation passes 4413 full FeMe tests
+(15 skipped, 10 unsupported), with confirmed FeMe CPU Vulkan Device identity.
+The focused matrix explicitly verifies flag-clear truncation remains unchanged.
+Artifact ABI 11 retains the descriptor layout but rejects runtimes without the
+new flag semantics. Image stores and Vulkan advertisements are unchanged.
+This is not a new CTS result.
+
 ## Packed WARP SRV and query regression scope, not CTS
 
 The packed typed-SRV and non-uniform buffer-query slices pass 4412 full FeMe

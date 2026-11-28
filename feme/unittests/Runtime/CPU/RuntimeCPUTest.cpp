@@ -878,6 +878,87 @@ TEST_F(RuntimeCPUTest, TypedStorePackedR8G8B8A8SintRoundTrips) {
   EXPECT_EQ(Result[3], 1);
 }
 
+TEST_F(RuntimeCPUTest, TypedIntegerStoreSaturationAndTruncation) {
+  Function *Wrappers[] = {
+      addStoreWrapper("store_scalar", "feme.cpu.resource.store.typed.i32",
+                      Type::getInt32Ty(Ctx)),
+      addStoreWrapper("store_v2", "feme.cpu.resource.store.typed.v2i32",
+                      FixedVectorType::get(Type::getInt32Ty(Ctx), 2)),
+      addStoreWrapper("store_v4", "feme.cpu.resource.store.typed.v4i32",
+                      FixedVectorType::get(Type::getInt32Ty(Ctx), 4))};
+  StoreFn Stores[3];
+  for (unsigned I = 0; I < 3; ++I) {
+    Stores[I] = resolve<StoreFn>(Wrappers[I]);
+    ASSERT_TRUE(Stores[I]);
+  }
+  struct FormatCase {
+    ResourceFormat Format;
+    unsigned Channels, Bytes;
+    bool Signed;
+  };
+  const FormatCase Cases[] = {{ResourceFormat::R8_UINT, 1, 1, false},
+                              {ResourceFormat::R8_SINT, 1, 1, true},
+                              {ResourceFormat::R8G8_UINT, 2, 1, false},
+                              {ResourceFormat::R8G8_SINT, 2, 1, true},
+                              {ResourceFormat::R8G8B8A8_UINT, 4, 1, false},
+                              {ResourceFormat::R8G8B8A8_SINT, 4, 1, true},
+                              {ResourceFormat::R16_UINT, 1, 2, false},
+                              {ResourceFormat::R16_SINT, 1, 2, true},
+                              {ResourceFormat::R16G16_UINT, 2, 2, false},
+                              {ResourceFormat::R16G16_SINT, 2, 2, true},
+                              {ResourceFormat::R16G16B16A16_UINT, 4, 2, false},
+                              {ResourceFormat::R16G16B16A16_SINT, 4, 2, true}};
+  const int32_t Inputs[] = {INT32_MIN, -1, 256, INT32_MAX};
+  for (const auto &Case : Cases)
+    for (bool Saturate : {false, true})
+      for (unsigned Rotation = 0; Rotation < 4; ++Rotation) {
+        SCOPED_TRACE(static_cast<unsigned>(Case.Format));
+        SCOPED_TRACE(Saturate);
+        std::array<uint32_t, 8> Storage;
+        Storage.fill(0x7faabbcc);
+        auto Expected = Storage;
+        FemeDescriptor Heap[1] = {};
+        Heap[0].Data = Storage.data() + 2;
+        Heap[0].SizeInBytes = Case.Channels * Case.Bytes;
+        Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+        Heap[0].Format = static_cast<uint32_t>(Case.Format);
+        Heap[0].Flags =
+            FEME_DESCRIPTOR_UAV |
+            (Saturate ? FEME_DESCRIPTOR_SATURATE_INTEGER_STORES : 0);
+        int32_t Values[4];
+        for (unsigned Channel = 0; Channel < Case.Channels; ++Channel) {
+          Values[Channel] = Inputs[(Rotation + Channel) % 4];
+          uint32_t Value = static_cast<uint32_t>(Values[Channel]);
+          if (Saturate) {
+            if (Case.Signed) {
+              int32_t Min = -(1 << (Case.Bytes * 8 - 1));
+              int32_t Max = (1 << (Case.Bytes * 8 - 1)) - 1;
+              Value = static_cast<uint32_t>(Values[Channel] < Min ? Min
+                                            : Values[Channel] > Max
+                                                ? Max
+                                                : Values[Channel]);
+            } else {
+              uint32_t Max = (1u << (Case.Bytes * 8)) - 1;
+              Value = Value > Max ? Max : Value;
+            }
+          }
+          std::memcpy(reinterpret_cast<unsigned char *>(Expected.data() + 2) +
+                          Channel * Case.Bytes,
+                      &Value, Case.Bytes);
+        }
+        StoreFn Store = Stores[Case.Channels == 1   ? 0
+                               : Case.Channels == 2 ? 1
+                                                    : 2];
+        Store(Heap, 1, 0, 0, Values, true);
+        EXPECT_EQ(Storage, Expected);
+        Store(Heap, 1, 0, 0, Values, false);
+        Store(Heap, 1, 0, 1, Values, true);
+        Heap[0].Flags &= ~FEME_DESCRIPTOR_UAV;
+        Store(Heap, 1, 0, 0, Values, true);
+        EXPECT_EQ(Storage, Expected);
+      }
+}
+
 TEST_F(RuntimeCPUTest, TypedLoadOutOfRangeOffsetReadsZero) {
   float Storage[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   FemeDescriptor Heap[1] = {};

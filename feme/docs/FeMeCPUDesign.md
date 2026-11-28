@@ -2716,6 +2716,16 @@ Artifacts from earlier descriptor layouts are rejected. Windows bridge ABI 4
 validates D3D component encodings for typed SRVs and materializes this mapping
 from live owned descriptors at ordered execution.
 
+Artifact ABI **11** retains the 48-byte descriptor layout and adds
+`FEME_DESCRIPTOR_SATURATE_INTEGER_STORES` (flag bit 4). With that flag set,
+scalar/two/four-component typed integer buffer stores clamp signed/unsigned
+8-/16-bit components to their destination range before packing, as required by
+Direct3D integer conversion (D3D11.3 functional specification, section
+3.2.3.13). Clear flags preserve the existing truncating buffer behavior.
+Image stores, floating conversion, 32-bit integers and robustness checks are
+unchanged. ABI 10 artifacts are rejected because older linked runtimes do not
+implement the new flag semantics.
+
 This is the one place where bindless makes the CPU target's job harder
 rather than easier, so it is worth taking apart.
 

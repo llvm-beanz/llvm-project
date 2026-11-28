@@ -582,6 +582,9 @@ enum FemeDescriptorFlagBits : uint32_t {
   /// only a host may, and only when it can prove the shader cannot exceed
   /// `SizeInBytes`. Ignored when `Kind == ResourceKind::None`.
   FEME_DESCRIPTOR_TRUSTED = 1u << 3,
+  /// Clamp narrow integer typed-buffer stores to the destination range,
+  /// as required by Direct3D. Clear preserves the existing truncating mode.
+  FEME_DESCRIPTOR_SATURATE_INTEGER_STORES = 1u << 4,
 };
 
 /// One descriptor: the unit the resource and sampler heaps are arrays of.

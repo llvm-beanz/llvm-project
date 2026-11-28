@@ -979,6 +979,9 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr);
 __attribute__((always_inline)) static void
 femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
                         FemeRTv4i32 Texel);
+__attribute__((always_inline)) static void
+femeRTPackBufferTexelI32(uint32_t Format, unsigned char *Ptr, FemeRTv4i32 Texel,
+                         uint32_t Flags);
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTApplyImageSwizzleI32(FemeRTv4i32 Color, uint32_t Swizzle);
 
@@ -1049,7 +1052,7 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   if (!(AccessOK && Mask && IsUAV))
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
-  femeRTPackImageTexelI32(Desc.Format, Ptr, Value);
+  femeRTPackBufferTexelI32(Desc.Format, Ptr, Value, Desc.Flags);
 }
 
 // `feme.cpu.resource.getdimensions.typed.i32` (roadmap H144): `Buffer<T>`/
@@ -3489,6 +3492,54 @@ femeRTPackImageTexelI32(uint32_t Format, unsigned char *Ptr,
   }
 }
 
+__attribute__((always_inline)) static void
+femeRTPackBufferTexelI32(uint32_t Format, unsigned char *Ptr, FemeRTv4i32 Texel,
+                         uint32_t Flags) {
+  if (Flags & 16u) { // FEME_DESCRIPTOR_SATURATE_INTEGER_STORES.
+    unsigned Bits = 0;
+    _Bool Signed = 0;
+    switch (Format) {
+    case 15: // R8G8B8A8_UINT.
+    case 87: // R8_UINT.
+    case 91: // R8G8_UINT.
+      Bits = 8;
+      break;
+    case 16: // R8G8B8A8_SINT.
+    case 88: // R8_SINT.
+    case 92: // R8G8_SINT.
+      Bits = 8;
+      Signed = 1;
+      break;
+    case 21:  // R16G16B16A16_UINT.
+    case 96:  // R16_UINT.
+    case 101: // R16G16_UINT.
+      Bits = 16;
+      break;
+    case 22:  // R16G16B16A16_SINT.
+    case 97:  // R16_SINT.
+    case 102: // R16G16_SINT.
+      Bits = 16;
+      Signed = 1;
+      break;
+    default:
+      break;
+    }
+    if (Bits)
+      for (unsigned Channel = 0; Channel < 4; ++Channel) {
+        if (Signed) {
+          int32_t Min = -(1 << (Bits - 1)), Max = (1 << (Bits - 1)) - 1;
+          Texel[Channel] = Texel[Channel] < Min   ? Min
+                           : Texel[Channel] > Max ? Max
+                                                  : Texel[Channel];
+        } else {
+          uint32_t Value = (uint32_t)Texel[Channel], Max = (1u << Bits) - 1;
+          Texel[Channel] = (int32_t)(Value > Max ? Max : Value);
+        }
+      }
+  }
+  femeRTPackImageTexelI32(Format, Ptr, Texel);
+}
+
 //--- Typed-buffer scalar (single-channel format) view -------------------
 
 // `feme.cpu.resource.load.typed.f32` (roadmap L9): reads a scalar `float`
@@ -3617,7 +3668,7 @@ femeCpuResourceStoreTypedI32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
   FemeRTv4i32 Texel = {Value, 0, 0, 1};
-  femeRTPackImageTexelI32(Desc.Format, Ptr, Texel);
+  femeRTPackBufferTexelI32(Desc.Format, Ptr, Texel, Desc.Flags);
 }
 
 // `feme.cpu.resource.load.typed.v2f32` (roadmap L7a): reads a `<2 x
@@ -3748,7 +3799,7 @@ femeCpuResourceStoreTypedV2I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
   FemeRTv4i32 Texel = {Value[0], Value[1], 0, 1};
-  femeRTPackImageTexelI32(Desc.Format, Ptr, Texel);
+  femeRTPackBufferTexelI32(Desc.Format, Ptr, Texel, Desc.Flags);
 }
 
 // Bounds-checked address helper for `feme.cpu.resource.atomic.*.typed.i32`

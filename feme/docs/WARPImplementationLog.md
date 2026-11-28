@@ -784,6 +784,28 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Shared Direct3D narrow integer store conversion
+
+Reference controls exposed a conversion mismatch: FeMe truncated out-of-range
+8-/16-bit typed integer stores, while system WARP saturated them. The public
+[D3D11.3 functional specification](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm),
+section 3.2.3.13, requires destination-range clamping for SINT/UINT conversion
+to fewer or equal bits. The shared runtime now gates saturation on descriptor
+flag bit 4, rather than changing the existing flag-clear Vulkan path.
+
+Artifact ABI **11** rejects old runtimes that do not implement this semantic
+flag; the descriptor remains 48 bytes. Scalar/two/four-component integer
+typed-buffer entry points share one gated packer. Image stores, floats,
+32-bit integers, masks, bounds and UAV permissions are unchanged.
+A twelve-format unit matrix tests signed/unsigned endpoints and overflow,
+flag-clear truncation, exact packed bytes, guards and ignored inactive,
+out-of-range and read-only stores. Old artifact versions remain rejected.
+
+Validation: focused runtime/version selectors **5/5** and full FeMe
+**4413** passed / **15** skipped / **10** unsupported, with confirmed FeMe ICD
+identity. Windows typed-UAV admission and its capability inventory are a
+separate integration slice. No Vulkan advertisement or CTS result changes.
+
 #### Owned narrow and packed typed SRVs
 
 The subsequent v15 slice adds twelve narrow/packed typed SRV formats:
