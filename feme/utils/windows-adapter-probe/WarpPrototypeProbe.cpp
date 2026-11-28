@@ -697,7 +697,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                const D3D12_SHADER_BYTECODE *DXIL = nullptr,
                                bool Ordered = false, bool Indirect = false,
                                bool CBV = false, bool Inline = false,
-                               bool Tables = false) {
+                               bool Tables = false, bool Views = false,
+                               bool Structured = false) {
   bool ConstantBindings = CBV || Inline;
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
@@ -712,7 +713,15 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       "output.Store(index * 4, output.Load(index * 4) + peer + 23);\n"
       "}\n";
   constexpr char CBVSource[] =
+      "#ifdef STRUCTURED_VIEWS\n"
+      "RWStructuredBuffer<uint> output : register(u3);\n"
+      "StructuredBuffer<uint2> input : register(t3);\n"
+      "#else\n"
       "RWByteAddressBuffer output : register(u3);\n"
+      "#ifdef BUFFER_VIEWS\n"
+      "ByteAddressBuffer input : register(t3);\n"
+      "#endif\n"
+      "#endif\n"
       "#ifdef INLINE_CONSTANTS\n"
       "cbuffer A : register(b3) { uint4 firstA; uint lastA; };\n"
       "cbuffer B : register(b3, space7) { uint4 firstB; uint lastB; };\n"
@@ -733,7 +742,14 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       "#else\n"
       "uint bias = valuesA[id.x % 2] + valuesB[id.x % 2];\n"
       "#endif\n"
+      "#ifdef STRUCTURED_VIEWS\n"
+      "output[index] = output[index] + peer + bias + input[index].y;\n"
+      "#else\n"
+      "#ifdef BUFFER_VIEWS\n"
+      "bias += input.Load(index * 4);\n"
+      "#endif\n"
       "output.Store(index * 4, output.Load(index * 4) + peer + bias);\n"
+      "#endif\n"
       "}\n";
   std::array<D3D12_ROOT_PARAMETER, 4> Parameters{};
   for (UINT I = 0; I < Parameters.size(); ++I) {
@@ -752,6 +768,20 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Parameters[I].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   }
   D3D12_DESCRIPTOR_RANGE Ranges[2]{};
+  D3D12_DESCRIPTOR_RANGE ViewRanges[2]{};
+  if (Views) {
+    ViewRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ViewRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    for (auto &Range : ViewRanges) {
+      Range.NumDescriptors = 1;
+      Range.BaseShaderRegister = 3;
+      Range.OffsetInDescriptorsFromTableStart =
+          D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    }
+    Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters[0].DescriptorTable.NumDescriptorRanges = 2;
+    Parameters[0].DescriptorTable.pDescriptorRanges = ViewRanges;
+  }
   if (Tables) {
     for (UINT I = 0; I < 2; ++I) {
       Ranges[I].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
@@ -770,13 +800,15 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
   RootDesc.pParameters = Parameters.data();
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
-  const D3D_SHADER_MACRO Defines[] = {{"INLINE_CONSTANTS", "1"},
-                                      {nullptr, nullptr}};
+  const D3D_SHADER_MACRO Defines[] = {
+      {Inline ? "INLINE_CONSTANTS" : "BUFFER_VIEWS", "1"},
+      {Structured ? "STRUCTURED_VIEWS" : nullptr, Structured ? "1" : nullptr},
+      {nullptr, nullptr}};
   HRESULT Result = createComputePipeline(
       Device, ConstantBindings ? CBVSource : Source,
       ConstantBindings ? sizeof(CBVSource) - 1 : sizeof(Source) - 1, RootDesc,
       Root, Pipeline, DXIL, ConstantBindings ? "cs_5_1" : "cs_5_0",
-      Inline ? Defines : nullptr);
+      Inline || Views ? Defines : nullptr);
   if (FAILED(Result))
     return Result;
   constexpr UINT Threads = 180, Words = Threads + 16;
@@ -785,7 +817,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
   Heap.CreationNodeMask = Heap.VisibleNodeMask = 1;
   D3D12_RESOURCE_DESC Desc{};
   Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  Desc.Width = Bytes;
+  Desc.Width = Structured ? 2 * Bytes : Bytes;
   Desc.Height = Desc.DepthOrArraySize = Desc.MipLevels = 1;
   Desc.SampleDesc.Count = 1;
   Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -798,6 +830,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                              nullptr, IID_PPV_ARGS(&Upload)));
   if (FAILED(Result))
     return Result;
+  Desc.Width = Bytes;
   Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
   Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   Result =
@@ -838,13 +871,13 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
   if (Tables) {
     D3D12_DESCRIPTOR_HEAP_DESC DescriptorDesc{};
     DescriptorDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    DescriptorDesc.NumDescriptors = 3;
+    DescriptorDesc.NumDescriptors = Views ? 4 : 3;
     Result = report("Create CPU descriptor heap",
                     Device->CreateDescriptorHeap(
                         &DescriptorDesc, IID_PPV_ARGS(&CPUDescriptors)));
     if (FAILED(Result))
       return Result;
-    DescriptorDesc.NumDescriptors = 6;
+    DescriptorDesc.NumDescriptors = Views ? 8 : 6;
     DescriptorDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     Result = report("Create shader-visible descriptor heap",
                     Device->CreateDescriptorHeap(
@@ -898,9 +931,10 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Upload->Unmap(0, &NoRead);
     return report("Missing command upload memory", E_FAIL);
   }
-  for (UINT I = 0; I < Words; ++I)
+  for (UINT I = 0; I < Words * (Structured ? 2 : 1); ++I)
     static_cast<UINT *>(Memory)[I] = I * 7 + 5;
-  Upload->Unmap(0, &Full);
+  D3D12_RANGE UploadWritten{0, Structured ? 2 * Bytes : Bytes};
+  Upload->Unmap(0, &UploadWritten);
   D3D12_COMMAND_QUEUE_DESC QueueDesc{};
   QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   ComPtr<ID3D12CommandQueue> Queue;
@@ -999,7 +1033,9 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     List->ResourceBarrier(1, &Barrier);
     List->SetComputeRootSignature(Root.Get());
-    List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress());
+    if (!Views)
+      List->SetComputeRootUnorderedAccessView(0,
+                                              Output->GetGPUVirtualAddress());
     if (CBV && !Tables) {
       for (UINT I = 0; I < Constants.size(); ++I)
         List->SetComputeRootConstantBufferView(
@@ -1013,6 +1049,9 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       List->SetDescriptorHeaps(1, Heaps);
       D3D12_GPU_DESCRIPTOR_HANDLE Base{GPUStart.ptr + DescriptorStride};
       List->SetComputeRootDescriptorTable(1, Base);
+      if (Views)
+        List->SetComputeRootDescriptorTable(
+            0, {GPUStart.ptr + 5 * DescriptorStride});
     }
     if (Inline) {
       UINT ValuesA[] = {7 + Repeat * 5, 0xab, 0xab, 0xab, 0xab};
@@ -1033,8 +1072,11 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                               0);
     } else
       List->Dispatch(3, 2, 1);
-    List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress() +
-                                                   16);
+    if (Views)
+      List->SetComputeRootDescriptorTable(0, GPUStart);
+    else
+      List->SetComputeRootUnorderedAccessView(
+          0, Output->GetGPUVirtualAddress() + 16);
     if (CBV && !Tables)
       List->SetComputeRootConstantBufferView(
           1, Constants[0]->GetGPUVirtualAddress());
@@ -1077,6 +1119,36 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         D3D12_CPU_DESCRIPTOR_HANDLE Destination{CPUStart.ptr +
                                                 I * DescriptorStride};
         Device->CreateConstantBufferView(&View, Destination);
+      }
+      if (Views) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC Input{};
+        Input.Format =
+            Structured ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+        Input.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        Input.Shader4ComponentMapping =
+            D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        Input.Buffer.FirstElement = Structured ? 2 : 4;
+        Input.Buffer.NumElements = Threads;
+        Input.Buffer.StructureByteStride = Structured ? 8 : 0;
+        Input.Buffer.Flags =
+            Structured ? D3D12_BUFFER_SRV_FLAG_NONE : D3D12_BUFFER_SRV_FLAG_RAW;
+        Device->CreateShaderResourceView(Repeat == 2 ? nullptr : Upload.Get(),
+                                         &Input,
+                                         {CPUStart.ptr + 2 * DescriptorStride});
+        D3D12_UNORDERED_ACCESS_VIEW_DESC OutputView{};
+        OutputView.Format = Input.Format;
+        OutputView.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        OutputView.Buffer.NumElements = Threads;
+        OutputView.Buffer.StructureByteStride = Structured ? 4 : 0;
+        OutputView.Buffer.Flags =
+            Structured ? D3D12_BUFFER_UAV_FLAG_NONE : D3D12_BUFFER_UAV_FLAG_RAW;
+        Device->CreateUnorderedAccessView(
+            Output.Get(), nullptr, &OutputView,
+            {CPUStart.ptr + 3 * DescriptorStride});
+        Device->CopyDescriptorsSimple(2,
+                                      {GPUCPUStart.ptr + 5 * DescriptorStride},
+                                      {CPUStart.ptr + 2 * DescriptorStride},
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
       }
       D3D12_CPU_DESCRIPTOR_HANDLE Destinations[] = {
           {GPUCPUStart.ptr + 2 * DescriptorStride},
@@ -1216,6 +1288,9 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
           Expected += 5 * Repeat * (Repeat + 1) / 2;
         if (Tables && Repeat == 2)
           Expected -= X % 2 ? 10 : 16;
+        if (Views)
+          Expected += (Repeat == 2 ? Executions - 1 : Executions) *
+                      ((Structured ? 2 * I + 5 : I + 4) * 7 + 5);
       }
       Valid = static_cast<const UINT *>(Memory)[I] == Expected;
       if (!Valid)
@@ -1338,6 +1413,28 @@ int wmain(int Argc, wchar_t **Argv) {
       Argc == 3 && std::wcscmp(Argv[1], L"--dxil-table-commands") == 0;
   bool Tables = ReferenceTables || OrderedTables || DXILTables ||
                 (Argc == 2 && std::wcscmp(Argv[1], L"--table-commands") == 0);
+  bool StructuredViews =
+      (Argc == 2 &&
+       (std::wcscmp(Argv[1], L"--structured-view-commands") == 0 ||
+        std::wcscmp(Argv[1], L"--reference-structured-view-commands") == 0 ||
+        std::wcscmp(Argv[1], L"--ordered-structured-view-commands") == 0)) ||
+      (Argc == 3 &&
+       std::wcscmp(Argv[1], L"--dxil-structured-view-commands") == 0);
+  bool ReferenceViews =
+      Argc == 2 &&
+      (std::wcscmp(Argv[1], L"--reference-view-commands") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-structured-view-commands") == 0);
+  bool OrderedViews =
+      Argc == 2 &&
+      (std::wcscmp(Argv[1], L"--ordered-view-commands") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-structured-view-commands") == 0);
+  bool DXILViews =
+      Argc == 3 &&
+      (std::wcscmp(Argv[1], L"--dxil-view-commands") == 0 ||
+       std::wcscmp(Argv[1], L"--dxil-structured-view-commands") == 0);
+  bool Views = StructuredViews || ReferenceViews || OrderedViews || DXILViews ||
+               (Argc == 2 && std::wcscmp(Argv[1], L"--view-commands") == 0);
+  Tables |= Views;
   CBV |= Tables;
   bool ReferenceIndirect =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-indirect-commands") == 0;
@@ -1353,16 +1450,17 @@ int wmain(int Argc, wchar_t **Argv) {
   bool PlacedBuffers =
       ReferencePlacedBuffers ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
-  bool Reference = ReferenceTables || ReferenceConstants || ReferenceCBV ||
-                   ReferenceIndirect || ReferenceBufferCommands ||
-                   ReferencePlacedBuffers ||
+  bool Reference = ReferenceViews || ReferenceTables || ReferenceConstants ||
+                   ReferenceCBV || ReferenceIndirect ||
+                   ReferenceBufferCommands || ReferencePlacedBuffers ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
-      OrderedTables || OrderedConstants || OrderedCBV || OrderedIndirect ||
+      OrderedViews || OrderedTables || OrderedConstants || OrderedCBV ||
+      OrderedIndirect ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0);
   bool Fences = Argc == 2 && std::wcscmp(Argv[1], L"--fences") == 0;
   bool DXILBufferCommands =
-      DXILTables || DXILConstants || DXILCBV || DXILIndirect ||
+      DXILViews || DXILTables || DXILConstants || DXILCBV || DXILIndirect ||
       (Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0);
   bool BufferCommands =
       Inline || CBV || Indirect || DXILBufferCommands ||
@@ -1392,6 +1490,12 @@ int wmain(int Argc, wchar_t **Argv) {
                          "--dxil-constant-commands FILE|"
                          "--table-commands|--reference-table-commands|"
                          "--ordered-table-commands|--dxil-table-commands FILE|"
+                         "--view-commands|--reference-view-commands|"
+                         "--ordered-view-commands|--dxil-view-commands FILE|"
+                         "--structured-view-commands|"
+                         "--reference-structured-view-commands|"
+                         "--ordered-structured-view-commands|"
+                         "--dxil-structured-view-commands FILE|"
                          "--placed-buffers|--reference-placed-buffers|"
                          "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
@@ -1509,9 +1613,10 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseCommands(Device.Get(),
                               DXILCommands || Coexist ? &DXIL : nullptr);
   if (SUCCEEDED(Result) && BufferCommands)
-    Result = exerciseBufferCommands(
-        Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
-        OrderedBufferCommands, Indirect, CBV, Inline, Tables);
+    Result = exerciseBufferCommands(Device.Get(),
+                                    DXILBufferCommands ? &DXIL : nullptr,
+                                    OrderedBufferCommands, Indirect, CBV,
+                                    Inline, Tables, Views, StructuredViews);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();

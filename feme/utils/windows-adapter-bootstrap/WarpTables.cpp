@@ -155,11 +155,26 @@ struct BufferRootParameter {
   UINT RangeCount = 0;
 };
 
-struct ConstantTableRange {
+struct BufferTableRange {
+  UINT Namespace = 0;
   UINT Space = 0;
   UINT Register = 0;
   UINT Offset = 0;
 };
+
+UINT rangeNamespace(D3D12DDI_DESCRIPTOR_RANGE_TYPE Type) {
+  switch (Type) {
+  case D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV:
+    return 1;
+  case D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV:
+    return 2;
+  case D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV:
+    return 3;
+  case D3D12DDI_DESCRIPTOR_RANGE_TYPE_SAMPLER:
+    return 0;
+  }
+  return 0;
+}
 
 BufferRootParameter
 getRootParameter(const D3D12DDI_ROOT_PARAMETER_0013 &Parameter) {
@@ -187,7 +202,7 @@ struct RootSignature {
   UINT Count = 0;
   std::array<BufferRootParameter, MaxRootParameters> Parameters{};
   UINT RangeCount = 0;
-  std::array<ConstantTableRange, MaxRootParameters> Ranges{};
+  std::array<BufferTableRange, MaxRootParameters> Ranges{};
 };
 
 template <typename Descriptor, typename Handle> struct ImmutableState {
@@ -302,8 +317,8 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
       UINT64 Cursor = 0;
       for (UINT J = 0; J < Ranges.NumDescriptorRanges; ++J) {
         const auto &Range = Ranges.pDescriptorRanges[J];
-        if (Range.RangeType != D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV ||
-            Range.NumDescriptors != 1)
+        UINT Namespace = rangeNamespace(Range.RangeType);
+        if (!Namespace || Range.NumDescriptors != 1)
           return E_NOTIMPL;
         constexpr UINT DataMask =
             D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DATA_VOLATILE |
@@ -324,7 +339,8 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
                             ? Cursor
                             : Range.OffsetInDescriptorsFromTableStart;
         if (Offset >= std::numeric_limits<UINT>::max() ||
-            !AddBinding({3, Range.RegisterSpace, Range.BaseShaderRegister}))
+            !AddBinding(
+                {Namespace, Range.RegisterSpace, Range.BaseShaderRegister}))
           return E_INVALIDARG;
         Cursor = Offset + 1;
       }
@@ -380,7 +396,8 @@ HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
                               std::numeric_limits<UINT>::max()
                           ? Cursor
                           : Range.OffsetInDescriptorsFromTableStart;
-        State->Ranges[State->RangeCount++] = {Range.RegisterSpace,
+        State->Ranges[State->RangeCount++] = {rangeNamespace(Range.RangeType),
+                                              Range.RegisterSpace,
                                               Range.BaseShaderRegister, Offset};
         Cursor = Offset + 1;
       }
@@ -786,6 +803,100 @@ void APIENTRY createCBV(D3D12DDI_HDEVICE Device,
   *Slot = Value;
 }
 
+HRESULT makeBufferView(feme::probe::WarpDeviceState *Owner,
+                       D3D12DDI_HRESOURCE Resource, DXGI_FORMAT Format,
+                       UINT64 First, UINT Count, UINT Stride, UINT Flags,
+                       UINT Namespace, DescriptorSlot &Value) {
+  if (!Count || Flags > 1 ||
+      (Flags && (Format != DXGI_FORMAT_R32_TYPELESS || Stride)) ||
+      (Stride &&
+       (Format != DXGI_FORMAT_UNKNOWN || Stride % 4 || Stride > 2048 || Flags)))
+    return E_INVALIDARG;
+  if (!Flags && !Stride)
+    return E_NOTIMPL;
+  UINT ElementSize = Stride ? Stride : 4;
+  if (First > std::numeric_limits<UINT64>::max() / ElementSize)
+    return E_INVALIDARG;
+  Value.Namespace = Namespace;
+  Value.Stride = Stride;
+  Value.Resource = Resource;
+  Value.ByteOffset = First * ElementSize;
+  Value.ByteSize = UINT64(Count) * ElementSize;
+  if (Value.ByteSize > std::numeric_limits<UINT64>::max() - Value.ByteOffset)
+    return E_INVALIDARG;
+  if (!Resource.pDrvPrivate)
+    return S_OK;
+  void *Data = nullptr;
+  return feme::probe::getWarpBufferRange(Owner, Resource, Value.ByteOffset,
+                                         Value.ByteSize, Data, Namespace == 2);
+}
+
+void APIENTRY
+createSRV(D3D12DDI_HDEVICE Device,
+          const D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 *Desc,
+          D3D12DDI_CPU_DESCRIPTOR_HANDLE Destination) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Desc) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER ||
+      Desc->Shader4ComponentMapping !=
+          D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING) {
+    reportError(Device, E_NOTIMPL);
+    return;
+  }
+  DescriptorSlot Value;
+  HRESULT Result = makeBufferView(
+      Owner, Desc->hDrvResource, Desc->Format, Desc->Buffer.FirstElement,
+      Desc->Buffer.NumElements, Desc->Buffer.StructureByteStride,
+      Desc->Buffer.Flags, 1, Value);
+  if (FAILED(Result)) {
+    reportError(Device, Result);
+    return;
+  }
+  DescriptorAccess Access;
+  auto *Slot = descriptorRange(Owner, Destination.ptr, 1);
+  if (!Slot) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  *Slot = Value;
+}
+
+void APIENTRY
+createUAV(D3D12DDI_HDEVICE Device,
+          const D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002 *Desc,
+          D3D12DDI_CPU_DESCRIPTOR_HANDLE Destination) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Desc) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER ||
+      Desc->Buffer.hDrvCounterResource.pDrvPrivate ||
+      Desc->Buffer.CounterOffsetInBytes) {
+    reportError(Device, E_NOTIMPL);
+    return;
+  }
+  DescriptorSlot Value;
+  HRESULT Result = makeBufferView(
+      Owner, Desc->hDrvResource, Desc->Format, Desc->Buffer.FirstElement,
+      Desc->Buffer.NumElements, Desc->Buffer.StructureByteStride,
+      Desc->Buffer.Flags, 2, Value);
+  if (FAILED(Result)) {
+    reportError(Device, Result);
+    return;
+  }
+  DescriptorAccess Access;
+  auto *Slot = descriptorRange(Owner, Destination.ptr, 1);
+  if (!Slot) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  *Slot = Value;
+}
+
 void APIENTRY
 copyDescriptors(D3D12DDI_HDEVICE Device, UINT DestinationCount,
                 const D3D12DDI_CPU_DESCRIPTOR_HANDLE *Destinations,
@@ -1184,7 +1295,7 @@ struct CommandList {
   std::array<BufferRootParameter, MaxRootParameters> RootParameters{};
   std::array<UINT64, MaxRootParameters> RootAddresses{};
   std::array<UINT, MaxRootDwords> RootConstants{};
-  std::array<ConstantTableRange, MaxRootParameters> RootRanges{};
+  std::array<BufferTableRange, MaxRootParameters> RootRanges{};
   std::array<UINT64, MaxRootParameters> RootTables{};
   D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
   UINT64 Marker = 0;
@@ -1796,7 +1907,7 @@ HRESULT prepareDispatch(CommandList *State,
         UINT Binding = Command->Dispatch.BufferCount++;
         Command->TableDescriptors[Binding] = reinterpret_cast<UINT64>(Slot);
         auto &Buffer = Command->Buffers[Binding];
-        Buffer.Namespace = 3;
+        Buffer.Namespace = Range.Namespace;
         Buffer.Space = Range.Space;
         Buffer.Register = Range.Register;
       }
@@ -2115,12 +2226,24 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
         return E_INVALIDARG;
       Buffer.Data = nullptr;
       Buffer.SizeInBytes = 0;
-      if (!Slot->Address)
-        continue;
-      UINT64 Extent = 0;
-      HRESULT Result = Buffers.address(Slot->Address, Buffer.Data, Extent);
-      if (FAILED(Result) || Slot->ByteSize > Extent)
-        return E_INVALIDARG;
+      Buffer.Kind = Slot->Stride ? 1 : 0;
+      Buffer.Stride = Slot->Stride;
+      if (Slot->Namespace == 3) {
+        if (!Slot->Address)
+          continue;
+        UINT64 Extent = 0;
+        HRESULT Result = Buffers.address(Slot->Address, Buffer.Data, Extent);
+        if (FAILED(Result) || Slot->ByteSize > Extent)
+          return E_INVALIDARG;
+      } else {
+        if (!Slot->Resource.pDrvPrivate)
+          continue;
+        HRESULT Result =
+            Buffers.range(Slot->Resource, Slot->ByteOffset, Slot->ByteSize,
+                          Buffer.Data, Slot->Namespace == 2);
+        if (FAILED(Result))
+          return Result;
+      }
       Buffer.SizeInBytes = Slot->ByteSize;
       continue;
     }
@@ -2467,6 +2590,8 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnGetCPUDescriptorHandleForHeapStart = descriptorCPUStart;
     Table.pfnGetGPUDescriptorHandleForHeapStart = descriptorGPUStart;
     Table.pfnCreateConstantBufferView = createCBV;
+    Table.pfnCreateShaderResourceView = createSRV;
+    Table.pfnCreateUnorderedAccessView = createUAV;
     Table.pfnCopyDescriptors = copyDescriptors;
     Table.pfnCopyDescriptorsSimple = copyDescriptorsSimple;
     Table.pfnCalcPrivatePipelineStateSize = pipelineSize;

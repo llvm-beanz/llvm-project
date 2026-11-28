@@ -18,7 +18,7 @@ and copies, monitored fences, completed readback and pending teardown.
 The W1 v1 inventory records the completed internal headless subset. W2 now
 adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
 decreasing monitored fences, dispatch-only indirect commands and multiple
-root CBVs, inline constants and scalar CBV descriptor tables; inventory v6
+root CBVs, inline constants and scalar CBV/raw/structured descriptor tables; inventory v7
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1335,9 +1335,10 @@ The [W2(a) parsing prerequisite](W0WindowsIntegrationProbe.md#w2a-root-signature
 now provides portable, owned 1.0/1.1 binding plans and a non-dispatch
 inspection path. It preserves serialized promises and resolves table
 offsets, but does not implement the runtime mapping below, enforce every
-SDK semantic rule or replace use-inferred cbuffer promotion. Explicit
-General tables and descriptor preparation remain pending; scalar CBV ranges
-now execute through owned descriptor heaps and CPU-source copies.
+SDK semantic rule or replace use-inferred cbuffer promotion.
+General tables and descriptor preparation remain pending; scalar CBV and
+raw/structured SRV/UAV ranges now execute through owned descriptor heaps and
+CPU-source copies.
 Owned raw SRV/UAV and CBV roots now map to bounded CPU
 descriptors; the owned compiler disables inferred single-CBV promotion.
 
@@ -1738,14 +1739,20 @@ held cross-queue execution. Inline constants additionally validate partial
 updates, source-storage independence and rebased submission-local pointers
 after recording objects are released. Root layouts enforce the aggregate
 64-DWORD cost, allowing up to 64 one-DWORD parameters or 32 root descriptors.
-CBV tables snapshot heap identity, table addresses and immutable range mappings,
+Buffer tables snapshot heap identity, table addresses and immutable range mappings,
 not descriptor contents. Execution resolves the live heap after kernel readiness
 and copies descriptor metadata while holding its registry lock. Null CBVs
 materialize zero descriptors; uninitialized or mismatched descriptors are errors.
 CPU descriptor metadata participates in runtime paging callbacks without
 fabricating KMD allocations. Mixed pageable lists still submit every real
-allocation. General descriptor families/arrays and broader residency remain open.
-See the implementation log and v6 inventory.
+allocation. Raw/structured SRV/UAV views preserve resource handles, element
+offsets, extents and strides; resolution checks the live logical resource rather
+than choosing a broader GPUVA alias. UAV views additionally require that exact
+resource's unordered-access flag. Null views materialize empty descriptors.
+Original SM 6.0 sparse structured loads at constant byte offsets raise into
+individually bounded scalar accesses, without widening unused components.
+Typed/image/counter descriptors, arrays and broader residency remain open.
+See the implementation log and v7 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

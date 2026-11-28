@@ -784,6 +784,42 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned raw/structured buffer views and mixed scalar tables
+
+The owned frontend now creates raw and structured buffer SRV/UAV descriptors
+and executes mixed scalar CBV/SRV/UAV tables. Views preserve the resource
+handle, first element, element count and structure stride. Creation and
+execution both check the live logical resource range; UAV views require that
+exact resource's unordered-access flag, even when a larger/UAV-capable alias
+shares its GPUVA. Checked multiplication/addition also rejects malformed null
+view extents. Null SRVs/UAVs retain their descriptor kind but materialize empty
+storage. Typed/image/counter views, custom component mappings and arrays remain
+unsupported rather than being approximated.
+
+Bring-up of the original SM 6.0 structured fixture exposed an unraised
+`dx.op.bufferLoad.i32`: DXC extracts only component one for `uint2.y`.
+Compiler prerequisite `2a6b8cfa3375` raises sparse legacy structured accesses
+at checked constant byte offsets into individually bounded scalar loads. It
+does not widen to unused components, change existing packed operations or
+silently accept sparse raw/dynamic-offset/status operations. Focused raising
+tests cover isolated/discontiguous integer/FP32 extracts, overflow and retained
+unsupported forms.
+
+Eight public gates compare owned SM 5.1, original DXC DXIL, independent system
+WARP and held cross-queue/pending teardown for both raw and structured views.
+The raw SRV starts sixteen bytes into its upload allocation; structured inputs
+use eight-byte elements and the second component, while output elements are
+four bytes. Tables combine appended SRV/UAV offsets with explicit CBV offsets.
+Descriptors are created/copied after recording; subsequent table mutations do
+not change the recorded bases. The final iteration uses null SRV/CBV views.
+Every scalar result and all sixteen output guards match the CPU oracle.
+
+Final validation: **4403** full-suite passes, **65/65** callback passes and
+**71/71** stock-runtime passes. Inventory **v7** records thirty-five OS gates,
+seven native fixtures, a 2048-byte maximum structured stride and the existing
+64 prepared-buffer limit. No WARP implementation was copied or forwarded and
+the KMD remains unchanged. W2 and complete feature-level conformance remain open.
+
 #### Owned descriptor heaps and scalar CBV tables
 
 The frontend owns checked CPU/shader-visible CBV/SRV/UAV heap storage, live

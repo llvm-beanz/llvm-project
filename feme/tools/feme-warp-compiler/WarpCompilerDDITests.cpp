@@ -616,6 +616,14 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   D3D12DDI_HROOTSIGNATURE TableRoot{TableRootStorage.data()};
   Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
   Core.pfnDestroyRootSignature(Device, TableRoot);
+  for (auto Type : {D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV,
+                    D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV}) {
+    TableRange.RangeType = Type;
+    Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) != 0;
+    Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
+    Core.pfnDestroyRootSignature(Device, TableRoot);
+  }
+  TableRange.RangeType = D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV;
   TableRange.NumDescriptors = 2;
   Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
           LastError == E_NOTIMPL;
@@ -697,6 +705,60 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Good &= LastError == E_INVALIDARG;
     Good &= std::memcmp(Expected.data(), reinterpret_cast<void *>(CPUBase.ptr),
                         Expected.size()) == 0;
+    D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 SRV{};
+    SRV.ResourceDimension = D3D12DDI_RD_BUFFER;
+    SRV.Shader4ComponentMapping = D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    SRV.Format = DXGI_FORMAT_R32_TYPELESS;
+    SRV.Buffer.NumElements = 4;
+    SRV.Buffer.Flags = D3D12DDI_BUFFER_SRV_FLAG_RAW;
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE Third{CPUBase.ptr + 2 * Stride};
+    LastError = S_OK;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == S_OK;
+    std::vector<unsigned char> Before(Stride);
+    std::memcpy(Before.data(), reinterpret_cast<void *>(Third.ptr), Stride);
+    SRV.Buffer.FirstElement = std::numeric_limits<UINT64>::max();
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == E_INVALIDARG &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                        Stride) == 0;
+    SRV.Buffer.FirstElement = std::numeric_limits<UINT64>::max() / 4;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == E_INVALIDARG &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                        Stride) == 0;
+    SRV.Buffer.FirstElement = 0;
+    SRV.Buffer.StructureByteStride = 8;
+    SRV.Buffer.Flags = D3D12DDI_BUFFER_SRV_FLAG_NONE;
+    SRV.Format = DXGI_FORMAT_UNKNOWN;
+    LastError = S_OK;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == S_OK;
+    SRV.Buffer.StructureByteStride = 6;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == E_INVALIDARG;
+    D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002 UAV{};
+    UAV.ResourceDimension = D3D12DDI_RD_BUFFER;
+    UAV.Format = DXGI_FORMAT_R32_TYPELESS;
+    UAV.Buffer.NumElements = 4;
+    UAV.Buffer.Flags = D3D12DDI_BUFFER_UAV_FLAG_RAW;
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE Fourth{CPUBase.ptr + 3 * Stride};
+    LastError = S_OK;
+    Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
+    Good &= LastError == S_OK;
+    UAV.Buffer.hDrvCounterResource = {reinterpret_cast<void *>(1)};
+    Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
+    Good &= LastError == E_NOTIMPL;
+    UAV.Buffer.hDrvCounterResource = {};
+    LastError = S_OK;
+    Core.pfnCreateUnorderedAccessView(OtherDevice, &UAV, Fourth);
+    Good &= LastError == E_INVALIDARG;
+    std::memcpy(Expected.data(), reinterpret_cast<void *>(Third.ptr),
+                Expected.size());
+    Core.pfnCopyDescriptorsSimple(Device, 2, GPUCPUBase, Third, HeapArgs.Type);
+    Good &=
+        std::memcmp(Expected.data(), reinterpret_cast<void *>(GPUCPUBase.ptr),
+                    Expected.size()) == 0;
   } else
     Good = false;
   Core.pfnDestroyDescriptorHeap(OtherDevice, GPUHeap);

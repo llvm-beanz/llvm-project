@@ -667,7 +667,8 @@ WarpBufferAccess::~WarpBufferAccess() {
 }
 
 HRESULT WarpBufferAccess::range(D3D12DDI_HRESOURCE Resource, UINT64 Offset,
-                                UINT64 Size, void *&Data) {
+                                UINT64 Size, void *&Data,
+                                bool UnorderedAccess) {
   Data = nullptr;
   if (!Owner || !Resource.pDrvPrivate)
     return E_INVALIDARG;
@@ -676,7 +677,9 @@ HRESULT WarpBufferAccess::range(D3D12DDI_HRESOURCE Resource, UINT64 Offset,
     if (Buffer != Resource.pDrvPrivate)
       continue;
     if (!Buffer->Heap->Locked || !Buffer->Heap->Memory ||
-        Offset > Buffer->Desc.Width || Size > Buffer->Desc.Width - Offset)
+        Offset > Buffer->Desc.Width || Size > Buffer->Desc.Width - Offset ||
+        (UnorderedAccess &&
+         !(Buffer->Desc.Flags & D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS)))
       return E_INVALIDARG;
     Data = static_cast<unsigned char *>(Buffer->Heap->Memory) + Buffer->Offset +
            Offset;
@@ -713,9 +716,10 @@ HRESULT WarpBufferAccess::address(UINT64 Address, void *&Data, UINT64 &Size,
 }
 
 HRESULT getWarpBufferRange(WarpDeviceState *Owner, D3D12DDI_HRESOURCE Resource,
-                           UINT64 Offset, UINT64 Size, void *&Data) {
+                           UINT64 Offset, UINT64 Size, void *&Data,
+                           bool UnorderedAccess) {
   WarpBufferAccess Access(Owner);
-  return Access.range(Resource, Offset, Size, Data);
+  return Access.range(Resource, Offset, Size, Data, UnorderedAccess);
 }
 
 HRESULT getWarpBufferAddress(WarpDeviceState *Owner, UINT64 Address,

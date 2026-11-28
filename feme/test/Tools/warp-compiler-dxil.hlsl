@@ -25,7 +25,15 @@
 #ifndef ROOT_REGISTER
 #define ROOT_REGISTER u0
 #endif
+#ifdef STRUCTURED_VIEWS
+RWStructuredBuffer<uint> output : register(ROOT_REGISTER);
+StructuredBuffer<uint2> input : register(t3);
+#else
 RWByteAddressBuffer output : register(ROOT_REGISTER);
+#ifdef BUFFER_VIEWS
+ByteAddressBuffer input : register(t3);
+#endif
+#endif
 #ifdef CBV
 #ifdef INLINE_CONSTANTS
 cbuffer A : register(b3) { uint4 firstA; uint lastA; };
@@ -59,7 +67,14 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
 #endif
 #endif
 #endif
+#ifdef STRUCTURED_VIEWS
+  output[index] = output[index] + peer + bias + input[index].y;
+#else
+#ifdef BUFFER_VIEWS
+  bias += input.Load(index * 4);
+#endif
   output.Store(index * 4, output.Load(index * 4) + peer + bias);
+#endif
 }
 #else
 [numthreads(1, 1, 1)]

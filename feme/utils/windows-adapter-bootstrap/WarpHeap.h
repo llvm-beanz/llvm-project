@@ -32,14 +32,15 @@ public:
   WarpBufferAccess(const WarpBufferAccess &) = delete;
   WarpBufferAccess &operator=(const WarpBufferAccess &) = delete;
   HRESULT range(D3D12DDI_HRESOURCE Resource, UINT64 Offset, UINT64 Size,
-                void *&Data);
+                void *&Data, bool UnorderedAccess = false);
   HRESULT address(UINT64 Address, void *&Data, UINT64 &Size,
                   bool UnorderedAccess = false);
 };
 
 /// Borrow a checked, persistently locked buffer extent for CPU commands.
 HRESULT getWarpBufferRange(WarpDeviceState *Owner, D3D12DDI_HRESOURCE Resource,
-                           UINT64 Offset, UINT64 Size, void *&Data);
+                           UINT64 Offset, UINT64 Size, void *&Data,
+                           bool UnorderedAccess = false);
 HRESULT getWarpBufferAddress(WarpDeviceState *Owner, UINT64 Address,
                              void *&Data, UINT64 &Size,
                              bool UnorderedAccess = false);

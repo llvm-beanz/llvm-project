@@ -27,6 +27,7 @@
     "root_parameters": 64,
     "max_prepared_buffer_bindings": 64,
     "descriptor_heap_capacity": 1000000,
+    "max_structured_buffer_stride": 2048,
     "root_dwords": 64,
     "root_gpuva_alignment": 16,
     "root_cbv_gpuva_alignment": 256,
@@ -34,8 +35,8 @@
     "max_buffer_allocation_bytes": 4294901760,
     "dispatch_groups_per_dimension": 65535
   },
-  "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "multiple inline constants", "scalar CBV descriptor-table ranges", "all-stage visibility"],
-  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "CPU-source descriptor copies", "execution-time scalar CBV table preparation", "live CPU-metadata residency"],
+  "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "multiple inline constants", "scalar CBV/SRV/UAV descriptor-table ranges", "all-stage visibility"],
+  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "CPU-source descriptor copies", "execution-time scalar buffer table preparation", "live CPU-metadata residency"],
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
@@ -61,6 +62,7 @@
     "Tools/warp-compiler-dispatch.dxasm",
     "Tools/warp-compiler-dxil.hlsl",
     "Tools/feme-run/cbv-bounds.ll",
+    "Transforms/DXIL/dxil-raise-raw-buffer-ops.ll",
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
@@ -88,6 +90,14 @@
     "os-routed-warp-compiler-owned-ordered-table-commands",
     "os-routed-warp-compiler-owned-dxil-table-commands",
     "os-routed-warp-compiler-reference-table-commands",
+    "os-routed-warp-compiler-owned-view-commands",
+    "os-routed-warp-compiler-owned-ordered-view-commands",
+    "os-routed-warp-compiler-owned-dxil-view-commands",
+    "os-routed-warp-compiler-reference-view-commands",
+    "os-routed-warp-compiler-owned-structured-view-commands",
+    "os-routed-warp-compiler-owned-ordered-structured-view-commands",
+    "os-routed-warp-compiler-owned-dxil-structured-view-commands",
+    "os-routed-warp-compiler-reference-structured-view-commands",
     "os-routed-warp-compiler-owned-coexistence",
     "os-routed-warp-compiler-reference-buffer-commands",
     "os-routed-warp-compiler-reference-placed-buffers"
@@ -99,7 +109,7 @@
   },
   "unsupported": [
     "complete graphics or feature-level conformance",
-    "SRV/UAV descriptor creation and table ranges; descriptor arrays and unbounded ranges",
+    "typed buffer views, UAV counters, component remapping, descriptor arrays and unbounded ranges",
     "images and samplers",
     "native fences and implicit multi-GPU",
     "split transitions, finite ranged/atomic-copy barriers, texture aliasing and enhanced barriers",

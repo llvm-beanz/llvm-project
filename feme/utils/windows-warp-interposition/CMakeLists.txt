@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 6)
+  set(FEME_WARP_PROFILE_VERSION 7)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -548,6 +548,18 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --reference-table-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-table-commands
     COMMAND warp-compiler-harness --ordered-table-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-view-commands
+    COMMAND warp-compiler-harness --view-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-view-commands
+    COMMAND warp-compiler-harness --reference-view-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-view-commands
+    COMMAND warp-compiler-harness --ordered-view-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-structured-view-commands
+    COMMAND warp-compiler-harness --structured-view-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-structured-view-commands
+    COMMAND warp-compiler-harness --reference-structured-view-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-structured-view-commands
+    COMMAND warp-compiler-harness --ordered-structured-view-commands)
   find_program(FEME_DXC_EXECUTABLE NAMES dxc
     DOC "DXC for original owned-DXIL execution fixtures")
   if(FEME_DXC_EXECUTABLE)
@@ -559,9 +571,14 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       "${WARP_COMPILER_OUTPUT_DIR}/owned-cbv-compute.dxil")
     set(WARP_DXIL_CONSTANT_FIXTURE
       "${WARP_COMPILER_OUTPUT_DIR}/owned-constant-compute.dxil")
+    set(WARP_DXIL_VIEW_FIXTURE
+      "${WARP_COMPILER_OUTPUT_DIR}/owned-view-compute.dxil")
+    set(WARP_DXIL_STRUCTURED_VIEW_FIXTURE
+      "${WARP_COMPILER_OUTPUT_DIR}/owned-structured-view-compute.dxil")
     add_custom_command(OUTPUT "${WARP_DXIL_FIXTURE}" "${WARP_DXIL_BUFFER_FIXTURE}"
         "${WARP_DXIL_CBV_FIXTURE}"
         "${WARP_DXIL_CONSTANT_FIXTURE}"
+        "${WARP_DXIL_VIEW_FIXTURE}" "${WARP_DXIL_STRUCTURED_VIEW_FIXTURE}"
       COMMAND "${CMAKE_COMMAND}" -E make_directory "${WARP_COMPILER_OUTPUT_DIR}"
       COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
         -Fo "${WARP_DXIL_FIXTURE}"
@@ -576,12 +593,21 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
         -DBUFFER=1 -DCBV=1 -DINLINE_CONSTANTS=1 -DROOT_REGISTER=u3
         -Fo "${WARP_DXIL_CONSTANT_FIXTURE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-dxil.hlsl"
+      COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
+        -DBUFFER=1 -DCBV=1 -DBUFFER_VIEWS=1 -DROOT_REGISTER=u3
+        -Fo "${WARP_DXIL_VIEW_FIXTURE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-dxil.hlsl"
+      COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
+        -DBUFFER=1 -DCBV=1 -DBUFFER_VIEWS=1 -DSTRUCTURED_VIEWS=1 -DROOT_REGISTER=u3
+        -Fo "${WARP_DXIL_STRUCTURED_VIEW_FIXTURE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-dxil.hlsl"
       DEPENDS ../../test/Tools/warp-compiler-dxil.hlsl
       VERBATIM)
     add_custom_target(warp-owned-dxil-fixture
       DEPENDS "${WARP_DXIL_FIXTURE}" "${WARP_DXIL_BUFFER_FIXTURE}"
         "${WARP_DXIL_CBV_FIXTURE}"
-        "${WARP_DXIL_CONSTANT_FIXTURE}")
+        "${WARP_DXIL_CONSTANT_FIXTURE}" "${WARP_DXIL_VIEW_FIXTURE}"
+        "${WARP_DXIL_STRUCTURED_VIEW_FIXTURE}")
     add_dependencies(warp-compiler-harness warp-owned-dxil-fixture)
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-commands
       COMMAND warp-compiler-harness --dxil-commands "${WARP_DXIL_FIXTURE}")
@@ -600,6 +626,12 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-table-commands
       COMMAND warp-compiler-harness --dxil-table-commands
         "${WARP_DXIL_CBV_FIXTURE}")
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-view-commands
+      COMMAND warp-compiler-harness --dxil-view-commands
+        "${WARP_DXIL_VIEW_FIXTURE}")
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-structured-view-commands
+      COMMAND warp-compiler-harness --dxil-structured-view-commands
+        "${WARP_DXIL_STRUCTURED_VIEW_FIXTURE}")
     get_filename_component(FEME_DXC_DIRECTORY "${FEME_DXC_EXECUTABLE}" DIRECTORY)
     find_file(FEME_DXCOMPILER_DLL NAMES dxcompiler.dll
       HINTS "${FEME_DXC_DIRECTORY}")

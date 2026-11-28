@@ -561,7 +561,7 @@ bool placement() {
     UINT64 Address = F.Table.pfnCheckResourceVirtualAddress(F.Device, Placed);
     Valid &= check(Address == reinterpret_cast<UINT64>(Expected) &&
                        feme::probe::getWarpBufferRange(&F.State, Placed, 4096,
-                                                       1, Data) == S_OK &&
+                                                       1, Data, true) == S_OK &&
                        Data == Expected + 4096,
                    "placed ranges and GPUVA include the heap offset");
     Valid &= check(feme::probe::getWarpBufferAddress(&F.State, Address, Data,
@@ -573,6 +573,7 @@ bool placement() {
                    "backing buffer does not expose placement padding");
     auto AliasArgs = Args;
     AliasArgs.Width = 1;
+    AliasArgs.Flags = {};
     D3D12DDI_HRESOURCE Alias{};
     Alias.pDrvPrivate =
         HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Sizes.Resource);
@@ -589,12 +590,22 @@ bool placement() {
                     Bytes == 4097,
                 "a smaller alias does not shadow a valid root buffer extent");
       if (AliasCreated) {
+        Valid &=
+            check(feme::probe::getWarpBufferRange(&F.State, Alias, 0, 1,
+                                                  Data) == S_OK &&
+                      Data == Expected &&
+                      feme::probe::getWarpBufferRange(
+                          &F.State, Alias, 0, 1, Data, true) == E_INVALIDARG &&
+                      !Data,
+                  "UAV views retain their resource's flags despite overlapping "
+                  "aliases");
         Valid &= check(feme::probe::getWarpBufferRange(&F.State, Alias, 0, 2,
                                                        Data) == E_INVALIDARG,
                        "resource-handle bounds remain alias-specific");
         F.Table.pfnDestroyHeapAndResource(F.Device, {}, Alias);
       }
       AliasArgs.Width = 8193;
+      AliasArgs.Flags = Args.Flags;
       AliasCreated = F.Table.pfnCreateHeapAndResource(F.Device, nullptr, {}, {},
                                                       &AliasArgs, nullptr, {},
                                                       Alias) == S_OK;
