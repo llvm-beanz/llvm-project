@@ -22,7 +22,7 @@ root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
 R32_UINT/R32_SINT/R32_FLOAT typed buffer views, two/four-component R32 SRVs
 and buffer-command predication, plus checked structured-UAV counters and bounded
 uint append/consume, typed SRV component mappings and narrow/packed SRVs;
-inventory v16
+inventory v17
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1743,6 +1743,12 @@ held cross-queue execution. Inline constants additionally validate partial
 updates, source-storage independence and rebased submission-local pointers
 after recording objects are released. Root layouts enforce the aggregate
 64-DWORD cost, allowing up to 64 one-DWORD parameters or 32 root descriptors.
+Conventional graphics-stage visibility is retained in immutable root metadata.
+Bindings may overlap only when their stage visibility is disjoint; ALL-visible
+and same-stage collisions remain rejected across roots and table ranges.
+Compute preparation skips non-ALL-visible roots before resolving descriptors
+or emitting inline bindings. This permits shared graphics/compute root layouts
+without claiming graphics execution or complete shader/root compatibility.
 Buffer tables snapshot heap identity, table addresses and immutable range mappings,
 not descriptor contents. Execution resolves the live heap after kernel readiness
 and copies descriptor metadata while holding its registry lock. Null CBVs
@@ -1809,7 +1815,7 @@ Both zero-comparison operations suppress matching commands; barriers remain
 unconditional. List reset disables predication, and pending submissions retain
 their captured state. Direct/indirect DXBC/DXIL, separate system-WARP and held
 teardown controls pass. Queries and remaining synchronization still stay open.
-See the implementation log and v16 inventory.
+See the implementation log and v17 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

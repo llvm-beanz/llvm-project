@@ -784,6 +784,31 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Stage-specific root visibility and compute isolation
+
+Root signatures retain conventional vertex/hull/domain/geometry/pixel
+visibility. Register/space/namespace collisions are legal only for disjoint
+stage visibility; ALL and same-stage overlaps remain errors, including
+descriptor-table ranges overlapping root descriptors. Root cost and finite
+binding limits remain unchanged. Compute preparation ignores non-ALL-visible
+parameters before descriptor resolution or inline binding materialization.
+
+The native matrix checks all five conventional stages, disjoint admission,
+same-stage/ALL rejection and table/root overlaps. Four stock-runtime controls
+use identical b99/space999 inline registers in separate vertex/pixel roots,
+with distinct recorded values, alongside live compute constants. Owned DXBC,
+original DXIL, independent WARP and held execution preserve the compute byte
+oracle, guards, root snapshots, replay and pending lifetime. Without compute
+isolation the two irrelevant inline roots become duplicate borrowed bindings.
+
+Validation: native selectors **4/4**, new controls **4/4**, full FeMe
+**4413** passed / **15** skipped / **10** unsupported, callbacks **65/65**,
+stock-runtime/coexistence **359/359** after shared DLL relinking, with confirmed
+FeMe ICD identity. Inventory **v17** contains **323** unique required OS gates
+and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
+This does not complete shader/root compatibility, static samplers, general
+heaps, graphics execution or W2.
+
 #### Shared Direct3D narrow integer store conversion
 
 Reference controls exposed a conversion mismatch: FeMe truncated out-of-range

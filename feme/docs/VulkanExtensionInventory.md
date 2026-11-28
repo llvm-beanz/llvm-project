@@ -434,5 +434,6 @@ and typed-buffer component mappings/non-uniform queries; packed WARP SRVs/UAVs
 reuse existing decoders. Descriptor-gated narrow integer saturation preserves
 flag-clear conversion and image stores.
 Validation is the full FeMe gate (4413 passed, 15 skipped, 10 unsupported) and
-355 stock-runtime/coexistence gates with confirmed FeMe ICD identity, not a new
+359 stock-runtime/coexistence gates (including Windows root visibility) with
+confirmed FeMe ICD identity, not a new
 CTS run; no historical Windows CTS executable is available.

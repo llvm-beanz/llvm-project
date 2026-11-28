@@ -11,6 +11,9 @@ This is not a new CTS result.
 The subsequent owned typed-UAV buffer integration passes all 84 new controls,
 65 callback gates and 355 stock-runtime/coexistence gates with the same 4413
 full passes and unchanged Vulkan advertisements. Bridge ABI remains 4.
+The subsequent Windows root-visibility slice passes 359 stock-runtime/
+coexistence gates, with the same full/callback counts and unchanged bridge,
+artifact and Vulkan advertisements; this remains non-CTS regression evidence.
 
 ## Packed WARP SRV and query regression scope, not CTS
 

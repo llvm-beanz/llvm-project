@@ -204,6 +204,7 @@ struct BufferRootParameter {
   UINT ConstantCount = 0;
   UINT RangeBase = 0;
   UINT RangeCount = 0;
+  D3D12DDI_SHADER_VISIBILITY Visibility = D3D12DDI_SHADER_VISIBILITY_ALL;
 };
 
 struct BufferTableRange {
@@ -234,6 +235,7 @@ getRootParameter(const D3D12DDI_ROOT_PARAMETER_0013 &Parameter) {
       D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
     BufferRootParameter Result;
     Result.RangeCount = Parameter.DescriptorTable.NumDescriptorRanges;
+    Result.Visibility = Parameter.ShaderVisibility;
     return Result;
   }
   bool Constants =
@@ -245,7 +247,11 @@ getRootParameter(const D3D12DDI_ROOT_PARAMETER_0013 &Parameter) {
                     : Parameter.Descriptor.RegisterSpace,
           Constants ? Parameter.Constants.ShaderRegister
                     : Parameter.Descriptor.ShaderRegister,
-          0, Constants ? Parameter.Constants.Num32BitValues : 0};
+          0,
+          Constants ? Parameter.Constants.Num32BitValues : 0,
+          0,
+          0,
+          Parameter.ShaderVisibility};
 }
 
 struct RootSignature {
@@ -336,7 +342,10 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
     for (UINT I = 0; I < BindingCount; ++I)
       if (Binding.Namespace == Bindings[I].Namespace &&
           Binding.Space == Bindings[I].Space &&
-          Binding.Register == Bindings[I].Register)
+          Binding.Register == Bindings[I].Register &&
+          (Binding.Visibility == Bindings[I].Visibility ||
+           Binding.Visibility == D3D12DDI_SHADER_VISIBILITY_ALL ||
+           Bindings[I].Visibility == D3D12DDI_SHADER_VISIBILITY_ALL))
         return false;
     Bindings[BindingCount++] = Binding;
     return true;
@@ -350,7 +359,8 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
              D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE &&
          Parameter.ParameterType !=
              D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) ||
-        Parameter.ShaderVisibility != D3D12DDI_SHADER_VISIBILITY_ALL)
+        static_cast<UINT>(Parameter.ShaderVisibility) >
+            D3D12DDI_SHADER_VISIBILITY_PIXEL)
       return E_NOTIMPL;
     bool Constants =
         Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -396,10 +406,14 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
                             : Range.OffsetInDescriptorsFromTableStart;
         if (Offset > std::numeric_limits<UINT>::max() - Range.NumDescriptors)
           return E_INVALIDARG;
-        for (UINT K = 0; K < Range.NumDescriptors; ++K)
-          if (!AddBinding({Namespace, Range.RegisterSpace,
-                           Range.BaseShaderRegister + K}))
+        for (UINT K = 0; K < Range.NumDescriptors; ++K) {
+          auto Element = Binding;
+          Element.Namespace = Namespace;
+          Element.Space = Range.RegisterSpace;
+          Element.Register = Range.BaseShaderRegister + K;
+          if (!AddBinding(Element))
             return E_INVALIDARG;
+        }
         Cursor = Offset + Range.NumDescriptors;
       }
       continue;
@@ -1994,6 +2008,8 @@ HRESULT prepareDispatch(CommandList *State,
   Command->Predicate = State->Predicate;
   for (UINT I = 0; I < State->RootCount; ++I) {
     const auto &Parameter = State->RootParameters[I];
+    if (Parameter.Visibility != D3D12DDI_SHADER_VISIBILITY_ALL)
+      continue;
     if (Parameter.RangeCount) {
       if (!State->RootTables[I])
         continue;

@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 16)
+  set(FEME_WARP_PROFILE_VERSION 17)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -554,6 +554,12 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --reference-constant-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-constant-commands
     COMMAND warp-compiler-harness --ordered-constant-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-visibility-commands
+    COMMAND warp-compiler-harness --visibility-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-visibility-commands
+    COMMAND warp-compiler-harness --reference-visibility-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-visibility-commands
+    COMMAND warp-compiler-harness --ordered-visibility-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-table-commands
     COMMAND warp-compiler-harness --table-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-reference-table-commands
@@ -808,6 +814,9 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
         "${WARP_DXIL_CBV_FIXTURE}")
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-constant-commands
       COMMAND warp-compiler-harness --dxil-constant-commands
+        "${WARP_DXIL_CONSTANT_FIXTURE}")
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-visibility-commands
+      COMMAND warp-compiler-harness --dxil-visibility-commands
         "${WARP_DXIL_CONSTANT_FIXTURE}")
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-table-commands
       COMMAND warp-compiler-harness --dxil-table-commands

@@ -708,7 +708,7 @@ HRESULT exerciseBufferCommands(
     bool Structured = false, bool Arrays = false,
     DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN, bool Predication = false,
     BufferCounterOperation CounterOperation = BufferCounterOperation::None,
-    bool MappedTyped = false, bool TypedUAV = false) {
+    bool MappedTyped = false, bool TypedUAV = false, bool Visibility = false) {
   bool Append = CounterOperation == BufferCounterOperation::Append;
   bool Consume = CounterOperation == BufferCounterOperation::Consume;
   int CounterDelta =
@@ -916,7 +916,7 @@ HRESULT exerciseBufferCommands(
       "OUTPUT.Store(index * 4, OUTPUT.Load(index * 4) + peer + bias);\n"
       "#endif\n"
       "}\n";
-  std::array<D3D12_ROOT_PARAMETER, 4> Parameters{};
+  std::array<D3D12_ROOT_PARAMETER, 6> Parameters{};
   for (UINT I = 0; I < Parameters.size(); ++I) {
     Parameters[I].ParameterType =
         !I       ? D3D12_ROOT_PARAMETER_TYPE_UAV
@@ -932,6 +932,14 @@ HRESULT exerciseBufferCommands(
     }
     Parameters[I].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   }
+  if (Visibility)
+    for (UINT I = 4; I < 6; ++I) {
+      Parameters[I].Constants.ShaderRegister = 99;
+      Parameters[I].Constants.RegisterSpace = 999;
+      Parameters[I].Constants.Num32BitValues = 1;
+      Parameters[I].ShaderVisibility = I == 4 ? D3D12_SHADER_VISIBILITY_VERTEX
+                                              : D3D12_SHADER_VISIBILITY_PIXEL;
+    }
   D3D12_DESCRIPTOR_RANGE Ranges[2]{};
   D3D12_DESCRIPTOR_RANGE ViewRanges[3]{};
   if (Views) {
@@ -966,7 +974,7 @@ HRESULT exerciseBufferCommands(
     Parameters[2].Descriptor.ShaderRegister = 10;
   }
   D3D12_ROOT_SIGNATURE_DESC RootDesc{};
-  RootDesc.NumParameters = ConstantBindings ? 4 : 1;
+  RootDesc.NumParameters = Visibility ? 6 : ConstantBindings ? 4 : 1;
   RootDesc.pParameters = Parameters.data();
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
@@ -1403,6 +1411,10 @@ HRESULT exerciseBufferCommands(
       if (Repeat == 1)
         List->SetComputeRoot32BitConstant(3, 0xabababab, 0);
       ValuesA[0] = ValuesB[0] = 0xefefefef;
+    }
+    if (Visibility) {
+      List->SetComputeRoot32BitConstant(4, 0x11111111 + Repeat, 0);
+      List->SetComputeRoot32BitConstant(5, 0xeeeeeeee - Repeat, 0);
     }
     List->SetComputeRootSignature(Root.Get());
     if (Predication) {
@@ -1996,14 +2008,28 @@ int wmain(int Argc, wchar_t **Argv) {
   bool DXILCBV = Argc == 3 && std::wcscmp(Argv[1], L"--dxil-cbv-commands") == 0;
   bool CBV = ReferenceCBV || OrderedCBV || DXILCBV ||
              (Argc == 2 && std::wcscmp(Argv[1], L"--cbv-commands") == 0);
+  bool ReferenceVisibility =
+      Argc == 2 &&
+      std::wcscmp(Argv[1], L"--reference-visibility-commands") == 0;
+  bool OrderedVisibility =
+      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-visibility-commands") == 0;
+  bool DXILVisibility =
+      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-visibility-commands") == 0;
+  bool Visibility =
+      ReferenceVisibility || OrderedVisibility || DXILVisibility ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--visibility-commands") == 0);
   bool ReferenceConstants =
-      Argc == 2 && std::wcscmp(Argv[1], L"--reference-constant-commands") == 0;
+      ReferenceVisibility ||
+      (Argc == 2 &&
+       std::wcscmp(Argv[1], L"--reference-constant-commands") == 0);
   bool OrderedConstants =
-      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-constant-commands") == 0;
+      OrderedVisibility ||
+      (Argc == 2 && std::wcscmp(Argv[1], L"--ordered-constant-commands") == 0);
   bool DXILConstants =
-      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-constant-commands") == 0;
+      DXILVisibility ||
+      (Argc == 3 && std::wcscmp(Argv[1], L"--dxil-constant-commands") == 0);
   bool Inline =
-      ReferenceConstants || OrderedConstants || DXILConstants ||
+      Visibility || ReferenceConstants || OrderedConstants || DXILConstants ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--constant-commands") == 0);
   bool ReferenceTables =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-table-commands") == 0;
@@ -2253,47 +2279,51 @@ int wmain(int Argc, wchar_t **Argv) {
       Argc == 2 && std::wcscmp(Argv[1], L"--expect-shader-rejection") == 0;
   if (Argc != 1 && !Reference && !ExpectShaderRejection && !Commands &&
       !Fences && !PlacedBuffers) {
-    std::fprintf(stderr, "Usage: warp-prototype-harness "
-                         "[--reference|--expect-shader-rejection|--commands|"
-                         "--buffer-commands|--dxil-commands FILE|"
-                         "--dxil-buffer-commands FILE|--fences|"
-                         "--ordered-buffer-commands|"
-                         "--reference-buffer-commands|"
-                         "--indirect-commands|--reference-indirect-commands|"
-                         "--ordered-indirect-commands|"
-                         "--dxil-indirect-commands FILE|"
-                         "--predicate-commands|--reference-predicate-commands|"
-                         "--ordered-predicate-commands|"
-                         "--dxil-predicate-commands FILE|"
-                         "--predicate-indirect-commands|"
-                         "--reference-predicate-indirect-commands|"
-                         "--ordered-predicate-indirect-commands|"
-                         "--dxil-predicate-indirect-commands FILE|"
-                         "--cbv-commands|--reference-cbv-commands|"
-                         "--ordered-cbv-commands|--dxil-cbv-commands FILE|"
-                         "--constant-commands|--reference-constant-commands|"
-                         "--ordered-constant-commands|"
-                         "--dxil-constant-commands FILE|"
-                         "--table-commands|--reference-table-commands|"
-                         "--ordered-table-commands|--dxil-table-commands FILE|"
-                         "--view-commands|--reference-view-commands|"
-                         "--ordered-view-commands|--dxil-view-commands FILE|"
-                         "--structured-view-commands|"
-                         "--reference-structured-view-commands|"
-                         "--ordered-structured-view-commands|"
-                         "--dxil-structured-view-commands FILE|"
-                         "--array-commands|--reference-array-commands|"
-                         "--ordered-array-commands|--dxil-array-commands FILE|"
-                         "--structured-array-commands|"
-                         "--reference-structured-array-commands|"
-                         "--ordered-structured-array-commands|"
-                         "--dxil-structured-array-commands FILE|"
-                         "--typed-{uint,sint,float}-commands|"
-                         "--reference-typed-{uint,sint,float}-commands|"
-                         "--ordered-typed-{uint,sint,float}-commands|"
-                         "--dxil-typed-{uint,sint,float}-commands FILE|"
-                         "--placed-buffers|--reference-placed-buffers|"
-                         "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
+    std::fprintf(stderr,
+                 "Usage: warp-prototype-harness "
+                 "[--reference|--expect-shader-rejection|--commands|"
+                 "--buffer-commands|--dxil-commands FILE|"
+                 "--dxil-buffer-commands FILE|--fences|"
+                 "--ordered-buffer-commands|"
+                 "--reference-buffer-commands|"
+                 "--indirect-commands|--reference-indirect-commands|"
+                 "--ordered-indirect-commands|"
+                 "--dxil-indirect-commands FILE|"
+                 "--predicate-commands|--reference-predicate-commands|"
+                 "--ordered-predicate-commands|"
+                 "--dxil-predicate-commands FILE|"
+                 "--predicate-indirect-commands|"
+                 "--reference-predicate-indirect-commands|"
+                 "--ordered-predicate-indirect-commands|"
+                 "--dxil-predicate-indirect-commands FILE|"
+                 "--cbv-commands|--reference-cbv-commands|"
+                 "--ordered-cbv-commands|--dxil-cbv-commands FILE|"
+                 "--constant-commands|--reference-constant-commands|"
+                 "--ordered-constant-commands|"
+                 "--dxil-constant-commands FILE|"
+                 "--visibility-commands|--reference-visibility-commands|"
+                 "--ordered-visibility-commands|"
+                 "--dxil-visibility-commands FILE|"
+                 "--table-commands|--reference-table-commands|"
+                 "--ordered-table-commands|--dxil-table-commands FILE|"
+                 "--view-commands|--reference-view-commands|"
+                 "--ordered-view-commands|--dxil-view-commands FILE|"
+                 "--structured-view-commands|"
+                 "--reference-structured-view-commands|"
+                 "--ordered-structured-view-commands|"
+                 "--dxil-structured-view-commands FILE|"
+                 "--array-commands|--reference-array-commands|"
+                 "--ordered-array-commands|--dxil-array-commands FILE|"
+                 "--structured-array-commands|"
+                 "--reference-structured-array-commands|"
+                 "--ordered-structured-array-commands|"
+                 "--dxil-structured-array-commands FILE|"
+                 "--typed-{uint,sint,float}-commands|"
+                 "--reference-typed-{uint,sint,float}-commands|"
+                 "--ordered-typed-{uint,sint,float}-commands|"
+                 "--dxil-typed-{uint,sint,float}-commands FILE|"
+                 "--placed-buffers|--reference-placed-buffers|"
+                 "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
   std::vector<unsigned char> DXILBytes;
@@ -2413,7 +2443,7 @@ int wmain(int Argc, wchar_t **Argv) {
         Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
         OrderedBufferCommands, Indirect, CBV, Inline, Tables, Views,
         StructuredViews, Arrays, Typed, Predication, CounterOperation,
-        MappedTyped, TypedUAV);
+        MappedTyped, TypedUAV, Visibility);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();

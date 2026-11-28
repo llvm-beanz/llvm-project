@@ -586,6 +586,28 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Good &= LastError == E_INVALIDARG && Owner.LiveRootSignatures == 1;
   Core.pfnDestroyRootSignature(Device, BufferRoot);
   Good &= Owner.LiveRootSignatures == 0;
+  Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_UAV;
+  for (auto Visibility :
+       {D3D12DDI_SHADER_VISIBILITY_VERTEX, D3D12DDI_SHADER_VISIBILITY_HULL,
+        D3D12DDI_SHADER_VISIBILITY_DOMAIN, D3D12DDI_SHADER_VISIBILITY_GEOMETRY,
+        D3D12DDI_SHADER_VISIBILITY_PIXEL}) {
+    Parameters[0].ShaderVisibility = Visibility;
+    Parameters[1].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_ALL;
+    Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+            LastError == E_INVALIDARG;
+    Parameters[1].ShaderVisibility = Visibility;
+    Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+            LastError == E_INVALIDARG;
+    Parameters[1].ShaderVisibility =
+        Visibility == D3D12DDI_SHADER_VISIBILITY_PIXEL
+            ? D3D12DDI_SHADER_VISIBILITY_VERTEX
+            : D3D12DDI_SHADER_VISIBILITY_PIXEL;
+    Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) != 0;
+    Good &= Core.pfnCreateRootSignature(Device, &RootArgs, BufferRoot) == S_OK;
+    Core.pfnDestroyRootSignature(Device, BufferRoot);
+  }
+  Parameters[0].ShaderVisibility = Parameters[1].ShaderVisibility =
+      D3D12DDI_SHADER_VISIBILITY_ALL;
   Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_CBV;
   Storage CBVRootStorage(
       Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs));
@@ -648,6 +670,18 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Parameters[1].Descriptor.ShaderRegister = 4;
   Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
           LastError == E_INVALIDARG;
+  Parameters[1].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_VERTEX;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_INVALIDARG;
+  Parameters[0].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_PIXEL;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) != 0;
+  Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
+  Core.pfnDestroyRootSignature(Device, TableRoot);
+  Parameters[1].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_PIXEL;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_INVALIDARG;
+  Parameters[0].ShaderVisibility = Parameters[1].ShaderVisibility =
+      D3D12DDI_SHADER_VISIBILITY_ALL;
   Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_UAV;
   Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) != 0;
   Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;

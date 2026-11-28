@@ -37,7 +37,9 @@ SRVs also execute packed decoding, mappings and live-view dimension queries.
 All 21 typed buffer formats also execute UAV loads/stores, including the
 complete mandatory fifteen-format additional set and optional RG32 formats.
 Narrow integer stores saturate according to Direct3D rather than truncate.
-The generated v16 inventory
+Root signatures additionally admit disjoint conventional graphics-stage
+bindings, without exposing them to compute execution.
+The generated v17 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -89,7 +91,7 @@ W2(b) operations, still remain.
 
 | Step | Current boundary and remaining work |
 |---|---|
-| W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |
+| W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute. Disjoint conventional graphics-stage roots coexist while compute prepares only ALL-visible bindings; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |
 | W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, all 21 mapped typed SRV/UAV formats including the complete additional-format buffer set, typed SRV component mappings/live dimensions, Direct3D narrow-store saturation, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; other optional typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
 | W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Images/formats/views/footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, execution-time 64-bit predication, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, indirect root changes/draws and general removal wakeups remain. |
