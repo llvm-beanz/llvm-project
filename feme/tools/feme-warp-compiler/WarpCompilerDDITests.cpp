@@ -616,17 +616,45 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   D3D12DDI_HROOTSIGNATURE TableRoot{TableRootStorage.data()};
   Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
   Core.pfnDestroyRootSignature(Device, TableRoot);
-  for (auto Type : {D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV,
-                    D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV}) {
+  for (auto Type :
+       {D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV, D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV,
+        D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV}) {
     TableRange.RangeType = Type;
+    TableRange.NumDescriptors = 2;
     Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) != 0;
     Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
     Core.pfnDestroyRootSignature(Device, TableRoot);
   }
+  TableRange.RangeType = D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV;
+  RootDesc.NumParameters = 2;
+  Parameters[1] = {};
+  Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_SRV;
+  Parameters[1].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_ALL;
+  Parameters[1].Descriptor.ShaderRegister = 4;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_INVALIDARG;
+  Parameters[1].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_UAV;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) != 0;
+  Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
+  Core.pfnDestroyRootSignature(Device, TableRoot);
+  RootDesc.NumParameters = 1;
   TableRange.RangeType = D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV;
-  TableRange.NumDescriptors = 2;
+  TableRange.NumDescriptors = 65;
   Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
           LastError == E_NOTIMPL;
+  TableRange.NumDescriptors = 1;
+  TableRange.BaseShaderRegister = std::numeric_limits<UINT>::max();
+  TableRange.NumDescriptors = 2;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_INVALIDARG;
+  TableRange.BaseShaderRegister = 3;
+  TableRange.NumDescriptors = 64;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) != 0;
+  Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
+  Core.pfnDestroyRootSignature(Device, TableRoot);
+  TableRange.NumDescriptors = 0;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_INVALIDARG;
   TableRange.NumDescriptors = 1;
   TableRange.Flags =
       D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DESCRIPTORS_VOLATILE |

@@ -18,7 +18,7 @@ and copies, monitored fences, completed readback and pending teardown.
 The W1 v1 inventory records the completed internal headless subset. W2 now
 adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
 decreasing monitored fences, dispatch-only indirect commands and multiple
-root CBVs, inline constants and scalar CBV/raw/structured descriptor tables; inventory v7
+root CBVs, inline constants and finite CBV/raw/structured descriptor tables; inventory v8
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1336,7 +1336,7 @@ now provides portable, owned 1.0/1.1 binding plans and a non-dispatch
 inspection path. It preserves serialized promises and resolves table
 offsets, but does not implement the runtime mapping below, enforce every
 SDK semantic rule or replace use-inferred cbuffer promotion.
-General tables and descriptor preparation remain pending; scalar CBV and
+General heaps and descriptor preparation remain pending; finite CBV and
 raw/structured SRV/UAV ranges now execute through owned descriptor heaps and
 CPU-source copies.
 Owned raw SRV/UAV and CBV roots now map to bounded CPU
@@ -1751,8 +1751,13 @@ than choosing a broader GPUVA alias. UAV views additionally require that exact
 resource's unordered-access flag. Null views materialize empty descriptors.
 Original SM 6.0 sparse structured loads at constant byte offsets raise into
 individually bounded scalar accesses, without widening unused components.
-Typed/image/counter descriptors, arrays and broader residency remain open.
-See the implementation log and v7 inventory.
+Finite buffer arrays expand immutable table plans into individual register
+bindings, then regroup complete reflected ranges into contiguous descriptor
+spans. Register/offset endpoints, aggregate limits and overlaps are checked.
+Non-uniform CBV/SRV/UAV selection executes without changing the bridge ABI;
+unbounded ranges and general heap indexing remain unsupported.
+Typed/image/counter descriptors and broader residency remain open.
+See the implementation log and v8 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

@@ -42,6 +42,7 @@ struct FeMeWarpVertexPipelineDesc {
 
 /// Borrowed buffer storage; namespaces 1/2/3 are SRV/UAV/CBV.
 /// Kind 0 is raw and kind 1 is structured. Storage must outlive dispatch.
+/// Register identifies an individual descriptor, including array elements.
 struct FeMeWarpBufferBinding {
   void *Data = nullptr;
   std::uint64_t SizeInBytes = 0;

@@ -326,7 +326,6 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
 
   std::array<feme::cpu::FemeDescriptor, 64> Descriptors{};
   std::array<feme::cpu::BoundResourceBinding, 64> Bindings{};
-  std::uint32_t BindingCount = 0;
   for (std::uint32_t I = 0; I < Desc->BufferCount; ++I) {
     const auto &Buffer = Desc->Buffers[I];
     if ((!Buffer.Data != !Buffer.SizeInBytes) || Buffer.Kind > 1 ||
@@ -347,47 +346,54 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
         return InvalidArgument;
       }
     }
-    bool Required = false;
-    for (const auto &Range : Info.BoundRanges)
-      Required |=
-          Range.Class == feme::cpu::BoundResourceClass::Buffer &&
-          Range.Namespace == static_cast<feme::cpu::BoundResourceNamespace>(
-                                 Buffer.Namespace) &&
-          Range.Space == Buffer.Space && Range.BaseRegister == Buffer.Register;
-    // Root signatures may contain parameters unused by this shader.
-    if (!Required)
-      continue;
-    auto &Descriptor = Descriptors[BindingCount];
-    Descriptor.Data = Buffer.Data;
-    Descriptor.SizeInBytes = Buffer.SizeInBytes;
-    Descriptor.Kind = static_cast<std::uint32_t>(
-        Buffer.Kind ? feme::cpu::ResourceKind::Structured
-                    : feme::cpu::ResourceKind::Raw);
-    Descriptor.Stride = Buffer.Stride;
-    Descriptor.Flags =
-        Buffer.Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
-    Bindings[BindingCount++] = {
-        Buffer.Space,
-        Buffer.Register,
-        {&Descriptor, 1},
-        static_cast<feme::cpu::BoundResourceNamespace>(Buffer.Namespace)};
+  }
+  std::uint32_t BindingCount = 0, DescriptorCount = 0;
+  for (const auto &Range : Info.BoundRanges) {
+    if (Range.Class != feme::cpu::BoundResourceClass::Buffer ||
+        !Range.RangeSize ||
+        Range.RangeSize > Descriptors.size() - DescriptorCount ||
+        Range.BaseRegister >
+            std::numeric_limits<std::uint32_t>::max() - (Range.RangeSize - 1)) {
+      llvm::errs() << "FeMe WARP dispatch: unsupported buffer range extent\n";
+      return InvalidArgument;
+    }
+    auto *RangeDescriptors = Descriptors.data() + DescriptorCount;
+    for (std::uint32_t I = 0; I < Range.RangeSize; ++I) {
+      const FeMeWarpBufferBinding *Matched = nullptr;
+      for (std::uint32_t J = 0; J < Desc->BufferCount; ++J) {
+        const auto &Buffer = Desc->Buffers[J];
+        if (Range.Namespace == static_cast<feme::cpu::BoundResourceNamespace>(
+                                   Buffer.Namespace) &&
+            Range.Space == Buffer.Space &&
+            Range.BaseRegister + I == Buffer.Register) {
+          Matched = &Buffer;
+          break;
+        }
+      }
+      if (!Matched) {
+        llvm::errs() << "FeMe WARP dispatch: required buffer range not bound\n";
+        return InvalidArgument;
+      }
+      auto &Descriptor = RangeDescriptors[I];
+      Descriptor.Data = Matched->Data;
+      Descriptor.SizeInBytes = Matched->SizeInBytes;
+      Descriptor.Kind = static_cast<std::uint32_t>(
+          Matched->Kind ? feme::cpu::ResourceKind::Structured
+                        : feme::cpu::ResourceKind::Raw);
+      Descriptor.Stride = Matched->Stride;
+      Descriptor.Flags =
+          Matched->Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
+    }
+    Bindings[BindingCount++] = {Range.Space,
+                                Range.BaseRegister,
+                                {RangeDescriptors, Range.RangeSize},
+                                Range.Namespace};
+    DescriptorCount += Range.RangeSize;
   }
   llvm::ArrayRef<feme::cpu::BoundResourceBinding> Bound(Bindings.data(),
                                                         BindingCount);
   if (auto Error = feme::cpu::validateBoundResourceBindings(Info, Bound))
     return report(std::move(Error));
-  for (const auto &Range : Info.BoundRanges) {
-    bool Found = false;
-    for (const auto &Binding : Bound)
-      Found |= Binding.Space == Range.Space &&
-               Binding.BaseRegister == Range.BaseRegister &&
-               Binding.Namespace == Range.Namespace;
-    if (Range.Class != feme::cpu::BoundResourceClass::Buffer ||
-        Range.RangeSize != 1 || !Found) {
-      llvm::errs() << "FeMe WARP dispatch: required buffer range not bound\n";
-      return InvalidArgument;
-    }
-  }
   for (auto Index : Info.StaticHeapIndices)
     if (Index >= Info.ReservedResourceHeapSize) {
       llvm::errs()

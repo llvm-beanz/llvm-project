@@ -25,7 +25,8 @@ copies/readback, and kernel-ordered asynchronous submissions through the
 existing WARP kernel services. Monitored fences, replay, retained code and
 pending teardown are tested. W2 adds placed buffers, bounded aliases and
 indirect compute dispatch, multiple root CBVs, inline constants and scalar
-CBV/raw/structured SRV/UAV tables. The generated v7 inventory
+CBV/raw/structured SRV/UAV tables and finite non-uniform buffer arrays.
+The generated v8 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -65,8 +66,8 @@ W2 remaining work is tracked without deeper milestone nesting:
 
 | Step | Current boundary and remaining work |
 |---|---|
-| W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and scalar CBV/raw/structured tables execute; arrays/static samplers and complete shader/root compatibility remain. |
-| W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time scalar table preparation and null CBV/SRV/UAV views execute; typed/image/counter views, volatility, non-uniform/unbounded ranges and complete atomic operations remain. |
+| W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |
+| W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation and null CBV/SRV/UAV views execute; typed/image/counter views, volatility, unbounded ranges and complete atomic operations remain. |
 | W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Images/formats/views/footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, predication, indirect root changes/draws and general removal wakeups remain. |
 

@@ -784,6 +784,40 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned finite and non-uniform buffer descriptor arrays
+
+Finite CBV/SRV/UAV table ranges now expand into checked individual register
+bindings. Immutable plans preserve count, append/explicit offsets and spaces;
+register endpoints, table endpoints, overlaps and the total 64 prepared-buffer
+limit are validated. The compiler regroups complete reflected ranges into
+contiguous descriptor spans and rejects missing elements. Valid extra roots
+remain ignored after input validation. This uses the existing individual
+register field and shared heap materializer; bridge ABI **1** is unchanged.
+Unbounded ranges and general resource/sampler heap indexing remain open.
+
+Native root tests cover arrays of every buffer namespace, zero/65-entry
+rejection, the 64-entry boundary, register overflow and root-descriptor overlap
+with a non-base array element. The same register in another namespace remains
+valid. Public controls use four two-element ranges: SRVs, UAVs and CBVs at the
+same b-registers in distinct spaces. Every lookup carries an explicit
+`NonUniformResourceIndex`, with alternating selection within each wave.
+
+Eight stock-runtime modes exercise owned SM 5.1, original SM 6.0 DXIL,
+independent system WARP and held cross-queue/pending teardown for raw and
+structured arrays. SRV elements start at different allocation offsets; CBV
+elements carry different values; all descriptors are copied after recording.
+The last iteration nulls one SRV and CBV element while a different UAV element
+becomes null. This distinguishes per-element zero reads from ignored writes
+and catches selecting the wrong element. Every one of the 180 results and
+sixteen guards matches the independent scalar oracle.
+
+Final validation: **4403** full-suite passes, **65/65** callback passes and
+**79/79** stock-runtime passes. Inventory **v8** validates forty-three distinct
+OS gates and the unchanged headless/bridge boundaries. W2 still needs typed,
+counter and image/sampler views, unbounded/general heaps and full root
+compatibility, resource classes/residency and complete synchronization.
+Neither the runtime nor the existing WARP KMD was replaced or modified.
+
 #### Owned raw/structured buffer views and mixed scalar tables
 
 The owned frontend now creates raw and structured buffer SRV/UAV descriptors

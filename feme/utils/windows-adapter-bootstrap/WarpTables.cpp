@@ -160,6 +160,7 @@ struct BufferTableRange {
   UINT Space = 0;
   UINT Register = 0;
   UINT Offset = 0;
+  UINT Count = 0;
 };
 
 UINT rangeNamespace(D3D12DDI_DESCRIPTOR_RANGE_TYPE Type) {
@@ -318,8 +319,12 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
       for (UINT J = 0; J < Ranges.NumDescriptorRanges; ++J) {
         const auto &Range = Ranges.pDescriptorRanges[J];
         UINT Namespace = rangeNamespace(Range.RangeType);
-        if (!Namespace || Range.NumDescriptors != 1)
+        if (!Namespace || Range.NumDescriptors > MaxRootParameters)
           return E_NOTIMPL;
+        if (!Range.NumDescriptors ||
+            Range.BaseShaderRegister >
+                std::numeric_limits<UINT>::max() - (Range.NumDescriptors - 1))
+          return E_INVALIDARG;
         constexpr UINT DataMask =
             D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DATA_VOLATILE |
             D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DATA_STATIC_WHILE_SET_AT_EXECUTE |
@@ -338,11 +343,13 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
                                 std::numeric_limits<UINT>::max()
                             ? Cursor
                             : Range.OffsetInDescriptorsFromTableStart;
-        if (Offset >= std::numeric_limits<UINT>::max() ||
-            !AddBinding(
-                {Namespace, Range.RegisterSpace, Range.BaseShaderRegister}))
+        if (Offset > std::numeric_limits<UINT>::max() - Range.NumDescriptors)
           return E_INVALIDARG;
-        Cursor = Offset + 1;
+        for (UINT K = 0; K < Range.NumDescriptors; ++K)
+          if (!AddBinding({Namespace, Range.RegisterSpace,
+                           Range.BaseShaderRegister + K}))
+            return E_INVALIDARG;
+        Cursor = Offset + Range.NumDescriptors;
       }
       continue;
     }
@@ -396,10 +403,10 @@ HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
                               std::numeric_limits<UINT>::max()
                           ? Cursor
                           : Range.OffsetInDescriptorsFromTableStart;
-        State->Ranges[State->RangeCount++] = {rangeNamespace(Range.RangeType),
-                                              Range.RegisterSpace,
-                                              Range.BaseShaderRegister, Offset};
-        Cursor = Offset + 1;
+        State->Ranges[State->RangeCount++] = {
+            rangeNamespace(Range.RangeType), Range.RegisterSpace,
+            Range.BaseShaderRegister, Offset, Range.NumDescriptors};
+        Cursor = Offset + Range.NumDescriptors;
       }
     }
     if (State->Parameters[I].ConstantCount) {
@@ -1900,16 +1907,18 @@ HRESULT prepareDispatch(CommandList *State,
         return E_INVALIDARG;
       for (UINT J = 0; J < Parameter.RangeCount; ++J) {
         const auto &Range = State->RootRanges[Parameter.RangeBase + J];
-        auto *Slot =
-            descriptorTableSlot(Heap, State->RootTables[I], Range.Offset);
-        if (!Slot)
-          return E_INVALIDARG;
-        UINT Binding = Command->Dispatch.BufferCount++;
-        Command->TableDescriptors[Binding] = reinterpret_cast<UINT64>(Slot);
-        auto &Buffer = Command->Buffers[Binding];
-        Buffer.Namespace = Range.Namespace;
-        Buffer.Space = Range.Space;
-        Buffer.Register = Range.Register;
+        for (UINT K = 0; K < Range.Count; ++K) {
+          auto *Slot =
+              descriptorTableSlot(Heap, State->RootTables[I], Range.Offset + K);
+          if (!Slot)
+            return E_INVALIDARG;
+          UINT Binding = Command->Dispatch.BufferCount++;
+          Command->TableDescriptors[Binding] = reinterpret_cast<UINT64>(Slot);
+          auto &Buffer = Command->Buffers[Binding];
+          Buffer.Namespace = Range.Namespace;
+          Buffer.Space = Range.Space;
+          Buffer.Register = Range.Register + K;
+        }
       }
       continue;
     }

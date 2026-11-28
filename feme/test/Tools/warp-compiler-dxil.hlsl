@@ -26,15 +26,36 @@
 #define ROOT_REGISTER u0
 #endif
 #ifdef STRUCTURED_VIEWS
+#ifdef DESCRIPTOR_ARRAYS
+RWStructuredBuffer<uint> output[2] : register(ROOT_REGISTER);
+#else
 RWStructuredBuffer<uint> output : register(ROOT_REGISTER);
+#endif
+#ifdef DESCRIPTOR_ARRAYS
+StructuredBuffer<uint2> input[2] : register(t3);
+#else
 StructuredBuffer<uint2> input : register(t3);
+#endif
+#else
+#ifdef DESCRIPTOR_ARRAYS
+RWByteAddressBuffer output[2] : register(ROOT_REGISTER);
 #else
 RWByteAddressBuffer output : register(ROOT_REGISTER);
+#endif
 #ifdef BUFFER_VIEWS
+#ifdef DESCRIPTOR_ARRAYS
+ByteAddressBuffer input[2] : register(t3);
+#else
 ByteAddressBuffer input : register(t3);
 #endif
 #endif
+#endif
 #ifdef CBV
+#ifdef DESCRIPTOR_ARRAYS
+struct ConstantsType { uint values[2]; };
+ConstantBuffer<ConstantsType> A[2] : register(b3);
+ConstantBuffer<ConstantsType> B[2] : register(b3, space7);
+#else
 #ifdef INLINE_CONSTANTS
 cbuffer A : register(b3) { uint4 firstA; uint lastA; };
 cbuffer B : register(b3, space7) { uint4 firstB; uint lastB; };
@@ -44,6 +65,12 @@ cbuffer A : register(b3) { uint valuesA[2]; };
 cbuffer B : register(b3, space7) { uint valuesB[2]; };
 #endif
 #endif
+#endif
+#endif
+#ifdef DESCRIPTOR_ARRAYS
+#define OUTPUT output[NonUniformResourceIndex(index % 2)]
+#else
+#define OUTPUT output
 #endif
 groupshared uint sharedValues[30];
 #ifdef WAVE_SIZE
@@ -58,6 +85,10 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
   uint peer = sharedValues[slot == 29 ? 0 : slot + 1];
   uint bias = 23;
 #ifdef CBV
+#ifdef DESCRIPTOR_ARRAYS
+  bias = A[NonUniformResourceIndex(index % 2)].values[id.x % 2] +
+         B[NonUniformResourceIndex(index % 2)].values[id.x % 2];
+#else
 #ifdef INLINE_CONSTANTS
   bias = id.x % 2 ? lastA + lastB : firstA.x + firstB.x;
 #else
@@ -67,13 +98,23 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
 #endif
 #endif
 #endif
+#endif
 #ifdef STRUCTURED_VIEWS
-  output[index] = output[index] + peer + bias + input[index].y;
+#ifdef DESCRIPTOR_ARRAYS
+  OUTPUT[index] = OUTPUT[index] + peer + bias +
+                  input[NonUniformResourceIndex(index % 2)][index].y;
+#else
+  OUTPUT[index] = OUTPUT[index] + peer + bias + input[index].y;
+#endif
 #else
 #ifdef BUFFER_VIEWS
+#ifdef DESCRIPTOR_ARRAYS
+  bias += input[NonUniformResourceIndex(index % 2)].Load(index * 4);
+#else
   bias += input.Load(index * 4);
 #endif
-  output.Store(index * 4, output.Load(index * 4) + peer + bias);
+#endif
+  OUTPUT.Store(index * 4, OUTPUT.Load(index * 4) + peer + bias);
 #endif
 }
 #else
