@@ -708,7 +708,7 @@ HRESULT exerciseBufferCommands(
     bool Structured = false, bool Arrays = false,
     DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN, bool Predication = false,
     BufferCounterOperation CounterOperation = BufferCounterOperation::None,
-    bool MappedTyped = false) {
+    bool MappedTyped = false, bool TypedUAV = false) {
   bool Append = CounterOperation == BufferCounterOperation::Append;
   bool Consume = CounterOperation == BufferCounterOperation::Consume;
   int CounterDelta =
@@ -754,6 +754,18 @@ HRESULT exerciseBufferCommands(
       Typed == DXGI_FORMAT_R16G16B16A16_SINT)
     ComponentBytes = 2;
   bool Packed = ComponentBytes != 4;
+  bool SeparateInput = Packed || TypedUAV;
+  if (TypedUAV) {
+    D3D12_FEATURE_DATA_D3D12_OPTIONS Options{};
+    HRESULT Status =
+        report("Check additional typed UAV formats",
+               Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS,
+                                           &Options, sizeof(Options)));
+    if (FAILED(Status))
+      return Status;
+    if (!Options.TypedUAVLoadAdditionalFormats)
+      return report("Missing complete additional typed UAV format set", E_FAIL);
+  }
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
       "groupshared uint sharedValues[30];\n"
@@ -868,6 +880,10 @@ HRESULT exerciseBufferCommands(
       "else\n"
       "  OUTPUT[index] = output[0].COUNTER_OPERATION();\n"
       "#endif\n"
+      "#elif defined(TYPED_UAV_VIEWS)\n"
+      "OUTPUT[index] = OUTPUT[index] + "
+      "input[NonUniformResourceIndex(index % 2)][index] + "
+      "output[NonUniformResourceIndex(1 - index % 2)][index];\n"
       "#elif defined(TYPED_VIEWS)\n"
       "#ifdef TYPED_VECTOR\n"
       "uint value = uint(OUTPUT[index]) + peer + bias + "
@@ -980,7 +996,10 @@ HRESULT exerciseBufferCommands(
   if (Typed != DXGI_FORMAT_UNKNOWN) {
     Defines.push_back({"TYPED_VIEWS", "1"});
     Defines.push_back({"TYPED_SCALAR", TypedName.c_str()});
-    Defines.push_back({"TYPED_OUTPUT_SCALAR", OutputType});
+    Defines.push_back(
+        {"TYPED_OUTPUT_SCALAR", TypedUAV ? TypedName.c_str() : OutputType});
+    if (TypedUAV)
+      Defines.push_back({"TYPED_UAV_VIEWS", "1"});
     if (Components > 1)
       Defines.push_back({"TYPED_VECTOR", "1"});
     if (Normalized)
@@ -998,9 +1017,10 @@ HRESULT exerciseBufferCommands(
       return Status;
     if (!(Support.Support1 & D3D12_FORMAT_SUPPORT1_BUFFER))
       return report("Missing typed SRV buffer format support", E_FAIL);
-    Support = {Floating ? DXGI_FORMAT_R32_FLOAT
-               : Signed ? DXGI_FORMAT_R32_SINT
-                        : DXGI_FORMAT_R32_UINT};
+    Support = {TypedUAV   ? Typed
+               : Floating ? DXGI_FORMAT_R32_FLOAT
+               : Signed   ? DXGI_FORMAT_R32_SINT
+                          : DXGI_FORMAT_R32_UINT};
     Status = report("Check scalar output buffer format",
                     Device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
                                                 &Support, sizeof(Support)));
@@ -1019,7 +1039,8 @@ HRESULT exerciseBufferCommands(
   if (FAILED(Result))
     return Result;
   constexpr UINT Threads = 180, Words = Threads + 16;
-  constexpr UINT Bytes = Words * sizeof(UINT);
+  const UINT Bytes =
+      Words * (TypedUAV ? Components * ComponentBytes : sizeof(UINT));
   auto InitialCounter = [Append, Consume, Threads](UINT Repeat, UINT Element) {
     return Append    ? 0u
            : Consume ? Threads / 2
@@ -1029,9 +1050,9 @@ HRESULT exerciseBufferCommands(
   Heap.CreationNodeMask = Heap.VisibleNodeMask = 1;
   D3D12_RESOURCE_DESC Desc{};
   Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  UINT UploadBytes = Packed       ? Bytes + Words * Components * ComponentBytes
-                     : Structured ? 2 * Bytes
-                                  : Components * Bytes;
+  UINT UploadBytes = SeparateInput ? Bytes + Words * Components * ComponentBytes
+                     : Structured  ? 2 * Bytes
+                                   : Components * Bytes;
   Desc.Width = UploadBytes;
   Desc.Height = Desc.DepthOrArraySize = Desc.MipLevels = 1;
   Desc.SampleDesc.Count = 1;
@@ -1195,31 +1216,43 @@ HRESULT exerciseBufferCommands(
       return 0u - (Hash % (ComponentBytes == 1 ? 127 : 32767) + 1);
     return Hash % (ComponentBytes == 1 ? 256 : 65536);
   };
-  for (UINT I = 0; I < Words * (Packed ? 1 : Components * (Structured ? 2 : 1));
-       ++I) {
-    if (Floating)
-      static_cast<float *>(Memory)[I] = static_cast<float>(InitialValue(I));
-    else
-      static_cast<UINT *>(Memory)[I] = InitialValue(I);
-  }
-  if (Packed)
+  auto EncodeSample = [Floating, ComponentBytes](unsigned char *Destination,
+                                                 UINT Sample) {
+    if (Floating && ComponentBytes > 1) {
+      float Value = static_cast<float>(Sample) * 0.5f;
+      if (ComponentBytes == 4)
+        std::memcpy(Destination, &Value, sizeof(Value));
+      else {
+        UINT Bits;
+        std::memcpy(&Bits, &Value, sizeof(Bits));
+        // All generated values are zero or exactly representable normal halves.
+        UINT16 Half =
+            !Sample ? 0 : ((Bits >> 13) & 0x3ff) | (((Bits >> 23) - 112) << 10);
+        std::memcpy(Destination, &Half, sizeof(Half));
+      }
+    } else
+      std::memcpy(Destination, &Sample, ComponentBytes);
+  };
+  if (TypedUAV)
+    for (UINT Element = 0; Element < Words; ++Element)
+      for (UINT Channel = 0; Channel < Components; ++Channel)
+        EncodeSample(static_cast<unsigned char *>(Memory) +
+                         (Element * Components + Channel) * ComponentBytes,
+                     PackedSample(Element, Channel));
+  else
+    for (UINT I = 0;
+         I < Words * (Packed ? 1 : Components * (Structured ? 2 : 1)); ++I) {
+      if (Floating)
+        static_cast<float *>(Memory)[I] = static_cast<float>(InitialValue(I));
+      else
+        static_cast<UINT *>(Memory)[I] = InitialValue(I);
+    }
+  if (SeparateInput)
     for (UINT Element = 0; Element < Words; ++Element)
       for (UINT Channel = 0; Channel < Components; ++Channel) {
         auto *Destination = static_cast<unsigned char *>(Memory) + Bytes +
                             (Element * Components + Channel) * ComponentBytes;
-        UINT Sample = PackedSample(Element, Channel);
-        if (ComponentBytes == 1) {
-          auto Value = static_cast<unsigned char>(Sample);
-          std::memcpy(Destination, &Value, sizeof(Value));
-        } else {
-          UINT16 Value = static_cast<UINT16>(Sample);
-          if (Floating) {
-            constexpr UINT16 HalfSamples[] = {0x0000, 0x3800, 0x3c00, 0x3e00,
-                                              0x4000, 0x4100, 0x4200, 0x4300};
-            Value = HalfSamples[(Element * 997 + Channel * 331 + 17) % 8];
-          }
-          std::memcpy(Destination, &Value, sizeof(Value));
-        }
+        EncodeSample(Destination, PackedSample(Element, Channel));
       }
   D3D12_RANGE UploadWritten{0, UploadBytes};
   Upload->Unmap(0, &UploadWritten);
@@ -1251,8 +1284,7 @@ HRESULT exerciseBufferCommands(
     return Result;
   ComPtr<ID3D12CommandQueue> GateQueue;
   ComPtr<ID3D12Fence> Gate;
-  std::array<UINT, Words> Previous;
-  Previous.fill(0xcdcdcdcd);
+  std::vector<UINT> Previous(Bytes / sizeof(UINT), 0xcdcdcdcd);
   if (Ordered) {
     D3D12_COMMAND_QUEUE_DESC GateDesc{};
     GateDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
@@ -1502,8 +1534,8 @@ HRESULT exerciseBufferCommands(
                     Components > 1 ? MappingSource : 1, 2, 3);
           }
           Input.Buffer.FirstElement =
-              Packed ? Bytes / (Components * ComponentBytes) + 4 + I * 4
-                     : (Structured ? 2 : 4) + I * (Structured ? 2 : 4);
+              SeparateInput ? Bytes / (Components * ComponentBytes) + 4 + I * 4
+                            : (Structured ? 2 : 4) + I * (Structured ? 2 : 4);
           bool Null = Repeat == 2 && I == 0;
           Device->CreateShaderResourceView(
               Null ? nullptr : Upload.Get(), &Input,
@@ -1511,7 +1543,7 @@ HRESULT exerciseBufferCommands(
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC OutputView{};
         OutputView.Format = Input.Format;
-        if (Typed != DXGI_FORMAT_UNKNOWN)
+        if (Typed != DXGI_FORMAT_UNKNOWN && !TypedUAV)
           OutputView.Format = Floating ? DXGI_FORMAT_R32_FLOAT
                               : Signed ? DXGI_FORMAT_R32_SINT
                                        : DXGI_FORMAT_R32_UINT;
@@ -1721,6 +1753,40 @@ HRESULT exerciseBufferCommands(
     bool Valid = Memory != nullptr;
     std::array<std::array<bool, Threads / 2>, 2> Seen{};
     for (UINT I = 0; Valid && I < Words; ++I) {
+      if (TypedUAV) {
+        for (UINT Channel = 0; Valid && Channel < Components; ++Channel) {
+          UINT Expected = PackedSample(I, Channel);
+          if (I < Threads)
+            for (UINT Step = 0; Step <= Repeat && Step < 2; ++Step) {
+              Expected =
+                  2 * Expected + PackedSample(I + 4 + (I % 2) * 4, Channel);
+              if (Normalized)
+                Expected = Expected > 255 ? 255 : Expected;
+              else if (!Floating && ComponentBytes < 4) {
+                if (Signed) {
+                  INT32 Value;
+                  std::memcpy(&Value, &Expected, sizeof(Value));
+                  INT32 Min = -(1 << (ComponentBytes * 8 - 1));
+                  INT32 Max = (1 << (ComponentBytes * 8 - 1)) - 1;
+                  Value = Value < Min ? Min : Value > Max ? Max : Value;
+                  std::memcpy(&Expected, &Value, sizeof(Expected));
+                } else {
+                  UINT Max = (1u << (ComponentBytes * 8)) - 1;
+                  Expected = Expected > Max ? Max : Expected;
+                }
+              }
+            }
+          std::array<unsigned char, sizeof(UINT)> Encoded{};
+          EncodeSample(Encoded.data(), Expected);
+          const auto *Actual = static_cast<const unsigned char *>(Memory) +
+                               (I * Components + Channel) * ComponentBytes;
+          Valid = std::memcmp(Actual, Encoded.data(), ComponentBytes) == 0;
+          if (!Valid)
+            std::fprintf(stderr, "Typed UAV element %u channel %u mismatch\n",
+                         I, Channel);
+        }
+        continue;
+      }
       if (CounterDelta && I < Threads) {
         UINT Element = Append ? I / (Threads / 2) : I % 2;
         UINT Step = Repeat == 2 && Element == 1 ? 1 : Repeat;
@@ -1992,7 +2058,7 @@ int wmain(int Argc, wchar_t **Argv) {
                 (Argc == 2 && std::wcscmp(Argv[1], L"--array-commands") == 0);
   DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN;
   bool ReferenceTyped = false, OrderedTyped = false, DXILTyped = false;
-  bool MappedTyped = false;
+  bool MappedTyped = false, TypedUAV = false;
   const wchar_t *TypedModes[][4] = {
       {L"--typed-uint-commands", L"--reference-typed-uint-commands",
        L"--ordered-typed-uint-commands", L"--dxil-typed-uint-commands"},
@@ -2066,13 +2132,18 @@ int wmain(int Argc, wchar_t **Argv) {
           L"--mapped-" + std::wstring(TypedModes[I][J] + 2);
       bool Mapped = Argc == (J == 3 ? 3 : 2) &&
                     std::wcscmp(Argv[1], MappedMode.c_str()) == 0;
+      std::wstring UAVMode(TypedModes[I][J]);
+      UAVMode.insert(UAVMode.find(L"typed-") + 6, L"uav-");
+      bool UAV = Argc == (J == 3 ? 3 : 2) &&
+                 std::wcscmp(Argv[1], UAVMode.c_str()) == 0;
       if (Argc == (J == 3 ? 3 : 2) &&
-          (std::wcscmp(Argv[1], TypedModes[I][J]) == 0 || Mapped)) {
+          (std::wcscmp(Argv[1], TypedModes[I][J]) == 0 || Mapped || UAV)) {
         Typed = TypedFormats[I];
         ReferenceTyped = J == 1;
         OrderedTyped = J == 2;
         DXILTyped = J == 3;
         MappedTyped = Mapped;
+        TypedUAV = UAV;
       }
     }
   int CounterDelta = 0;
@@ -2342,7 +2413,7 @@ int wmain(int Argc, wchar_t **Argv) {
         Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
         OrderedBufferCommands, Indirect, CBV, Inline, Tables, Views,
         StructuredViews, Arrays, Typed, Predication, CounterOperation,
-        MappedTyped);
+        MappedTyped, TypedUAV);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();

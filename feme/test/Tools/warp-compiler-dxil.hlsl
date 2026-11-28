@@ -149,6 +149,10 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
   else
     OUTPUT[index] = output[0].COUNTER_OPERATION();
 #endif
+#elif defined(TYPED_UAV_VIEWS)
+  OUTPUT[index] = OUTPUT[index] +
+      input[NonUniformResourceIndex(index % 2)][index] +
+      output[NonUniformResourceIndex(1 - index % 2)][index];
 #elif defined(TYPED_VIEWS)
 #ifdef TYPED_VECTOR
   uint value = uint(OUTPUT[index]) + peer + bias +

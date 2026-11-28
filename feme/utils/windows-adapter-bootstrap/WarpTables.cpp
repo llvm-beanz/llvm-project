@@ -161,8 +161,7 @@ UINT typedBufferElementSize(DXGI_FORMAT Format) {
 }
 
 bool typedBufferUAVSupported(DXGI_FORMAT Format) {
-  return Format == DXGI_FORMAT_R32_FLOAT || Format == DXGI_FORMAT_R32_UINT ||
-         Format == DXGI_FORMAT_R32_SINT;
+  return typedBufferElementSize(Format) != 0;
 }
 #endif
 

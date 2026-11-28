@@ -432,9 +432,6 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
     const auto &Buffer = Desc->Buffers[I];
     auto Format = typedBufferFormat(Buffer.Format);
     auto ElementSize = typedBufferElementSize(Format);
-    bool ScalarR32 = Buffer.Format == DXGI_FORMAT_R32_FLOAT ||
-                     Buffer.Format == DXGI_FORMAT_R32_UINT ||
-                     Buffer.Format == DXGI_FORMAT_R32_SINT;
     if ((!Buffer.Data != !Buffer.SizeInBytes) ||
         !FeMeWarpValidComponentMapping(Buffer.Shader4ComponentMapping) ||
         (Buffer.Shader4ComponentMapping != FeMeWarpDefaultComponentMapping &&
@@ -450,7 +447,6 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
         (Buffer.Kind == 0 && Buffer.Stride) ||
         (Buffer.Kind != 2 && Buffer.Format) ||
         (Buffer.Kind == 2 && (Buffer.Stride || !ElementSize ||
-                              (Buffer.Namespace == 2 && !ScalarR32) ||
                               Buffer.SizeInBytes % ElementSize)) ||
         (Buffer.Kind == 1 && (!Buffer.Stride || Buffer.Stride % 4 ||
                               Buffer.SizeInBytes % Buffer.Stride))) {
@@ -507,6 +503,8 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
       Descriptor.Swizzle = bufferSwizzle(Matched->Shader4ComponentMapping);
       Descriptor.Flags =
           Matched->Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
+      if (Matched->Namespace == 2 && Matched->Kind == 2)
+        Descriptor.Flags |= feme::cpu::FEME_DESCRIPTOR_SATURATE_INTEGER_STORES;
       Descriptor.Counter = Matched->CounterData;
       if (Descriptor.Counter)
         Descriptor.Flags |= feme::cpu::FEME_DESCRIPTOR_HAS_COUNTER;

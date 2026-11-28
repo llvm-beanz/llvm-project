@@ -107,13 +107,7 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   Buffer.Kind = 2;
   Buffer.Format = DXGI_FORMAT_R32_TYPELESS;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
-  for (auto Format :
-       {DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R32G32B32A32_UINT,
-        DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8_SINT,
-        DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_SINT,
-        DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UINT,
-        DXGI_FORMAT_R8G8B8A8_SINT, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        DXGI_FORMAT_R16G16B16A16_UINT, DXGI_FORMAT_R16G16B16A16_SINT}) {
+  for (auto Format : {DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT}) {
     Buffer.Format = Format;
     Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
   }

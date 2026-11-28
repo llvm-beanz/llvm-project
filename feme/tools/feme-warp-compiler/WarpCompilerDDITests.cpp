@@ -823,14 +823,10 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
                         DXGI_FORMAT_R32G32B32A32_UINT,
                         DXGI_FORMAT_R32G32B32A32_SINT}) {
       UINT Support = 0;
-      bool Scalar = Format == DXGI_FORMAT_R32_FLOAT ||
-                    Format == DXGI_FORMAT_R32_UINT ||
-                    Format == DXGI_FORMAT_R32_SINT;
       Core.pfnCheckFormatSupport(Device, Format, &Support);
       UINT ExpectedSupport = D3D12DDI_FORMAT_SUPPORT_BUFFER;
-      if (Scalar)
-        ExpectedSupport |= D3D12DDI_FORMAT_SUPPORT_UAV_READS |
-                           D3D12DDI_FORMAT_SUPPORT_UAV_WRITES;
+      ExpectedSupport |= D3D12DDI_FORMAT_SUPPORT_UAV_READS |
+                         D3D12DDI_FORMAT_SUPPORT_UAV_WRITES;
       Good &= Support == ExpectedSupport;
       SRV.Format = UAV.Format = Format;
       UAV.Buffer.Flags = D3D12DDI_BUFFER_UAV_FLAG_NONE;
@@ -839,10 +835,7 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
       Good &= LastError == S_OK;
       std::memcpy(Before.data(), reinterpret_cast<void *>(Fourth.ptr), Stride);
       Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
-      Good &= LastError == (Scalar ? S_OK : E_NOTIMPL);
-      if (!Scalar)
-        Good &= std::memcmp(Before.data(), reinterpret_cast<void *>(Fourth.ptr),
-                            Stride) == 0;
+      Good &= LastError == S_OK;
     }
     for (UINT Mapping : {0x168du, 0x1684u, 0x1680u}) {
       SRV.Shader4ComponentMapping = Mapping;

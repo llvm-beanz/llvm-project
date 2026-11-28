@@ -1378,6 +1378,10 @@ HRESULT APIENTRY getCaps(D3D12DDI_HADAPTER, CONST D3D12DDIARG_GETCAPS *Args) {
       return RecordResult(E_INVALIDARG);
     }
     std::memset(Args->pData, 0, Args->DataSize);
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+    static_cast<D3D12DDI_SHADER_CAPS_0003 *>(Args->pData)
+        ->TypedUAVLoadAdditionalFormats = TRUE;
+#endif
     if (Args->DataSize >= sizeof(D3D12DDI_SHADER_CAPS_0012)) {
       // The runtime validates lane limits even with WaveOps disabled.
       auto *Shader = static_cast<D3D12DDI_SHADER_CAPS_0012 *>(Args->pData);

@@ -806,6 +806,39 @@ Validation: focused runtime/version selectors **5/5** and full FeMe
 identity. Windows typed-UAV admission and its capability inventory are a
 separate integration slice. No Vulkan advertisement or CTS result changes.
 
+#### Owned complete additional typed-UAV buffer set
+
+All 21 mapped typed buffer formats now support owned and borrowed UAV views:
+the three scalar R32 formats, all fifteen mandatory additional formats, and
+the three optional R32G32 formats. Compiler-backed shader caps now enable
+`TypedUAVLoadAdditionalFormats`; callback-only builds remain unchanged.
+Per-format support remains buffer-only, without texture/render-target or
+complete feature-level claims. Windows bridge **4** materializes the shared
+integer saturation flag for typed UAVs; artifact ABI is **11**.
+
+Eighty-four controls cover every format through owned DXBC, original DXIL,
+independent system WARP and held execution. Full-width scalar/vector shaders
+load two aliased UAV views and an independently initialized SRV. Each invocation
+owns its output texel, avoiding inter-invocation data races. Exact physical
+output sizing and all-channel byte oracles verify repeated converted writes,
+packed UINT/SINT/UNORM/FP16 values, untouched guards, live descriptor changes,
+null SRV/UAV replacement and pending-resource/code lifetime.
+
+The first run passed **76/84**; eight reference narrow integer controls exposed
+the truncation/saturation discrepancy fixed by the shared prerequisite.
+The corrected oracle and descriptor flag then pass **84/84** without
+weakening conversion, channel, null or guard checks. Native compiler selectors
+pass **4/4**, full FeMe **4413** passed / **15** skipped / **10** unsupported,
+callbacks **65/65** and stock-runtime/coexistence **355/355**, after shared DLL
+relinking. FeMe ICD identity was confirmed in the full/coexistence launch.
+Inventory **v16** contains **319** unique required OS gates, **11** existing
+native fixtures, bridge 4, artifact 11 and no complete feature-level claim.
+No KMD or Vulkan advertisement changes and no new CTS result are claimed.
+
+W2 remains open for other optional typed/image formats, general append/consume
+payloads and dynamic counter parity, complete bindings/resources/residency,
+barriers, queries, other indirect signatures and removal wakeups.
+
 #### Owned narrow and packed typed SRVs
 
 The subsequent v15 slice adds twelve narrow/packed typed SRV formats:

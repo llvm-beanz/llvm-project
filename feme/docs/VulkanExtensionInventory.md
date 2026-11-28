@@ -430,8 +430,9 @@ after any change that could affect either table.
 ## WARP shared-counter regression scope
 
 Extension advertisements are unchanged by the shared DirectX counter helper
-and typed-buffer component mappings/non-uniform queries; packed WARP SRVs
-reuse existing decoders.
-Validation is the full FeMe gate (4412 passed, 15 skipped, 10 unsupported) and
-271 stock-runtime/coexistence gates with confirmed FeMe ICD identity, not a new
+and typed-buffer component mappings/non-uniform queries; packed WARP SRVs/UAVs
+reuse existing decoders. Descriptor-gated narrow integer saturation preserves
+flag-clear conversion and image stores.
+Validation is the full FeMe gate (4413 passed, 15 skipped, 10 unsupported) and
+355 stock-runtime/coexistence gates with confirmed FeMe ICD identity, not a new
 CTS run; no historical Windows CTS executable is available.

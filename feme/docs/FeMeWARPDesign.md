@@ -22,7 +22,7 @@ root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
 R32_UINT/R32_SINT/R32_FLOAT typed buffer views, two/four-component R32 SRVs
 and buffer-command predication, plus checked structured-UAV counters and bounded
 uint append/consume, typed SRV component mappings and narrow/packed SRVs;
-inventory v15
+inventory v16
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1769,17 +1769,20 @@ R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT SRVs additionally use
 their actual one/two/four/eight-byte element geometry and existing shared
 decoders. Non-uniform live-view dimension queries count physical texels
 independently of shader scalar/vector widths and component mappings.
-These additional formats advertise buffer support only; wider UAV descriptors
-and borrowed UAV bindings are explicitly rejected. The normative
-`TypedUAVLoadAdditionalFormats` flag remains false until the complete
-mandatory additional-format set is implemented and tested. Only scalar R32
-typed-UAV read/write support is added, not texture/render-target support.
-Unbounded/general heaps, wider UAVs, other typed formats, image
+All 21 mapped formats now admit owned and borrowed typed UAV bindings.
+The complete mandatory fifteen-format additional set and optional
+R32G32 FLOAT/UINT/SINT formats execute typed buffer loads/stores, allowing the
+compiler-backed `TypedUAVLoadAdditionalFormats` flag. Format support remains
+buffer-only, without texture/render-target support. Scalar/vector integer
+stores use descriptor-gated destination-range saturation for narrow components;
+the flag-clear shared path preserves existing Vulkan behavior.
+Unbounded/general heaps, other optional typed formats, image
 descriptors and broader residency remain open.
 The shared typed-buffer runtime additionally applies descriptor-backed
 component mappings after format decoding and before narrowing, including
 constant zero/one and absent-format-component defaults. Invalid accesses still
-return zero before mapping. Artifact ABI 10 invalidates older descriptor layouts.
+return zero before mapping. Artifact ABI 11 rejects older descriptor layouts
+and runtimes lacking saturation-flag semantics, without changing bridge ABI 4.
 Owned typed SRV descriptors retain checked D3D component encodings through copies
 and execution-time bridge 4 preparation. Original DXBC/DXIL, reference WARP and
 held controls cover reordering, zero/one, absent-channel defaults and nulls
@@ -1806,7 +1809,7 @@ Both zero-comparison operations suppress matching commands; barriers remain
 unconditional. List reset disables predication, and pending submissions retain
 their captured state. Direct/indirect DXBC/DXIL, separate system-WARP and held
 teardown controls pass. Queries and remaining synchronization still stay open.
-See the implementation log and v15 inventory.
+See the implementation log and v16 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

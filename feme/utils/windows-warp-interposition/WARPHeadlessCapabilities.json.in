@@ -10,6 +10,7 @@
     "command_queue": "D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001"
   },
   "compiler_bridge_version": 4,
+  "artifact_abi_version": 11,
   "input_profiles": ["released SM 5.1", "released SM 6.0"],
   "shader_scope": ["application compute subset", "initialization vertex only"],
   "wave_policy": {
@@ -36,7 +37,8 @@
     "dispatch_groups_per_dimension": 65535
   },
   "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "multiple inline constants", "finite CBV/SRV/UAV descriptor-table ranges", "non-uniform finite buffer-array selection", "all-stage visibility"],
-  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32_UINT/R32_SINT/R32_FLOAT typed buffer SRV/UAVs", "R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRVs only", "R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT typed buffer SRVs only", "typed SRV component mappings and constant/default channels", "non-uniform live typed-buffer dimension queries", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
+  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32/R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRV/UAVs", "R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT typed buffer SRV/UAVs", "complete fifteen-format additional typed-UAV buffer set", "Direct3D narrow integer store saturation", "typed SRV component mappings and constant/default channels", "non-uniform live typed-buffer dimension queries", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
+  "typed_uav_load_additional_formats": true,
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
@@ -50,6 +52,7 @@
     "D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION",
     "D3D12DDI_ROOT_SIGNATURE_VERSION_1_1",
     "D3D12DDI_SHADER_CAPS_0012",
+    "D3D11.3 functional specification 3.2.3.13 integer conversion",
     "D3D12DDI_RESOURCE_BARRIER_FLAG_0022_ALIASING",
     "D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001",
     "D3D12_DISPATCH_ARGUMENTS",
@@ -74,6 +77,7 @@
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
+@FEME_WARP_TYPED_UAV_GATES@
 @FEME_WARP_PACKED_GATES@
     "os-routed-warp-compiler-owned-buffer",
     "os-routed-warp-compiler-owned-mapped-typed-uint-commands",
