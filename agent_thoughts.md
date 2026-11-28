@@ -137165,3 +137165,105 @@ implemented or claimed. Next implement real queue/list/fence and dispatch
 execution over the shared executor; do not extend the boundary with successful
 no-op DDIs. Retain the independent positive/reference/negative gates and
 the explicit runtime-specific residency/capability observations.
+
+# W1 closure: owned kernel-ordered headless compute
+
+Closed the current W1 request, preserving the W0 application-local contract:
+stock D3D12/DXGI, Microsoft WARP identity and the existing unmodified KMD,
+with FeMe-owned UMD objects, compilation and CPU execution. No reference
+forwarding, Microsoft implementation/fixture copying, ordinal 199, replacement
+system binary, new driver or substitute COM runtime was introduced.
+
+Small implementation steps:
+- 8c8fe8369498: owned shared-CPU grouped dispatch.
+- 57b05d6bf98e: typed queues, recorder/list tables, allocator epochs and
+  retained native pipelines.
+- 92c347353254: raw root SRV/UAV bindings, bounded buffer dispatch, copies,
+  barriers and completed readback.
+- 2eef5a731515: checked owned DXIL ProgramHeader import and groupshared
+  retention-list repair.
+- d8f642f7700f: monitored fence placements, ownership and public kernel waits.
+- 31ac6e0896e4: kernel-ordered asynchronous owned CPU submission and pending
+  teardown.
+- 6a834ae5cfba: exact exports, actual wave queries, generated v1 capability
+  inventory and live DXC/Vulkan/D3D12 coexistence.
+- bcdad7983968: safe Windows diff-scoped formatting/read-sharing guidance.
+- c58bc1d8554e: roadmap/design/log W1 closure and acceptance reconciliation.
+- e4cace11775b: distinguish Vulkan physical-device coexistence from untested
+  logical-device execution.
+
+Advertising the diagnostic SM6.0 input profile changes stock runtime
+initialization shaders and converts legacy application DXBC to DXIL. The
+original grouped shader exposed TGSM0 retained through an addrspacecast in
+llvm.used, not an unsupported actual groupshared access. Remove only the
+transformed globals from both LLVM retention lists and their dead constant
+users before SIMD rewriting; retain unrelated globals. The portable
+regression covers that distinction. The temporary imported-module dump was
+removed from code. LLVM-mode tests use -passes=feme-cpu-simdize,verify rather
+than unsupported -verify-each.
+
+Public monitored queue Signal/Wait bypass the UMD's native-fence slots.
+The authorized WARP reference established the opaque CORE runtime context
+and generic kernel callback ordering contract. Each queue GPU-signals
+Ready=N after preceding waits and GPU-waits Done=N before Execute returns;
+the owned worker CPU-waits Ready, executes its immutable snapshot and
+CPU-signals Done. Later public signals cannot overtake CPU writes.
+No Microsoft compute DMA decoder is needed.
+
+The Win32 worker specializes the frontend's checked no-exceptions allocation,
+partial failure cleanup and kernel handshake. The extracted portable
+TaskExecutor uses std::thread/std::function/deque allocation without checked
+creation/enqueue errors; it was not silently substituted at the DDI boundary.
+CompiledStage, prepared invocation, groupshared lowering and native code remain
+shared. Windows runtime handles stay out of the portable compiler.
+
+Snapshots retain native pipelines independently of PSOs/lists/allocators.
+Resource lookup verifies the live owner registry before dereferencing private
+handles; shared guards hold mappings stable during CPU work. Application
+buffers still must survive submitted use. The pending-teardown test releases
+recording objects and the consumer queue while a delayed producer queue
+releases the held gate, keeping buffers valid. Native failures cover partial
+second-fence OOM, S_FALSE with a returned handle, worker errors and canceled
+readiness events. An application that never signals its own wait can deadlock;
+no arbitrary timeout or shared-environment device/process reset was added.
+
+The grouped scalar/WARP control uses (5,3,2) threads, (3,2,1) groups, 180
+results and 16 guards. Thirty-entry groupshared exchange crosses the group
+barrier; three dispatches accumulate without reupload. A post-record root
+mutation checks snapshots. Held-gate readback proves no early writes.
+The system WARP execution is an explicitly separate original-shader control.
+
+Final evidence on native ARM64 Windows, OS 10.0.26300, inbox D3D12/WARP
+10.0.26100.9818, standalone SDK 10.0.26100.0:
+- check-feme: 4400 passed, 15 skipped, 10 unsupported, with assertions,
+  object caching and PCH disabled.
+- Native compiler/DDI selectors: 4/4 passed, also in the full suite.
+- Callback probes: 64/64 passed.
+- Final stock-runtime probes: 45/45 passed after refreshed main compiler/ICD
+  artifacts and source formatting, including same-process coexistence.
+- Generated inventory parsed successfully; nine OS gates are registered,
+  five native fixtures exist and DXC/coexistence evidence is configured.
+  Actual public wave min/max/total are 4; WaveOps=false. Native requested
+  width 4 succeeds and 8 fails; this does not advertise public SM6.6.
+
+Both Vulkan ICD environment variables were set and FeMe CPU Vulkan Device
+verified in the launching shell before Vulkan/full/coexistence runs. Native
+DXC is the ARM64 Vulkan SDK compiler DLL. Missing vswhere.exe and duplicate
+driver-sorting-layer warnings were nonfatal. Formatting must precede builds
+reading the same files on Windows; compiler read sharing can otherwise deny
+formatter writes. Preserve unchanged line bytes and use LF for changed/new
+lines; validate cached as well as working-tree whitespace.
+
+The roadmap now strikes W1 and the implementation log maps W1(a)/(b)/(c) to
+passing owned evidence. Generated inventory v1 is an internal headless subset
+with complete_product_feature_level=null, not full FL11_0/12_2, SM6.0 or
+WaveOps conformance. Optional unconfigured evidence is explicitly recorded,
+not turned into a successful certificate. Historical E_NOTIMPL/reference-only
+entries remain historical.
+
+Next steps are W2, outside this request: complete roots/CBVs/constants/tables,
+descriptor preparation, structured/typed operations, images/views and resource
+classes, barrier/query/indirect semantics and the broader synchronization/
+isolation matrix. W3-W7 graphics, advanced FL12_2 features, DXR, presentation
+and conformance remain open. Do not distribute the bring-up profile as a
+complete lower feature level or weaken host bounds checks to advance it.
