@@ -137607,3 +137607,34 @@ and execution-time bridge materialization, then original DXBC/DXIL/reference
 and pending-lifetime controls. Inventory remains v13/103 OS gates until that
 separate step passes. Full W2 still needs the other formats, resources, bindings
 and synchronization work; this prerequisite is not a closeout claim.
+# W2 progress: owned typed SRV component mappings
+
+Commit `686523a873c6` completes Windows materialization of the preceding shared
+mapping prerequisite. Bridge 4 explicitly carries D3D component encodings,
+validates all source channels/reserved bits/required marker, and converts them
+to FeMe's distinct swizzle representation. Older bridges are rejected rather
+than accepting differently sized binding arrays. Artifact ABI stays 10.
+
+The descriptor stores mapping metadata, not transformed resource contents.
+Copies preserve it and ordered execution refreshes it with live resource state.
+This keeps alias visibility and post-record updates intact. Typed SRVs admit
+custom mappings; raw/structured views and borrowed UAVs reject them. Native
+tests verify invalid encodings and no descriptor mutation on rejection.
+
+Thirty-six controls reuse identical shaders across owned DXBC, original DXIL,
+reference WARP and held execution for all nine admitted formats. Scalar absent
+alpha, vector channel reordering, per-view zero/one, post-record copies and
+forced-one null SRV behavior are checked against exact readback. Null UAV
+preservation and existing lifetime/provenance audits remain. The first harness
+build found a shadowed local, corrected before tests. Native selectors passed
+4/4, new controls 36/36, full FeMe 4410/15 skipped/10 unsupported, callbacks
+65/65 and stock runtime 175/175. Identity was verified before Vulkan/coexistence
+launches. Inventory v14/bridge4 has 139 unique required gates with actual native
+and OS fixtures. No full feature level, new CTS result, wider typed UAV flag or
+Vulkan advertisement is claimed; the WARP KMD remains unchanged.
+
+Next W2 work remains substantial: complete typed additional-format/UAV support,
+general counter payload/dynamic-expression coverage, images and samplers,
+full roots/resource classes/residency, transitions/splits/ranged barriers,
+queries and broader indirect signatures/removal wakeups. Keep W2 open until
+its complete acceptance evidence exists, not just these passing buffer slices.
