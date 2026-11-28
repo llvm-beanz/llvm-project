@@ -840,6 +840,37 @@ with confirmed FeMe ICD identity. Inventory **v24** retains bridge 5/artifact 12
 and a null complete product FL. Native narrow formats, volume/dimensional views,
 the remaining image/sampling matrix and general W2 contracts stay open.
 
+#### Owned volume UAV views and checked W-slice origins
+
+Owned 3D UAV descriptions now admit a selected mip and validate FirstW/WSize
+against its depth, including checked all-remaining sentinel normalization.
+The independent reference reports depth 4 for mip 1 of an 8-deep texture,
+despite FirstW=1/WSize=2. A logical Z=2 write/read lands in physical slice 3;
+the earlier proposed WSize compute clamp was therefore disproven.
+
+Bridge 6 and artifact ABI 13 carry `FirstDepthSlice` separately from reported
+depth and unshifted mip layouts. Shared FP32/i32 loads/stores and 3D atomics
+translate the coordinate with subtraction-based physical-depth bounds.
+Queries retain full mip depth, while accesses beyond the physical mip return
+zero/do nothing, even when the backing allocation has padding. Existing zero
+origins retain Vulkan and SRV behavior; nonzero origins require single-mip
+3D UAV bindings. Older bridge callers/artifacts are rejected.
+
+Four original-DXIL owned/reference volume controls check every subresource and
+padding, selected writes including the in-resource WSize-boundary probe, live
+descriptor updates, dimensions, null replacement, replay, upload preservation
+and held recording teardown. Runtime regression coverage checks FP32/i32 and
+atomic origin translation, invalid origins/coordinates, masks, full dimensions
+and physical guards. Native constructor negatives preserve existing descriptors.
+This is finite volume evidence, not complete image-format/operation or W2
+acceptance. Out-of-physical-mip reference behavior is deliberately not inferred.
+
+Validation: focused compiler/owned/reference controls **11/11**, full FeMe
+**4433** passed / **15** skipped / **10** unsupported, callbacks **65/65**,
+stock-runtime/coexistence **395/395**, with confirmed FeMe ICD identity.
+Generated inventory **v25** has **359** unique existing required OS gates,
+**18** native fixtures, bridge **6**/artifact **13**, and null complete product FL.
+
 #### Shared Direct3D integer image-store conversion
 
 `FEME_IMAGE_SATURATE_INTEGER_STORES` opts storage-image stores into the same

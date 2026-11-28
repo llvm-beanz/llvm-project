@@ -1039,12 +1039,30 @@ HRESULT WarpBufferAccess::imageView(
     Selected.Tex2D.PlaneSlice = View.Tex2D.PlaneSlice;
     break;
   case D3D12DDI_RD_TEXTURE3D:
+    if (!View.Tex3D.WSize || View.Tex3D.FirstW >= 2048 ||
+        (View.Tex3D.WSize != UINT_MAX &&
+         View.Tex3D.WSize > 2048 - View.Tex3D.FirstW))
+      return E_INVALIDARG;
+    Selected.Tex3D.MostDetailedMip = View.Tex3D.MipSlice;
+    Selected.Tex3D.MipLevels = 1;
+    break;
   case D3D12DDI_RD_TEXTURECUBE:
   case D3D12DDI_RD_BUFFER:
   case D3D12DDI_RD_RAYTRACING_ACCELERATION_STRUCTURE_0042:
     return E_NOTIMPL;
   }
-  return imageView(Selected, Image, Layouts, true);
+  HRESULT Result = imageView(Selected, Image, Layouts, true);
+  if (FAILED(Result) || !Image.Data ||
+      View.ResourceDimension != D3D12DDI_RD_TEXTURE3D)
+    return Result;
+  if (View.Tex3D.FirstW >= Image.Depth ||
+      (View.Tex3D.WSize != UINT_MAX &&
+       View.Tex3D.WSize > Image.Depth - View.Tex3D.FirstW))
+    return E_INVALIDARG;
+  // WARP compute addressing starts at FirstW, but reports the full mip depth.
+  // WSize is validated here, not used as the shader's depth bound.
+  Image.FirstDepthSlice = View.Tex3D.FirstW;
+  return S_OK;
 }
 #endif
 

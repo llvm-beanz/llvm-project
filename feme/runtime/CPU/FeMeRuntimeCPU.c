@@ -2053,8 +2053,20 @@ typedef struct {
   // See RuntimeABI.h's own comment on this field for why a
   // block-compressed format's widened decode-target `Format` needs this.
   uint32_t BorderComponentMask;
-  uint32_t Reserved[1];
+  uint32_t FirstDepthSlice;
 } FemeRTImageDescriptor;
+
+__attribute__((always_inline)) static uint32_t
+femeRTImageDepthCoordinate(const FemeRTImageDescriptor *Img, uint32_t Level,
+                           int32_t Z) {
+  uint32_t Depth = Img->Depth >> Level;
+  if (!Depth)
+    Depth = 1;
+  if (Z < 0 || Img->FirstDepthSlice >= Depth ||
+      (uint32_t)Z >= Depth - Img->FirstDepthSlice)
+    return UINT32_MAX;
+  return Img->FirstDepthSlice + (uint32_t)Z;
+}
 
 // Mirrors `feme::cpu::FemeSamplerDescriptor` (RuntimeABI.h) field for field.
 typedef struct {
@@ -4941,11 +4953,14 @@ femeRTAtomicTexelAddress3D(const FemeRTImageDescriptor *Img, int32_t X,
   if (X < 0 || Y < 0 || Z < 0 || (uint32_t)X >= Img->Width ||
       (uint32_t)Y >= Img->Height || (uint32_t)Z >= Img->Depth)
     return (int32_t *)0;
+  uint32_t Slice = femeRTImageDepthCoordinate(Img, 0, Z);
+  if (Slice == UINT32_MAX)
+    return (int32_t *)0;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
   if (ElemSize != sizeof(int32_t))
     return (int32_t *)0;
   const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
-  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+  uint64_t Offset = Layout->Offset + (uint64_t)Slice * Layout->SlicePitch +
                     (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
   if (Offset + ElemSize > Img->SizeInBytes)
     return (int32_t *)0;
@@ -5313,16 +5328,14 @@ femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
   }
   if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
     return Zero;
-  uint32_t LevelDepth = Img->Depth >> Level;
-  if (LevelDepth == 0)
-    LevelDepth = 1;
-  if ((uint32_t)Z >= LevelDepth)
+  uint32_t Slice = femeRTImageDepthCoordinate(Img, Level, Z);
+  if (Slice == UINT32_MAX)
     return Zero;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
   if (ElemSize == 0)
     return Zero;
   const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
-  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+  uint64_t Offset = Layout->Offset + (uint64_t)Slice * Layout->SlicePitch +
                     (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
@@ -5341,16 +5354,14 @@ femeRTFetchTexel3DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
     return Zero;
-  uint32_t LevelDepth = Img->Depth >> Level;
-  if (LevelDepth == 0)
-    LevelDepth = 1;
-  if ((uint32_t)Z >= LevelDepth)
+  uint32_t Slice = femeRTImageDepthCoordinate(Img, Level, Z);
+  if (Slice == UINT32_MAX)
     return Zero;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
   if (ElemSize == 0)
     return Zero;
   const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
-  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+  uint64_t Offset = Layout->Offset + (uint64_t)Slice * Layout->SlicePitch +
                     (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
@@ -5373,11 +5384,14 @@ femeRTStoreTexel3D(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   if (X < 0 || Y < 0 || Z < 0 || (uint32_t)X >= Img->Width ||
       (uint32_t)Y >= Img->Height || (uint32_t)Z >= Img->Depth)
     return;
+  uint32_t Slice = femeRTImageDepthCoordinate(Img, 0, Z);
+  if (Slice == UINT32_MAX)
+    return;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
   if (ElemSize == 0)
     return;
   const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
-  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+  uint64_t Offset = Layout->Offset + (uint64_t)Slice * Layout->SlicePitch +
                     (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
   if (Offset + ElemSize > Img->SizeInBytes)
     return;
@@ -5395,11 +5409,14 @@ femeRTStoreTexel3DI32(const FemeRTImageDescriptor *Img, int32_t X, int32_t Y,
   if (X < 0 || Y < 0 || Z < 0 || (uint32_t)X >= Img->Width ||
       (uint32_t)Y >= Img->Height || (uint32_t)Z >= Img->Depth)
     return;
+  uint32_t Slice = femeRTImageDepthCoordinate(Img, 0, Z);
+  if (Slice == UINT32_MAX)
+    return;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
   if (ElemSize == 0)
     return;
   const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
-  uint64_t Offset = Layout->Offset + (uint64_t)Z * Layout->SlicePitch +
+  uint64_t Offset = Layout->Offset + (uint64_t)Slice * Layout->SlicePitch +
                     (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
   if (Offset + ElemSize > Img->SizeInBytes)
     return;

@@ -87,7 +87,7 @@ The original compute-only compiler baseline is no longer current:
 - `feme::cpu::CompiledStage` supports compute, vertex, fragment, hull,
   patch-constant, domain, geometry, mesh, and task invocation. Reuse its
   prepared resource and stage ABIs rather than inventing a Direct3D variant.
-- `StageArtifactInfo` uses artifact ABI version 12 and populated wave,
+- `StageArtifactInfo` uses artifact ABI version 13 and populated wave,
   workgroup, and groupshared reflection. Divergent groupshared indexing has
   lowering and regression coverage; remaining barrier and masking limitations
   must be assessed against individual shaders, not treated as blanket gaps.
@@ -1878,12 +1878,21 @@ image namespace and opts integer stores into Direct3D saturation.
 Shared DXIL full-texel stores canonicalize FP32/i32 scalar/vector payloads for
 1D/array, 2D/array and 3D into existing image-store helpers. Unsupported
 non-heap, read-only, ROV or mismatched coordinate/texel shapes receive early
-diagnostics; native volume UAV views still reject pending W-slice evidence.
+diagnostics. Native volume UAVs now validate selected mip/FirstW/WSize metadata.
+Reference execution reports the full mip depth and maps logical Z through
+FirstW, including a tested in-resource access beyond WSize. Bridge 6 and artifact
+ABI 13 preserve a separate `FirstDepthSlice` origin without shifting the layout
+or weakening its full-resource bounds. Loads, stores and atomics share checked
+physical-depth addressing; zero origins preserve existing Vulkan/SRV behavior.
 Original-DXIL owned/reference 2D-array controls verify selected mip/layer writes,
 loads and dimensions, OOB/null loads/stores, live CPU-source descriptor copies,
 replay and held teardown. Readback covers every subresource and padding rather
 than only shader output, preserving untouched texels, other mips/layers, guards
-and upload storage. Remaining native dimensions and narrow-format execution
+and upload storage. The same complete-readback controls now execute selected
+3D mip/W-slice origins, full-mip dimensions, live copies, nulls and held teardown.
+Reference probes do not establish behavior beyond the physical mip; FeMe
+rejects those accesses rather than relying on allocation padding.
+Remaining native dimensions and narrow-format execution
 coverage stay open. Owned CPU/shader-visible sampler heaps now use checked
 heap-type-specific creation/copy paths and shared canonical state validation.
 Native inactive anisotropy/comparison fields normalize before validation.
@@ -1903,7 +1912,7 @@ covered only by scalar static samplers before issuing shader DDIs.
 Original-DXIL owned/reference controls execute point/linear filtering,
 clamp/custom-border/opaque-black addressing, copied live sampler updates, null
 images, replay and held list/allocator/CPU-heap release. Complete sampling
-operation/format coverage remains open. See the implementation log and v24
+operation/format coverage remains open. See the implementation log and v25
 inventory.
 
 Recorded commands retain immutable binding identities separately from prepared

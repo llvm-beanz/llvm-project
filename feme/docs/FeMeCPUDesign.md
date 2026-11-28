@@ -3999,15 +3999,21 @@ Notes and constraints:
   these errors before preparation; low-level callers must validate first.
   Existing unambiguous unqualified inputs, including Vulkan's bindings, retain
   their behavior. DXIL image/sampler normalization and image namespace
-  serialization now supply this identity end-to-end. Windows bridge 5 prepares
+  serialization now supply this identity end-to-end. Windows bridge 6 prepares
   checked borrowed image/mip-layout and sampler PODs into these separate heaps;
   owned finite texture SRV/UAVs now resolve live mip/layer geometry into these PODs.
   Submission-local layout banks keep recording identities separate from borrowed
   execution pointers. Owned sampler tables now populate an independent array;
   scalar static sampler state is copied from native roots into recordings.
-  Native 2D-array UAV execution checks selected stores/loads and complete
-  subresource readback; volume views and complete operation/format coverage
-  remain open. DXIL full-texel stores use the existing masked image-store
+  Native 2D-array/3D UAV execution checks selected stores/loads and complete
+  subresource readback. Single-mip 3D storage views keep the full reported mip
+  depth and a separate `FirstDepthSlice` coordinate origin. Artifact ABI 13
+  consumes image-descriptor reserved headroom for this origin; shared loads,
+  stores and atomics bound the resulting physical slice by the original depth.
+  Reference WARP's tested in-resource compute access is not clipped by WSize;
+  view construction still validates FirstW/WSize against the selected mip.
+  Complete operation/format coverage remains open.
+  DXIL full-texel stores use the existing masked image-store
   helpers for writable non-ROV FP32/i32 1D/array, 2D/array and 3D handles.
   Direct3D SRV descriptors
   set `FEME_IMAGE_LOAD_SWIZZLE`, opting addressed loads into component mapping.

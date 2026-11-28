@@ -955,8 +955,11 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered,
 HRESULT exerciseTextureViews(ID3D12Device *Device,
                              const D3D12_SHADER_BYTECODE &Shader, bool Ordered,
                              bool SingleLayer, bool Sampling,
-                             bool StaticSampling, bool TextureUAV) {
-  constexpr UINT UploadBytes = 16384, SeedOffset = 15872;
+                             bool StaticSampling, bool TextureUAV,
+                             bool Volume) {
+  constexpr UINT TextureStride = 16384, UploadBytes = 2 * TextureStride,
+                 SeedOffset = UploadBytes - 512;
+  UINT SubresourceCount = Volume ? 2 : 6;
   constexpr UINT Words = 34, Bytes = Words * sizeof(UINT);
   UINT OutputOffset = TextureUAV ? UploadBytes : 0;
   UINT ReadbackBytes = OutputOffset + Bytes;
@@ -1000,10 +1003,11 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
   std::vector<unsigned char> Data(UploadBytes, 0xa5);
   std::memcpy(Data.data() + SeedOffset, Seed.data(), Bytes);
   D3D12_RESOURCE_DESC TextureDesc{};
-  TextureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  TextureDesc.Dimension = Volume ? D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                 : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
   TextureDesc.Width = 8;
   TextureDesc.Height = 4;
-  TextureDesc.DepthOrArraySize = 3;
+  TextureDesc.DepthOrArraySize = Volume ? 8 : 3;
   TextureDesc.MipLevels = 2;
   TextureDesc.Format =
       Sampling ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R32G32B32A32_UINT;
@@ -1022,34 +1026,37 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
     if (FAILED(Result))
       return Result;
     UINT64 Total = 0;
-    Device->GetCopyableFootprints(&TextureDesc, 0, 6, I * 8192,
-                                  Footprints[I].data(), nullptr, nullptr,
-                                  &Total);
-    if (Total > 8192)
+    Device->GetCopyableFootprints(&TextureDesc, 0, SubresourceCount,
+                                  I * TextureStride, Footprints[I].data(),
+                                  nullptr, nullptr, &Total);
+    if (Total > TextureStride)
       return report("Unexpected texture-view upload footprint extent", E_FAIL);
-    for (UINT Subresource = 0; Subresource < 6; ++Subresource) {
+    for (UINT Subresource = 0; Subresource < SubresourceCount; ++Subresource) {
       const auto &Layout = Footprints[I][Subresource];
       UINT Mip = Subresource % 2, Layer = Subresource / 2;
-      for (UINT Y = 0; Y < Layout.Footprint.Height; ++Y)
-        for (UINT X = 0; X < Layout.Footprint.Width; ++X) {
-          std::array<UINT, 4> Texel{};
-          for (UINT C = 0; C < Texel.size(); ++C)
-            Texel[C] =
-                I * 1000 + Mip * 100 + Layer * 40 + Y * 10 + X + C * 10000;
-          auto Offset = Layout.Offset + UINT64(Y) * Layout.Footprint.RowPitch +
-                        X * sizeof(Texel);
-          if (Offset > SeedOffset || sizeof(Texel) > SeedOffset - Offset)
-            return report("Texture-view upload span overlaps output seed",
-                          E_FAIL);
-          if (Sampling) {
-            std::array<float, 4> Floating{};
-            for (UINT C = 0; C < Floating.size(); ++C)
-              Floating[C] = static_cast<float>(Texel[C]);
-            std::memcpy(Data.data() + Offset, Floating.data(),
-                        sizeof(Floating));
-          } else
-            std::memcpy(Data.data() + Offset, Texel.data(), sizeof(Texel));
-        }
+      for (UINT Z = 0; Z < Layout.Footprint.Depth; ++Z)
+        for (UINT Y = 0; Y < Layout.Footprint.Height; ++Y)
+          for (UINT X = 0; X < Layout.Footprint.Width; ++X) {
+            std::array<UINT, 4> Texel{};
+            for (UINT C = 0; C < Texel.size(); ++C)
+              Texel[C] = I * 1000 + Mip * 100 + (Layer + Z) * 40 + Y * 10 + X +
+                         C * 10000;
+            auto Offset = Layout.Offset +
+                          (UINT64(Z) * Layout.Footprint.Height + Y) *
+                              Layout.Footprint.RowPitch +
+                          X * sizeof(Texel);
+            if (Offset > SeedOffset || sizeof(Texel) > SeedOffset - Offset)
+              return report("Texture-view upload span overlaps output seed",
+                            E_FAIL);
+            if (Sampling) {
+              std::array<float, 4> Floating{};
+              for (UINT C = 0; C < Floating.size(); ++C)
+                Floating[C] = static_cast<float>(Texel[C]);
+              std::memcpy(Data.data() + Offset, Floating.data(),
+                          sizeof(Floating));
+            } else
+              std::memcpy(Data.data() + Offset, Texel.data(), sizeof(Texel));
+          }
     }
   }
   std::vector<unsigned char> ReadbackSeed(ReadbackBytes, 0xa5);
@@ -1059,13 +1066,26 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
   auto ExpectedReadback = ReadbackSeed;
   if (TextureUAV)
     for (UINT Thread = 0; Thread < 4; ++Thread) {
-      UINT Index = Thread & 1, Subresource = 1 + (1 + Thread / 2) * 2;
+      UINT Index = Thread & 1;
+      UINT Subresource = Volume ? 1 : 1 + (1 + Thread / 2) * 2;
       const auto &Layout = Footprints[Index][Subresource];
       std::array<UINT, 4> Texel{256 + Thread, 65536 + Thread, UINT_MAX - Thread,
                                 17 + Thread};
-      std::memcpy(ExpectedReadback.data() + Layout.Offset +
+      UINT64 DepthOffset = Volume ? UINT64(1 + Thread / 2) *
+                                        Layout.Footprint.RowPitch *
+                                        Layout.Footprint.Height
+                                  : 0;
+      std::memcpy(ExpectedReadback.data() + Layout.Offset + DepthOffset +
                       Thread * sizeof(Texel),
                   Texel.data(), sizeof(Texel));
+      if (Volume) {
+        Texel.fill(777);
+        std::memcpy(ExpectedReadback.data() + Layout.Offset +
+                        3 * Layout.Footprint.RowPitch *
+                            Layout.Footprint.Height +
+                        Thread * sizeof(Texel),
+                    Texel.data(), sizeof(Texel));
+      }
     }
   D3D12_RANGE NoRead{0, 0}, Full{0, ReadbackBytes}, UploadRange{0, UploadBytes};
   void *Memory = nullptr;
@@ -1174,10 +1194,17 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
       if (TextureUAV) {
         D3D12_UNORDERED_ACCESS_VIEW_DESC UAV{};
         UAV.Format = TextureDesc.Format;
-        UAV.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-        UAV.Texture2DArray.MipSlice = Selected ? 1 : 0;
-        UAV.Texture2DArray.FirstArraySlice = Selected ? 1 : 0;
-        UAV.Texture2DArray.ArraySize = Selected ? 2 : 3;
+        if (Volume) {
+          UAV.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+          UAV.Texture3D.MipSlice = Selected ? 1 : 0;
+          UAV.Texture3D.FirstWSlice = Selected ? 1 : 0;
+          UAV.Texture3D.WSize = Selected ? 2 : 8;
+        } else {
+          UAV.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+          UAV.Texture2DArray.MipSlice = Selected ? 1 : 0;
+          UAV.Texture2DArray.FirstArraySlice = Selected ? 1 : 0;
+          UAV.Texture2DArray.ArraySize = Selected ? 2 : 3;
+        }
         Device->CreateUnorderedAccessView(Null && !I ? nullptr
                                                      : Textures[I].Get(),
                                           nullptr, &UAV, {CPU.ptr + I * Step});
@@ -1246,7 +1273,7 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
       TextureUAV ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
                  : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
   for (UINT I = 0; I < 2; ++I) {
-    for (UINT Subresource = 0; Subresource < 6; ++Subresource) {
+    for (UINT Subresource = 0; Subresource < SubresourceCount; ++Subresource) {
       D3D12_TEXTURE_COPY_LOCATION Source{}, Destination{};
       Source.pResource = Upload.Get();
       Source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -1297,7 +1324,8 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
       Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
       Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
       List->ResourceBarrier(1, &Barrier);
-      for (UINT Subresource = 0; Subresource < 6; ++Subresource) {
+      for (UINT Subresource = 0; Subresource < SubresourceCount;
+           ++Subresource) {
         D3D12_TEXTURE_COPY_LOCATION Source{}, Destination{};
         Source.pResource = Textures[I].Get();
         Source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -1370,7 +1398,8 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
         std::array<UINT, 4> Texel{256 + Thread, 65536 + Thread,
                                   UINT_MAX - Thread, 17 + Thread};
         for (UINT C = 0; C < 4; ++C)
-          Expected[1 + Thread * 8 + C] = Null && !Index ? 0 : Texel[C];
+          Expected[1 + Thread * 8 + C] =
+              Null && !Index ? 0 : Texel[C] + (Volume ? 777 : 0);
       } else if (Sampling) {
         constexpr std::array<UINT, 4> Border{2, 3, 5, 7};
         for (UINT C = 0; C < 4; ++C)
@@ -1391,7 +1420,9 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
       for (UINT C = 0; C < 4; ++C)
         Expected[5 + Thread * 8 + C] = C == 0   ? 4
                                        : C == 1 ? 2
-                                       : C == 2 ? (SingleLayer ? 1 : 2)
+                                       : C == 2 ? (Volume        ? 4
+                                                   : SingleLayer ? 1
+                                                                 : 2)
                                                 : 1;
     }
     std::memcpy(ExpectedReadback.data() + OutputOffset, Expected.data(), Bytes);
@@ -3044,20 +3075,34 @@ int wmain(int Argc, wchar_t **Argv) {
        std::wcscmp(Argv[1], L"--reference-ordered-sampler-views") == 0 ||
        std::wcscmp(Argv[1], L"--ordered-static-sampler-views") == 0 ||
        std::wcscmp(Argv[1], L"--reference-ordered-static-sampler-views") == 0);
-  bool TextureUAVViews =
+  bool VolumeTextureUAVViews =
       Argc == 3 &&
-      (std::wcscmp(Argv[1], L"--texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--ordered-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0);
+      (std::wcscmp(Argv[1], L"--volume-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-volume-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-volume-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-volume-texture-uav-views") ==
+           0);
+  bool TextureUAVViews =
+      VolumeTextureUAVViews ||
+      Argc == 3 &&
+          (std::wcscmp(Argv[1], L"--texture-uav-views") == 0 ||
+           std::wcscmp(Argv[1], L"--ordered-texture-uav-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-texture-uav-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0);
   bool ReferenceTextureUAVViews =
       TextureUAVViews &&
       (std::wcscmp(Argv[1], L"--reference-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0);
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-volume-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-volume-texture-uav-views") ==
+           0);
   bool OrderedTextureUAVViews =
       TextureUAVViews &&
       (std::wcscmp(Argv[1], L"--ordered-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0);
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-volume-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-volume-texture-uav-views") ==
+           0);
   bool ReferenceTextureViews =
       ReferenceSamplerViews || ReferenceTextureUAVViews ||
       Argc == 3 &&
@@ -3172,6 +3217,7 @@ int wmain(int Argc, wchar_t **Argv) {
                  "--[reference-][ordered-]sampler-views FILE|"
                  "--[reference-][ordered-]static-sampler-views FILE|"
                  "--[reference-][ordered-]texture-uav-views FILE|"
+                 "--[reference-][ordered-]volume-texture-uav-views FILE|"
                  "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
@@ -3290,7 +3336,8 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result) && TextureViews)
     Result = exerciseTextureViews(Device.Get(), DXIL, OrderedTextureViews,
                                   SingleLayerTextureViews, SamplerViews,
-                                  StaticSamplerViews, TextureUAVViews);
+                                  StaticSamplerViews, TextureUAVViews,
+                                  VolumeTextureUAVViews);
   if (SUCCEEDED(Result) && Commands)
     Result = exerciseCommands(Device.Get(),
                               DXILCommands || Coexist ? &DXIL : nullptr);
@@ -3499,11 +3546,12 @@ int wmain(int Argc, wchar_t **Argv) {
                          : BufferCommands ? 9u
                          : PlacedBuffers || Footprints ? 0u
                                                        : 6u) &&
-          Copies == (TextureUAVViews ? (OrderedTextureViews ? 26u : 52u)
-                     : TextureViews  ? (OrderedTextureViews ? 14u : 16u)
-                     : ArrayTexture  ? 13u
-                     : TextureCopies ? 7u
-                     : CounterDelta  ? 10u
+          Copies == (VolumeTextureUAVViews ? (OrderedTextureViews ? 10u : 20u)
+                     : TextureUAVViews     ? (OrderedTextureViews ? 26u : 52u)
+                     : TextureViews        ? (OrderedTextureViews ? 14u : 16u)
+                     : ArrayTexture        ? 13u
+                     : TextureCopies       ? 7u
+                     : CounterDelta        ? 10u
                      : Indirect || Predication     ? 7u
                      : BufferCommands              ? 4u
                      : PlacedBuffers || Footprints ? 2u

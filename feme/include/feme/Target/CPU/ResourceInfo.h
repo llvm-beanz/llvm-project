@@ -269,7 +269,8 @@ struct ResourceInfo {
 /// Version 10 adds component mappings to the buffer descriptor layout.
 /// Version 11 admits descriptor-controlled saturating integer stores.
 /// Version 12 admits SRV/UAV namespaces on image ranges.
-constexpr uint32_t ArtifactAbiVersion = 12;
+/// Version 13 makes single-mip 3D storage accesses honor a depth-slice origin.
+constexpr uint32_t ArtifactAbiVersion = 13;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.

@@ -1,5 +1,11 @@
 # Vulkan `KHR`/`EXT` extension inventory
 
+Owned volume UAV origins pass 4433 full FeMe tests (15 skipped, 10 unsupported),
+65 callbacks and 395 stock-runtime/coexistence gates, including four volume
+controls and confirmed FeMe ICD identity. Bridge6/artifact13 keep full dimensions
+separate from guarded storage origins. Vulkan zero-origin behavior and
+advertisements are unchanged; no inventory regeneration or CTS result.
+
 Owned texture UAV preparation/shared DXIL stores pass 4432 full FeMe tests
 (15 skipped, 10 unsupported), 65 callbacks and 391 stock-runtime/coexistence
 gates, including four new selected-write/subresource controls. FeMe ICD identity

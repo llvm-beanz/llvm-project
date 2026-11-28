@@ -8972,4 +8972,85 @@ TEST_F(ImageSamplingTest, Store3DOutOfBoundsZIsANoOp) {
   EXPECT_FLOAT_EQ(Storage[0][0][0][0], 1.0f);
 }
 
+TEST_F(ImageSamplingTest, VolumeViewOriginPreservesDepthAndPhysicalGuards) {
+  auto *FloatLoad = addWrapper("volume_float", "feme.cpu.image.load.3d.v4f32");
+  auto *IntegerLoad =
+      addWrapper("volume_integer", "feme.cpu.image.load.3d.v4i32");
+  auto *FloatStore =
+      keepForJIT(getRuntimeFunction(*M, "feme.cpu.image.store.3d.v4f32"));
+  auto *IntegerStore =
+      keepForJIT(getRuntimeFunction(*M, "feme.cpu.image.store.3d.v4i32"));
+  auto *Query = addWrapper("volume_dimensions",
+                           "feme.cpu.image.getdimensions.lod.3d.v3i32");
+  auto *Atomic =
+      keepForJIT(getRuntimeFunction(*M, "feme.cpu.image.atomic.add.3d.i32"));
+  auto LoadFloat = resolve<Load3DFn>(FloatLoad);
+  auto LoadInteger = resolve<Load3DI32Fn>(IntegerLoad);
+  auto StoreFloat = resolve<Store3DFn>(FloatStore);
+  auto StoreInteger = resolve<Store3DI32Fn>(IntegerStore);
+  using DimensionsFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                                int32_t, bool, void *);
+  auto Dimensions = resolve<DimensionsFn>(Query);
+  using AtomicFn = int32_t (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                               int32_t, int32_t, int32_t, int32_t, bool);
+  auto AtomicAdd = resolve<AtomicFn>(Atomic);
+  for (uint32_t First : {0u, 1u, 3u, 4u, UINT32_MAX}) {
+    SCOPED_TRACE(First);
+    std::array<std::array<float, 4>, 6> Floating;
+    std::array<std::array<int32_t, 4>, 6> Integer;
+    for (auto &Texel : Floating)
+      Texel.fill(42);
+    for (auto &Texel : Integer)
+      Texel.fill(42);
+    auto ExpectedFloat = Floating;
+    auto ExpectedInteger = Integer;
+    std::array<int32_t, 6> AtomicStorage;
+    AtomicStorage.fill(42);
+    auto ExpectedAtomic = AtomicStorage;
+    FemeImageSubresourceLayout FloatLayout, IntegerLayout, AtomicLayout;
+    auto FloatImage = makeImage3D(Floating.data(), sizeof(Floating), 1, 1, 4,
+                                  ResourceFormat::R32G32B32A32_FLOAT,
+                                  FloatLayout, FEME_IMAGE_STORAGE);
+    auto IntegerImage = makeImage3D(Integer.data(), sizeof(Integer), 1, 1, 4,
+                                    ResourceFormat::R32G32B32A32_SINT,
+                                    IntegerLayout, FEME_IMAGE_STORAGE);
+    auto AtomicImage =
+        makeImage3D(AtomicStorage.data(), sizeof(AtomicStorage), 1, 1, 4,
+                    ResourceFormat::R32_SINT, AtomicLayout, FEME_IMAGE_STORAGE);
+    FloatLayout = IntegerLayout = {0, 16, 16, 0};
+    AtomicLayout = {0, 4, 4, 0};
+    FloatImage.FirstDepthSlice = IntegerImage.FirstDepthSlice =
+        AtomicImage.FirstDepthSlice = First;
+    uint32_t Extent[4]{};
+    Dimensions(&IntegerImage, 1, 0, 0, true, Extent);
+    EXPECT_EQ(Extent[2], 4u);
+    for (int32_t Z : {-1, 0, 1, 2, 3, 4, INT32_MAX}) {
+      bool Valid = Z >= 0 && First < 4 && uint32_t(Z) < 4 - First;
+      StoreFloat(&FloatImage, 1, 0, 0, 0, Z, {7, 8, 9, 10}, true);
+      StoreInteger(&IntegerImage, 1, 0, 0, 0, Z, {-7, -8, -9, -10}, true);
+      EXPECT_EQ(AtomicAdd(&AtomicImage, 1, 0, 0, 0, Z, 8, true),
+                Valid ? 42 : 0);
+      if (Valid) {
+        ExpectedFloat[First + Z] = {7, 8, 9, 10};
+        ExpectedInteger[First + Z] = {-7, -8, -9, -10};
+        ExpectedAtomic[First + Z] = 50;
+      }
+      float FloatOut[4];
+      int32_t IntegerOut[4];
+      LoadFloat(&FloatImage, 1, 0, 0, 0, Z, 0, 0, true, FloatOut);
+      LoadInteger(&IntegerImage, 1, 0, 0, 0, Z, 0, true, IntegerOut);
+      for (unsigned C = 0; C < 4; ++C) {
+        EXPECT_FLOAT_EQ(FloatOut[C], Valid ? 7 + C : 0);
+        EXPECT_EQ(IntegerOut[C], Valid ? -7 - int32_t(C) : 0);
+      }
+    }
+    StoreFloat(&FloatImage, 1, 0, 0, 0, 0, {99, 99, 99, 99}, false);
+    StoreInteger(&IntegerImage, 1, 0, 0, 0, 0, {99, 99, 99, 99}, false);
+    EXPECT_EQ(AtomicAdd(&AtomicImage, 1, 0, 0, 0, 0, 99, false), 0);
+    EXPECT_EQ(Floating, ExpectedFloat);
+    EXPECT_EQ(Integer, ExpectedInteger);
+    EXPECT_EQ(AtomicStorage, ExpectedAtomic);
+  }
+}
+
 } // namespace

@@ -186,7 +186,7 @@ bool prepareImage(const FeMeWarpImageBinding &Image,
   if (!Image.Data)
     return !Image.Width && !Image.Height && !Image.Depth && !Image.MipLevels &&
            !Image.MipLayoutCount && !Image.MipLayouts &&
-           (!Image.Format || ElementSize);
+           !Image.FirstDepthSlice && (!Image.Format || ElementSize);
   using D = feme::cpu::ImageDimension;
   bool Volume = *Dimension == D::Texture3D;
   bool OneDimensional =
@@ -205,6 +205,10 @@ bool prepareImage(const FeMeWarpImageBinding &Image,
       (*Dimension == D::TextureCube && Image.ArrayLayers != 6) ||
       !Image.MipLevels || Image.MipLevels > Layouts.size() ||
       Image.MipLayoutCount != Image.MipLevels || !Image.MipLayouts)
+    return false;
+  if (Image.FirstDepthSlice &&
+      (!Volume || Image.Namespace != 2 || Image.MipLevels != 1 ||
+       Image.FirstDepthSlice >= Image.Depth))
     return false;
   unsigned MaxMips = 0;
   for (auto Extent = std::max(Image.Width, std::max(Image.Height, Image.Depth));
@@ -241,6 +245,7 @@ bool prepareImage(const FeMeWarpImageBinding &Image,
   Descriptor.Width = Image.Width;
   Descriptor.Height = Image.Height;
   Descriptor.Depth = Image.Depth;
+  Descriptor.FirstDepthSlice = Image.FirstDepthSlice;
   Descriptor.MipLevels = Image.MipLevels;
   Descriptor.ArrayLayers = Image.ArrayLayers;
   Descriptor.PlaneCount = Descriptor.SampleCount = 1;

@@ -13,7 +13,7 @@
 #include <cmath>
 #include <cstdint>
 
-inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 5;
+inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 6;
 inline constexpr std::uint32_t FeMeWarpMaxImageMipLevels = 15;
 /// D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, 3), without SDK headers.
 inline constexpr std::uint32_t FeMeWarpDefaultComponentMapping = 0x1688;
@@ -116,6 +116,7 @@ struct FeMeWarpImageBinding {
   std::uint32_t MipLayoutCount = 0;
   const FeMeWarpImageMipLayout *MipLayouts = nullptr;
   std::uint32_t Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
+  std::uint32_t FirstDepthSlice = 0;
 };
 
 /// Direct3D sampler state without SDK types, identified by space/register.

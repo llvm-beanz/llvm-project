@@ -1265,12 +1265,52 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
         Invalid.Tex2D.PlaneSlice = 1;
         break;
       case 5:
-        Invalid.ResourceDimension = D3D12DDI_RD_TEXTURE3D;
+        Invalid.ResourceDimension = D3D12DDI_RD_TEXTURECUBE;
         break;
       }
       LastError = S_OK;
       Core.pfnCreateUnorderedAccessView(Device, &Invalid, Fourth);
       Good &= LastError == (Case >= 4 ? E_NOTIMPL : E_INVALIDARG) &&
+              std::memcmp(Before.data(), reinterpret_cast<void *>(Fourth.ptr),
+                          Stride) == 0;
+    }
+    D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002 VolumeUAV{};
+    VolumeUAV.ResourceDimension = D3D12DDI_RD_TEXTURE3D;
+    VolumeUAV.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+    VolumeUAV.Tex3D.FirstW = 1;
+    for (UINT Size : {2u, UINT_MAX}) {
+      VolumeUAV.Tex3D.WSize = Size;
+      LastError = S_OK;
+      Core.pfnCreateUnorderedAccessView(Device, &VolumeUAV, Fourth);
+      Good &= LastError == S_OK;
+    }
+    VolumeUAV.Tex3D.WSize = 2;
+    std::memcpy(Before.data(), reinterpret_cast<void *>(Fourth.ptr), Stride);
+    for (UINT Case = 0; Case < 6; ++Case) {
+      auto Invalid = VolumeUAV;
+      switch (Case) {
+      case 0:
+        Invalid.Tex3D.MipSlice = FeMeWarpMaxImageMipLevels;
+        break;
+      case 1:
+        Invalid.Tex3D.WSize = 0;
+        break;
+      case 2:
+        Invalid.Tex3D.FirstW = 2048;
+        break;
+      case 3:
+        Invalid.Tex3D.FirstW = UINT_MAX;
+        break;
+      case 4:
+        Invalid.Tex3D.WSize = 2048;
+        break;
+      case 5:
+        Invalid.hDrvResource.pDrvPrivate = reinterpret_cast<void *>(1);
+        break;
+      }
+      LastError = S_OK;
+      Core.pfnCreateUnorderedAccessView(Device, &Invalid, Fourth);
+      Good &= LastError == E_INVALIDARG &&
               std::memcmp(Before.data(), reinterpret_cast<void *>(Fourth.ptr),
                           Stride) == 0;
     }

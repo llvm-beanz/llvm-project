@@ -30,7 +30,7 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   void *Shader = nullptr, *Pipeline = nullptr;
   FeMeWarpCompiledShaderInfo Info;
   auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
-  for (auto Version : {1u, 2u, 3u, 4u}) {
+  for (auto Version : {1u, 2u, 3u, 4u, 5u}) {
     auto OldInfo = Info;
     OldInfo.BridgeVersion = Version;
     if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()),

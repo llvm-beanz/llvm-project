@@ -768,10 +768,10 @@ struct FemeImageDescriptor {
   /// *original* format actually stored. Taken from this struct's own
   /// former `Reserved[2]` headroom (now `Reserved[1]`).
   uint32_t BorderComponentMask;
-  /// ABI headroom for later image-descriptor extensions. Was `Reserved[2]`
-  /// before roadmap L125(w) donated one slot's worth of space to
-  /// `BorderComponentMask` above.
-  uint32_t Reserved[1];
+  /// Storage-coordinate origin for a single-mip 3D storage view. Dimensions
+  /// still report the full mip depth; accesses cannot leave that depth.
+  /// Zero preserves ordinary image addressing. Uses former Reserved[1].
+  uint32_t FirstDepthSlice;
 };
 
 /// The minification/magnification/mip filter a `FemeSamplerDescriptor`

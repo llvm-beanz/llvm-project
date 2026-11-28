@@ -110,7 +110,7 @@ bool testWarpCompilerImages(const std::vector<std::uint32_t> &Tokens,
     return Good;
   }
   auto Bad = Desc;
-  Bad.Version = 4;
+  Bad.Version = 5;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
   Bad = Desc;
   Bad.ImageCount = 65;
@@ -134,6 +134,9 @@ bool testWarpCompilerImages(const std::vector<std::uint32_t> &Tokens,
   Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
   Images[0] = Saved;
   Images[0].SampleCount = 2;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Images[0] = Saved;
+  Images[0].FirstDepthSlice = 1;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
   Images[0] = Saved;
   Images[0].PlaneCount = 2;

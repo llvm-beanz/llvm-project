@@ -1,5 +1,15 @@
 # Vulkan CTS status
 
+## Owned WARP volume-UAV regression scope, not CTS
+
+Selected 3D UAV origins pass 4433 full FeMe tests (15 skipped, 10 unsupported),
+65 callbacks and 395 stock-runtime/coexistence gates with confirmed FeMe ICD
+identity. Four owned/reference volume gates check full-mip dimensions, FirstW
+addressing, every subresource, nulls, replay and held lifetime. Bridge6/artifact13
+separate the storage origin from reported depth; FP32/i32 loads/stores and
+atomics preserve physical guards. Vulkan advertisements and zero-origin
+behavior are unchanged. No CTS run or complete W2 claim.
+
 ## Owned WARP texture-UAV regression scope, not CTS
 
 Texture UAV preparation and shared DXIL stores pass 4432 full FeMe tests
