@@ -138217,3 +138217,39 @@ Vulkan advertisements and zero-origin addressing are unchanged; no CTS run.
 Next broaden native narrow-format image load/store saturation and dimensional
 execution, then remaining sampling/planes/MSAA and general resource/root/heap/
 residency/barrier/query/indirect/removal contracts. W2 is not complete.
+
+# W2 native narrow integer images and typed OOB defaults
+
+Committed 634195841a33. Thirty-two owned/reference normal/held controls now
+exercise all eight currently admitted narrow integer image formats:
+R8/R16/RGBA8/RGBA16 UINT/SINT. The existing texture harness packs independent
+byte oracles, applies expected signed/unsigned saturation, and checks every
+subresource/padding/guard, live selected views, null replacement, replay,
+held recording teardown and unchanged upload bytes.
+
+Reference R8/R16 execution exposed a real coupled load gap: active OOB reads
+retain alpha1 for the missing channel, so the shader's in-bounds plus OOB alpha
+is2. Null descriptor reads instead return all-zero. Shared FP32/i32 addressed
+loads now use a descriptor opt-in and existing format/border expansion rather
+than duplicating format tables. All supported load dimensions and underlying
+2D/3D fetch bounds honor it; masks and nulls still return zero. Native UAVs set
+the new flag; SRVs/Vulkan do not. Artifact14 prevents older cached helpers from
+silently ignoring it. The bridge6 layout and existing KMD ABI are unchanged.
+
+The first oracle incorrectly expected all-zero OOB missing channels; a second
+iteration incorrectly extended defaults to nulls. Independent reference
+failures separated those cases before the final implementation was accepted.
+The focused runtime test checks opt-in versus unchanged Vulkan convention,
+single/full-channel formats, float/integer results, masks and nulls.
+
+All texture-UAV OS controls40/40, full FeMe4434 passed/15 skipped/10 unsupported,
+callbacks65/65 and stock-runtime/coexistence427/427. FeMe ICD identity was
+confirmed; OS runs followed main relinking and application-local refresh.
+Generated v26 inventory verified391 unique existing OS gates,18 native
+fixtures, bridge6/artifact14, complete product FL null. No CTS or Vulkan
+advertisement changes.
+
+Remaining W2 includes optional RG and other image formats/dimensions, the
+sampling/plane/MSAA matrix, complete atomics and general resources/roots/heaps/
+residency/barriers/queries/indirect/removal. These commits close finite volume
+and admitted narrow-integer image slices, not W2 or the full WARP roadmap.
