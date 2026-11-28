@@ -137516,3 +137516,42 @@ versioned compiler bridge, with exact four-byte resource bounds, 4096-byte
 counter-offset alignment, UAV ownership, copies, execution-time refresh and
 DXBC/DXIL/system-WARP/pending-teardown controls. Then continue the remaining
 W2 format/image/root/resource/synchronization work; this is not W2 closeout.
+
+# W2 progress: owned structured-UAV counter views
+
+bb31606ea3d5 materializes the shared counter helper through owned descriptors.
+Store the counter resource and offset, not a borrowed host pointer; resolve
+the exact four-byte live UAV extent again at ordered execution. Counter
+offsets use the normative 4096-byte placement alignment. CPU descriptor
+copies retain the metadata and null replacement clears it.
+
+Bridge ABI 3 deliberately carries optional aligned four-byte counter storage.
+Reject both older bridge versions before compilation/dispatch and malformed
+counter pointer/extents, kinds and alignment. The existing CPU descriptor
+Counter field and artifact ABI 9 do not change. Submission clones continue
+to refresh descriptor/counter bindings after kernel readiness, preserving
+pending queue teardown and application-owned resource lifetimes.
+
+Eight DXBC/DXIL/system-WARP/held controls test increment and decrement.
+Counters at offsets 0/4096 are seeded after recording; each active counter
+returns ninety unique indices and reaches its exact final count. The final
+replay nulls one UAV, preserving its old output and leaving its fresh counter
+seed unchanged. Both data and counter guards are checked. Audits require nine
+balanced KMD heaps, ten residency callbacks and nine dispatches/ten copies.
+
+The first dynamic-counter expression passed owned outputs but the system-WARP
+control used counter zero for both arrays. This is an observed parity gap,
+not a diagnosed reference/compiler bug. Identical explicit divergent
+fixed-counter branches pass both paths and retain lane-mask coverage.
+General dynamic-counter-expression parity remains open. Initial owned
+provenance failures were stale six-heap expectations, corrected to the
+actual independently checked resource set.
+
+Final evidence: full 4408 passed, 15 skipped, 10 unsupported; callback 65/65;
+OS 131/131; inventory v12 with 95 unique gates, native fixtures, bridge 3,
+and no complete feature-level claim. FeMe ICD identity was checked before
+full/coexistence execution. No system binaries or drivers were modified.
+
+Continue W2: append/consume end-to-end coverage, remaining typed/component/
+atomic behavior, images/samplers, full roots/resources/residency, barriers,
+queries and indirect/removal semantics. W2 remains open.
