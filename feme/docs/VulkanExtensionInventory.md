@@ -435,7 +435,7 @@ reuse existing decoders. Descriptor-gated narrow integer saturation preserves
 flag-clear conversion and image stores.
 Shared aligned image geometry preserves default packed storage.
 Validation is the full FeMe gate (4415 passed, 15 skipped, 10 unsupported) and
-363 stock-runtime/coexistence gates (including Windows root visibility and
-pitched buffer-footprint copies) with
+371 stock-runtime/coexistence gates (including Windows root visibility,
+pitched buffer footprints and linear texture mip/array copies) with
 confirmed FeMe ICD identity, not a new
 CTS run; no historical Windows CTS executable is available.

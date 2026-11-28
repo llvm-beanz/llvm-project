@@ -12,14 +12,53 @@
 #include "BootstrapAudit.h"
 #include "WarpAllocationInfo.h"
 
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+#include "feme/Image/SubresourceLayout.h"
+#endif
+
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <new>
+#include <utility>
 
 namespace feme {
 namespace probe {
+UINT warpFormatElementSize(DXGI_FORMAT Format) {
+  switch (Format) {
+  case DXGI_FORMAT_R8_UNORM:
+  case DXGI_FORMAT_R8_UINT:
+  case DXGI_FORMAT_R8_SINT:
+    return 1;
+  case DXGI_FORMAT_R16_FLOAT:
+  case DXGI_FORMAT_R16_UINT:
+  case DXGI_FORMAT_R16_SINT:
+    return 2;
+  case DXGI_FORMAT_R8G8B8A8_UNORM:
+  case DXGI_FORMAT_R8G8B8A8_UINT:
+  case DXGI_FORMAT_R8G8B8A8_SINT:
+  case DXGI_FORMAT_R32_FLOAT:
+  case DXGI_FORMAT_R32_UINT:
+  case DXGI_FORMAT_R32_SINT:
+    return 4;
+  case DXGI_FORMAT_R32G32_FLOAT:
+  case DXGI_FORMAT_R32G32_UINT:
+  case DXGI_FORMAT_R32G32_SINT:
+  case DXGI_FORMAT_R16G16B16A16_FLOAT:
+  case DXGI_FORMAT_R16G16B16A16_UINT:
+  case DXGI_FORMAT_R16G16B16A16_SINT:
+    return 8;
+  case DXGI_FORMAT_R32G32B32A32_FLOAT:
+  case DXGI_FORMAT_R32G32B32A32_UINT:
+  case DXGI_FORMAT_R32G32B32A32_SINT:
+    return 16;
+  default:
+    return 0;
+  }
+}
+
 namespace {
 constexpr UINT32 BufferAlignment = 64 * 1024;
 std::atomic<UINT> AppCreated{0}, AppDestroyed{0}, AppMaps{0}, AppUnmaps{0};
@@ -39,10 +78,18 @@ struct HeapState {
   SIZE_T ResourceCount = 0;
 };
 
+struct ResourceGeometry {
+  UINT64 ByteSize = 0;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  std::vector<feme::cpu::FemeImageSubresourceLayout> Mips;
+#endif
+};
+
 struct ResourceState {
   WarpDeviceState *Owner;
   HeapState *Heap;
   D3D12DDIARG_CREATERESOURCE_0003 Desc;
+  ResourceGeometry Geometry;
   ResourceState *Next = nullptr;
   UINT64 Offset = 0;
   bool PlacementBacking = false;
@@ -67,12 +114,9 @@ void reportError(WarpDeviceState *State, HRESULT Result) {
 }
 
 HRESULT validateResource(const D3D12DDIARG_CREATERESOURCE_0003 *Args,
-                         UINT64 &Size) {
+                         UINT64 &Size, ResourceGeometry *Geometry = nullptr) {
   if (!Args)
     return E_INVALIDARG;
-  if (Args->ResourceType != D3D12DDI_RT_BUFFER ||
-      Args->Layout != D3D12DDI_TL_ROW_MAJOR || Args->pRowMajorLayout)
-    return E_NOTIMPL;
   if (!Args->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate &&
       Args->ReuseBufferGPUVA.BaseAddress.UMD.Offset)
     return E_INVALIDARG;
@@ -82,21 +126,88 @@ HRESULT validateResource(const D3D12DDIARG_CREATERESOURCE_0003 *Args,
       D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS;
   if (static_cast<UINT>(Args->Flags) & ~AllowedFlags)
     return E_NOTIMPL;
-  if (!Args->Width || Args->Height != 1 || Args->DepthOrArraySize != 1 ||
-      Args->MipLevels != 1 || Args->Format != DXGI_FORMAT_UNKNOWN ||
-      Args->SampleDesc.Count != 1 || Args->SampleDesc.Quality ||
-      Args->Width > std::numeric_limits<SIZE_T>::max() - BufferAlignment + 1)
+  if (!Args->Width || Args->SampleDesc.Count != 1 || Args->SampleDesc.Quality)
     return E_INVALIDARG;
-  if (Args->Width > std::numeric_limits<UINT32>::max())
+  ResourceGeometry Result;
+  if (Args->ResourceType == D3D12DDI_RT_BUFFER) {
+    if (Args->Layout != D3D12DDI_TL_ROW_MAJOR || Args->pRowMajorLayout)
+      return E_NOTIMPL;
+    if (Args->Height != 1 || Args->DepthOrArraySize != 1 ||
+        Args->MipLevels != 1 || Args->Format != DXGI_FORMAT_UNKNOWN ||
+        Args->Width > std::numeric_limits<SIZE_T>::max() - BufferAlignment + 1)
+      return E_INVALIDARG;
+    Result.ByteSize = Args->Width;
+  } else {
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+    bool Is3D = Args->ResourceType == D3D12DDI_RT_TEXTURE3D;
+    if (Args->ResourceType != D3D12DDI_RT_TEXTURE1D &&
+        Args->ResourceType != D3D12DDI_RT_TEXTURE2D && !Is3D)
+      return E_NOTIMPL;
+    if ((Args->Layout != D3D12DDI_TL_UNDEFINED &&
+         Args->Layout != D3D12DDI_TL_ROW_MAJOR) ||
+        (Args->Flags & D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS))
+      return E_NOTIMPL;
+    UINT ElementSize = warpFormatElementSize(Args->Format);
+    if (!ElementSize)
+      return E_NOTIMPL;
+    UINT DimensionLimit = Is3D ? 2048 : 16384;
+    if (!Args->Height || !Args->DepthOrArraySize || !Args->MipLevels ||
+        Args->Width > DimensionLimit || Args->Height > DimensionLimit ||
+        Args->DepthOrArraySize > 2048 ||
+        (Args->ResourceType == D3D12DDI_RT_TEXTURE1D && Args->Height != 1))
+      return E_INVALIDARG;
+    UINT MaxExtent = std::max(static_cast<UINT>(Args->Width), Args->Height);
+    if (Is3D)
+      MaxExtent = std::max(MaxExtent, UINT(Args->DepthOrArraySize));
+    UINT MaxMips = 0;
+    for (; MaxExtent; MaxExtent >>= 1)
+      ++MaxMips;
+    if (Args->MipLevels > MaxMips)
+      return E_INVALIDARG;
+    auto Layout = feme::image::computeSubresourceLayouts(
+        Is3D, static_cast<UINT>(Args->Width), Args->Height,
+        Is3D ? Args->DepthOrArraySize : 1, Args->MipLevels,
+        Is3D ? 1 : Args->DepthOrArraySize, 1, 1, 1, ElementSize, 256, 512);
+    if (Args->pRowMajorLayout) {
+      if (Args->Layout != D3D12DDI_TL_ROW_MAJOR || Args->MipLevels != 1 ||
+          (!Is3D && Args->DepthOrArraySize != 1))
+        return E_INVALIDARG;
+      auto &Mip = Layout.first[0];
+      const auto &Required = *Args->pRowMajorLayout;
+      if (Required.RowPitch)
+        Mip.RowPitch = Required.RowPitch;
+      if (Mip.RowPitch % 256 || Mip.RowPitch < Args->Width * ElementSize)
+        return E_INVALIDARG;
+      Mip.SlicePitch = Mip.RowPitch * Args->Height;
+      if (Required.SlicePitch)
+        Mip.SlicePitch = Required.SlicePitch;
+      if (Mip.SlicePitch % 256 || Mip.SlicePitch < Mip.RowPitch * Args->Height)
+        return E_INVALIDARG;
+      Layout.second = Mip.SlicePitch * (Is3D ? Args->DepthOrArraySize : 1);
+    }
+    Result.ByteSize = Layout.second;
+    Result.Mips = std::move(Layout.first);
+#else
     return E_NOTIMPL;
-  Size = (Args->Width + BufferAlignment - 1) & ~UINT64(BufferAlignment - 1);
+#endif
+  }
+  if (Result.ByteSize >
+      std::numeric_limits<UINT32>::max() - BufferAlignment + 1)
+    return E_NOTIMPL;
+  Size = (Result.ByteSize + BufferAlignment - 1) & ~UINT64(BufferAlignment - 1);
+  if (Geometry)
+    *Geometry = std::move(Result);
   return S_OK;
 }
 
 HRESULT validateHeap(const D3D12DDIARG_CREATEHEAP_0001 *Args) {
   if (!Args)
     return E_NOTIMPL;
-  constexpr UINT AllowedFlags = D3D12DDI_HEAP_FLAG_BUFFERS;
+  constexpr UINT AllowedFlags = D3D12DDI_HEAP_FLAG_BUFFERS
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+                                | D3D12DDI_HEAP_FLAG_NON_RT_DS_TEXTURES
+#endif
+      ;
   if (Args->MemoryPool != D3D12DDI_MEMORY_POOL_L0 ||
       (static_cast<UINT>(Args->Flags) & ~AllowedFlags))
     return E_NOTIMPL;
@@ -160,7 +271,8 @@ HRESULT validatePlacement(WarpDeviceState *Owner,
   HRESULT Result = validateResource(Args, Size);
   if (FAILED(Result))
     return Result;
-  if (!Backing || !Backing->Heap->Locked || !Backing->Heap->Memory ||
+  if (!Backing || Backing->Desc.ResourceType != D3D12DDI_RT_BUFFER ||
+      !Backing->Heap->Locked || !Backing->Heap->Memory ||
       Placement.Offset % BufferAlignment ||
       Placement.Offset > Backing->Desc.Width ||
       Size > Backing->Desc.Width - Placement.Offset)
@@ -237,7 +349,8 @@ HRESULT releaseAllocation(HeapState *State) {
 }
 
 HRESULT allocateHeap(HeapState *State,
-                     const D3D12DDIARG_CREATERESOURCE_0003 *Resource) {
+                     const D3D12DDIARG_CREATERESOURCE_0003 *Resource,
+                     const ResourceGeometry &Geometry) {
   WarpKmdAllocationInfo PrivateInfo{};
   PrivateInfo.ResourceDimension = D3D10DDIRESOURCE_BUFFER;
   PrivateInfo.Width = Resource ? static_cast<UINT32>(Resource->Width)
@@ -249,9 +362,34 @@ HRESULT allocateHeap(HeapState *State,
   PrivateInfo.ArraySize = 1;
   PrivateInfo.MipLevels = 1;
   PrivateInfo.SampleDesc.Count = 1;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  if (Resource && Resource->ResourceType != D3D12DDI_RT_BUFFER) {
+    PrivateInfo.ResourceDimension =
+        static_cast<D3D10DDIRESOURCE_TYPE>(Resource->ResourceType);
+    PrivateInfo.Format = Resource->Format;
+    PrivateInfo.Height = Resource->Height;
+    PrivateInfo.Depth = Resource->ResourceType == D3D12DDI_RT_TEXTURE3D
+                            ? Resource->DepthOrArraySize
+                            : 1;
+    PrivateInfo.ArraySize = Resource->ResourceType == D3D12DDI_RT_TEXTURE3D
+                                ? 1
+                                : Resource->DepthOrArraySize;
+    PrivateInfo.MipLevels = Resource->MipLevels;
+    PrivateInfo.Pitch = static_cast<UINT32>(Geometry.Mips[0].RowPitch);
+  }
+#else
+  (void)Geometry;
+#endif
   if (Resource)
     PrivateInfo.BindFlags =
         D3D10_DDI_BIND_SHADER_RESOURCE | D3D11_DDI_BIND_UNORDERED_ACCESS;
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+  if (Resource && Resource->ResourceType != D3D12DDI_RT_BUFFER)
+    PrivateInfo.BindFlags =
+        Resource->Flags & D3D12DDI_RESOURCE_FLAG_0003_SHADER_RESOURCE
+            ? D3D10_DDI_BIND_SHADER_RESOURCE
+            : 0;
+#endif
   // This DDI does not expose the application's sharing choice.
   PrivateInfo.Flags = WarpAllocationFlagInAperture | WarpAllocationFlagShared;
   if (!Resource)
@@ -305,6 +443,13 @@ HRESULT APIENTRY createHeapAndResource(
   HRESULT Result = validateCreation(HeapArgs, ResourceArgs, Protected);
   if (FAILED(Result))
     return Result;
+  ResourceGeometry Geometry;
+  if (ResourceArgs) {
+    UINT64 Size = 0;
+    Result = validateResource(ResourceArgs, Size, &Geometry);
+    if (FAILED(Result))
+      return Result;
+  }
   if (!HeapArgs) {
     AcquireSRWLockExclusive(&Owner->ResourceLock);
     ResourceState *Backing = nullptr;
@@ -323,8 +468,9 @@ HRESULT APIENTRY createHeapAndResource(
           break;
         }
     if (SUCCEEDED(Result)) {
-      auto *Buffer = ::new (Resource.pDrvPrivate)
-          ResourceState{Owner, Backing->Heap, *ResourceArgs};
+      auto *Buffer = ::new (Resource.pDrvPrivate) ResourceState{
+          Owner, Backing->Heap, *ResourceArgs, std::move(Geometry)};
+      Buffer->Desc.pRowMajorLayout = nullptr;
       Buffer->Offset = Offset;
       Buffer->Next = static_cast<ResourceState *>(Owner->ResourceList);
       Owner->ResourceList = Buffer;
@@ -343,7 +489,7 @@ HRESULT APIENTRY createHeapAndResource(
   auto *State = ::new (Heap.pDrvPrivate) HeapState{
       Owner, RTResource.handle, static_cast<SIZE_T>(HeapArgs->ByteSize),
       HeapArgs->CPUPageProperty};
-  Result = allocateHeap(State, ResourceArgs);
+  Result = allocateHeap(State, ResourceArgs, Geometry);
   if (FAILED(Result)) {
     HRESULT Cleanup = releaseAllocation(State);
     Owner->HeapCleanupResult = Cleanup;
@@ -356,8 +502,9 @@ HRESULT APIENTRY createHeapAndResource(
   if (State->RTResource)
     ++AppCreated;
   if (ResourceArgs) {
-    auto *Buffer =
-        ::new (Resource.pDrvPrivate) ResourceState{Owner, State, *ResourceArgs};
+    auto *Buffer = ::new (Resource.pDrvPrivate)
+        ResourceState{Owner, State, *ResourceArgs, std::move(Geometry)};
+    Buffer->Desc.pRowMajorLayout = nullptr;
     AcquireSRWLockExclusive(&Owner->ResourceLock);
     Buffer->Next = static_cast<ResourceState *>(Owner->ResourceList);
     Owner->ResourceList = Buffer;
@@ -493,12 +640,17 @@ void APIENTRY checkExistingAllocationInfo(
     D3D12DDI_HDEVICE Device, D3D12DDI_HRESOURCE Resource,
     D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 *Info) {
   auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
-  if (!Buffer || Buffer->Owner != deviceState(Device)) {
+  if (!Buffer || Buffer->Owner != deviceState(Device) || !Info) {
     reportError(deviceState(Device), E_INVALIDARG);
     return;
   }
-  checkAllocationInfo(Device, &Buffer->Desc,
-                      D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, Info);
+  *Info = {};
+  Info->ResourceDataSize = (Buffer->Geometry.ByteSize + BufferAlignment - 1) &
+                           ~UINT64(BufferAlignment - 1);
+  Info->ResourceDataAlignment = BufferAlignment;
+  Info->AdditionalDataHeaderAlignment = 1;
+  Info->AdditionalDataAlignment = 1;
+  Info->Layout = D3D12DDI_TL_ROW_MAJOR;
 }
 
 D3D12DDI_GPU_VIRTUAL_ADDRESS APIENTRY
@@ -508,6 +660,8 @@ checkVirtualAddress(D3D12DDI_HDEVICE Device, D3D12DDI_HRESOURCE Resource) {
     reportError(deviceState(Device), E_INVALIDARG);
     return 0;
   }
+  if (Buffer->Desc.ResourceType != D3D12DDI_RT_BUFFER)
+    return 0;
   return reinterpret_cast<ULONG_PTR>(Buffer->Heap->Memory) + Buffer->Offset;
 }
 
@@ -525,14 +679,14 @@ void APIENTRY checkSubresourceInfo(D3D12DDI_HDEVICE Device,
                                    D3D12DDI_HRESOURCE Resource,
                                    UINT Subresource,
                                    D3D12DDI_SUBRESOURCE_INFO *Info) {
-  auto *Buffer = static_cast<ResourceState *>(Resource.pDrvPrivate);
-  if (!Buffer || Buffer->Owner != deviceState(Device) || Subresource || !Info) {
+  if (!Info) {
     reportError(deviceState(Device), E_INVALIDARG);
     return;
   }
-  *Info = {};
-  Info->RowStride = Buffer->Desc.Width;
-  Info->DepthStride = Buffer->Desc.Width;
+  WarpBufferAccess Access(deviceState(Device));
+  HRESULT Result = Access.subresource(Resource, Subresource, *Info);
+  if (FAILED(Result))
+    reportError(deviceState(Device), Result);
 }
 
 HRESULT validateObjects(WarpDeviceState *Owner, UINT Count,
@@ -669,6 +823,18 @@ WarpBufferAccess::~WarpBufferAccess() {
 HRESULT WarpBufferAccess::range(D3D12DDI_HRESOURCE Resource, UINT64 Offset,
                                 UINT64 Size, void *&Data,
                                 bool UnorderedAccess) {
+  return storageRange(Resource, Offset, Size, Data, UnorderedAccess, true);
+}
+
+HRESULT WarpBufferAccess::resourceRange(D3D12DDI_HRESOURCE Resource,
+                                        UINT64 Offset, UINT64 Size,
+                                        void *&Data) {
+  return storageRange(Resource, Offset, Size, Data, false, false);
+}
+
+HRESULT WarpBufferAccess::storageRange(D3D12DDI_HRESOURCE Resource,
+                                       UINT64 Offset, UINT64 Size, void *&Data,
+                                       bool UnorderedAccess, bool BufferOnly) {
   Data = nullptr;
   if (!Owner || !Resource.pDrvPrivate)
     return E_INVALIDARG;
@@ -677,13 +843,60 @@ HRESULT WarpBufferAccess::range(D3D12DDI_HRESOURCE Resource, UINT64 Offset,
     if (Buffer != Resource.pDrvPrivate)
       continue;
     if (!Buffer->Heap->Locked || !Buffer->Heap->Memory ||
-        Offset > Buffer->Desc.Width || Size > Buffer->Desc.Width - Offset ||
+        (BufferOnly && Buffer->Desc.ResourceType != D3D12DDI_RT_BUFFER) ||
+        Offset > Buffer->Geometry.ByteSize ||
+        Size > Buffer->Geometry.ByteSize - Offset ||
         (UnorderedAccess &&
          !(Buffer->Desc.Flags & D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS)))
       return E_INVALIDARG;
     Data = static_cast<unsigned char *>(Buffer->Heap->Memory) + Buffer->Offset +
            Offset;
     return S_OK;
+  }
+  return E_INVALIDARG;
+}
+
+HRESULT WarpBufferAccess::subresource(
+    D3D12DDI_HRESOURCE Resource, UINT Index, D3D12DDI_SUBRESOURCE_INFO &Info,
+    D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT *Pitched) {
+  if (!Owner || !Resource.pDrvPrivate)
+    return E_INVALIDARG;
+  for (auto *Entry = static_cast<ResourceState *>(Owner->ResourceList); Entry;
+       Entry = Entry->Next) {
+    if (Entry != Resource.pDrvPrivate)
+      continue;
+    Info = {};
+    if (Entry->Desc.ResourceType == D3D12DDI_RT_BUFFER) {
+      if (Index)
+        return E_INVALIDARG;
+      if (Pitched)
+        return E_NOTIMPL;
+      Info.RowStride = Info.DepthStride = Entry->Geometry.ByteSize;
+      return S_OK;
+    }
+#ifdef FEME_BOOTSTRAP_WARP_COMPILER
+    const auto &Desc = Entry->Desc;
+    bool Is3D = Desc.ResourceType == D3D12DDI_RT_TEXTURE3D;
+    UINT Mip = Index % Desc.MipLevels, Layer = Index / Desc.MipLevels;
+    if (Layer >= (Is3D ? 1u : Desc.DepthOrArraySize))
+      return E_INVALIDARG;
+    const auto &MipLayout = Entry->Geometry.Mips[Mip];
+    auto Layout = feme::image::computeSubresourceLayout(
+        Is3D, Is3D ? Desc.DepthOrArraySize : 1, MipLayout, Mip, Layer);
+    Info.Offset = Layout.Offset;
+    Info.RowStride = MipLayout.RowPitch;
+    Info.DepthStride = MipLayout.SlicePitch;
+    if (Pitched)
+      *Pitched = {Desc.Format,
+                  std::max(1u, static_cast<UINT>(Desc.Width) >> Mip),
+                  std::max(1u, Desc.Height >> Mip),
+                  Is3D ? std::max(1u, UINT(Desc.DepthOrArraySize) >> Mip) : 1,
+                  static_cast<UINT>(MipLayout.RowPitch),
+                  static_cast<UINT>(MipLayout.SlicePitch)};
+    return S_OK;
+#else
+    return E_NOTIMPL;
+#endif
   }
   return E_INVALIDARG;
 }
@@ -698,7 +911,8 @@ HRESULT WarpBufferAccess::address(UINT64 Address, void *&Data, UINT64 &Size,
        Buffer = Buffer->Next) {
     UINT64 Base =
         reinterpret_cast<UINT64>(Buffer->Heap->Memory) + Buffer->Offset;
-    if (Buffer->PlacementBacking || !Buffer->Heap->Locked || !Base ||
+    if (Buffer->Desc.ResourceType != D3D12DDI_RT_BUFFER ||
+        Buffer->PlacementBacking || !Buffer->Heap->Locked || !Base ||
         Address < Base || Address - Base >= Buffer->Desc.Width)
       continue;
     if (UnorderedAccess &&

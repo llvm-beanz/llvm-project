@@ -22,8 +22,9 @@ root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
 R32_UINT/R32_SINT/R32_FLOAT typed buffer views, two/four-component R32 SRVs
 and buffer-command predication, plus checked structured-UAV counters and bounded
 uint append/consume, typed SRV component mappings and narrow/packed SRVs;
-pitched buffer-footprint copies;
-inventory v18
+pitched buffer-footprint copies and single-plane linear texture storage with
+mip/array subresource copies;
+inventory v19
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1830,9 +1831,21 @@ remain alive through completion, as required by D3D12. This is buffer storage
 with placed footprints, not texture allocation or image-view execution.
 Shared mip-major layout computation accepts optional row/slice alignment
 for texture preparation; default packed Vulkan geometry is unchanged.
-Aligned array offsets and shrinking 3D mips are unit-tested, but the owned
-texture allocation/view boundary remains open.
-See the implementation log and v18 inventory.
+Owned single-plane, single-sample uncompressed textures now materialize those
+layouts with checked dimensions, mip counts, total sizes and optional required
+row/slice pitches. Immutable geometry replaces borrowed creation-layout pointers.
+The existing 96-byte WARP allocation metadata carries dimension, format,
+pitch, total size and mip/array counts; no KMD change is required.
+D3D subresource indices map to `(mip = index % mipCount, layer = index /
+mipCount)` against mip-major storage. The stock runtime's SELECT_SUBRESOURCE
+copy layout carries an index in the placement offset; recording resolves it
+to checked owned physical geometry and a byte offset. Textures remain excluded
+from shader buffer/GPUVA lookup. Per-subresource transition indices are checked.
+Eight owned/reference and held controls execute exact mipmapped 3D/2D-array
+copy/readback, with distinct layers/mips, partial regions, padding/guards,
+source preservation and recording-object release. Texture shader views,
+samplers, compressed/depth/stencil/planar/MS storage and broader resource classes
+remain open. See the implementation log and v19 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

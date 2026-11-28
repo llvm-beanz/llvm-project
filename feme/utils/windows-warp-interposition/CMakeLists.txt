@@ -481,7 +481,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     ../windows-adapter-bootstrap/BootstrapStub.cpp
     ../windows-adapter-bootstrap/WarpHeap.cpp
     ../windows-adapter-bootstrap/WarpTables.cpp
-    ../../lib/Image/CopyWalk.cpp)
+    ../../lib/Image/CopyWalk.cpp
+    ../../lib/Image/SubresourceLayout.cpp)
   target_include_directories(warp-compiler-shim PRIVATE ../../include)
   target_compile_definitions(warp-compiler-shim PRIVATE
     FEME_BOOTSTRAP_PINNED_VERSION=D3D12DDI_SUPPORTED_0072
@@ -502,7 +503,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 18)
+  set(FEME_WARP_PROFILE_VERSION 19)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -522,6 +523,22 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --reference-footprint-copies)
   feme_add_probe_test(NAME os-routed-warp-compiler-reference-ordered-footprint-copies
     COMMAND warp-compiler-harness --reference-ordered-footprint-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-texture-copies
+    COMMAND warp-compiler-harness --texture-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-texture-copies
+    COMMAND warp-compiler-harness --ordered-texture-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-texture-copies
+    COMMAND warp-compiler-harness --reference-texture-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-ordered-texture-copies
+    COMMAND warp-compiler-harness --reference-ordered-texture-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-texture-array-copies
+    COMMAND warp-compiler-harness --texture-array-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-texture-array-copies
+    COMMAND warp-compiler-harness --ordered-texture-array-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-texture-array-copies
+    COMMAND warp-compiler-harness --reference-texture-array-copies)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-ordered-texture-array-copies
+    COMMAND warp-compiler-harness --reference-ordered-texture-array-copies)
   feme_add_probe_test(NAME os-routed-warp-compiler-reference-placed-buffers
     COMMAND warp-compiler-harness --reference-placed-buffers)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-commands

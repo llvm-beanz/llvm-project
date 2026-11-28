@@ -1,5 +1,14 @@
 # Vulkan CTS status
 
+## Owned WARP texture-storage regression scope, not CTS
+
+Linear texture storage and selected mip/array copies pass 4415 full FeMe
+tests (15 skipped, 10 unsupported), 65 callback gates and 371 stock-runtime/
+coexistence gates. Eight new owned/reference and held controls cover three
+mips and 3D depth/2D-array addressing. FeMe ICD identity was confirmed.
+Texture shader views and sampling remain open; Vulkan advertisements and
+historical CTS evidence are unchanged.
+
 ## Shared aligned image-layout regression scope, not CTS
 
 Optional row/slice alignment preserves packed defaults and passes 17 shared

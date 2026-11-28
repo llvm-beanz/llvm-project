@@ -134,6 +134,66 @@ void APIENTRY setListTable(D3D12DDI_HRTCOMMANDLIST List,
     LastError = S_OK;
 }
 
+bool testTextureAllocationInfo(D3D12DDI_HDEVICE Device,
+                               const D3D12DDI_DEVICE_FUNCS_CORE_0072 &Core) {
+  D3D12DDIARG_CREATERESOURCE_0003 Desc{};
+  Desc.Width = 131;
+  Desc.Height = 7;
+  Desc.DepthOrArraySize = 3;
+  Desc.MipLevels = 3;
+  Desc.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+  Desc.SampleDesc.Count = 1;
+  Desc.Layout = D3D12DDI_TL_UNDEFINED;
+  bool Good = true;
+  for (auto Type :
+       {D3D12DDI_RT_TEXTURE1D, D3D12DDI_RT_TEXTURE2D, D3D12DDI_RT_TEXTURE3D}) {
+    Desc.ResourceType = Type;
+    Desc.Height = Type == D3D12DDI_RT_TEXTURE1D ? 1 : 7;
+    D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Info{};
+    LastError = S_OK;
+    Core.pfnCheckResourceAllocationInfo(
+        Device, &Desc, D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, &Info);
+    Good &= LastError == S_OK && Info.ResourceDataSize == 65536 &&
+            Info.ResourceDataAlignment == 65536 &&
+            Info.Layout == D3D12DDI_TL_ROW_MAJOR;
+  }
+  Desc.ResourceType = D3D12DDI_RT_TEXTURE2D;
+  Desc.MipLevels = 9;
+  D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Info{};
+  LastError = S_OK;
+  Core.pfnCheckResourceAllocationInfo(
+      Device, &Desc, D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, &Info);
+  Good &= LastError == E_INVALIDARG;
+  Desc.MipLevels = 1;
+  Desc.DepthOrArraySize = 1;
+  Desc.Layout = D3D12DDI_TL_ROW_MAJOR;
+  D3D12DDIARG_ROW_MAJOR_RESOURCE_LAYOUT Required{768, 5632};
+  Desc.pRowMajorLayout = &Required;
+  LastError = S_OK;
+  Core.pfnCheckResourceAllocationInfo(
+      Device, &Desc, D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, &Info);
+  Good &= LastError == S_OK && Info.ResourceDataSize == 65536;
+  Required.RowPitch = 512;
+  LastError = S_OK;
+  Core.pfnCheckResourceAllocationInfo(
+      Device, &Desc, D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, &Info);
+  Good &= LastError == E_INVALIDARG;
+  Required.RowPitch = 768;
+  Required.SlicePitch = 5120;
+  LastError = S_OK;
+  Core.pfnCheckResourceAllocationInfo(
+      Device, &Desc, D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, &Info);
+  Good &= LastError == E_INVALIDARG;
+  Required.SlicePitch = 5632;
+  Desc.Flags = D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS;
+  LastError = S_OK;
+  Core.pfnCheckResourceAllocationInfo(
+      Device, &Desc, D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, &Info);
+  Good &= LastError == E_NOTIMPL;
+  LastError = S_OK;
+  return Good;
+}
+
 bool testQueueWorkerFailure(D3D12DDI_HDEVICE Device,
                             const D3D12DDI_DEVICE_FUNCS_CORE_0072 &Core,
                             bool Canceled = false) {
@@ -329,6 +389,7 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Core.pfnDestroyPipelineState(OtherDevice, Pipeline);
   Good &= LastError == E_INVALIDARG && Owner.LivePipelines == 1;
   if (Compute) {
+    Good &= testTextureAllocationInfo(Device, Core);
     D3D12DDI_COMMAND_LIST_FUNCS_3D_0062 Lists{};
     D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001 Queues{};
     Good &=

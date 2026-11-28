@@ -128,41 +128,10 @@ UINT APIENTRY implicitAdapterMask(D3D12DDI_HDEVICE) { return 0; }
 #ifdef FEME_BOOTSTRAP_WARP_COMPILER
 static_assert(FeMeWarpDefaultComponentMapping ==
               D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING);
-UINT typedBufferElementSize(DXGI_FORMAT Format) {
-  switch (Format) {
-  case DXGI_FORMAT_R8_UNORM:
-  case DXGI_FORMAT_R8_UINT:
-  case DXGI_FORMAT_R8_SINT:
-    return 1;
-  case DXGI_FORMAT_R16_FLOAT:
-  case DXGI_FORMAT_R16_UINT:
-  case DXGI_FORMAT_R16_SINT:
-    return 2;
-  case DXGI_FORMAT_R8G8B8A8_UNORM:
-  case DXGI_FORMAT_R8G8B8A8_UINT:
-  case DXGI_FORMAT_R8G8B8A8_SINT:
-  case DXGI_FORMAT_R32_FLOAT:
-  case DXGI_FORMAT_R32_UINT:
-  case DXGI_FORMAT_R32_SINT:
-    return 4;
-  case DXGI_FORMAT_R32G32_FLOAT:
-  case DXGI_FORMAT_R32G32_UINT:
-  case DXGI_FORMAT_R32G32_SINT:
-  case DXGI_FORMAT_R16G16B16A16_FLOAT:
-  case DXGI_FORMAT_R16G16B16A16_UINT:
-  case DXGI_FORMAT_R16G16B16A16_SINT:
-    return 8;
-  case DXGI_FORMAT_R32G32B32A32_FLOAT:
-  case DXGI_FORMAT_R32G32B32A32_UINT:
-  case DXGI_FORMAT_R32G32B32A32_SINT:
-    return 16;
-  default:
-    return 0;
-  }
-}
+using feme::probe::warpFormatElementSize;
 
 bool typedBufferUAVSupported(DXGI_FORMAT Format) {
-  return typedBufferElementSize(Format) != 0;
+  return warpFormatElementSize(Format) != 0;
 }
 #endif
 
@@ -174,7 +143,7 @@ void APIENTRY checkFormat(D3D12DDI_HDEVICE Device, DXGI_FORMAT Format,
   }
   *Support = 0;
 #ifdef FEME_BOOTSTRAP_WARP_COMPILER
-  UINT ElementSize = typedBufferElementSize(Format);
+  UINT ElementSize = warpFormatElementSize(Format);
   if (ElementSize)
     *Support = D3D12DDI_FORMAT_SUPPORT_BUFFER;
   if (typedBufferUAVSupported(Format))
@@ -891,7 +860,7 @@ HRESULT makeBufferView(feme::probe::WarpDeviceState *Owner,
     return E_INVALIDARG;
   UINT ElementSize = Stride  ? Stride
                      : Flags ? 4
-                             : typedBufferElementSize(Format);
+                             : warpFormatElementSize(Format);
   if (!Flags && !Stride) {
     if (!ElementSize || (Namespace == 2 && !typedBufferUAVSupported(Format)))
       return E_NOTIMPL;
@@ -2165,7 +2134,23 @@ struct PitchedCopyLayout {
 };
 
 HRESULT normalizeCopyLayout(D3D12DDIARG_PLACED_RESOURCE Placed,
-                            PitchedCopyLayout &Layout) {
+                            PitchedCopyLayout &Layout,
+                            feme::probe::WarpBufferAccess &Access,
+                            D3D12DDIARG_BUFFER_PLACEMENT &Placement) {
+  D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT Selected{};
+  if (Placed.Layout == D3D12DDI_RL_SELECT_SUBRESOURCE) {
+    // This placement carries a subresource index rather than a byte offset.
+    if (Placement.BaseAddress.UMD.Offset > std::numeric_limits<UINT>::max())
+      return E_INVALIDARG;
+    D3D12DDI_SUBRESOURCE_INFO Info{};
+    HRESULT Result = Access.subresource(
+        Placement.BaseAddress.UMD.hResource,
+        static_cast<UINT>(Placement.BaseAddress.UMD.Offset), Info, &Selected);
+    if (FAILED(Result))
+      return Result;
+    Placement.BaseAddress.UMD.Offset = Info.Offset;
+    Placed = {D3D12DDI_RL_PLACED_PHYSICAL_SUBRESOURCE_PITCHED, &Selected};
+  }
   if (!Placed.pLayout)
     return E_INVALIDARG;
   if (Placed.Layout == D3D12DDI_RL_PLACED_PHYSICAL_SUBRESOURCE_PITCHED) {
@@ -2186,7 +2171,7 @@ HRESULT normalizeCopyLayout(D3D12DDIARG_PLACED_RESOURCE Placed,
               Input.VirtualDepth, Input.Pitch,        Input.SlicePitch};
   } else
     return E_NOTIMPL;
-  UINT ElementSize = typedBufferElementSize(Layout.Format);
+  UINT ElementSize = warpFormatElementSize(Layout.Format);
   if (!ElementSize)
     return E_NOTIMPL;
   if (!Layout.Width || !Layout.Height || !Layout.Depth ||
@@ -2209,12 +2194,18 @@ void APIENTRY copyTextureRegion(D3D12DDI_HCOMMANDLIST List,
   auto *State = recordingList(List);
   if (!State)
     return;
+  feme::probe::WarpBufferAccess Access(State->Owner);
+  D3D12DDIARG_BUFFER_PLACEMENT SrcPlacement =
+      Source ? *Source : D3D12DDIARG_BUFFER_PLACEMENT{};
+  D3D12DDIARG_BUFFER_PLACEMENT DstPlacement =
+      Destination ? *Destination : D3D12DDIARG_BUFFER_PLACEMENT{};
   PitchedCopyLayout Src{}, Dst{};
-  HRESULT Result = Destination && Source
-                       ? normalizeCopyLayout(SourceLayout, Src)
-                       : E_INVALIDARG;
+  HRESULT Result =
+      Destination && Source
+          ? normalizeCopyLayout(SourceLayout, Src, Access, SrcPlacement)
+          : E_INVALIDARG;
   if (SUCCEEDED(Result))
-    Result = normalizeCopyLayout(DestinationLayout, Dst);
+    Result = normalizeCopyLayout(DestinationLayout, Dst, Access, DstPlacement);
   if (FAILED(Result)) {
     reportObjectError(List, Result);
     return;
@@ -2244,27 +2235,27 @@ void APIENTRY copyTextureRegion(D3D12DDI_HCOMMANDLIST List,
     return;
   }
   auto Walk = feme::image::computeImageCopyRegionWalk(
-      1, 1, 1, 1, typedBufferElementSize(Src.Format), 1, true, true,
+      1, 1, 1, 1, warpFormatElementSize(Src.Format), 1, true, true,
       static_cast<UINT>(Region.Right - Region.Left),
       static_cast<UINT>(Region.Bottom - Region.Top),
       static_cast<UINT>(Region.Back - Region.Front),
       static_cast<UINT>(Region.Left), static_cast<UINT>(Region.Top), X, Y, 1);
-  feme::probe::WarpBufferAccess Access(State->Owner);
   void *Data = nullptr;
-  Result = Access.range(
-      Source->BaseAddress.UMD.hResource, Source->BaseAddress.UMD.Offset,
-      UINT64(Src.Depth - 1) * Src.SlicePitch +
-          UINT64(Src.Height - 1) * Src.RowPitch +
-          UINT64(Src.Width) * typedBufferElementSize(Src.Format),
-      Data);
+  Result = Access.resourceRange(SrcPlacement.BaseAddress.UMD.hResource,
+                                SrcPlacement.BaseAddress.UMD.Offset,
+                                UINT64(Src.Depth - 1) * Src.SlicePitch +
+                                    UINT64(Src.Height - 1) * Src.RowPitch +
+                                    UINT64(Src.Width) *
+                                        warpFormatElementSize(Src.Format),
+                                Data);
   if (SUCCEEDED(Result))
-    Result =
-        Access.range(Destination->BaseAddress.UMD.hResource,
-                     Destination->BaseAddress.UMD.Offset,
-                     UINT64(Dst.Depth - 1) * Dst.SlicePitch +
-                         UINT64(Dst.Height - 1) * Dst.RowPitch +
-                         UINT64(Dst.Width) * typedBufferElementSize(Dst.Format),
-                     Data);
+    Result = Access.resourceRange(DstPlacement.BaseAddress.UMD.hResource,
+                                  DstPlacement.BaseAddress.UMD.Offset,
+                                  UINT64(Dst.Depth - 1) * Dst.SlicePitch +
+                                      UINT64(Dst.Height - 1) * Dst.RowPitch +
+                                      UINT64(Dst.Width) *
+                                          warpFormatElementSize(Dst.Format),
+                                  Data);
   if (FAILED(Result)) {
     reportObjectError(List, Result);
     return;
@@ -2274,27 +2265,27 @@ void APIENTRY copyTextureRegion(D3D12DDI_HCOMMANDLIST List,
   UINT64 SrcOffset =
       UINT64(Region.Front) * Src.SlicePitch +
       UINT64(Walk.SrcOffsetYUnits) * Src.RowPitch +
-      UINT64(Walk.SrcOffsetXUnits) * typedBufferElementSize(Src.Format);
+      UINT64(Walk.SrcOffsetXUnits) * warpFormatElementSize(Src.Format);
   UINT64 DstOffset =
       UINT64(Z) * Dst.SlicePitch + UINT64(Walk.DstOffsetYUnits) * Dst.RowPitch +
-      UINT64(Walk.DstOffsetXUnits) * typedBufferElementSize(Dst.Format);
+      UINT64(Walk.DstOffsetXUnits) * warpFormatElementSize(Dst.Format);
   UINT64 SrcBytes = UINT64(Walk.SliceCount - 1) * Src.SlicePitch +
                     UINT64(Walk.HeightUnits - 1) * Src.RowPitch + Walk.RowBytes;
   UINT64 DstBytes = UINT64(Walk.SliceCount - 1) * Dst.SlicePitch +
                     UINT64(Walk.HeightUnits - 1) * Dst.RowPitch + Walk.RowBytes;
-  if (SrcOffset >
-          std::numeric_limits<UINT64>::max() - Source->BaseAddress.UMD.Offset ||
+  if (SrcOffset > std::numeric_limits<UINT64>::max() -
+                      SrcPlacement.BaseAddress.UMD.Offset ||
       DstOffset > std::numeric_limits<UINT64>::max() -
-                      Destination->BaseAddress.UMD.Offset)
+                      DstPlacement.BaseAddress.UMD.Offset)
     Result = E_INVALIDARG;
   else {
-    SrcOffset += Source->BaseAddress.UMD.Offset;
-    DstOffset += Destination->BaseAddress.UMD.Offset;
-    Result = Access.range(Source->BaseAddress.UMD.hResource, SrcOffset,
-                          SrcBytes, Data);
+    SrcOffset += SrcPlacement.BaseAddress.UMD.Offset;
+    DstOffset += DstPlacement.BaseAddress.UMD.Offset;
+    Result = Access.resourceRange(SrcPlacement.BaseAddress.UMD.hResource,
+                                  SrcOffset, SrcBytes, Data);
     if (SUCCEEDED(Result))
-      Result = Access.range(Destination->BaseAddress.UMD.hResource, DstOffset,
-                            DstBytes, Data);
+      Result = Access.resourceRange(DstPlacement.BaseAddress.UMD.hResource,
+                                    DstOffset, DstBytes, Data);
   }
   if (FAILED(Result)) {
     reportObjectError(List, Result);
@@ -2306,8 +2297,8 @@ void APIENTRY copyTextureRegion(D3D12DDI_HCOMMANDLIST List,
     return;
   }
   Command->Type = RecordedCommand::Kind::Copy;
-  Command->Source = *Source;
-  Command->Destination = *Destination;
+  Command->Source = SrcPlacement;
+  Command->Destination = DstPlacement;
   Command->Source.BaseAddress.UMD.Offset = SrcOffset;
   Command->Destination.BaseAddress.UMD.Offset = DstOffset;
   Command->Bytes = Walk.RowBytes;
@@ -2342,14 +2333,23 @@ resourceBarrier(D3D12DDI_HCOMMANDLIST List, UINT Count,
       return;
     }
     if (Barrier.Type == D3D12DDI_RESOURCE_BARRIER_TYPE_TRANSITION) {
-      if (!Barrier.Transition.hResource.pDrvPrivate ||
-          (Barrier.Transition.Subresource != 0 &&
-           Barrier.Transition.Subresource !=
-               std::numeric_limits<UINT>::max())) {
+      if (!Barrier.Transition.hResource.pDrvPrivate) {
         reportObjectError(List, E_INVALIDARG);
         return;
       }
       Resource = Barrier.Transition.hResource;
+      feme::probe::WarpBufferAccess Access(State->Owner);
+      D3D12DDI_SUBRESOURCE_INFO Info{};
+      HRESULT Result = Access.subresource(
+          Resource,
+          Barrier.Transition.Subresource == std::numeric_limits<UINT>::max()
+              ? 0
+              : Barrier.Transition.Subresource,
+          Info);
+      if (FAILED(Result)) {
+        reportObjectError(List, Result);
+        return;
+      }
     } else if (Barrier.Type == D3D12DDI_RESOURCE_BARRIER_TYPE_UAV)
       Resource = Barrier.UAV.hResource;
     else if (Aliasing) {
@@ -2372,8 +2372,8 @@ resourceBarrier(D3D12DDI_HCOMMANDLIST List, UINT Count,
     }
     void *Data = nullptr;
     if (Resource.pDrvPrivate) {
-      HRESULT Result =
-          feme::probe::getWarpBufferRange(State->Owner, Resource, 0, 0, Data);
+      feme::probe::WarpBufferAccess Access(State->Owner);
+      HRESULT Result = Access.resourceRange(Resource, 0, 0, Data);
       if (FAILED(Result)) {
         reportObjectError(List, Result);
         return;
@@ -2590,7 +2590,7 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
     if (Command->Type == RecordedCommand::Kind::Barrier) {
       void *Data = nullptr;
       if (Command->BarrierResource.pDrvPrivate)
-        Result = Access.range(Command->BarrierResource, 0, 0, Data);
+        Result = Access.resourceRange(Command->BarrierResource, 0, 0, Data);
       if (SUCCEEDED(Result))
         std::atomic_thread_fence(std::memory_order_seq_cst);
       continue;
@@ -2654,7 +2654,7 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
       continue;
     }
     void *Destination = nullptr, *Source = nullptr;
-    Result = Access.range(
+    Result = Access.resourceRange(
         Command->Destination.BaseAddress.UMD.hResource,
         Command->Destination.BaseAddress.UMD.Offset,
         UINT64(Command->CopySlices - 1) * Command->DestinationSlicePitch +
@@ -2662,7 +2662,7 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
             Command->Bytes,
         Destination);
     if (SUCCEEDED(Result))
-      Result = Access.range(
+      Result = Access.resourceRange(
           Command->Source.BaseAddress.UMD.hResource,
           Command->Source.BaseAddress.UMD.Offset,
           UINT64(Command->CopySlices - 1) * Command->SourceSlicePitch +

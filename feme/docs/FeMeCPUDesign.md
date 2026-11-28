@@ -3544,6 +3544,9 @@ Aligned slice pitches retain mip-major storage and align array/mip offsets;
 3D depth still halves per mip. Callers must retain checked size bounds.
 Two focused aligned-array/3D tests supplement existing packed-layout tests;
 this prerequisite does not itself implement owned D3D12 texture resources.
+The Windows frontend now uses it for checked uncompressed single-plane texture
+storage and D3D mip/array subresource copies. Texture storage is excluded from
+shader buffer/GPUVA resolution; texture shader views and sampling remain open.
 Single-mip defaults, zero-fill and repeated-dispatch ownership are
 preserved. Canonical all-path tests cover 1D/2D plain/array and 3D mips,
 non-power-of-two geometry, mip-31 bounds, trailing zero-fill and cube

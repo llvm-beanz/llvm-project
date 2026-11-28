@@ -41,9 +41,10 @@ Root signatures additionally admit disjoint conventional graphics-stage
 bindings, without exposing them to compute execution.
 Placed buffer-footprint copies additionally preserve independent row/depth
 pitches, partial regions, recording snapshots and ordered execution.
-Shared aligned mip/array storage geometry is tested as a texture prerequisite;
-owned texture allocation/views remain open.
-The generated v18 inventory
+Owned single-plane, single-sample linear texture storage now uses that shared
+geometry. Mipmapped 3D and 2D-array texture copies pass selected-subresource
+indexing, partial regions and held execution; shader views/samplers remain open.
+The generated v19 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -97,7 +98,7 @@ W2(b) operations, still remain.
 |---|---|
 | W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute. Disjoint conventional graphics-stage roots coexist while compute prepares only ALL-visible bindings; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |
 | W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, all 21 mapped typed SRV/UAV formats including the complete additional-format buffer set, typed SRV component mappings/live dimensions, Direct3D narrow-store saturation, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; other optional typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
-| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed exact-format placed buffer-footprint copies pass pitched rows/depth slices, partial regions, guards and held recording-object lifetime. Texture allocation/subresources/formats/views, remaining footprints, reserved/shared resources and broader residency remain. |
+| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed placed footprints and linear texture storage reuse shared layouts; mipmapped 3D/2D-array copies pass selected-subresource indexing, pitched regions, guards and held lifetime. Texture shader views/samplers, remaining storage formats/planes/MSAA, footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, execution-time 64-bit predication, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, indirect root changes/draws and general removal wakeups remain. |
 
 ```text

@@ -701,10 +701,12 @@ enum class BufferCounterOperation {
   Consume
 };
 
-HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered) {
+HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered,
+                                bool TextureStorage, bool ArrayTexture) {
   constexpr UINT Bytes = 20480, SourceOffset = 512, DestinationOffset = 1024;
-  constexpr UINT SourcePitch = 256, DestinationPitch = 512;
-  constexpr UINT SourceSlicePitch = SourcePitch * 13;
+  constexpr UINT DestinationPitch = 512;
+  const UINT SourcePitch = ArrayTexture ? 512 : 256;
+  const UINT SourceSlicePitch = SourcePitch * 13;
   constexpr UINT DestinationSlicePitch = DestinationPitch * 17;
   std::vector<unsigned char> SourceData(Bytes, 0xa5), Expected(Bytes, 0xcd);
   for (UINT Z = 0; Z < 2; ++Z)
@@ -740,6 +742,25 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered) {
                                              nullptr, IID_PPV_ARGS(&Readback)));
   if (FAILED(Result))
     return Result;
+  ComPtr<ID3D12Resource> Texture;
+  if (TextureStorage) {
+    Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    Desc.Dimension = ArrayTexture ? D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                                  : D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    Desc.Width = 19;
+    Desc.Height = 13;
+    Desc.DepthOrArraySize = 2;
+    Desc.MipLevels = 3;
+    Desc.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    Result = report(
+        "Create mipmapped copy texture",
+        Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(&Texture)));
+    if (FAILED(Result))
+      return Result;
+  }
   D3D12_RANGE NoRead{0, 0}, Full{0, Bytes};
   void *Memory = nullptr;
   for (auto *Resource : {Upload.Get(), Readback.Get()}) {
@@ -783,6 +804,40 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered) {
                                       SourcePitch};
   Destination.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UINT, 23, 17, 2,
                                            DestinationPitch};
+  if (TextureStorage) {
+    D3D12_TEXTURE_COPY_LOCATION Target{};
+    Target.pResource = Texture.Get();
+    Target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    for (UINT Layer = 0; Layer < (ArrayTexture ? 2u : 1u); ++Layer) {
+      auto Input = Source;
+      Input.PlacedFootprint.Offset += Layer * SourceSlicePitch;
+      if (ArrayTexture)
+        Input.PlacedFootprint.Footprint.Depth = 1;
+      Target.SubresourceIndex = Layer * 3;
+      List->CopyTextureRegion(&Target, 0, 0, 0, &Input, nullptr);
+      for (UINT Mip = 1; Mip < 3; ++Mip) {
+        Target.SubresourceIndex = Layer * 3 + Mip;
+        Input = Source;
+        Input.PlacedFootprint.Offset +=
+            Layer * SourceSlicePitch + Mip * 2 * SourcePitch;
+        Input.PlacedFootprint.Footprint.Width = 19 >> Mip;
+        Input.PlacedFootprint.Footprint.Height = 13 >> Mip;
+        Input.PlacedFootprint.Footprint.Depth = 1;
+        List->CopyTextureRegion(&Target, 0, 0, 0, &Input, nullptr);
+      }
+      Input = {};
+    }
+    D3D12_RESOURCE_BARRIER Barrier{};
+    Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    Barrier.Transition.pResource = Texture.Get();
+    Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    List->ResourceBarrier(1, &Barrier);
+    Source = {};
+    Source.pResource = Texture.Get();
+    Source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  }
   auto UpdateExpected = [&](UINT X, UINT Y, UINT Z, const D3D12_BOX &Box) {
     for (UINT Slice = Box.front; Slice < Box.back; ++Slice)
       for (UINT Row = Box.top; Row < Box.bottom; ++Row)
@@ -794,11 +849,34 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered) {
                         Box.left * 4,
                     (Box.right - Box.left) * 4);
   };
-  List->CopyTextureRegion(&Destination, 2, 3, 0, &Source, nullptr);
-  UpdateExpected(2, 3, 0, {0, 0, 0, 19, 13, 2});
+  if (ArrayTexture)
+    for (UINT Layer = 0; Layer < 2; ++Layer) {
+      Source.SubresourceIndex = Layer * 3;
+      List->CopyTextureRegion(&Destination, 2, 3, Layer, &Source, nullptr);
+      UpdateExpected(2, 3, Layer, {0, 0, Layer, 19, 13, Layer + 1});
+    }
+  else {
+    List->CopyTextureRegion(&Destination, 2, 3, 0, &Source, nullptr);
+    UpdateExpected(2, 3, 0, {0, 0, 0, 19, 13, 2});
+  }
   D3D12_BOX Box{4, 2, 1, 11, 8, 2};
+  if (ArrayTexture) {
+    Source.SubresourceIndex = 3;
+    Box.front = 0;
+    Box.back = 1;
+  }
   List->CopyTextureRegion(&Destination, 3, 5, 0, &Source, &Box);
-  UpdateExpected(3, 5, 0, Box);
+  UpdateExpected(3, 5, 0, {4, 2, 1, 11, 8, 2});
+  if (TextureStorage)
+    for (UINT Layer = 0; Layer < (ArrayTexture ? 2u : 1u); ++Layer)
+      for (UINT Mip = 1; Mip < 3; ++Mip) {
+        Source.SubresourceIndex = Layer * 3 + Mip;
+        List->CopyTextureRegion(&Destination, 4 + Mip * 2, 2 + Mip * 2,
+                                ArrayTexture ? Layer : 1, &Source, nullptr);
+        UpdateExpected(
+            4 + Mip * 2, 2 + Mip * 2, ArrayTexture ? Layer : 1,
+            {0, Mip * 2, Layer, 19u >> Mip, Mip * 2 + (13u >> Mip), Layer + 1});
+      }
   Box = {};
   Source.PlacedFootprint.Footprint = {};
   Destination.PlacedFootprint.Footprint = {};
@@ -868,7 +946,9 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered) {
       return report("Pitched footprint copy modified source storage", E_FAIL);
   }
   std::printf(
-      "Pitched footprint rows/slices, regions, guards and lifetime PASS\n");
+      "Pitched footprint rows/slices, regions, guards and lifetime PASS "
+      "(texture=%u array=%u)\n",
+      TextureStorage, ArrayTexture);
   return S_OK;
 }
 
@@ -2425,16 +2505,37 @@ int wmain(int Argc, wchar_t **Argv) {
   bool PlacedBuffers =
       ReferencePlacedBuffers ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
+  bool ArrayTexture =
+      Argc == 2 &&
+      (std::wcscmp(Argv[1], L"--texture-array-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-texture-array-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-texture-array-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-array-copies") == 0);
+  bool TextureCopies =
+      ArrayTexture ||
+      Argc == 2 &&
+          (std::wcscmp(Argv[1], L"--texture-copies") == 0 ||
+           std::wcscmp(Argv[1], L"--ordered-texture-copies") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-texture-copies") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-ordered-texture-copies") == 0);
   bool ReferenceFootprints =
       Argc == 2 &&
       (std::wcscmp(Argv[1], L"--reference-footprint-copies") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-footprint-copies") == 0);
+       std::wcscmp(Argv[1], L"--reference-ordered-footprint-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-texture-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-texture-array-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-array-copies") == 0);
   bool OrderedFootprints =
       Argc == 2 &&
       (std::wcscmp(Argv[1], L"--ordered-footprint-copies") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-footprint-copies") == 0);
+       std::wcscmp(Argv[1], L"--reference-ordered-footprint-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-texture-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-texture-array-copies") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-texture-array-copies") == 0);
   bool Footprints =
-      ReferenceFootprints || OrderedFootprints ||
+      TextureCopies || ReferenceFootprints || OrderedFootprints ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--footprint-copies") == 0);
   bool Reference = ReferenceViews || ReferenceTables || ReferenceConstants ||
                    ReferenceCBV || ReferenceIndirect || ReferencePredication ||
@@ -2509,6 +2610,12 @@ int wmain(int Argc, wchar_t **Argv) {
                  "--footprint-copies|--reference-footprint-copies|"
                  "--ordered-footprint-copies|"
                  "--reference-ordered-footprint-copies|"
+                 "--texture-copies|--ordered-texture-copies|"
+                 "--reference-texture-copies|"
+                 "--reference-ordered-texture-copies|"
+                 "--texture-array-copies|--ordered-texture-array-copies|"
+                 "--reference-texture-array-copies|"
+                 "--reference-ordered-texture-array-copies|"
                  "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
   }
@@ -2617,7 +2724,8 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result) && PlacedBuffers)
     Result = exercisePlacedBuffers(Device.Get());
   if (SUCCEEDED(Result) && Footprints)
-    Result = exerciseFootprintCopies(Device.Get(), OrderedFootprints);
+    Result = exerciseFootprintCopies(Device.Get(), OrderedFootprints,
+                                     TextureCopies, ArrayTexture);
   if (SUCCEEDED(Result) && Fences)
     Result = exerciseFences(Device.Get());
   if (SUCCEEDED(Result) && Commands)
@@ -2792,7 +2900,8 @@ int wmain(int Argc, wchar_t **Argv) {
                   Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
                   Data.MakeResidentCallbacks, Data.EvictCallbacks,
                   Data.HasRuntimePagingQueue);
-      UINT ExpectedHeaps = CounterDelta                     ? 9
+      UINT ExpectedHeaps = TextureCopies                    ? 4
+                           : CounterDelta                   ? 9
                            : CBV || Indirect || Predication ? 6
                            : BufferCommands                 ? 4
                            : PlacedBuffers || Footprints    ? 3
@@ -2800,7 +2909,8 @@ int wmain(int Argc, wchar_t **Argv) {
       ValidOwned &=
           Data.Created == ExpectedHeaps && Data.Destroyed == ExpectedHeaps &&
           Data.Maps > 0 && Data.Maps == Data.Unmaps &&
-          Data.MakeResidentCallbacks == (CounterDelta                     ? 10u
+          Data.MakeResidentCallbacks == (TextureCopies                    ? 5u
+                                         : CounterDelta                   ? 10u
                                          : CBV || Indirect || Predication ? 7u
                                          : BufferCommands                 ? 5u
                                          : PlacedBuffers || Footprints    ? 4u
@@ -2823,7 +2933,9 @@ int wmain(int Argc, wchar_t **Argv) {
                                    : BufferCommands              ? 9u
                                    : PlacedBuffers || Footprints ? 0u
                                                                  : 6u) &&
-                    Copies == (CounterDelta                  ? 10u
+                    Copies == (ArrayTexture                  ? 13u
+                               : TextureCopies               ? 7u
+                               : CounterDelta                ? 10u
                                : Indirect || Predication     ? 7u
                                : BufferCommands              ? 4u
                                : PlacedBuffers || Footprints ? 2u

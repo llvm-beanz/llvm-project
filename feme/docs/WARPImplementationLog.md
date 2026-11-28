@@ -809,6 +809,52 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Owned linear texture storage and selected-subresource copies
+
+Compiler-backed resource DDIs now admit mapped uncompressed single-plane,
+single-sample linear textures. Checked 1D/2D/3D dimensions, mip limits,
+array/depth counts, optional required pitches and bounded total sizes feed
+the shared aligned layout helper. Immutable per-resource geometry retains
+all mip layouts, not caller creation pointers. Non-render-target texture
+heaps reuse existing WARP allocations and their 96-byte metadata, with actual
+dimension, format, row pitch, total bytes and mip/array counts.
+Callback-only builds remain buffer-only.
+
+D3D subresource indices select mip by remainder and array layer by quotient.
+3D subresources cover the complete halved depth extent. The owned copy DDI
+now handles SELECT_SUBRESOURCE, whose placement offset is an index rather
+than bytes, and normalizes it to checked physical geometry/byte placement
+before recording. Resource copy bounds use complete logical storage, while
+shader buffer and root-GPUVA lookup continue to reject textures. Existing
+allocation queries preserve normalized required pitches, and transition
+indices are checked against live subresource metadata.
+
+The native allocation-info matrix covers 1D arrays, 2D arrays and 3D mips,
+required pitches, short row/slice pitches, excessive mips and unsupported
+texture UAV admission. Eight stock-runtime controls cover owned/reference
+and held 3D/2D-array copies. Three mips, two depth slices or array layers,
+distinct source regions, full/partial overwrite, exact destination padding/
+guards and unchanged source storage test physical addressing. Held controls
+retain resources through completion while releasing list/allocator.
+
+Initial owned controls exposed the runtime's SELECT_SUBRESOURCE layout,
+which was missing from footprint normalization. An additional probe issue
+used offsets incompatible with FeMe's reported 512-byte placement alignment;
+uploads were corrected to a common aligned contract rather than relaxing
+caps. A signed-literal narrowing diagnostic in the revised oracle was fixed
+explicitly. Native selectors then pass **4/4**, and the combined new texture
+and prior footprint controls pass **12/12**.
+
+Full FeMe passes **4415** / **15** skipped / **10** unsupported, callbacks
+**65/65**, stock-runtime/coexistence **371/371**, with confirmed FeMe ICD
+identity and OS execution after shared DLL relinking. Inventory **v19**
+contains **335** unique required OS gates and **11** native fixtures;
+bridge4/artifact11 are unchanged, without a complete feature-level claim.
+The inventory no longer incorrectly lists the completed additional typed-UAV
+buffer set as unsupported. No system/KMD or Vulkan capability modification
+or new CTS result is claimed. Texture shader views/samplers, remaining formats/
+planes/MSAA, resource classes/residency, complete roots and ordering remain.
+
 #### Shared aligned texture-storage geometry prerequisite
 
 `FeMeImage` subresource layouts now accept independent nonzero power-of-two

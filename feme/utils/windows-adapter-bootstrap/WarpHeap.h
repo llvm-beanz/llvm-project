@@ -1,4 +1,4 @@
-//===- WarpHeap.h - Owned buffer heap DDIs -----------------------*- C++
+//===- WarpHeap.h - Owned resource heap DDIs ---------------------*- C++
 //-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -15,9 +15,12 @@
 namespace feme {
 namespace probe {
 
-/// Populate committed and placed buffer entries, not a complete device table.
+/// Byte geometry of the mapped, uncompressed Windows resource formats.
+UINT warpFormatElementSize(DXGI_FORMAT Format);
+
+/// Populate committed and placed resource entries, not a complete device table.
 /// These callbacks use the existing WARP KMD allocation ABI. Shared-resource
-/// opening, protected heaps and non-buffer resources are not supported.
+/// opening, protected heaps and shader-visible texture views are not supported.
 /// Publication through FillDDITable remains
 /// gated on the complete device contract.
 void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table);
@@ -25,6 +28,8 @@ void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table);
 /// Keep live buffer mappings stable throughout a CPU command.
 class WarpBufferAccess {
   WarpDeviceState *Owner;
+  HRESULT storageRange(D3D12DDI_HRESOURCE Resource, UINT64 Offset, UINT64 Size,
+                       void *&Data, bool UnorderedAccess, bool BufferOnly);
 
 public:
   explicit WarpBufferAccess(WarpDeviceState *Owner);
@@ -33,6 +38,13 @@ public:
   WarpBufferAccess &operator=(const WarpBufferAccess &) = delete;
   HRESULT range(D3D12DDI_HRESOURCE Resource, UINT64 Offset, UINT64 Size,
                 void *&Data, bool UnorderedAccess = false);
+  /// Resolve copy storage without admitting textures as shader buffers.
+  HRESULT resourceRange(D3D12DDI_HRESOURCE Resource, UINT64 Offset, UINT64 Size,
+                        void *&Data);
+  /// Translate D3D mip/array indexing into owned physical subresource metadata.
+  HRESULT subresource(
+      D3D12DDI_HRESOURCE Resource, UINT Index, D3D12DDI_SUBRESOURCE_INFO &Info,
+      D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT *Layout = nullptr);
   HRESULT address(UINT64 Address, void *&Data, UINT64 &Size,
                   bool UnorderedAccess = false);
 };
