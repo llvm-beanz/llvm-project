@@ -138040,3 +138040,39 @@ layouts and retain the resource lock throughout dispatch. Validate selected
 mips/layers, format/dimension compatibility and shader-resource admission.
 Sampler heaps/static state, UAVs, broader resource classes/formats, roots and
 ordering still remain. W2 is not complete.
+
+# W2 owned finite texture SRVs and live image preparation
+
+Commit 68b512dc7df6 copies native DDI texture-SRV metadata and resolves owned
+resource geometry at execution. Separate local buffer/image arrays and mip
+banks replace recorded preparation pointers. Selected mip/layer offsets reuse
+immutable mip-major storage; textures remain excluded from buffer/GPUVA lookup.
+Resource/type/format identity, mip/layer limits and cube faces are checked.
+Nonzero plane slices and minimum-LOD clamps are explicit unsupported cases.
+
+Eight original-DXIL owned/reference controls validate selected base mips and
+array layers, divergent descriptors, component mappings, OOB/null zero loads,
+live-view dimensions, post-record CPU descriptor copies, replay, guarded output,
+source preservation and queue-held list/allocator/CPU-heap release. Singleton
+array views prove that the native DDI's erased array distinction is compatible
+with the shape-specific shared load/dimension helpers. Six constructor negatives
+also preserve existing descriptor contents after failed validation.
+
+Two exploratory reference failures refined the oracle rather than weakening
+owned provenance. The installed WARP JIT faults on a null-view dimension query;
+dimensions are now queried only from the live descriptor, while null loads
+remain tested. Releasing the application's root/PSO while the queue is held
+also broke reference execution; these objects now stay alive through completion.
+Private retained compiler-stage/pipeline controls remain separate.
+
+Focused image/native and new OS controls pass 10/10. Full FeMe passes 4428,
+15 skipped and 10 unsupported; callbacks 65/65; OS/coexistence 379/379.
+FeMe ICD identity was checked before launches, and OS testing followed shared
+DLL relinking. Generated inventory v22 was parsed and checked: 343 unique
+existing OS gates, 14 native fixtures, bridge5/artifact12 and complete FL null.
+No Vulkan advertisement or CTS evidence changes are claimed.
+
+Continue with owned sampler heaps and static sampler state, texture UAV
+admission/stores, and the remaining dimensional/format execution matrix.
+General roots/heaps/volatility, resource classes/residency and complete
+barriers/queries/indirect/removal contracts remain. W2 is still open.
