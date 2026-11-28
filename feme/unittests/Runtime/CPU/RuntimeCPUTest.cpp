@@ -951,6 +951,11 @@ TEST_F(RuntimeCPUTest, TypedIntegerStoreSaturationAndTruncation) {
                                                     : 2];
         Store(Heap, 1, 0, 0, Values, true);
         EXPECT_EQ(Storage, Expected);
+        for (unsigned Channel = 0; Channel < Case.Channels; ++Channel)
+          Values[Channel] = reinterpret_cast<const unsigned char *>(
+                                Expected.data() + 2)[Channel * Case.Bytes] == 0
+                                ? 1
+                                : 0;
         Store(Heap, 1, 0, 0, Values, false);
         Store(Heap, 1, 0, 1, Values, true);
         Heap[0].Flags &= ~FEME_DESCRIPTOR_UAV;
