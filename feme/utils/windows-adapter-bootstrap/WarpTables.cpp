@@ -644,6 +644,8 @@ struct DescriptorSlot {
   UINT64 ByteOffset = 0;
   UINT64 ByteSize = 0;
   UINT64 Address = 0;
+  D3D12DDI_HRESOURCE CounterResource{};
+  UINT64 CounterOffset = 0;
 };
 
 struct DescriptorHeap {
@@ -917,9 +919,7 @@ createUAV(D3D12DDI_HDEVICE Device,
     reportError(Device, E_INVALIDARG);
     return;
   }
-  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER ||
-      Desc->Buffer.hDrvCounterResource.pDrvPrivate ||
-      Desc->Buffer.CounterOffsetInBytes) {
+  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER) {
     reportError(Device, E_NOTIMPL);
     return;
   }
@@ -930,6 +930,26 @@ createUAV(D3D12DDI_HDEVICE Device,
       Desc->Buffer.Flags, 2, Value);
   if (FAILED(Result)) {
     reportError(Device, Result);
+    return;
+  }
+  if (Desc->Buffer.hDrvCounterResource.pDrvPrivate) {
+    if (!Desc->hDrvResource.pDrvPrivate || !Value.Stride ||
+        Desc->Buffer.CounterOffsetInBytes % 4096) {
+      reportError(Device, E_INVALIDARG);
+      return;
+    }
+    void *Counter = nullptr;
+    Result = feme::probe::getWarpBufferRange(
+        Owner, Desc->Buffer.hDrvCounterResource,
+        Desc->Buffer.CounterOffsetInBytes, sizeof(UINT), Counter, true);
+    if (FAILED(Result)) {
+      reportError(Device, Result);
+      return;
+    }
+    Value.CounterResource = Desc->Buffer.hDrvCounterResource;
+    Value.CounterOffset = Desc->Buffer.CounterOffsetInBytes;
+  } else if (Desc->Buffer.CounterOffsetInBytes) {
+    reportError(Device, E_INVALIDARG);
     return;
   }
   DescriptorAccess Access;
@@ -2304,6 +2324,8 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
         return E_INVALIDARG;
       Buffer.Data = nullptr;
       Buffer.SizeInBytes = 0;
+      Buffer.CounterData = nullptr;
+      Buffer.CounterSizeInBytes = 0;
       Buffer.Kind = Slot->Format != DXGI_FORMAT_UNKNOWN ? 2
                     : Slot->Stride                      ? 1
                                                         : 0;
@@ -2326,6 +2348,14 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
           return Result;
       }
       Buffer.SizeInBytes = Slot->ByteSize;
+      if (Slot->CounterResource.pDrvPrivate) {
+        HRESULT Result =
+            Buffers.range(Slot->CounterResource, Slot->CounterOffset,
+                          sizeof(UINT), Buffer.CounterData, true);
+        if (FAILED(Result))
+          return Result;
+        Buffer.CounterSizeInBytes = sizeof(UINT);
+      }
       continue;
     }
     HRESULT Result =

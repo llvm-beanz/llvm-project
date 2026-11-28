@@ -110,7 +110,12 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
 #endif
 #endif
 #endif
-#ifdef TYPED_VIEWS
+#ifdef COUNTER_VIEWS
+  if (index % 2)
+    OUTPUT[index] = output[1].COUNTER_OPERATION();
+  else
+    OUTPUT[index] = output[0].COUNTER_OPERATION();
+#elif defined(TYPED_VIEWS)
 #ifdef TYPED_VECTOR
   uint value = uint(OUTPUT[index]) + peer + bias +
                uint(input[NonUniformResourceIndex(index % 2)][index].y);

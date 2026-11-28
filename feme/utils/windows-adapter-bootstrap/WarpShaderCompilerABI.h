@@ -12,7 +12,7 @@
 
 #include <cstdint>
 
-inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 2;
+inline constexpr std::uint32_t FeMeWarpCompilerBridgeVersion = 3;
 
 #ifdef FEME_WARP_COMPILER_EXPORTS
 #define FEME_WARP_COMPILER_API __declspec(dllexport)
@@ -47,6 +47,7 @@ struct FeMeWarpVertexPipelineDesc {
 /// Storage must outlive dispatch. Format is a DXGI format for typed buffers,
 /// not a FeMe runtime format, and must be zero for other kinds.
 /// Register identifies an individual descriptor, including array elements.
+/// Counter storage is an optional aligned four-byte extent for structured UAVs.
 struct FeMeWarpBufferBinding {
   void *Data = nullptr;
   std::uint64_t SizeInBytes = 0;
@@ -56,6 +57,8 @@ struct FeMeWarpBufferBinding {
   std::uint32_t Kind = 0;
   std::uint32_t Stride = 0;
   std::uint32_t Format = 0;
+  void *CounterData = nullptr;
+  std::uint64_t CounterSizeInBytes = 0;
 };
 
 struct FeMeWarpDispatchDesc {

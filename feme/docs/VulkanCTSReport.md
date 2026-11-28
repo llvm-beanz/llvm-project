@@ -5,10 +5,11 @@
 The DirectX counter raising/lowering/runtime slice passes the full FeMe gate:
 4408 passed, 15 skipped, 10 unsupported. FeMe CPU Vulkan Device identity was
 confirmed before execution; refreshed stock-runtime/coexistence gates pass
-123/123. Vulkan advertisements and both inventories are unchanged. No CTS
+123/123 for the shared prerequisite, then 131/131 after owned counter views.
+Vulkan advertisements and both inventories are unchanged. No CTS
 executable is available at the historical Windows build locations, so no new
 CTS result or Vulkan capability is claimed. The new counter helper reuses
-the existing CPU descriptor field; Windows counter views remain pending.
+the existing CPU descriptor field; the owned Windows views use bridge ABI 3.
 
 ## W2(a)/W2(b) float dimension coverage, not CTS (2026-11-25)
 

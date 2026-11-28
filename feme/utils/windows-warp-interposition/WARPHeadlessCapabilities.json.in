@@ -9,7 +9,7 @@
     "command_list": "D3D12DDI_COMMAND_LIST_FUNCS_3D_0062",
     "command_queue": "D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001"
   },
-  "compiler_bridge_version": 2,
+  "compiler_bridge_version": 3,
   "input_profiles": ["released SM 5.1", "released SM 6.0"],
   "shader_scope": ["application compute subset", "initialization vertex only"],
   "wave_policy": {
@@ -43,6 +43,7 @@
   "indirect_scope": ["dispatch-only signatures", "four-byte-aligned padded strides", "execution-time arguments and optional clamped count"],
   "synchronization": "runtime monitored fences and per-queue kernel Ready/Done gates",
   "predication_scope": ["execution-time 64-bit buffer values", "equal/not-equal-zero suppression", "direct/indirect dispatch and buffer copies", "recorded state and disabled list reset", "unpredicated barriers"],
+  "counter_scope": ["structured UAV counter resource ownership", "4096-byte-aligned counter offsets", "execution-time exact four-byte storage", "per-active-lane increment/decrement", "divergent fixed-counter selection and non-uniform output arrays", "CPU descriptor copies and null replacement", "pending submission lifetime"],
   "normative_requirements": [
     "D3D12_MAX_ROOT_COST",
     "D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT",
@@ -53,6 +54,7 @@
     "D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001",
     "D3D12_DISPATCH_ARGUMENTS",
     "D3D12_PREDICATION_OP",
+    "D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT",
     "D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU",
     "D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU",
     "D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU",
@@ -65,6 +67,8 @@
     "Tools/warp-compiler-dxil.hlsl",
     "Tools/feme-run/cbv-bounds.ll",
     "Transforms/DXIL/dxil-raise-raw-buffer-ops.ll",
+    "Transforms/DXIL/dxil-raise-buffer-counter.ll",
+    "Transforms/CPU/resource-lowering-counter.ll",
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
@@ -152,6 +156,14 @@
     "os-routed-warp-compiler-owned-ordered-typed-float4-commands",
     "os-routed-warp-compiler-owned-dxil-typed-float4-commands",
     "os-routed-warp-compiler-reference-typed-float4-commands",
+    "os-routed-warp-compiler-owned-counter-increment-commands",
+    "os-routed-warp-compiler-owned-ordered-counter-increment-commands",
+    "os-routed-warp-compiler-owned-dxil-counter-increment-commands",
+    "os-routed-warp-compiler-reference-counter-increment-commands",
+    "os-routed-warp-compiler-owned-counter-decrement-commands",
+    "os-routed-warp-compiler-owned-ordered-counter-decrement-commands",
+    "os-routed-warp-compiler-owned-dxil-counter-decrement-commands",
+    "os-routed-warp-compiler-reference-counter-decrement-commands",
     "os-routed-warp-compiler-owned-coexistence",
     "os-routed-warp-compiler-reference-buffer-commands",
     "os-routed-warp-compiler-reference-placed-buffers"
@@ -163,7 +175,7 @@
   },
   "unsupported": [
     "complete graphics or feature-level conformance",
-    "wider typed UAVs and TypedUAVLoadAdditionalFormats, other typed buffer formats, UAV counters, component remapping and unbounded ranges",
+    "wider typed UAVs and TypedUAVLoadAdditionalFormats, other typed buffer formats, general append/consume and dynamically indexed counter-expression parity, component remapping and unbounded ranges",
     "images and samplers",
     "native fences and implicit multi-GPU",
     "split transitions, finite ranged/atomic-copy barriers, texture aliasing and enhanced barriers",

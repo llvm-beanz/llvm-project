@@ -700,7 +700,7 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                bool Tables = false, bool Views = false,
                                bool Structured = false, bool Arrays = false,
                                DXGI_FORMAT Typed = DXGI_FORMAT_UNKNOWN,
-                               bool Predication = false) {
+                               bool Predication = false, int CounterDelta = 0) {
   bool ConstantBindings = CBV || Inline;
   UINT Components = 1;
   bool Floating = Typed == DXGI_FORMAT_R32_FLOAT ||
@@ -795,7 +795,12 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       "uint bias = valuesA[id.x % 2] + valuesB[id.x % 2];\n"
       "#endif\n"
       "#endif\n"
-      "#ifdef TYPED_VIEWS\n"
+      "#ifdef COUNTER_VIEWS\n"
+      "if (index % 2)\n"
+      "  OUTPUT[index] = output[1].COUNTER_OPERATION();\n"
+      "else\n"
+      "  OUTPUT[index] = output[0].COUNTER_OPERATION();\n"
+      "#elif defined(TYPED_VIEWS)\n"
       "#ifdef TYPED_VECTOR\n"
       "uint value = uint(OUTPUT[index]) + peer + bias + "
       "uint(input[NonUniformResourceIndex(index % 2)][index].y);\n"
@@ -889,6 +894,12 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Defines[DefineCount++] = {"STRUCTURED_VIEWS", "1"};
   if (Arrays)
     Defines[DefineCount++] = {"DESCRIPTOR_ARRAYS", "1"};
+  if (CounterDelta) {
+    Defines[DefineCount++] = {"COUNTER_VIEWS", "1"};
+    Defines[DefineCount++] = {"COUNTER_OPERATION", CounterDelta > 0
+                                                       ? "IncrementCounter"
+                                                       : "DecrementCounter"};
+  }
   const char *OutputType = Floating ? "float" : Signed ? "int" : "uint";
   std::string TypedName = OutputType;
   if (Components > 1)
@@ -965,6 +976,39 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                              nullptr, IID_PPV_ARGS(&Readback)));
   if (FAILED(Result))
     return Result;
+  constexpr UINT CounterStride = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT;
+  constexpr UINT CounterBytes = 2 * CounterStride;
+  ComPtr<ID3D12Resource> CounterUpload, Counters, CounterReadback;
+  if (CounterDelta) {
+    D3D12_RESOURCE_DESC CounterDesc = Desc;
+    CounterDesc.Width = CounterBytes;
+    Heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    Result = report("Create counter upload",
+                    Device->CreateCommittedResource(
+                        &Heap, D3D12_HEAP_FLAG_NONE, &CounterDesc,
+                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                        IID_PPV_ARGS(&CounterUpload)));
+    if (FAILED(Result))
+      return Result;
+    Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    CounterDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    Result = report("Create UAV counters",
+                    Device->CreateCommittedResource(
+                        &Heap, D3D12_HEAP_FLAG_NONE, &CounterDesc,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                        IID_PPV_ARGS(&Counters)));
+    if (FAILED(Result))
+      return Result;
+    Heap.Type = D3D12_HEAP_TYPE_READBACK;
+    CounterDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    Result = report("Create counter readback",
+                    Device->CreateCommittedResource(
+                        &Heap, D3D12_HEAP_FLAG_NONE, &CounterDesc,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                        IID_PPV_ARGS(&CounterReadback)));
+    if (FAILED(Result))
+      return Result;
+  }
   std::array<ComPtr<ID3D12Resource>, 2> Constants;
   if (CBV) {
     D3D12_RESOURCE_DESC ConstantDesc = Desc;
@@ -1113,6 +1157,25 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       return report("Missing held readback memory", E_FAIL);
   }
   for (UINT Repeat = 0; Repeat < 3; ++Repeat) {
+    if (CounterDelta) {
+      D3D12_RESOURCE_BARRIER CounterBarrier{};
+      CounterBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      CounterBarrier.Transition.pResource = Counters.Get();
+      CounterBarrier.Transition.Subresource =
+          D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      if (Repeat) {
+        CounterBarrier.Transition.StateBefore =
+            D3D12_RESOURCE_STATE_COPY_SOURCE;
+        CounterBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        List->ResourceBarrier(1, &CounterBarrier);
+      }
+      List->CopyBufferRegion(Counters.Get(), 0, CounterUpload.Get(), 0,
+                             CounterBytes);
+      CounterBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+      CounterBarrier.Transition.StateAfter =
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      List->ResourceBarrier(1, &CounterBarrier);
+    }
     ComPtr<ID3D12CommandSignature> Signature;
     if (Indirect) {
       D3D12_INDIRECT_ARGUMENT_DESC Argument{};
@@ -1239,6 +1302,19 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     List->ResourceBarrier(1, &Barrier);
     List->CopyBufferRegion(Readback.Get(), 0, Output.Get(), 0, Bytes);
+    if (CounterDelta) {
+      D3D12_RESOURCE_BARRIER CounterBarrier{};
+      CounterBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      CounterBarrier.Transition.pResource = Counters.Get();
+      CounterBarrier.Transition.Subresource =
+          D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      CounterBarrier.Transition.StateBefore =
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+      CounterBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      List->ResourceBarrier(1, &CounterBarrier);
+      List->CopyBufferRegion(CounterReadback.Get(), 0, Counters.Get(), 0,
+                             CounterBytes);
+    }
     if (Predication)
       List->SetPredication(Arguments.Get(), 16,
                            D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
@@ -1316,12 +1392,16 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                       ? D3D12_BUFFER_UAV_FLAG_NONE
                                       : D3D12_BUFFER_UAV_FLAG_RAW;
         UINT OutputCount = Arrays ? 2 : 1;
-        for (UINT I = 0; I < OutputCount; ++I)
+        for (UINT I = 0; I < OutputCount; ++I) {
+          bool Null = Arrays && Repeat == 2 && I == 1;
+          OutputView.Buffer.CounterOffsetInBytes =
+              CounterDelta && !Null ? I * CounterStride : 0;
           Device->CreateUnorderedAccessView(
-              Arrays && Repeat == 2 && I == 1 ? nullptr : Output.Get(), nullptr,
-              &OutputView,
+              Null ? nullptr : Output.Get(),
+              CounterDelta && !Null ? Counters.Get() : nullptr, &OutputView,
               {CPUStart.ptr +
                ((Arrays ? 4 : 2) + InputCount + I) * DescriptorStride});
+        }
         Device->CopyDescriptorsSimple(
             InputCount + OutputCount,
             {GPUCPUStart.ptr + (Arrays ? 6 : 5) * DescriptorStride},
@@ -1349,6 +1429,22 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         Device->CopyDescriptors(2, Destinations, nullptr, 1, &CPUStart, &Count,
                                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
       }
+    }
+    if (CounterDelta) {
+      Result = report("Map execution-time counter values",
+                      CounterUpload->Map(0, &NoRead, &Memory));
+      if (FAILED(Result))
+        return Result;
+      if (!Memory) {
+        CounterUpload->Unmap(0, &NoRead);
+        return report("Missing counter upload memory", E_FAIL);
+      }
+      std::memset(Memory, 0xcd, CounterBytes);
+      for (UINT I = 0; I < 2; ++I)
+        static_cast<UINT *>(Memory)[I * CounterStride / sizeof(UINT)] =
+            500 + Repeat * 100 + I * 200;
+      D3D12_RANGE Written{0, CounterBytes};
+      CounterUpload->Unmap(0, &Written);
     }
     if (Indirect || Predication) {
       Result = report("Map execution-time arguments",
@@ -1472,7 +1568,24 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     bool Valid = Memory != nullptr;
     if (Memory)
       std::memcpy(Previous.data(), Memory, Bytes);
+    std::array<std::array<bool, Threads / 2>, 2> Seen{};
     for (UINT I = 0; Valid && I < Words; ++I) {
+      if (CounterDelta && I < Threads) {
+        UINT Element = I % 2;
+        UINT Step = Repeat == 2 && Element == 1 ? 1 : Repeat;
+        UINT Start = 500 + Step * 100 + Element * 200;
+        UINT Lower = CounterDelta > 0 ? Start : Start - Threads / 2;
+        UINT Value = static_cast<const UINT *>(Memory)[I];
+        Valid = Value >= Lower && Value - Lower < Threads / 2 &&
+                !Seen[Element][Value - Lower];
+        if (Valid)
+          Seen[Element][Value - Lower] = true;
+        else
+          std::fprintf(stderr,
+                       "Counter result %u: got %u outside unique [%u,%u)\n", I,
+                       Value, Lower, Lower + Threads / 2);
+        continue;
+      }
       UINT Expected = InitialValue(I);
       if (I < Threads) {
         UINT X = I % 15, Y = I / 15 % 6, Z = I / 90;
@@ -1520,6 +1633,28 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     Readback->Unmap(0, &NoRead);
     if (!Valid)
       return report("Owned grouped compute/readback mismatch", E_FAIL);
+    if (CounterDelta) {
+      D3D12_RANGE CounterRange{0, CounterBytes};
+      Result = report("Map counter readback",
+                      CounterReadback->Map(0, &CounterRange, &Memory));
+      if (FAILED(Result))
+        return Result;
+      Valid = Memory != nullptr;
+      for (UINT I = 0; Valid && I < CounterBytes / sizeof(UINT); ++I) {
+        UINT Expected = 0xcdcdcdcd;
+        if (I == 0 || I == CounterStride / sizeof(UINT)) {
+          UINT Element = I ? 1 : 0;
+          UINT Start = 500 + Repeat * 100 + Element * 200;
+          UINT Count = Repeat == 2 && Element == 1 ? 0 : Threads / 2;
+          Expected = CounterDelta > 0 ? Start + Count : Start - Count;
+        }
+        Valid = static_cast<const UINT *>(Memory)[I] == Expected;
+      }
+      CounterReadback->Unmap(0, &NoRead);
+      if (!Valid)
+        return report("Counter values or guards mismatch", E_FAIL);
+      std::printf("Structured UAV counters and guards PASS\n");
+    }
     std::printf("Grouped buffer oracle: repeat=%u values=%u guards=%u\n",
                 Repeat + 1, Threads, Words - Threads);
     if (Repeat != 2) {
@@ -1712,11 +1847,30 @@ int wmain(int Argc, wchar_t **Argv) {
         OrderedTyped = J == 2;
         DXILTyped = J == 3;
       }
-  Arrays |= Typed != DXGI_FORMAT_UNKNOWN;
+  int CounterDelta = 0;
+  const wchar_t *CounterModes[][4] = {
+      {L"--counter-increment-commands",
+       L"--reference-counter-increment-commands",
+       L"--ordered-counter-increment-commands",
+       L"--dxil-counter-increment-commands"},
+      {L"--counter-decrement-commands",
+       L"--reference-counter-decrement-commands",
+       L"--ordered-counter-decrement-commands",
+       L"--dxil-counter-decrement-commands"}};
+  for (UINT I = 0; I < ARRAYSIZE(CounterModes); ++I)
+    for (UINT J = 0; J < 4; ++J)
+      if (Argc == (J == 3 ? 3 : 2) &&
+          std::wcscmp(Argv[1], CounterModes[I][J]) == 0) {
+        CounterDelta = I ? -1 : 1;
+        ReferenceArrays |= J == 1;
+        OrderedArrays |= J == 2;
+        DXILArrays |= J == 3;
+      }
+  Arrays |= Typed != DXGI_FORMAT_UNKNOWN || CounterDelta;
   ReferenceArrays |= ReferenceTyped;
   OrderedArrays |= OrderedTyped;
   DXILArrays |= DXILTyped;
-  StructuredViews |= StructuredArrays;
+  StructuredViews |= StructuredArrays || CounterDelta;
   ReferenceViews |= ReferenceArrays;
   OrderedViews |= OrderedArrays;
   DXILViews |= DXILArrays;
@@ -1949,7 +2103,7 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseBufferCommands(
         Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
         OrderedBufferCommands, Indirect, CBV, Inline, Tables, Views,
-        StructuredViews, Arrays, Typed, Predication);
+        StructuredViews, Arrays, Typed, Predication, CounterDelta);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();
@@ -2110,17 +2264,19 @@ int wmain(int Argc, wchar_t **Argv) {
                   Data.Created, Data.Destroyed, Data.Maps, Data.Unmaps,
                   Data.MakeResidentCallbacks, Data.EvictCallbacks,
                   Data.HasRuntimePagingQueue);
-      UINT ExpectedHeaps = CBV || Indirect || Predication ? 6
-                           : BufferCommands               ? 4
-                           : PlacedBuffers                ? 3
-                                                          : 1;
+      UINT ExpectedHeaps = CounterDelta                     ? 9
+                           : CBV || Indirect || Predication ? 6
+                           : BufferCommands                 ? 4
+                           : PlacedBuffers                  ? 3
+                                                            : 1;
       ValidOwned &=
           Data.Created == ExpectedHeaps && Data.Destroyed == ExpectedHeaps &&
           Data.Maps > 0 && Data.Maps == Data.Unmaps &&
-          Data.MakeResidentCallbacks == (CBV || Indirect || Predication ? 7u
-                                         : BufferCommands               ? 5u
-                                         : PlacedBuffers                ? 4u
-                                                                        : 2u) &&
+          Data.MakeResidentCallbacks == (CounterDelta                     ? 10u
+                                         : CBV || Indirect || Predication ? 7u
+                                         : BufferCommands                 ? 5u
+                                         : PlacedBuffers                  ? 4u
+                                                         : 2u) &&
           Data.EvictCallbacks == 1 && Data.HasRuntimePagingQueue;
     } else
       ValidOwned = false;
@@ -2139,10 +2295,11 @@ int wmain(int Argc, wchar_t **Argv) {
                                    : BufferCommands ? 9u
                                    : PlacedBuffers  ? 0u
                                                     : 6u) &&
-                    Copies == (Indirect || Predication ? 7u
-                               : BufferCommands        ? 4u
-                               : PlacedBuffers         ? 2u
-                                                       : 0u);
+                    Copies == (CounterDelta              ? 10u
+                               : Indirect || Predication ? 7u
+                               : BufferCommands          ? 4u
+                               : PlacedBuffers           ? 2u
+                                                         : 0u);
     }
   }
 #ifdef FEME_WARP_COEXIST

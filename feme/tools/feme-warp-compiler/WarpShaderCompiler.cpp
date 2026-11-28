@@ -379,8 +379,14 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
     const auto &Buffer = Desc->Buffers[I];
     auto Format = typedBufferFormat(Buffer.Format);
     auto ElementSize = typedBufferElementSize(Format);
-    if ((!Buffer.Data != !Buffer.SizeInBytes) || Buffer.Kind > 2 ||
-        (Buffer.Namespace < 1 || Buffer.Namespace > 3) ||
+    if ((!Buffer.Data != !Buffer.SizeInBytes) ||
+        (!Buffer.CounterData != !Buffer.CounterSizeInBytes) ||
+        (Buffer.CounterData &&
+         (Buffer.Kind != 1 || Buffer.Namespace != 2 || !Buffer.Data ||
+          Buffer.CounterSizeInBytes != sizeof(std::uint32_t) ||
+          reinterpret_cast<std::uintptr_t>(Buffer.CounterData) %
+              alignof(std::uint32_t))) ||
+        Buffer.Kind > 2 || (Buffer.Namespace < 1 || Buffer.Namespace > 3) ||
         (Buffer.Namespace == 3 && Buffer.Kind != 0) ||
         (Buffer.Kind == 0 && Buffer.Stride) ||
         (Buffer.Kind != 2 && Buffer.Format) ||
@@ -441,6 +447,9 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
           static_cast<std::uint32_t>(typedBufferFormat(Matched->Format));
       Descriptor.Flags =
           Matched->Namespace == 2 ? feme::cpu::FEME_DESCRIPTOR_UAV : 0;
+      Descriptor.Counter = Matched->CounterData;
+      if (Descriptor.Counter)
+        Descriptor.Flags |= feme::cpu::FEME_DESCRIPTOR_HAS_COUNTER;
     }
     Bindings[BindingCount++] = {Range.Space,
                                 Range.BaseRegister,

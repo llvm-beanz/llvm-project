@@ -2664,8 +2664,8 @@ general typed-format and owned-device closure remain open.
   counter pointer. Masked/invalid accesses are no-ops returning zero, as for
   other resource helpers. Atomic classification preserves per-active-lane
   execution even when every argument is uniform. This reuses the existing
-  descriptor counter field without changing the runtime ABI; Windows view/
-  bridge materialization is a separate prerequisite.
+  descriptor counter field without changing the runtime ABI. The Windows
+  frontend now materializes checked four-byte counters through bridge ABI 3.
 - **The mask is a trailing `i1` operand**, as it is on the
   `feme.cpu.masked.*` intrinsics, rather than a second family of names. This
   pass emits `true` for it; Phase 3 replaces that with the governing mask

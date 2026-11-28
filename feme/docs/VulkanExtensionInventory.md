@@ -431,5 +431,5 @@ after any change that could affect either table.
 
 Extension advertisements are unchanged by the shared DirectX counter helper.
 Validation is the full FeMe gate (4408 passed, 15 skipped, 10 unsupported) and
-123 stock-runtime/coexistence gates with confirmed FeMe ICD identity, not a new
+131 stock-runtime/coexistence gates with confirmed FeMe ICD identity, not a new
 CTS run; no historical Windows CTS executable is available.

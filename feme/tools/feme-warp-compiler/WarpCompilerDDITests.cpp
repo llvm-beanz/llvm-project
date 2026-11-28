@@ -791,8 +791,15 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Good &= LastError == S_OK;
     UAV.Buffer.hDrvCounterResource = {reinterpret_cast<void *>(1)};
     Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
-    Good &= LastError == E_NOTIMPL;
+    Good &= LastError == E_INVALIDARG;
     UAV.Buffer.hDrvCounterResource = {};
+    std::memcpy(Before.data(), reinterpret_cast<void *>(Fourth.ptr), Stride);
+    UAV.Buffer.CounterOffsetInBytes = 4096;
+    Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
+    Good &= LastError == E_INVALIDARG &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(Fourth.ptr),
+                        Stride) == 0;
+    UAV.Buffer.CounterOffsetInBytes = 0;
     SRV.Buffer.StructureByteStride = 0;
     for (auto Format :
          {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT,

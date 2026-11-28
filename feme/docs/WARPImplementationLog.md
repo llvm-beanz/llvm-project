@@ -784,6 +784,48 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned structured-UAV counter views
+
+Structured UAV descriptors now retain counter resource identity and a
+4096-byte-aligned offset. Creation validates both the live data view and
+exact four-byte UAV counter range; ordered execution refreshes both through
+the existing live-owner resource registry. Descriptor copies preserve counter
+metadata and null replacement clears it. This uses the existing WARP allocation
+and monitored-fence machinery, without modifying the KMD.
+
+Compiler bridge ABI **3** adds optional counter pointer/extent metadata.
+Compilation and dispatch reject versions 1/2; counter pointer/extent pairs
+must agree and represent aligned four-byte storage on a non-null structured
+UAV. Native controls reject malformed kinds/extents/alignment, missing counter
+resources and stale bridge versions without writes. Runtime artifact ABI **9**
+and the shared descriptor layout are unchanged.
+
+Eight controls cover increment/decrement through owned original DXBC, original
+DXIL, independent system WARP and held/pending teardown. Two counters at offsets
+0/4096 are seeded after recording, copied before dispatch, and read back with
+all surrounding guards. Divergent fixed-counter selection and non-uniform output
+array stores exercise per-active-lane masking. Each replay verifies ninety unique
+returned indices per live counter, and exact final counts; the final replay nulls
+the second UAV and preserves its previous outputs. Recording objects and the
+queue are released while the final cross-queue submission is held.
+
+The initial dynamically indexed counter expression passed owned output/count
+checks but selected the first counter for both arrays in the system-WARP control.
+No root cause is claimed. The final identical DXBC/DXIL fixture uses explicit
+divergent fixed-counter branches, retaining two counters and lane-mask checks.
+General dynamically indexed counter-expression parity remains unproven. Initial
+owned provenance failures were the unchanged six-heap audit expectation; these
+controls now require **9/9** balanced heaps, **10** residency callbacks and
+**9 dispatches / 10 copies**, including warmup work.
+
+Final validation: **4408** full-suite passes, **15** skipped, **10** unsupported;
+**65/65** callback passes; **131/131** stock-runtime passes, including all eight
+counter controls. FeMe ICD identity was confirmed before full/coexistence runs.
+Inventory **v12** validates **95** unique OS gates, existing native fixtures,
+bridge **3** and no complete feature-level claim. Wider formats, images/samplers,
+general append/consume and dynamic-counter parity, complete roots/resources/
+residency/barriers/queries and the rest of W2 still remain open.
+
 #### Shared structured-UAV counter prerequisite
 
 Opcode 70 now raises to `llvm.dx.resource.updatecounter`, with writable raw/

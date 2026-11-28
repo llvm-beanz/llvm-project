@@ -28,12 +28,14 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   void *Shader = nullptr, *Pipeline = nullptr;
   FeMeWarpCompiledShaderInfo Info;
   auto Compile = DXIL ? FeMeWarpCompileDXILProgram : FeMeWarpCompileRawDXBC;
-  auto OldInfo = Info;
-  OldInfo.BridgeVersion = 1;
-  if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()), &Shader,
-              &OldInfo) >= 0 ||
-      Shader)
-    return false;
+  for (auto Version : {1u, 2u}) {
+    auto OldInfo = Info;
+    OldInfo.BridgeVersion = Version;
+    if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()),
+                &Shader, &OldInfo) >= 0 ||
+        Shader)
+      return false;
+  }
   if (Compile(Tokens.data(), static_cast<std::uint32_t>(Tokens.size()), &Shader,
               &Info) ||
       FeMeWarpCreateComputePipeline(Shader, &Pipeline))
@@ -69,6 +71,23 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   auto Bad = Desc;
   Bad.Version = 1;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  Bad.Version = 2;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Bad) < 0;
+  std::uint32_t Counter = 0;
+  Buffer.CounterData = &Counter;
+  Buffer.CounterSizeInBytes = sizeof(Counter);
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.Kind = 1;
+  Buffer.Stride = 4;
+  Buffer.CounterSizeInBytes = 3;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.CounterSizeInBytes = sizeof(Counter);
+  Buffer.CounterData = reinterpret_cast<unsigned char *>(&Counter) + 1;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.CounterData = nullptr;
+  Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  Buffer.Kind = Buffer.Stride = 0;
+  Buffer.CounterSizeInBytes = 0;
   Buffer.Kind = 3;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
   Buffer.Kind = 0;
