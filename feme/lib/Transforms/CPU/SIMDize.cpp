@@ -3136,10 +3136,12 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   // `i32` operand exactly like `StoredValue`, just never vector-typed
   // (SPIR-V's own comparator is always a scalar), so it needs no
   // `StoredValueIsVector`-style decomposition of its own.
-  bool AnyDivergent = Widened.count(Matched.DescriptorIndex) ||
-                      Widened.count(Matched.Offset) || StoredValueDivergent ||
-                      Widened.count(Matched.Mask) ||
-                      (Matched.Comparator && Widened.count(Matched.Comparator));
+  bool AnyDivergent =
+      Widened.count(Matched.DescriptorIndex) ||
+      (Matched.Offset && Widened.count(Matched.Offset)) ||
+      (Matched.PrefixOffset && Widened.count(Matched.PrefixOffset)) ||
+      StoredValueDivergent || Widened.count(Matched.Mask) ||
+      (Matched.Comparator && Widened.count(Matched.Comparator));
   // An `Atomic*Typed`/`Atomic*Raw` resource call's effect accumulates
   // across lanes exactly like a groupshared `atomicrmw` does (see the
   // "always scalarize an atomicrmw" comment in `widenInstruction` below,
@@ -3167,7 +3169,11 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   // memory (see "masked feme.cpu.resource.* call" in "Phase 4: Widening").
   Function *Callee = CI.getCalledFunction();
   Value *WideDescriptorIndex = getWidened(Matched.DescriptorIndex, Builder);
-  Value *WideOffset = getWidened(Matched.Offset, Builder);
+  Value *WideOffset =
+      Matched.Offset ? getWidened(Matched.Offset, Builder) : nullptr;
+  Value *WidePrefixOffset = Matched.PrefixOffset
+                                ? getWidened(Matched.PrefixOffset, Builder)
+                                : nullptr;
   Value *WideComparator =
       Matched.Comparator ? getWidened(Matched.Comparator, Builder) : nullptr;
 
@@ -3180,7 +3186,7 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
 
   Value *BaseMask = Matched.StoredValue ? Env.SideEffectMask : Env.EntryMask;
   Value *LaneMaskBase = BaseMask;
-  if (!isa<Constant>(Matched.Mask)) {
+  if (Matched.Mask != Builder.getTrue()) {
     Value *WideCallMask = getWidened(Matched.Mask, Builder);
     LaneMaskBase = Builder.CreateAnd(BaseMask, WideCallMask, "resource.mask");
   }
@@ -3217,14 +3223,16 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
         LaneMaskBase, Builder.getInt32(Lane), "lane.mask");
     Value *LaneDescriptorIndex = Builder.CreateExtractElement(
         WideDescriptorIndex, Builder.getInt32(Lane), "lane.desc");
-    Value *LaneOffset = Builder.CreateExtractElement(
-        WideOffset, Builder.getInt32(Lane), "lane.offset");
-
     SmallVector<Value *, 6> CallArgs;
     CallArgs.push_back(CI.getArgOperand(0)); // ResourceHeap
     CallArgs.push_back(CI.getArgOperand(1)); // ResourceHeapCount
     CallArgs.push_back(LaneDescriptorIndex);
-    CallArgs.push_back(LaneOffset);
+    if (WideOffset)
+      CallArgs.push_back(Builder.CreateExtractElement(
+          WideOffset, Builder.getInt32(Lane), "lane.offset"));
+    if (WidePrefixOffset)
+      CallArgs.push_back(Builder.CreateExtractElement(
+          WidePrefixOffset, Builder.getInt32(Lane), "lane.prefix"));
     if (Matched.Comparator) {
       // `AtomicCompareExchangeTyped` only (roadmap H8w): the comparator
       // operand comes ahead of the value operand (see

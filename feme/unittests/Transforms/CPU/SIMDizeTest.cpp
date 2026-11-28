@@ -10,6 +10,7 @@
 
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/Linearize.h"
+#include "feme/Transforms/CPU/ResourceCalls.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -112,6 +113,7 @@ TEST(SIMDizeTest, LeavesUniformFunctionUnchanged) {
       %r = add i32 %v, 1
       ret void
     }
+
     attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
   )");
   ASSERT_TRUE(M);
@@ -124,6 +126,64 @@ TEST(SIMDizeTest, LeavesUniformFunctionUnchanged) {
       EXPECT_FALSE(BO->getType()->isVectorTy());
 }
 
+TEST(SIMDizeTest, ScalarizesNonUniformBufferDimensions) {
+  LLVMContext Ctx;
+  auto M = parseIR(Ctx, R"(
+    define void @main(ptr %heap, i32 %count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %active = icmp ult i32 %tid, 3
+      %prefix = zext i32 %tid to i64
+      %typed = call i32 @feme.cpu.resource.getdimensions.typed.i32(
+          ptr %heap, i32 %count, i32 %tid, i1 %active)
+      %raw = call i32 @feme.cpu.resource.getdimensions.raw.i32(
+          ptr %heap, i32 %count, i32 0, i64 12, i64 %prefix, i1 %active)
+      %masked = call i32 @feme.cpu.resource.getdimensions.typed.i32(
+          ptr %heap, i32 %count, i32 %tid, i1 false)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @feme.cpu.resource.getdimensions.typed.i32(ptr, i32, i32, i1)
+    declare i32 @feme.cpu.resource.getdimensions.raw.i32(ptr, i32, i32, i64, i64, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  ASSERT_FALSE(verifyModule(*M, &errs()));
+  auto *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  auto Env = getWaveBodyEnv(*F);
+  ASSERT_TRUE(Env);
+  unsigned Typed = 0, Raw = 0, Masked = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    auto Matched = matchResourceCall(*CI);
+    if (!Matched)
+      continue;
+    auto *Mask = dyn_cast<ExtractElementInst>(Matched->Mask);
+    ASSERT_TRUE(Mask);
+    auto *Combined = dyn_cast<BinaryOperator>(Mask->getVectorOperand());
+    ASSERT_TRUE(Combined);
+    EXPECT_EQ(Combined->getOpcode(), Instruction::And);
+    EXPECT_EQ(Combined->getOperand(0), Env->EntryMask);
+    if (Matched->Kind == ResourceCallKind::GetDimensionsRaw) {
+      ++Raw;
+      EXPECT_EQ(cast<ConstantInt>(Matched->Offset)->getZExtValue(), 12u);
+      EXPECT_TRUE(isa<ExtractElementInst>(Matched->PrefixOffset));
+    } else {
+      ++Typed;
+      EXPECT_EQ(Matched->Offset, nullptr);
+      EXPECT_TRUE(isa<ExtractElementInst>(Matched->DescriptorIndex));
+      if (auto *C = dyn_cast<Constant>(Combined->getOperand(1)))
+        if (C->isNullValue())
+          ++Masked;
+    }
+  }
+  EXPECT_EQ(Typed, 8u);
+  EXPECT_EQ(Raw, 4u);
+  EXPECT_EQ(Masked, 4u);
+}
 TEST(SIMDizeTest, WidensMaskedLoopBackedge) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

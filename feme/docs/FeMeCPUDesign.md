@@ -2378,6 +2378,12 @@ descriptors still return zero. Only unused/zero mip operands and field-zero
 extracts are raised; mixed fields, aggregate uses and meaningful mips
 remain outside this path. Queries and loads
 through the same typed handle lower together without changing the ABI.
+Non-uniform typed and raw dimension queries now participate in canonical
+resource-call recognition, linearization and per-lane scalarization. Typed
+queries omit the offset; raw queries retain both stride and array-prefix
+operands, including a divergent prefix. Each lane combines the query's mask
+with the entry mask, including constant-false masks. Descriptor/runtime ABI
+and uniform-query behavior are unchanged.
 Native SDK DXC SM6.6/SM6.0 SINT/UINT/FP32 SRV/UAV queries pass RGB32
 and mixed R32/RG32/RGBA32 layouts in normal waves 4/8, reference and
 ARM64 AOT. Partial/too-short views, namespaces, divergence, guards and

@@ -131,10 +131,7 @@ TEST_F(ResourceCallsTest, CreateGetDimensionsTypedTakesNoOffset) {
   // element index/byte offset at all -- a typed buffer's own element count
   // has nothing to index into -- so its callee's own signature should have
   // 4 parameters (heap, heap_count, descriptor_index, mask), not the usual
-  // 5 (...offset...) a load/store shares. Deliberately not run back through
-  // `matchResourceCall`: `GetDimensionsTyped` is intentionally left out of
-  // its `AllKinds` list for now (see the enum's own doc comment), since no
-  // known CTS case needs it recognized under divergent control flow yet.
+  // 5 (...offset...) a load/store shares.
   IRBuilder<> Builder(BB);
   ResourceCallEnv Env = makeEnv(Builder);
   Value *DescIdx = Builder.getInt32(0);
@@ -150,6 +147,29 @@ TEST_F(ResourceCallsTest, CreateGetDimensionsTypedTakesNoOffset) {
   EXPECT_EQ(CI->getArgOperand(1), Env.ResourceHeapCount);
   EXPECT_EQ(CI->getArgOperand(2), DescIdx);
   EXPECT_EQ(CI->getArgOperand(3), Mask);
+  auto Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::GetDimensionsTyped);
+  EXPECT_EQ(Matched->Offset, nullptr);
+  EXPECT_EQ(Matched->PrefixOffset, nullptr);
+  EXPECT_EQ(Matched->Mask, Mask);
+}
+
+TEST_F(ResourceCallsTest, RawDimensionsPreserveStrideAndPrefix) {
+  IRBuilder<> Builder(BB);
+  auto Env = makeEnv(Builder);
+  auto *Stride = Builder.getInt64(12);
+  auto *Prefix = Builder.getInt64(16);
+  auto *Mask = Builder.getFalse();
+  auto *CI = createGetDimensionsRaw(Builder, Env, Builder.getInt32(2), Stride,
+                                    Prefix, Mask);
+  auto Matched = matchResourceCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ResourceCallKind::GetDimensionsRaw);
+  EXPECT_EQ(Matched->Offset, Stride);
+  EXPECT_EQ(Matched->PrefixOffset, Prefix);
+  EXPECT_EQ(Matched->Mask, Mask);
+  EXPECT_EQ(Matched->StoredValue, nullptr);
 }
 
 TEST_F(ResourceCallsTest, CreateRawLoadAndStoreRoundTrip) {

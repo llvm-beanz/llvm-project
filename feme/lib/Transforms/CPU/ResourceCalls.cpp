@@ -593,6 +593,8 @@ feme::cpu::matchResourceCall(const CallInst &CI) {
       ResourceCallKind::AtomicExchangeRaw,
       ResourceCallKind::AtomicCompareExchangeRaw,
       ResourceCallKind::AtomicUpdateCounter,
+      ResourceCallKind::GetDimensionsTyped,
+      ResourceCallKind::GetDimensionsRaw,
   };
 
   ResourceCallKind Kind;
@@ -614,12 +616,29 @@ feme::cpu::matchResourceCall(const CallInst &CI) {
   // takes one, and `isCompareExchange(Kind)` alone takes two (comparator
   // then value).
   unsigned ExpectedArgs = 6;
-  if (isLoad(Kind))
+  if (Kind == ResourceCallKind::GetDimensionsTyped)
+    ExpectedArgs = 4;
+  else if (Kind == ResourceCallKind::GetDimensionsRaw)
+    ExpectedArgs = 6;
+  else if (isLoad(Kind))
     ExpectedArgs = 5;
   else if (isCompareExchange(Kind))
     ExpectedArgs = 7;
   if (CI.arg_size() != ExpectedArgs)
     return std::nullopt;
+  if (Kind == ResourceCallKind::GetDimensionsTyped ||
+      Kind == ResourceCallKind::GetDimensionsRaw) {
+    if (!CI.getType()->isIntegerTy(32) ||
+        !CI.getArgOperand(0)->getType()->isPointerTy() ||
+        !CI.getArgOperand(1)->getType()->isIntegerTy(32) ||
+        !CI.getArgOperand(2)->getType()->isIntegerTy(32) ||
+        !CI.getArgOperand(ExpectedArgs - 1)->getType()->isIntegerTy(1))
+      return std::nullopt;
+    if (Kind == ResourceCallKind::GetDimensionsRaw &&
+        (!CI.getArgOperand(3)->getType()->isIntegerTy(64) ||
+         !CI.getArgOperand(4)->getType()->isIntegerTy(64)))
+      return std::nullopt;
+  }
 
   MatchedResourceCall Result;
   Result.Kind = Kind;
@@ -627,8 +646,15 @@ feme::cpu::matchResourceCall(const CallInst &CI) {
   Result.Env.ResourceHeap = CI.getArgOperand(0);
   Result.Env.ResourceHeapCount = CI.getArgOperand(1);
   Result.DescriptorIndex = CI.getArgOperand(2);
-  Result.Offset = CI.getArgOperand(3);
-  if (isLoad(Kind)) {
+  if (Kind != ResourceCallKind::GetDimensionsTyped)
+    Result.Offset = CI.getArgOperand(3);
+  if (Kind == ResourceCallKind::GetDimensionsTyped ||
+      Kind == ResourceCallKind::GetDimensionsRaw) {
+    if (Kind == ResourceCallKind::GetDimensionsRaw)
+      Result.PrefixOffset = CI.getArgOperand(4);
+    Result.Mask = CI.getArgOperand(ExpectedArgs - 1);
+    Result.ElementType = CI.getType();
+  } else if (isLoad(Kind)) {
     Result.Mask = CI.getArgOperand(4);
     Result.ElementType = CI.getType();
   } else if (isCompareExchange(Kind)) {

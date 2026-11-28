@@ -161,11 +161,7 @@ enum class ResourceCallKind : uint8_t {
   /// `LoadTyped`'s `ElementType`-typed result) -- `getOrInsertResourceCall`/
   /// `createCall`'s shared operand-building logic special-cases this one
   /// kind to omit the offset parameter both kinds otherwise always carry.
-  /// Deliberately left out of `matchResourceCall`'s own `AllKinds` list:
-  /// no known CTS case calls `GetDimensions` on a typed buffer from
-  /// inside divergent control flow yet, so `Linearize.cpp`/`SIMDize.cpp`'s
-  /// own per-lane-masking machinery (which `matchResourceCall` feeds) has
-  /// no real case to handle today -- widen this scope if one is found.
+  /// Participates in per-lane masking for non-uniform descriptor queries.
   GetDimensionsTyped,
   /// `feme.cpu.resource.getdimensions.raw.i32` (roadmap H160, extended by
   /// L124(a)): a raw or structured buffer's own (`ByteAddressBuffer`/
@@ -185,9 +181,7 @@ enum class ResourceCallKind : uint8_t {
   /// for a real multi-field block, whose array does not). The result is
   /// always `i32` (the element count) regardless of the buffer's own
   /// declared element type, exactly like `GetDimensionsTyped`'s own
-  /// return-type override. Left out of `matchResourceCall`'s own
-  /// `AllKinds` list for the same reason `GetDimensionsTyped` is: no
-  /// known CTS case calls it from inside divergent control flow yet.
+  /// return-type override.
   GetDimensionsRaw,
   /// Updates a structured UAV's associated counter by +1 or -1. The
   /// increment returns the old value; the decrement returns the new value.
@@ -243,8 +237,11 @@ struct MatchedResourceCall {
   llvm::Type *ElementType = nullptr;
   ResourceCallEnv Env;
   llvm::Value *DescriptorIndex = nullptr;
-  /// The element index (`Typed`) or byte offset (`Raw`) operand.
+  /// The element index (`Typed`), byte offset (`Raw`), or raw-query stride.
+  /// Null for a typed-buffer dimension query.
   llvm::Value *Offset = nullptr;
+  /// Raw dimension queries only: byte prefix preceding the runtime array.
+  llvm::Value *PrefixOffset = nullptr;
   /// The stored value operand, for `StoreTyped`/`StoreRaw`; the RMW/xchg
   /// value operand, for every `Atomic*Typed` kind (roadmap H8w); null for a
   /// load.
