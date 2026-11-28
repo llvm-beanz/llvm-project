@@ -650,6 +650,9 @@ enum FemeImageDescriptorFlagBits : uint32_t {
   /// Saturate narrow integer stores for Direct3D UAVs. Without this opt-in,
   /// storage-image conversion retains its Vulkan truncation behavior.
   FEME_IMAGE_SATURATE_INTEGER_STORES = 1u << 4,
+  /// Keep format-default missing channels on active out-of-bounds loads.
+  /// Direct3D typed UAVs use this; Vulkan retains all-zero OOB results.
+  FEME_IMAGE_OOB_FORMAT_DEFAULTS = 1u << 5,
 };
 
 /// One subresource's byte layout within a `FemeImageDescriptor::Data`

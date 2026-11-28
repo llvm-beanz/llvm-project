@@ -8972,6 +8972,43 @@ TEST_F(ImageSamplingTest, Store3DOutOfBoundsZIsANoOp) {
   EXPECT_FLOAT_EQ(Storage[0][0][0][0], 1.0f);
 }
 
+TEST_F(ImageSamplingTest,
+       Direct3DUAVOOBKeepsFormatDefaultsWithoutChangingVulkan) {
+  auto *Integer = addWrapper("oob_integer", "feme.cpu.image.load.2d.v4i32");
+  auto *Floating = addWrapper("oob_float", "feme.cpu.image.load.2d.v4f32");
+  auto LoadInteger = resolve<LoadI32Fn>(Integer);
+  auto LoadFloat = resolve<LoadFn>(Floating);
+  uint32_t Storage[4] = {42, 43, 44, 45};
+  for (bool Defaults : {false, true}) {
+    for (auto Format : {ResourceFormat::R8_UINT, ResourceFormat::R16_SINT,
+                        ResourceFormat::R32G32B32A32_SINT}) {
+      FemeImageSubresourceLayout Layout;
+      auto Img = makeImage2D(
+          Storage, sizeof(Storage), 1, 1, Format, Layout,
+          FEME_IMAGE_STORAGE | (Defaults ? FEME_IMAGE_OOB_FORMAT_DEFAULTS : 0));
+      int32_t Out[4];
+      for (bool Null : {false, true}) {
+        Img.Data = Null ? nullptr : Storage;
+        for (bool Mask : {false, true}) {
+          LoadInteger(&Img, 1, 0, 99, 0, 0, 0, Mask, Out);
+          for (unsigned C = 0; C < 4; ++C)
+            EXPECT_EQ(Out[C],
+                      Defaults && Mask && !Null && C == 3 &&
+                              Format != ResourceFormat::R32G32B32A32_SINT
+                          ? 1
+                          : 0);
+        }
+      }
+      Img.Format = static_cast<uint32_t>(ResourceFormat::R16_FLOAT);
+      Img.Data = Storage;
+      float FloatOut[4];
+      LoadFloat(&Img, 1, 0, 99, 0, 0, 0, true, FloatOut);
+      EXPECT_FLOAT_EQ(FloatOut[3], Defaults ? 1 : 0);
+      EXPECT_FLOAT_EQ(FloatOut[0], 0);
+    }
+  }
+}
+
 TEST_F(ImageSamplingTest, VolumeViewOriginPreservesDepthAndPhysicalGuards) {
   auto *FloatLoad = addWrapper("volume_float", "feme.cpu.image.load.3d.v4f32");
   auto *IntegerLoad =

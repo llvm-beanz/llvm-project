@@ -270,7 +270,8 @@ struct ResourceInfo {
 /// Version 11 admits descriptor-controlled saturating integer stores.
 /// Version 12 admits SRV/UAV namespaces on image ranges.
 /// Version 13 makes single-mip 3D storage accesses honor a depth-slice origin.
-constexpr uint32_t ArtifactAbiVersion = 13;
+/// Version 14 admits format-default channels for Direct3D UAV OOB loads.
+constexpr uint32_t ArtifactAbiVersion = 14;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.

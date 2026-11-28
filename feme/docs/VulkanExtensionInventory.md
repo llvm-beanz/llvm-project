@@ -1,5 +1,11 @@
 # Vulkan `KHR`/`EXT` extension inventory
 
+Native narrow integer texture UAVs pass 4434 full FeMe tests (15 skipped,
+10 unsupported), 65 callbacks and 427 stock-runtime/coexistence gates with
+confirmed FeMe ICD identity. Artifact14 gates Direct3D OOB channel defaults;
+Vulkan/SRV OOB behavior and advertisements are unchanged. No inventory
+regeneration or CTS result.
+
 Owned volume UAV origins pass 4433 full FeMe tests (15 skipped, 10 unsupported),
 65 callbacks and 395 stock-runtime/coexistence gates, including four volume
 controls and confirmed FeMe ICD identity. Bridge6/artifact13 keep full dimensions

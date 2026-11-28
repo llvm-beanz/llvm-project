@@ -367,8 +367,8 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsThirteen) {
-  EXPECT_EQ(ArtifactAbiVersion, 13u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsFourteen) {
+  EXPECT_EQ(ArtifactAbiVersion, 14u);
 }
 
 TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {

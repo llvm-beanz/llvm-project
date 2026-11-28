@@ -4020,6 +4020,15 @@ Notes and constraints:
   Ordinary Vulkan storage-image reads leave this bit clear and remain unmapped.
   OOB loads still return zero before mapping, including constant-one channels.
 
+  Direct3D typed UAVs additionally set `FEME_IMAGE_OOB_FORMAT_DEFAULTS`.
+  Active OOB loads return zero for stored channels and format-default missing
+  channels (including alpha one for R/RG formats), reusing border-format
+  expansion. Null descriptors and inactive lanes still return all-zero.
+  Artifact ABI 14 invalidates cached helpers that lack this opt-in.
+  Vulkan descriptors and SRVs leave it clear, preserving their existing
+  all-zero OOB convention. Native R8/R16/RGBA8/RGBA16 UINT/SINT execution
+  covers saturation, default channels, nulls and complete subresource guards.
+
   Storage-image integer stores can opt into
   `FEME_IMAGE_SATURATE_INTEGER_STORES`. All image dimensions reuse the same
   narrow typed-texel packer as buffers: 8-/16-bit UINT/SINT channels saturate

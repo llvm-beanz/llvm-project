@@ -1,5 +1,14 @@
 # Vulkan CTS status
 
+## Native WARP narrow integer image regression scope, not CTS
+
+R8/R16/RGBA8/RGBA16 UINT/SINT texture UAV controls pass 4434 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 427 stock-runtime/coexistence
+gates with confirmed FeMe ICD identity. Thirty-two new gates verify saturation,
+default channels, nulls, selected views and complete subresource guards.
+Artifact14 gates Direct3D UAV OOB format defaults; Vulkan/SRV OOB behavior and
+advertisements remain unchanged. No CTS run or complete W2 claim.
+
 ## Owned WARP volume-UAV regression scope, not CTS
 
 Selected 3D UAV origins pass 4433 full FeMe tests (15 skipped, 10 unsupported),

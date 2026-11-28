@@ -840,6 +840,33 @@ with confirmed FeMe ICD identity. Inventory **v24** retains bridge 5/artifact 12
 and a null complete product FL. Native narrow formats, volume/dimensional views,
 the remaining image/sampling matrix and general W2 contracts stay open.
 
+#### Native narrow integer texture UAVs and OOB format defaults
+
+Eight currently admitted narrow formats (R8/R16/RGBA8/RGBA16 UINT/SINT) now
+have original-DXIL owned/reference normal and held controls. Signed and unsigned
+overflow inputs exercise native store saturation, selected mip/array views,
+post-record descriptor copies, null replacement and replay. Exact packed
+readback checks every subresource, padding, untouched texel and upload byte,
+while shader readback checks stored and missing channels.
+
+The reference exposed a coupled load difference: an active OOB R8/R16 UAV
+read keeps the format's missing alpha one, but a null UAV returns all-zero.
+Shared FP32/i32 addressed loads now opt into format-default OOB channels through
+`FEME_IMAGE_OOB_FORMAT_DEFAULTS`, reusing border-format expansion. Masked/null
+loads still return zero. Native UAV preparation sets this flag; Vulkan and SRV
+descriptors retain their existing all-zero OOB behavior. Artifact ABI 14 rejects
+cached helpers that would ignore the opt-in; bridge 6 remains unchanged.
+
+This proves the admitted narrow integer image set, not optional RG formats,
+the full image operation/format/dimension matrix or W2 acceptance.
+
+Validation: all texture-UAV OS controls **40/40**, full FeMe **4434** passed /
+**15** skipped / **10** unsupported, callbacks **65/65**, stock-runtime/
+coexistence **427/427**, with confirmed FeMe ICD identity and refreshed
+application-local compiler. Inventory **v26** has **391** unique existing
+required OS gates, **18** native fixtures, bridge **6**/artifact **14** and null
+complete product FL. No Vulkan advertisement or CTS result changes.
+
 #### Owned volume UAV views and checked W-slice origins
 
 Owned 3D UAV descriptions now admit a selected mip and validate FirstW/WSize

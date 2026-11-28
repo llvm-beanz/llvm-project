@@ -23,6 +23,7 @@
 #include <vulkan/vulkan.h>
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -955,8 +956,47 @@ HRESULT exerciseFootprintCopies(ID3D12Device *Device, bool Ordered,
 HRESULT exerciseTextureViews(ID3D12Device *Device,
                              const D3D12_SHADER_BYTECODE &Shader, bool Ordered,
                              bool SingleLayer, bool Sampling,
-                             bool StaticSampling, bool TextureUAV,
-                             bool Volume) {
+                             bool StaticSampling, bool TextureUAV, bool Volume,
+                             DXGI_FORMAT Narrow = DXGI_FORMAT_UNKNOWN) {
+  bool Signed = Narrow == DXGI_FORMAT_R8_SINT ||
+                Narrow == DXGI_FORMAT_R16_SINT ||
+                Narrow == DXGI_FORMAT_R8G8B8A8_SINT ||
+                Narrow == DXGI_FORMAT_R16G16B16A16_SINT;
+  UINT ComponentBytes = Narrow == DXGI_FORMAT_UNKNOWN ? 4
+                        : Narrow == DXGI_FORMAT_R8_UINT ||
+                                Narrow == DXGI_FORMAT_R8_SINT ||
+                                Narrow == DXGI_FORMAT_R8G8B8A8_UINT ||
+                                Narrow == DXGI_FORMAT_R8G8B8A8_SINT
+                            ? 1
+                            : 2;
+  UINT Components =
+      Narrow == DXGI_FORMAT_R8_UINT || Narrow == DXGI_FORMAT_R8_SINT ||
+              Narrow == DXGI_FORMAT_R16_UINT || Narrow == DXGI_FORMAT_R16_SINT
+          ? 1
+          : 4;
+  UINT TexelBytes = Components * ComponentBytes;
+  auto PackTexel = [&](unsigned char *Destination,
+                       const std::array<UINT, 4> &Texel) {
+    for (UINT C = 0; C < Components; ++C)
+      std::memcpy(Destination + C * ComponentBytes, &Texel[C], ComponentBytes);
+  };
+  auto StoredTexel = [&](UINT Thread) {
+    std::array<UINT, 4> Texel{256 + Thread, 65536 + Thread, UINT_MAX - Thread,
+                              17 + Thread};
+    if (Signed) {
+      std::array<INT, 4> Values{-70000 + INT(Thread), 70000 + INT(Thread),
+                                -129 - INT(Thread), 129 + INT(Thread)};
+      INT Maximum = (1 << (ComponentBytes * 8 - 1)) - 1;
+      for (UINT C = 0; C < 4; ++C)
+        Texel[C] =
+            static_cast<UINT>(std::clamp(Values[C], -Maximum - 1, Maximum));
+    } else if (ComponentBytes < 4) {
+      UINT Maximum = (1u << (ComponentBytes * 8)) - 1;
+      for (auto &Value : Texel)
+        Value = std::min(Value, Maximum);
+    }
+    return Texel;
+  };
   constexpr UINT TextureStride = 16384, UploadBytes = 2 * TextureStride,
                  SeedOffset = UploadBytes - 512;
   UINT SubresourceCount = Volume ? 2 : 6;
@@ -1009,8 +1049,9 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
   TextureDesc.Height = 4;
   TextureDesc.DepthOrArraySize = Volume ? 8 : 3;
   TextureDesc.MipLevels = 2;
-  TextureDesc.Format =
-      Sampling ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R32G32B32A32_UINT;
+  TextureDesc.Format = Narrow != DXGI_FORMAT_UNKNOWN ? Narrow
+                       : Sampling ? DXGI_FORMAT_R32G32B32A32_FLOAT
+                                  : DXGI_FORMAT_R32G32B32A32_UINT;
   TextureDesc.SampleDesc.Count = 1;
   if (TextureUAV)
     TextureDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -1044,8 +1085,8 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
             auto Offset = Layout.Offset +
                           (UINT64(Z) * Layout.Footprint.Height + Y) *
                               Layout.Footprint.RowPitch +
-                          X * sizeof(Texel);
-            if (Offset > SeedOffset || sizeof(Texel) > SeedOffset - Offset)
+                          X * TexelBytes;
+            if (Offset > SeedOffset || TexelBytes > SeedOffset - Offset)
               return report("Texture-view upload span overlaps output seed",
                             E_FAIL);
             if (Sampling) {
@@ -1055,7 +1096,7 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
               std::memcpy(Data.data() + Offset, Floating.data(),
                           sizeof(Floating));
             } else
-              std::memcpy(Data.data() + Offset, Texel.data(), sizeof(Texel));
+              PackTexel(Data.data() + Offset, Texel);
           }
     }
   }
@@ -1069,21 +1110,20 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
       UINT Index = Thread & 1;
       UINT Subresource = Volume ? 1 : 1 + (1 + Thread / 2) * 2;
       const auto &Layout = Footprints[Index][Subresource];
-      std::array<UINT, 4> Texel{256 + Thread, 65536 + Thread, UINT_MAX - Thread,
-                                17 + Thread};
+      auto Texel = StoredTexel(Thread);
       UINT64 DepthOffset = Volume ? UINT64(1 + Thread / 2) *
                                         Layout.Footprint.RowPitch *
                                         Layout.Footprint.Height
                                   : 0;
-      std::memcpy(ExpectedReadback.data() + Layout.Offset + DepthOffset +
-                      Thread * sizeof(Texel),
-                  Texel.data(), sizeof(Texel));
+      PackTexel(ExpectedReadback.data() + Layout.Offset + DepthOffset +
+                    Thread * TexelBytes,
+                Texel);
       if (Volume) {
         Texel.fill(777);
         std::memcpy(ExpectedReadback.data() + Layout.Offset +
                         3 * Layout.Footprint.RowPitch *
                             Layout.Footprint.Height +
-                        Thread * sizeof(Texel),
+                        Thread * TexelBytes,
                     Texel.data(), sizeof(Texel));
       }
     }
@@ -1395,11 +1435,14 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
       UINT Index = Thread & 1;
       UINT Base = Index * 1000 + 100 + (1 + Thread / 2) * 40 + Thread;
       if (TextureUAV) {
-        std::array<UINT, 4> Texel{256 + Thread, 65536 + Thread,
-                                  UINT_MAX - Thread, 17 + Thread};
+        auto Texel = StoredTexel(Thread);
+        for (UINT C = Components; C < 4; ++C)
+          Texel[C] = C == 3 ? 1 : 0;
         for (UINT C = 0; C < 4; ++C)
           Expected[1 + Thread * 8 + C] =
               Null && !Index ? 0 : Texel[C] + (Volume ? 777 : 0);
+        if (Components == 1)
+          Expected[1 + Thread * 8 + 3] = Null && !Index ? 0 : 2;
       } else if (Sampling) {
         constexpr std::array<UINT, 4> Border{2, 3, 5, 7};
         for (UINT C = 0; C < 4; ++C)
@@ -3075,6 +3118,44 @@ int wmain(int Argc, wchar_t **Argv) {
        std::wcscmp(Argv[1], L"--reference-ordered-sampler-views") == 0 ||
        std::wcscmp(Argv[1], L"--ordered-static-sampler-views") == 0 ||
        std::wcscmp(Argv[1], L"--reference-ordered-static-sampler-views") == 0);
+  bool NarrowTextureUAVViews =
+      Argc == 4 &&
+      (std::wcscmp(Argv[1], L"--narrow-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--ordered-narrow-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-narrow-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-narrow-texture-uav-views") ==
+           0);
+  DXGI_FORMAT NarrowFormat = DXGI_FORMAT_UNKNOWN;
+  if (NarrowTextureUAVViews) {
+    const struct {
+      const wchar_t *Name;
+      DXGI_FORMAT Format;
+    } Formats[] = {{L"uint8", DXGI_FORMAT_R8_UINT},
+                   {L"sint8", DXGI_FORMAT_R8_SINT},
+                   {L"uint16", DXGI_FORMAT_R16_UINT},
+                   {L"sint16", DXGI_FORMAT_R16_SINT},
+                   {L"uint8x4", DXGI_FORMAT_R8G8B8A8_UINT},
+                   {L"sint8x4", DXGI_FORMAT_R8G8B8A8_SINT},
+                   {L"uint16x4", DXGI_FORMAT_R16G16B16A16_UINT},
+                   {L"sint16x4", DXGI_FORMAT_R16G16B16A16_SINT}};
+    for (const auto &Format : Formats)
+      if (!std::wcscmp(Argv[3], Format.Name))
+        NarrowFormat = Format.Format;
+    if (NarrowFormat == DXGI_FORMAT_UNKNOWN) {
+      report("Unknown narrow texture UAV format", E_INVALIDARG);
+      return 2;
+    }
+  }
+  bool ReferenceNarrowTextureUAVViews =
+      NarrowTextureUAVViews &&
+      (std::wcscmp(Argv[1], L"--reference-narrow-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-narrow-texture-uav-views") ==
+           0);
+  bool OrderedNarrowTextureUAVViews =
+      NarrowTextureUAVViews &&
+      (std::wcscmp(Argv[1], L"--ordered-narrow-texture-uav-views") == 0 ||
+       std::wcscmp(Argv[1], L"--reference-ordered-narrow-texture-uav-views") ==
+           0);
   bool VolumeTextureUAVViews =
       Argc == 3 &&
       (std::wcscmp(Argv[1], L"--volume-texture-uav-views") == 0 ||
@@ -3083,26 +3164,30 @@ int wmain(int Argc, wchar_t **Argv) {
        std::wcscmp(Argv[1], L"--reference-ordered-volume-texture-uav-views") ==
            0);
   bool TextureUAVViews =
-      VolumeTextureUAVViews ||
+      NarrowTextureUAVViews || VolumeTextureUAVViews ||
       Argc == 3 &&
           (std::wcscmp(Argv[1], L"--texture-uav-views") == 0 ||
            std::wcscmp(Argv[1], L"--ordered-texture-uav-views") == 0 ||
            std::wcscmp(Argv[1], L"--reference-texture-uav-views") == 0 ||
            std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0);
   bool ReferenceTextureUAVViews =
+      ReferenceNarrowTextureUAVViews ||
       TextureUAVViews &&
-      (std::wcscmp(Argv[1], L"--reference-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-volume-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-volume-texture-uav-views") ==
-           0);
+          (std::wcscmp(Argv[1], L"--reference-texture-uav-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") ==
+               0 ||
+           std::wcscmp(Argv[1], L"--reference-volume-texture-uav-views") == 0 ||
+           std::wcscmp(Argv[1],
+                       L"--reference-ordered-volume-texture-uav-views") == 0);
   bool OrderedTextureUAVViews =
+      OrderedNarrowTextureUAVViews ||
       TextureUAVViews &&
-      (std::wcscmp(Argv[1], L"--ordered-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--ordered-volume-texture-uav-views") == 0 ||
-       std::wcscmp(Argv[1], L"--reference-ordered-volume-texture-uav-views") ==
-           0);
+          (std::wcscmp(Argv[1], L"--ordered-texture-uav-views") == 0 ||
+           std::wcscmp(Argv[1], L"--reference-ordered-texture-uav-views") ==
+               0 ||
+           std::wcscmp(Argv[1], L"--ordered-volume-texture-uav-views") == 0 ||
+           std::wcscmp(Argv[1],
+                       L"--reference-ordered-volume-texture-uav-views") == 0);
   bool ReferenceTextureViews =
       ReferenceSamplerViews || ReferenceTextureUAVViews ||
       Argc == 3 &&
@@ -3337,7 +3422,7 @@ int wmain(int Argc, wchar_t **Argv) {
     Result = exerciseTextureViews(Device.Get(), DXIL, OrderedTextureViews,
                                   SingleLayerTextureViews, SamplerViews,
                                   StaticSamplerViews, TextureUAVViews,
-                                  VolumeTextureUAVViews);
+                                  VolumeTextureUAVViews, NarrowFormat);
   if (SUCCEEDED(Result) && Commands)
     Result = exerciseCommands(Device.Get(),
                               DXILCommands || Coexist ? &DXIL : nullptr);

@@ -10,7 +10,7 @@
     "command_queue": "D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001"
   },
   "compiler_bridge_version": 6,
-  "artifact_abi_version": 13,
+  "artifact_abi_version": 14,
   "input_profiles": ["released SM 5.1", "released SM 6.0"],
   "shader_scope": ["application compute subset", "initialization vertex only"],
   "compiler_image_scope": ["checked borrowed finite SRV/UAV images", "independent finite sampler bindings", "single-plane single-sample mapped uncompressed formats", "copied mip-layout metadata", "SRV load component mappings", "Direct3D integer-store saturation for UAV images", "DXIL full-texel stores reuse masked image helpers; writable non-ROV FP32/i32 1D/array, 2D/array and 3D", "native image/sampler heap indexing rejected", "owned finite texture SRV/UAV and sampler-table preparation; copied scalar static sampler state"],
@@ -46,6 +46,7 @@
   "sampler_scope": ["owned CPU/shader-visible sampler heaps", "heap-type-checked creation and CPU-source copies", "independent simultaneous resource/sampler heaps and stable heap reordering", "native unused anisotropy/comparison normalization", "shared filter/address/LOD/border validation", "live sampler arrays and copied static scalar samplers", "owned/reference point/linear, clamp/custom-border/opaque-black execution, replay, null images and held lifetime", "complete sampling operation/format matrix and newer integer-border root versions remain open"],
   "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32/R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRV/UAVs", "R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT typed buffer SRV/UAVs", "complete fifteen-format additional typed-UAV buffer set", "Direct3D narrow integer store saturation", "typed SRV component mappings and constant/default channels", "non-uniform live typed-buffer dimension queries", "CPU-source descriptor copies", "execution-time finite buffer/image table preparation", "live CPU-metadata residency", "copied native texture SRV descriptions; checked mip/layer selection and null views", "owned/reference 2D-array and singleton-array SRV execution, mappings, live dimensions, replay and held recording teardown"],
   "typed_uav_load_additional_formats": true,
+  "native_narrow_image_scope": ["R8/R16/RGBA8/RGBA16 UINT/SINT UAV stores and loads", "signed/unsigned saturation", "active OOB format-default missing channels; null/masked results remain zero", "selected mip/layers, complete subresource/padding guards, live descriptors, replay and held lifetime", "optional RG formats and complete dimensional/format/sampling matrix remain open"],
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV", "single-plane single-sample uncompressed linear texture storage; checked mip/array metadata and finite SRVs/UAVs", "owned/reference 2D-array and 3D UAV stores/loads with selected mip/layer/W-slice origin, complete subresource guards, replay, nulls and held lifetime", "3D UAV dimensions report full mip depth; compute coordinates add FirstW and remain bounded by physical mip depth; WSize is creation-validated, not a compute clamp"],
   "copy_scope": ["buffer byte regions", "exact-format uncompressed placed buffer footprints", "selected texture subresources translated from D3D mip/array indices", "pitched row/depth region copies", "recorded layout and box snapshots"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
@@ -95,6 +96,7 @@
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
+@FEME_WARP_NARROW_IMAGE_GATES@
     "os-routed-warp-compiler-owned-texture-uav-views",
     "os-routed-warp-compiler-owned-ordered-texture-uav-views",
     "os-routed-warp-compiler-reference-texture-uav-views",

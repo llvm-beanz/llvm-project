@@ -4674,6 +4674,24 @@ femeRTExpandBorderColorForFormatI32(const float BorderColor[4],
   return Result;
 }
 
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTImageOOBValue(const FemeRTImageDescriptor *Img) {
+  FemeRTv4f32 Zero = {0, 0, 0, 0};
+  const float Border[4] = {0, 0, 0, 0};
+  return Img->Data && (Img->Flags & 32u)
+             ? femeRTExpandBorderColorForFormat(Border, Img->Format, 0)
+             : Zero;
+}
+
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTImageOOBValueI32(const FemeRTImageDescriptor *Img) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  const float Border[4] = {0, 0, 0, 0};
+  return Img->Data && (Img->Flags & 32u)
+             ? femeRTExpandBorderColorForFormatI32(Border, Img->Format)
+             : Zero;
+}
+
 // Reads one texel at integer coordinates `(X, Y)`, array layer `Layer`,
 // sample `Sample`, of mip level `Level` of `Img`, or `BorderColor` if
 // `UseBorder` is set (a `ClampToBorder` axis resolved out of range), or
@@ -4722,7 +4740,7 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
                    uint32_t Layer, int32_t X, int32_t Y, uint32_t Sample,
                    _Bool UseBorder, const float BorderColor[4],
                    _Bool ApplySwizzle) {
-  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  FemeRTv4f32 Zero = femeRTImageOOBValue(Img);
   if (UseBorder) {
     FemeRTv4f32 Border =
         femeRTExpandBorderColorForFormat(BorderColor, Img->Format,
@@ -4772,7 +4790,7 @@ __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
                       uint32_t Layer, int32_t X, int32_t Y, uint32_t Sample,
                       _Bool ApplySwizzle) {
-  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  FemeRTv4i32 Zero = femeRTImageOOBValueI32(Img);
   if (!Img->Data || Level >= Img->MipLayoutCount || Layer >= Img->ArrayLayers)
     return Zero;
   uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
@@ -5318,7 +5336,7 @@ __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
                    int32_t X, int32_t Y, int32_t Z, _Bool UseBorder,
                    const float BorderColor[4], _Bool ApplySwizzle) {
-  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  FemeRTv4f32 Zero = femeRTImageOOBValue(Img);
   if (UseBorder) {
     FemeRTv4f32 Border =
         femeRTExpandBorderColorForFormat(BorderColor, Img->Format,
@@ -5351,7 +5369,7 @@ femeRTFetchTexel3D(const FemeRTImageDescriptor *Img, uint32_t Level,
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel3DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
                       int32_t X, int32_t Y, int32_t Z, _Bool ApplySwizzle) {
-  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  FemeRTv4i32 Zero = femeRTImageOOBValueI32(Img);
   if (!Img->Data || Level >= Img->MipLayoutCount || Z < 0)
     return Zero;
   uint32_t Slice = femeRTImageDepthCoordinate(Img, Level, Z);
@@ -7738,6 +7756,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValue(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32 || Sample >= Img.SampleCount)
     return Zero;
@@ -7771,6 +7790,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValueI32(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32 || Sample >= Img.SampleCount)
     return Zero;
@@ -9667,6 +9687,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DV4F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValue(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32)
     return Zero;
@@ -9693,6 +9714,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValueI32(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32)
     return Zero;
@@ -9754,6 +9776,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad1DArrayV4F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValue(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32)
     return Zero;
@@ -9782,6 +9805,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad1DArrayV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValueI32(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32)
     return Zero;
@@ -9852,6 +9876,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad3DV4F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValue(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32)
     return Zero;
@@ -9882,6 +9907,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad3DV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValueI32(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32)
     return Zero;
@@ -10849,6 +10875,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DArrayV4F32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValue(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32 || Sample >= Img.SampleCount)
     return Zero;
@@ -10884,6 +10911,7 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DArrayV4I32(
     return Zero;
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  Zero = femeRTImageOOBValueI32(&Img);
   if (!Img.Data || Mip >= Img.MipLevels || Mip >= Img.MipLayoutCount ||
       Mip >= 32 || Sample >= Img.SampleCount)
     return Zero;
