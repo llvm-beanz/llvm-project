@@ -137692,3 +137692,29 @@ Vulkan advertisements, KMD changes or new CTS result are claimed.
 Next: continue the fifteen-format additional typed-UAV prerequisite and its
 owned exposure gates, then images/samplers, complete roots/resource classes
 and synchronization. The current request remains open; W2 is not complete.
+
+# W2 progress: descriptor-gated integer-store saturation
+
+The first complete typed-UAV experiment passed 76 of 84 controls. All owned
+controls agreed with the initial truncation oracle, but eight reference
+R8/R16 UINT/SINT scalar/vector controls did not. The public D3D11.3 functional
+specification, section 3.2.3.13, requires clamping to the destination integer
+range. This was a shared conversion mismatch, not a reason to weaken the
+reference oracle or claim additional-format support from owned-only passes.
+
+Commit 0f89195e3bcc introduces descriptor flag bit 4 and artifact ABI 11.
+The layout remains 48 bytes. One gated packer covers scalar/two/four-component
+typed integer buffer stores, leaving image stores and flag-clear behavior
+unchanged. A twelve-format matrix checks extreme signed/unsigned inputs,
+truncation and saturation, exact bytes, guards, inactive/OOB accesses and
+read-only permissions. Wrappers are all created before first JIT resolution.
+
+Focused runtime/version tests passed 5/5 and full FeMe passed 4413, with
+15 skipped and 10 unsupported. FeMe ICD identity was confirmed before the
+full/coexistence launch. The pending Windows integration also passed all
+84 typed-UAV controls, callbacks 65/65 and stock-runtime gates 355/355 after
+shared DLL relinking; its admission and truthful v16 inventory are committed
+separately. No Vulkan advertisement, new CTS result or KMD change is claimed.
+
+Next: commit the tested Windows typed-UAV integration and continue the
+remaining W2 binding, image/resource and synchronization work. W2 remains open.
