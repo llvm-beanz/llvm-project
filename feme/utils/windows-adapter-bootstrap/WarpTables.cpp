@@ -1322,7 +1322,10 @@ resourceBarrier(D3D12DDI_HCOMMANDLIST List, UINT Count,
   for (UINT I = 0; I < Count; ++I) {
     const auto &Barrier = Barriers[I];
     D3D12DDI_HRESOURCE Resource{};
-    if (Barrier.Flags != D3D12DDI_RESOURCE_BARRIER_FLAG_NONE) {
+    bool Aliasing =
+        Barrier.Type == D3D12DDI_RESOURCE_BARRIER_TYPE_0022_RANGED &&
+        (Barrier.Flags & D3D12DDI_RESOURCE_BARRIER_FLAG_0022_ALIASING);
+    if (!Aliasing && Barrier.Flags != D3D12DDI_RESOURCE_BARRIER_FLAG_NONE) {
       reportObjectError(List, E_NOTIMPL);
       return;
     }
@@ -1337,7 +1340,21 @@ resourceBarrier(D3D12DDI_HCOMMANDLIST List, UINT Count,
       Resource = Barrier.Transition.hResource;
     } else if (Barrier.Type == D3D12DDI_RESOURCE_BARRIER_TYPE_UAV)
       Resource = Barrier.UAV.hResource;
-    else {
+    else if (Aliasing) {
+      auto Flags =
+          Barrier.Flags & ~D3D12DDI_RESOURCE_BARRIER_FLAG_0022_ALIASING;
+      if ((Flags != D3D12DDI_RESOURCE_BARRIER_FLAG_NONE &&
+           Flags != D3D12DDI_RESOURCE_BARRIER_FLAG_BEGIN_ONLY &&
+           Flags != D3D12DDI_RESOURCE_BARRIER_FLAG_END_ONLY) ||
+          (Barrier.Ranged.Subresource != 0 &&
+           Barrier.Ranged.Subresource != std::numeric_limits<UINT>::max()) ||
+          Barrier.Ranged.Range.Begin ||
+          Barrier.Ranged.Range.End != std::numeric_limits<UINT64>::max()) {
+        reportObjectError(List, E_INVALIDARG);
+        return;
+      }
+      Resource = Barrier.Ranged.hResource;
+    } else {
       reportObjectError(List, E_NOTIMPL);
       return;
     }

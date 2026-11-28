@@ -241,7 +241,7 @@ struct CoexistState {
 
 HRESULT queryWavePolicy(ID3D12Device *Device) {
 #ifdef FEME_WARP_PROFILE_VERSION
-  std::printf("W1 internal capability inventory: version=%u; product FL=none\n",
+  std::printf("Internal capability inventory: version=%u; product FL=none\n",
               static_cast<unsigned>(FEME_WARP_PROFILE_VERSION));
 #endif
   D3D12_FEATURE_DATA_D3D12_OPTIONS1 Options{};
@@ -394,6 +394,11 @@ HRESULT exerciseFences(ID3D12Device *Device) {
     if (WaitForSingleObject(Event, 5000) != WAIT_OBJECT_0 ||
         Fence->GetCompletedValue() != 1)
       return report("CPU fence completion mismatch", E_FAIL);
+    Status = report("Decrease CPU fence value", Fence->Signal(0));
+    if (FAILED(Status))
+      return Status;
+    if (Fence->GetCompletedValue() != 0)
+      return report("Decreasing CPU fence value was lost", E_FAIL);
     Status = report("Queue future fence wait", Queue->Wait(Fence.Get(), 3));
     if (FAILED(Status))
       return Status;
@@ -408,6 +413,12 @@ HRESULT exerciseFences(ID3D12Device *Device) {
       return Status;
     if (WaitForSingleObject(Event, 100) != WAIT_TIMEOUT)
       return report("Queue signal bypassed future wait", E_FAIL);
+    Status = report("Decrease pending-wait fence", Fence->Signal(0));
+    if (FAILED(Status))
+      return Status;
+    if (WaitForSingleObject(Event, 100) != WAIT_TIMEOUT ||
+        Fence->GetCompletedValue() != 0)
+      return report("Decreasing signal bypassed future wait", E_FAIL);
     Status = report("Release future fence wait", Fence->Signal(3));
     if (FAILED(Status))
       return Status;
@@ -523,7 +534,6 @@ HRESULT exercisePlacedBuffers(ID3D12Device *Device) {
   }
   static_cast<unsigned char *>(Alias)[0] = 0x42;
   Buffers[2]->Unmap(0, &Written);
-  Buffers[2].Reset();
   D3D12_HEAP_PROPERTIES ReadbackHeap{};
   ReadbackHeap.Type = D3D12_HEAP_TYPE_READBACK;
   ReadbackHeap.CreationNodeMask = 1;
@@ -538,7 +548,7 @@ HRESULT exercisePlacedBuffers(ID3D12Device *Device) {
   if (FAILED(Result))
     return Result;
   D3D12_COMMAND_QUEUE_DESC QueueDesc{};
-  QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+  QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   ComPtr<ID3D12CommandQueue> Queue;
   ComPtr<ID3D12CommandAllocator> Allocator;
   ComPtr<ID3D12GraphicsCommandList> List;
@@ -555,7 +565,14 @@ HRESULT exercisePlacedBuffers(ID3D12Device *Device) {
         Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
   if (FAILED(Result))
     return report("Create placed-buffer copy objects", Result);
+  D3D12_RESOURCE_BARRIER AliasBarrier{};
+  AliasBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+  AliasBarrier.Aliasing.pResourceBefore = Buffers[2].Get();
+  AliasBarrier.Aliasing.pResourceAfter = Buffers[0].Get();
+  List->ResourceBarrier(1, &AliasBarrier);
   List->CopyBufferRegion(Readback.Get(), 0, Buffers[0].Get(), 0, Bytes);
+  AliasBarrier.Aliasing = {};
+  List->ResourceBarrier(1, &AliasBarrier);
   List->CopyBufferRegion(Readback.Get(), Bytes, Buffers[1].Get(), 0, Bytes);
   Result = List->Close();
   if (FAILED(Result))
@@ -565,6 +582,7 @@ HRESULT exercisePlacedBuffers(ID3D12Device *Device) {
   Result = waitQueue(Queue.Get(), Fence.Get(), 1);
   if (FAILED(Result))
     return Result;
+  Buffers[2].Reset();
   void *Data = nullptr;
   D3D12_RANGE Read{0, static_cast<SIZE_T>(Desc.Width)};
   Result = Readback->Map(0, &Read, &Data);

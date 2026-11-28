@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -412,6 +413,17 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     Good &= LastError == E_NOTIMPL;
     LastError = S_OK;
     Lists.pfnSetPipelineState(List, Pipeline);
+    D3D12DDIARG_RESOURCE_BARRIER_0022 Alias{};
+    Alias.Type = D3D12DDI_RESOURCE_BARRIER_TYPE_0022_RANGED;
+    Alias.Flags = D3D12DDI_RESOURCE_BARRIER_FLAG_0022_ALIASING;
+    Alias.Ranged.Subresource = std::numeric_limits<UINT>::max();
+    Alias.Ranged.Range.End = std::numeric_limits<UINT64>::max();
+    Lists.pfnResourceBarrier(List, 1, &Alias);
+    Good &= LastError == S_OK;
+    Alias.Ranged.hResource.pDrvPrivate = &Other;
+    Lists.pfnResourceBarrier(List, 1, &Alias);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
     Lists.pfnDispatch(List, 2, 1, 1);
     Good &= LastError == S_OK;
     Core.pfnResetCommandPool(Device, Pool);
