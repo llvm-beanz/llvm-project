@@ -137555,3 +137555,30 @@ full/coexistence execution. No system binaries or drivers were modified.
 Continue W2: append/consume end-to-end coverage, remaining typed/component/
 atomic behavior, images/samplers, full roots/resources/residency, barriers,
 queries and indirect/removal semantics. W2 remains open.
+# W2 progress: bounded owned structured append and consume
+
+Commit `71d8892167bf` validates the next counter-dependent public slice without
+changing the shared helper, bridge 3, artifact 9 or existing WARP KMD. Append
+must prove counter-selected data writes, not merely final counter values.
+Consume uses a distinct source region so its oracle does not accidentally
+validate a destructive read/write race. Reusing the counter allocation at
+disjoint offsets preserves the real-allocation provenance contract.
+
+The permutation checks require ninety unique valid values per live view.
+Final null replacement additionally preserves the preceding output bytes.
+Counter/source guards and exact counts are checked independently. Explicit
+divergent counter branches preserve the previously established owned/reference
+contract; the unexplained dynamic-counter-expression reference discrepancy is
+not hidden or declared fixed.
+
+The first build found a missing explicit lambda capture, fixed before running
+tests. Eight new controls passed, then full FeMe 4408/15 skipped/10 unsupported,
+callbacks 65/65 and stock-runtime 139/139. FeMe ICD identity was verified for
+full/coexistence launches. Inventory v13 has 103 unique required OS gates and
+does not claim a complete feature level. Historical CTS executables remain
+unavailable; no CTS run or Vulkan advertisement is claimed.
+
+Next steps remain full W2 acceptance: general counter payload/dynamic-selection
+coverage, mandatory typed formats/UAVs, component mappings, image resources and
+samplers, complete roots/residency/barriers/queries and other indirect signatures.
+W2 must not be struck through merely because this bounded slice passes.
