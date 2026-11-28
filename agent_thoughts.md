@@ -137657,3 +137657,38 @@ landed inside an existing IR raw string; I corrected it before validation.
 Next: commit the separately tested packed SRV admission and execution slice,
 then continue W2's additional typed UAV formats, roots/resources and
 synchronization. W2 is not complete; no new CTS or capability closure is claimed.
+
+# W2 progress: owned narrow and packed typed SRVs
+
+The existing shared decoders now serve twelve R8/R16/RGBA8/RGBA16 Windows
+SRV formats with exact physical element sizes. I kept scalar R32-only UAV
+admission explicit: RGBA8 also occupies four bytes, so size alone cannot
+decide UAV support. Bridge 4 and artifact 10 stay unchanged. The v15
+inventory has 235 unique OS gates and 11 existing native fixtures, all
+verified to exist; it still makes no complete feature-level claim.
+
+The 96 new controls preserve post-record metadata, copies, non-uniform
+arrays, null loads/writes, guards and held teardown across owned DXBC,
+original DXIL and independent system WARP. Separate packed upload storage
+preserves the output seed. UNORM recovers original bytes, and FP16 scaling
+by two distinguishes every tested half-unit fraction rather than truncating
+them into identical integer results. Live dimension queries add exactly 180
+physical elements irrespective of shader width or component mapping.
+
+The first 90/96 result exposed six legacy UNORM macro-array crashes. A
+vector with an explicit terminator fixed them. Queries then exposed the
+shared scalarization gap fixed in the preceding commit. Unrestricted null
+dimension queries also crashed reference processes; no vendor root cause
+was established. A phase check through the first live constant now queries
+only live views, while preserving the final null-load oracle. An earlier
+phase condition confused global parity with X parity and was corrected.
+
+Final validation passes 4412 full FeMe tests, with 15 skipped and 10
+unsupported, 65/65 callback gates and 271/271 stock-runtime/coexistence
+gates, including all 96 new controls. The stock suite was rerun after shared
+DLL relinking. FeMe Vulkan identity was checked in each launch shell; no
+Vulkan advertisements, KMD changes or new CTS result are claimed.
+
+Next: continue the fifteen-format additional typed-UAV prerequisite and its
+owned exposure gates, then images/samplers, complete roots/resource classes
+and synchronization. The current request remains open; W2 is not complete.
