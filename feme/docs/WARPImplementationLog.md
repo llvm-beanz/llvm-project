@@ -840,6 +840,30 @@ with confirmed FeMe ICD identity. Inventory **v24** retains bridge 5/artifact 12
 and a null complete product FL. Native narrow formats, volume/dimensional views,
 the remaining image/sampling matrix and general W2 contracts stay open.
 
+#### Optional RG integer buffer and image views
+
+RG8/RG16 UINT/SINT now use their exact two/four-byte geometry in shared native
+format admission and compiler mapping. Because these helpers serve both buffers
+and images, the new formats are validated in both paths rather than silently
+expanding buffer capability claims. The native DDI format/view constructor
+matrix includes all four additions.
+
+Forty-eight new original-DXIL/generated-source buffer controls cover typed SRV
+decoding, component mappings, live dimensions, UAV loads/stores, replay and held
+execution against independent WARP. Sixteen new texture-UAV controls use signed/
+unsigned saturation inputs, selected views, OOB/default/null channels, live
+descriptor copies and complete subresource/upload guards. Two-channel missing
+alpha retains the reference-proven format defaults.
+
+Validation: new format selectors **64/64**, updated native DDI fixtures **3/3**,
+full FeMe **4434** passed / **15** skipped / **10** unsupported, callbacks
+**65/65**, stock-runtime/coexistence **491/491**, with confirmed FeMe ICD identity
+and refreshed application-local compiler. Inventory **v27** has **455** unique
+existing required OS gates and **18** native fixtures; bridge **6**/artifact
+**14** and null complete product FL remain unchanged. No shared runtime, Vulkan
+advertisement or CTS result changes. Other optional formats, the remaining
+image-dimension/sampling matrix and complete W2 contracts remain open.
+
 #### Native narrow integer texture UAVs and OOB format defaults
 
 Eight currently admitted narrow formats (R8/R16/RGBA8/RGBA16 UINT/SINT) now

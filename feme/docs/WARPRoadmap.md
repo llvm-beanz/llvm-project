@@ -34,8 +34,9 @@ masked atomic runtime.
 Typed SRVs additionally execute checked component mappings, constants and
 absent-channel defaults. R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT
 SRVs also execute packed decoding, mappings and live-view dimension queries.
-All 21 typed buffer formats also execute UAV loads/stores, including the
-complete mandatory fifteen-format additional set and optional RG32 formats.
+All 25 typed buffer formats also execute UAV loads/stores, including the
+complete mandatory fifteen-format additional set and optional RG32 and
+RG8/RG16 integer formats.
 Narrow integer stores saturate according to Direct3D rather than truncate.
 Root signatures additionally admit disjoint conventional graphics-stage
 bindings, without exposing them to compute execution.
@@ -52,24 +53,25 @@ DXIL against WARP, including live point/linear and clamp/border updates, replay,
 null images and held teardown. Owned finite 1D/2D texture UAV descriptions
 reuse the checked mip/layer normalizer with write permission. Original DXIL
 2D-array stores/loads pass live updates, nulls, replay, held teardown and exact
-readback of every subresource. Volume UAV views and remaining image/sampling
-coverage stay open.
+readback of every subresource. Selected volume UAVs execute checked FirstW
+origins with full-mip dimensions. All twelve R/RG/RGBA 8/16-bit integer formats
+execute native UAV saturation and OOB/default/null channels. Remaining
+image/sampling coverage stays open.
 The shared image-store runtime now supports descriptor-opted Direct3D narrow
 integer saturation, reusing the typed-buffer packer while preserving Vulkan
-truncation. Native UAV preparation sets this bit; narrow-format native execution
-coverage remains required. Shared DXIL texture stores now canonicalize into
+truncation. Native UAV preparation sets this bit. Shared DXIL texture stores now canonicalize into
 the existing masked image-store helpers rather than reaching SIMD unlowered.
 Shared DXIL image/sampler bindings now use independent checked heap prefixes,
-qualified SRV/UAV image identity and artifact ABI 12. Native CPU JIT/scalar/AOT
+qualified SRV/UAV image identity and artifact ABI 14. Native CPU JIT/scalar/AOT
 controls distinguish image namespaces and sampler arrays. Private Windows
-bridge 5 now prepares checked borrowed image views and finite sampler arrays,
+bridge 6 now prepares checked borrowed image views and finite sampler arrays,
 with copied mip layouts, SRV load mappings and explicit native-heap rejection.
 Owned finite texture SRV/UAV and sampler-table preparation reuse this bridge;
 static sampler state is copied through root, recording and submission ownership.
 Recorded binding identities are now separate from execution descriptors, retaining
 live descriptor updates and copied inline state. Buffer/image descriptors and
 copied mip layouts are now submission-local preparation, not recording storage.
-The generated v24 inventory
+The generated v27 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -107,10 +109,10 @@ not a device or runtime.
 
 W2 remaining work is tracked without deeper milestone nesting:
 
-The shared typed-buffer runtime and Windows bridge 5 execute descriptor-backed
-typed SRV component mappings (artifact ABI 12), including post-record updates,
-nulls and held execution. Twelve additional narrow SRV formats reuse existing
-decoders with exact physical element geometry. All 21 mapped formats execute
+The shared typed-buffer runtime and Windows bridge 6 execute descriptor-backed
+typed SRV component mappings (artifact ABI 14), including post-record updates,
+nulls and held execution. Sixteen additional narrow SRV formats reuse existing
+decoders with exact physical element geometry. All 25 mapped formats execute
 typed UAV loads/stores; descriptor-gated saturation preserves existing Vulkan
 integer conversion while matching Direct3D's narrow-store contract.
 
@@ -122,8 +124,8 @@ W2(b) operations, still remain.
 | Step | Current boundary and remaining work |
 |---|---|
 | W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured/sampler tables execute. Independent resource/sampler heaps and copied scalar static samplers execute. Disjoint conventional graphics-stage roots/static samplers coexist while compute prepares only ALL-visible bindings; unbounded/general heaps, complete sampler operation/format coverage and shader/root compatibility remain. |
-| W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, all 21 mapped typed SRV/UAV formats including the complete additional-format buffer set, typed SRV component mappings/live dimensions, Direct3D narrow-store saturation, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; other optional typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
-| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed placed footprints and linear texture storage reuse shared layouts; mipmapped 3D/2D-array copies pass selected-subresource indexing, pitched regions, guards and held lifetime. Finite SRV/UAV descriptions resolve live selected mip/layer/W-slice metadata; owned/reference 2D-array/3D UAV stores/loads preserve every subresource, padding and upload storage with nulls/replay/held teardown. Volume dimensions retain full mip depth while checked FirstW addressing stays inside physical storage. Native R8/R16/RGBA8/RGBA16 UINT/SINT UAVs verify saturation and OOB/default/null channels. SRV singleton arrays, mappings and sampler/static point/linear/clamp/border controls also execute. Optional RG and remaining dimensional/sampling/format/plane/MSAA coverage, footprints, reserved/shared resources and broader residency remain. |
+| W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, all 25 mapped typed SRV/UAV formats including the complete additional-format buffer set and optional RG integers, typed SRV component mappings/live dimensions, Direct3D narrow-store saturation, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; other optional typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
+| W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Uncompressed placed footprints and linear texture storage reuse shared layouts; mipmapped 3D/2D-array copies pass selected-subresource indexing, pitched regions, guards and held lifetime. Finite SRV/UAV descriptions resolve live selected mip/layer/W-slice metadata; owned/reference 2D-array/3D UAV stores/loads preserve every subresource, padding and upload storage with nulls/replay/held teardown. Volume dimensions retain full mip depth while checked FirstW addressing stays inside physical storage. Native R8/RG8/R16/RG16/RGBA8/RGBA16 UINT/SINT UAVs verify saturation and OOB/default/null channels. SRV singleton arrays, mappings and sampler/static point/linear/clamp/border controls also execute. Other optional formats and remaining dimensional/sampling/format/plane/MSAA coverage, footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, execution-time 64-bit predication, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, indirect root changes/draws and general removal wakeups remain. |
 
 ```text

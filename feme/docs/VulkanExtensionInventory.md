@@ -1,5 +1,11 @@
 # Vulkan `KHR`/`EXT` extension inventory
 
+Optional WARP RG integer buffer/texture controls pass 64 new owned/reference
+gates, 4434 full FeMe tests (15 skipped, 10 unsupported), 65 callbacks and 491
+stock-runtime/coexistence gates with confirmed FeMe ICD identity. Existing
+shared format helpers are reused; Vulkan advertisements, bridge6/artifact14
+and runtime semantics are unchanged. No inventory regeneration or CTS result.
+
 Native narrow integer texture UAVs pass 4434 full FeMe tests (15 skipped,
 10 unsupported), 65 callbacks and 427 stock-runtime/coexistence gates with
 confirmed FeMe ICD identity. Artifact14 gates Direct3D OOB channel defaults;

@@ -75,6 +75,14 @@ feme::cpu::ResourceFormat typedBufferFormat(std::uint32_t Format) {
     return feme::cpu::ResourceFormat::R8_UINT;
   case DXGI_FORMAT_R8_SINT:
     return feme::cpu::ResourceFormat::R8_SINT;
+  case DXGI_FORMAT_R8G8_UINT:
+    return feme::cpu::ResourceFormat::R8G8_UINT;
+  case DXGI_FORMAT_R8G8_SINT:
+    return feme::cpu::ResourceFormat::R8G8_SINT;
+  case DXGI_FORMAT_R16G16_UINT:
+    return feme::cpu::ResourceFormat::R16G16_UINT;
+  case DXGI_FORMAT_R16G16_SINT:
+    return feme::cpu::ResourceFormat::R16G16_SINT;
   case DXGI_FORMAT_R16_FLOAT:
     return feme::cpu::ResourceFormat::R16_FLOAT;
   case DXGI_FORMAT_R16_UINT:
@@ -108,6 +116,8 @@ std::uint32_t typedBufferElementSize(feme::cpu::ResourceFormat Format) {
   case ResourceFormat::R16_FLOAT:
   case ResourceFormat::R16_UINT:
   case ResourceFormat::R16_SINT:
+  case ResourceFormat::R8G8_UINT:
+  case ResourceFormat::R8G8_SINT:
     return 2;
   case ResourceFormat::R8G8B8A8_UNORM:
   case ResourceFormat::R8G8B8A8_UINT:
@@ -115,6 +125,8 @@ std::uint32_t typedBufferElementSize(feme::cpu::ResourceFormat Format) {
   case ResourceFormat::R32_FLOAT:
   case ResourceFormat::R32_UINT:
   case ResourceFormat::R32_SINT:
+  case ResourceFormat::R16G16_UINT:
+  case ResourceFormat::R16G16_SINT:
     return 4;
   case ResourceFormat::R32G32_FLOAT:
   case ResourceFormat::R32G32_UINT:

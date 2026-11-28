@@ -958,12 +958,15 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
                              bool SingleLayer, bool Sampling,
                              bool StaticSampling, bool TextureUAV, bool Volume,
                              DXGI_FORMAT Narrow = DXGI_FORMAT_UNKNOWN) {
-  bool Signed = Narrow == DXGI_FORMAT_R8_SINT ||
-                Narrow == DXGI_FORMAT_R16_SINT ||
-                Narrow == DXGI_FORMAT_R8G8B8A8_SINT ||
-                Narrow == DXGI_FORMAT_R16G16B16A16_SINT;
+  bool Signed =
+      Narrow == DXGI_FORMAT_R8_SINT || Narrow == DXGI_FORMAT_R8G8_SINT ||
+      Narrow == DXGI_FORMAT_R16G16_SINT || Narrow == DXGI_FORMAT_R16_SINT ||
+      Narrow == DXGI_FORMAT_R8G8B8A8_SINT ||
+      Narrow == DXGI_FORMAT_R16G16B16A16_SINT;
   UINT ComponentBytes = Narrow == DXGI_FORMAT_UNKNOWN ? 4
                         : Narrow == DXGI_FORMAT_R8_UINT ||
+                                Narrow == DXGI_FORMAT_R8G8_UINT ||
+                                Narrow == DXGI_FORMAT_R8G8_SINT ||
                                 Narrow == DXGI_FORMAT_R8_SINT ||
                                 Narrow == DXGI_FORMAT_R8G8B8A8_UINT ||
                                 Narrow == DXGI_FORMAT_R8G8B8A8_SINT
@@ -974,6 +977,9 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
               Narrow == DXGI_FORMAT_R16_UINT || Narrow == DXGI_FORMAT_R16_SINT
           ? 1
           : 4;
+  if (Narrow == DXGI_FORMAT_R8G8_UINT || Narrow == DXGI_FORMAT_R8G8_SINT ||
+      Narrow == DXGI_FORMAT_R16G16_UINT || Narrow == DXGI_FORMAT_R16G16_SINT)
+    Components = 2;
   UINT TexelBytes = Components * ComponentBytes;
   auto PackTexel = [&](unsigned char *Destination,
                        const std::array<UINT, 4> &Texel) {
@@ -1441,7 +1447,7 @@ HRESULT exerciseTextureViews(ID3D12Device *Device,
         for (UINT C = 0; C < 4; ++C)
           Expected[1 + Thread * 8 + C] =
               Null && !Index ? 0 : Texel[C] + (Volume ? 777 : 0);
-        if (Components == 1)
+        if (Components < 4)
           Expected[1 + Thread * 8 + 3] = Null && !Index ? 0 : 2;
       } else if (Sampling) {
         constexpr std::array<UINT, 4> Border{2, 3, 5, 7};
@@ -1532,12 +1538,15 @@ HRESULT exerciseBufferCommands(
                   Typed == DXGI_FORMAT_R16_FLOAT ||
                   Typed == DXGI_FORMAT_R16G16B16A16_FLOAT || Normalized;
   bool Signed =
+      Typed == DXGI_FORMAT_R8G8_SINT || Typed == DXGI_FORMAT_R16G16_SINT ||
       Typed == DXGI_FORMAT_R32_SINT || Typed == DXGI_FORMAT_R32G32_SINT ||
       Typed == DXGI_FORMAT_R32G32B32A32_SINT || Typed == DXGI_FORMAT_R8_SINT ||
       Typed == DXGI_FORMAT_R16_SINT || Typed == DXGI_FORMAT_R8G8B8A8_SINT ||
       Typed == DXGI_FORMAT_R16G16B16A16_SINT;
   if (Typed == DXGI_FORMAT_R32G32_FLOAT || Typed == DXGI_FORMAT_R32G32_UINT ||
-      Typed == DXGI_FORMAT_R32G32_SINT)
+      Typed == DXGI_FORMAT_R32G32_SINT || Typed == DXGI_FORMAT_R8G8_UINT ||
+      Typed == DXGI_FORMAT_R8G8_SINT || Typed == DXGI_FORMAT_R16G16_UINT ||
+      Typed == DXGI_FORMAT_R16G16_SINT)
     Components = 2;
   if (Typed == DXGI_FORMAT_R32G32B32A32_FLOAT ||
       Typed == DXGI_FORMAT_R32G32B32A32_UINT ||
@@ -1551,10 +1560,12 @@ HRESULT exerciseBufferCommands(
     Components = 4;
   UINT ComponentBytes = 4;
   if (Typed == DXGI_FORMAT_R8_UNORM || Typed == DXGI_FORMAT_R8_UINT ||
+      Typed == DXGI_FORMAT_R8G8_UINT || Typed == DXGI_FORMAT_R8G8_SINT ||
       Typed == DXGI_FORMAT_R8_SINT || Typed == DXGI_FORMAT_R8G8B8A8_UNORM ||
       Typed == DXGI_FORMAT_R8G8B8A8_UINT || Typed == DXGI_FORMAT_R8G8B8A8_SINT)
     ComponentBytes = 1;
   if (Typed == DXGI_FORMAT_R16_FLOAT || Typed == DXGI_FORMAT_R16_UINT ||
+      Typed == DXGI_FORMAT_R16G16_UINT || Typed == DXGI_FORMAT_R16G16_SINT ||
       Typed == DXGI_FORMAT_R16_SINT ||
       Typed == DXGI_FORMAT_R16G16B16A16_FLOAT ||
       Typed == DXGI_FORMAT_R16G16B16A16_UINT ||
@@ -2935,8 +2946,16 @@ int wmain(int Argc, wchar_t **Argv) {
       {L"--typed-sint8x4-commands", L"--reference-typed-sint8x4-commands",
        L"--ordered-typed-sint8x4-commands", L"--dxil-typed-sint8x4-commands"},
       {L"--typed-unorm8x4-commands", L"--reference-typed-unorm8x4-commands",
-       L"--ordered-typed-unorm8x4-commands",
-       L"--dxil-typed-unorm8x4-commands"}};
+       L"--ordered-typed-unorm8x4-commands", L"--dxil-typed-unorm8x4-commands"},
+      {L"--typed-uint8x2-commands", L"--reference-typed-uint8x2-commands",
+       L"--ordered-typed-uint8x2-commands", L"--dxil-typed-uint8x2-commands"},
+      {L"--typed-sint8x2-commands", L"--reference-typed-sint8x2-commands",
+       L"--ordered-typed-sint8x2-commands", L"--dxil-typed-sint8x2-commands"},
+      {L"--typed-uint16x2-commands", L"--reference-typed-uint16x2-commands",
+       L"--ordered-typed-uint16x2-commands", L"--dxil-typed-uint16x2-commands"},
+      {L"--typed-sint16x2-commands", L"--reference-typed-sint16x2-commands",
+       L"--ordered-typed-sint16x2-commands",
+       L"--dxil-typed-sint16x2-commands"}};
   const DXGI_FORMAT TypedFormats[] = {DXGI_FORMAT_R32_UINT,
                                       DXGI_FORMAT_R32_SINT,
                                       DXGI_FORMAT_R32_FLOAT,
@@ -2957,7 +2976,11 @@ int wmain(int Argc, wchar_t **Argv) {
                                       DXGI_FORMAT_R16G16B16A16_FLOAT,
                                       DXGI_FORMAT_R8G8B8A8_UINT,
                                       DXGI_FORMAT_R8G8B8A8_SINT,
-                                      DXGI_FORMAT_R8G8B8A8_UNORM};
+                                      DXGI_FORMAT_R8G8B8A8_UNORM,
+                                      DXGI_FORMAT_R8G8_UINT,
+                                      DXGI_FORMAT_R8G8_SINT,
+                                      DXGI_FORMAT_R16G16_UINT,
+                                      DXGI_FORMAT_R16G16_SINT};
   static_assert(ARRAYSIZE(TypedModes) == ARRAYSIZE(TypedFormats));
   for (UINT I = 0; I < ARRAYSIZE(TypedModes); ++I)
     for (UINT J = 0; J < 4; ++J) {
@@ -3137,7 +3160,11 @@ int wmain(int Argc, wchar_t **Argv) {
                    {L"uint8x4", DXGI_FORMAT_R8G8B8A8_UINT},
                    {L"sint8x4", DXGI_FORMAT_R8G8B8A8_SINT},
                    {L"uint16x4", DXGI_FORMAT_R16G16B16A16_UINT},
-                   {L"sint16x4", DXGI_FORMAT_R16G16B16A16_SINT}};
+                   {L"sint16x4", DXGI_FORMAT_R16G16B16A16_SINT},
+                   {L"uint8x2", DXGI_FORMAT_R8G8_UINT},
+                   {L"sint8x2", DXGI_FORMAT_R8G8_SINT},
+                   {L"uint16x2", DXGI_FORMAT_R16G16_UINT},
+                   {L"sint16x2", DXGI_FORMAT_R16G16_SINT}};
     for (const auto &Format : Formats)
       if (!std::wcscmp(Argv[3], Format.Name))
         NarrowFormat = Format.Format;

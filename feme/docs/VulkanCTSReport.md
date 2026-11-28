@@ -1,5 +1,14 @@
 # Vulkan CTS status
 
+## Optional WARP RG integer regression scope, not CTS
+
+RG8/RG16 UINT/SINT buffer and texture controls pass 64 new owned/reference gates,
+4434 full FeMe tests (15 skipped, 10 unsupported), 65 callbacks and 491
+stock-runtime/coexistence gates with confirmed FeMe ICD identity. The native
+format mapping reuses existing shared decoding and packing; bridge6/artifact14,
+Vulkan advertisements and runtime semantics are unchanged. No CTS run or
+complete W2 claim.
+
 ## Native WARP narrow integer image regression scope, not CTS
 
 R8/R16/RGBA8/RGBA16 UINT/SINT texture UAV controls pass 4434 full FeMe tests

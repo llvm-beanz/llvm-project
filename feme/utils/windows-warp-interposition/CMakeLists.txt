@@ -503,7 +503,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 26)
+  set(FEME_WARP_PROFILE_VERSION 27)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -627,7 +627,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   endforeach()
   set(WARP_TYPED_FORMATS uint sint float uint2 sint2 float2 uint4 sint4 float4
     uint16 sint16 float16 uint8 sint8 unorm8
-    uint16x4 sint16x4 float16x4 uint8x4 sint8x4 unorm8x4)
+    uint16x4 sint16x4 float16x4 uint8x4 sint8x4 unorm8x4
+    uint8x2 sint8x2 uint16x2 sint16x2)
   set(FEME_WARP_PACKED_GATES "")
   set(FEME_WARP_TYPED_UAV_GATES "")
   foreach(scalar IN LISTS WARP_TYPED_FORMATS)
@@ -712,8 +713,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
         else()
           set(shader_scalar uint)
         endif()
-        if(scalar MATCHES "x4$")
-          string(APPEND shader_scalar "4")
+        if(scalar MATCHES "x([24])$")
+          string(APPEND shader_scalar "${CMAKE_MATCH_1}")
         endif()
         if(scalar MATCHES "^unorm")
           set(normalized_define -DTYPED_UNORM=1)
@@ -844,7 +845,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       feme_add_probe_test(NAME os-routed-warp-compiler-${gate_mode}volume-texture-uav-views
         COMMAND warp-compiler-harness "--${mode}volume-texture-uav-views"
           "${WARP_DXIL_TEXTURE_UAV_VOLUME_FIXTURE}")
-      foreach(format IN ITEMS uint8 sint8 uint16 sint16 uint8x4 sint8x4 uint16x4 sint16x4)
+      foreach(format IN ITEMS uint8 sint8 uint16 sint16 uint8x4 sint8x4 uint16x4 sint16x4
+          uint8x2 sint8x2 uint16x2 sint16x2)
         set(fixture "${WARP_DXIL_TEXTURE_UAV_VIEW_FIXTURE}")
         if(format MATCHES "^sint")
           set(fixture "${WARP_DXIL_SIGNED_TEXTURE_UAV_VIEW_FIXTURE}")

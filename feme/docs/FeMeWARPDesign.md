@@ -1777,7 +1777,11 @@ R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT SRVs additionally use
 their actual one/two/four/eight-byte element geometry and existing shared
 decoders. Non-uniform live-view dimension queries count physical texels
 independently of shader scalar/vector widths and component mappings.
-All 21 mapped formats now admit owned and borrowed typed UAV bindings.
+Optional RG8/RG16 UINT/SINT views use two/four-byte physical elements through
+the same geometry and compiler mapping helpers as images. Independent
+owned/reference buffer controls cover mapped SRVs, live dimensions, UAV
+loads/stores, replay and held execution.
+All 25 mapped formats now admit owned and borrowed typed UAV bindings.
 The complete mandatory fifteen-format additional set and optional
 R32G32 FLOAT/UINT/SINT formats execute typed buffer loads/stores, allowing the
 compiler-backed `TypedUAVLoadAdditionalFormats` flag. Format support remains
@@ -1892,11 +1896,11 @@ and upload storage. The same complete-readback controls now execute selected
 3D mip/W-slice origins, full-mip dimensions, live copies, nulls and held teardown.
 Reference probes do not establish behavior beyond the physical mip; FeMe
 rejects those accesses rather than relying on allocation padding.
-Native narrow integer controls now exercise R8/R16 and RGBA8/RGBA16 UINT/SINT
+Native narrow integer controls now exercise R8/RG8/R16/RG16 and RGBA8/RGBA16 UINT/SINT
 stores/loads, saturation, missing channels and nulls. Active OOB typed-UAV loads
 retain format-default missing channels; null/masked loads remain all-zero.
 `FEME_IMAGE_OOB_FORMAT_DEFAULTS` and artifact ABI 14 gate this without changing
-Vulkan or SRV behavior. Optional RG and remaining dimensional/format execution
+Vulkan or SRV behavior. Other optional formats and remaining dimensional/format execution
 coverage stay open. Owned CPU/shader-visible sampler heaps now use checked
 heap-type-specific creation/copy paths and shared canonical state validation.
 Native inactive anisotropy/comparison fields normalize before validation.
@@ -1916,7 +1920,7 @@ covered only by scalar static samplers before issuing shader DDIs.
 Original-DXIL owned/reference controls execute point/linear filtering,
 clamp/custom-border/opaque-black addressing, copied live sampler updates, null
 images, replay and held list/allocator/CPU-heap release. Complete sampling
-operation/format coverage remains open. See the implementation log and v26
+operation/format coverage remains open. See the implementation log and v27
 inventory.
 
 Recorded commands retain immutable binding identities separately from prepared
