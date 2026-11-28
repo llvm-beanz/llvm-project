@@ -27,6 +27,10 @@ BoundResourceNamespace getNamespace(const BoundResourceBinding &Binding) {
   return Binding.Namespace;
 }
 
+BoundResourceNamespace getNamespace(const BoundImageBinding &Binding) {
+  return Binding.Namespace;
+}
+
 /// Copies each of \p Info's bound ranges of class \p Class into \p Heap from
 /// the \p Bindings entry that matches it by (Space, BaseRegister), then
 /// appends \p DynamicHeap after the reserved prefix. Shared by the three
@@ -69,19 +73,23 @@ materializeHeap(llvm::ArrayRef<BoundResourceRange> Ranges,
   return Heap;
 }
 
-} // namespace
-
-Error validateBoundResourceBindings(const ResourceInfo &Info,
-                                    ArrayRef<BoundResourceBinding> Bindings) {
+template <typename BindingT>
+Error validateBindings(const ResourceInfo &Info, ArrayRef<BindingT> Bindings,
+                       BoundResourceClass Class) {
+  const char *Name = Class == BoundResourceClass::Buffer ? "buffer" : "image";
+  auto MaxNamespace = Class == BoundResourceClass::Buffer
+                          ? BoundResourceNamespace::CBV
+                          : BoundResourceNamespace::UAV;
+  const char *NamespaceHint =
+      Class == BoundResourceClass::Buffer ? "srv, uav or cbv" : "srv or uav";
   for (auto [Index, Binding] : llvm::enumerate(Bindings)) {
-    if (uint32_t(Binding.Namespace) > uint32_t(BoundResourceNamespace::CBV))
+    if (uint32_t(Binding.Namespace) > uint32_t(MaxNamespace))
       return createStringError(inconvertibleErrorCode(),
-                               "invalid buffer binding register namespace");
+                               "invalid %s binding register namespace", Name);
     std::optional<BoundResourceNamespace> Namespace;
     bool Matched = false;
     for (const BoundResourceRange &Range : Info.BoundRanges) {
-      if (Range.Class != BoundResourceClass::Buffer ||
-          Range.Space != Binding.Space ||
+      if (Range.Class != Class || Range.Space != Binding.Space ||
           Range.BaseRegister != Binding.BaseRegister)
         continue;
       if (Binding.Namespace != BoundResourceNamespace::Unspecified) {
@@ -91,9 +99,8 @@ Error validateBoundResourceBindings(const ResourceInfo &Info,
       if (Namespace && *Namespace != Range.Namespace)
         return createStringError(
             inconvertibleErrorCode(),
-            "ambiguous buffer binding space=%u register=%u: specify srv, uav "
-            "or cbv",
-            Binding.Space, Binding.BaseRegister);
+            "ambiguous %s binding space=%u register=%u: specify %s", Name,
+            Binding.Space, Binding.BaseRegister, NamespaceHint);
       Namespace = Range.Namespace;
     }
     if (Binding.Namespace == BoundResourceNamespace::Unspecified)
@@ -101,19 +108,31 @@ Error validateBoundResourceBindings(const ResourceInfo &Info,
     if (!Matched)
       return createStringError(
           inconvertibleErrorCode(),
-          "qualified buffer binding space=%u register=%u has no matching "
+          "qualified %s binding space=%u register=%u has no matching "
           "shader declaration",
-          Binding.Space, Binding.BaseRegister);
-    for (const BoundResourceBinding &Previous : Bindings.take_front(Index))
+          Name, Binding.Space, Binding.BaseRegister);
+    for (const BindingT &Previous : Bindings.take_front(Index))
       if (Previous.Space == Binding.Space &&
           Previous.BaseRegister == Binding.BaseRegister &&
           Previous.Namespace == Binding.Namespace)
         return createStringError(
             inconvertibleErrorCode(),
-            "duplicate qualified buffer binding space=%u register=%u",
+            "duplicate qualified %s binding space=%u register=%u", Name,
             Binding.Space, Binding.BaseRegister);
   }
   return Error::success();
+}
+
+} // namespace
+
+Error validateBoundResourceBindings(const ResourceInfo &Info,
+                                    ArrayRef<BoundResourceBinding> Bindings) {
+  return validateBindings(Info, Bindings, BoundResourceClass::Buffer);
+}
+
+Error validateBoundImageBindings(const ResourceInfo &Info,
+                                 ArrayRef<BoundImageBinding> Bindings) {
+  return validateBindings(Info, Bindings, BoundResourceClass::Image);
 }
 
 std::vector<FemeDescriptor>
@@ -130,6 +149,7 @@ std::vector<FemeImageDescriptor>
 materializeImageHeap(const ResourceInfo &Info,
                      ArrayRef<BoundImageBinding> Bindings,
                      ArrayRef<FemeImageDescriptor> DynamicHeap) {
+  cantFail(validateBoundImageBindings(Info, Bindings));
   return materializeHeap<FemeImageDescriptor>(
       Info.BoundRanges, BoundResourceClass::Image, Info.ReservedImageHeapSize,
       Bindings, DynamicHeap);

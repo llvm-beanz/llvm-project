@@ -44,6 +44,9 @@ pitches, partial regions, recording snapshots and ordered execution.
 Owned single-plane, single-sample linear texture storage now uses that shared
 geometry. Mipmapped 3D and 2D-array texture copies pass selected-subresource
 indexing, partial regions and held execution; shader views/samplers remain open.
+Shared host image bindings now preserve qualified SRV/UAV identity and reject
+ambiguous bindings; compiler image normalization/serialization and the Windows
+image bridge remain open.
 The generated v19 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.

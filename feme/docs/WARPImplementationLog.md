@@ -809,6 +809,30 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Shared image-binding identity prerequisite
+
+`BoundImageBinding` now carries the same explicit register namespace as buffer
+bindings. Shared heap matching honors exact SRV/UAV qualification before legacy
+fallback. The buffer validator is reused with a resource-class filter and
+image-appropriate namespace limits; ambiguous unqualified inputs, duplicate
+qualified inputs, missing declarations and invalid/CBV qualification return
+errors. JIT dispatch returns image-binding errors before preparation, while
+low-level materialization requires the validated contract. Unambiguous legacy
+image inputs and Vulkan bindings retain their behavior.
+
+Two focused cases distinguish same-space/register SRV/UAV image arrays,
+partially bound tails, reversed binding order and invalid identities, and
+verify that a buffer declaration does not make a legacy image binding
+ambiguous. The combined resource-heap suite passes **12/12**; full FeMe
+passes **4417** / **15** skipped / **10** unsupported, callbacks **65/65** and
+stock-runtime/coexistence **371/371** after shared DLL relinking, with confirmed
+FeMe ICD identity. No capability, argument-layout or artifact-version change
+is claimed: inventory v19, bridge4/artifact11 remain unchanged.
+
+This is a shared host-binding prerequisite, not owned texture shader execution.
+DXIL image normalization, image namespace serialization, Windows image/sampler
+descriptors and bridge dispatch remain open, as does W2.
+
 #### Owned linear texture storage and selected-subresource copies
 
 Compiler-backed resource DDIs now admit mapped uncompressed single-plane,

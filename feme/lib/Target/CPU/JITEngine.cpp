@@ -54,6 +54,9 @@ Error JITEngine::dispatch(const DispatchResources &Resources,
   if (Error E = validateBoundResourceBindings(Stage->getResourceInfo(),
                                               Resources.BoundResources))
     return E;
+  if (Error E = validateBoundImageBindings(Stage->getResourceInfo(),
+                                           Resources.BoundImages))
+    return E;
   PreparedDispatch Prepared =
       PreparedDispatch::create(Stage->getResourceInfo(), Resources, GroupCount);
 

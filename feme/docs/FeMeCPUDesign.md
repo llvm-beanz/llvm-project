@@ -3981,6 +3981,18 @@ Notes and constraints:
   unqualified fallback. Legacy unmatched unqualified inputs and excess
   descriptors retain their previous ignored/truncated behavior.
 
+  The shared host-side `BoundImageBinding` now also carries `Namespace`.
+  `materializeImageHeap` uses the same exact-match/fallback mechanism, and
+  `validateBoundImageBindings` reuses class-filtered validation, admitting only
+  SRV/UAV qualification. Same-space/register SRV and UAV image arrays remain
+  independent; ambiguous unqualified inputs, duplicates, unmatched qualified
+  inputs and CBV/unknown qualification are rejected. JIT dispatch propagates
+  these errors before preparation; low-level callers must validate first.
+  Existing unambiguous unqualified inputs, including Vulkan's bindings, retain
+  their behavior. This is a shared host-binding prerequisite: image namespace
+  serialization/normalization and the Windows image bridge remain open, so
+  artifact ABI 11 and Windows bridge 4 are unchanged.
+
   DXIL normalization publishes six-field ranges in
   `!feme.cpu.bound_resources.v2`; legacy/SPIR-V five-field
   `!feme.cpu.bound_resources` remains readable with the shared/unspecified

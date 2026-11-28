@@ -53,7 +53,14 @@ struct BoundImageBinding {
   uint32_t Space = 0;
   uint32_t BaseRegister = 0;
   llvm::ArrayRef<FemeImageDescriptor> Descriptors;
+  BoundResourceNamespace Namespace = BoundResourceNamespace::Unspecified;
 };
+
+/// The image counterpart of validateBoundResourceBindings, admitting only
+/// SRV/UAV qualification or an unambiguous legacy unqualified binding.
+llvm::Error
+validateBoundImageBindings(const ResourceInfo &Info,
+                           llvm::ArrayRef<BoundImageBinding> Bindings);
 
 /// The same, for a bound sampler range (`BoundResourceClass::Sampler`).
 struct BoundSamplerBinding {
@@ -76,6 +83,8 @@ materializeResourceHeap(const ResourceInfo &Info,
 /// `ReservedImageHeapSize` prefix filled from the `BoundResourceClass::Image`
 /// ranges, followed by \p DynamicHeap (a bindless heap the shader indexes
 /// directly, which is all a DXIL-sourced shader uses).
+/// Bindings must satisfy validateBoundImageBindings; low-level preparation
+/// treats violations as contract errors. JIT dispatch returns these errors.
 std::vector<FemeImageDescriptor>
 materializeImageHeap(const ResourceInfo &Info,
                      llvm::ArrayRef<BoundImageBinding> Bindings,

@@ -179,6 +179,47 @@ TEST(ResourceHeapTest, UnqualifiedBindingInfersOnlyAnUnambiguousNamespace) {
   EXPECT_EQ(Heap[0].Data, &A);
 }
 
+TEST(ResourceHeapTest, QualifiedImageNamespacesFillDistinctArrayRanges) {
+  ResourceInfo Info;
+  Info.ReservedImageHeapSize = 4;
+  Info.BoundRanges = {
+      {7, 3, 2, 0, BoundResourceClass::Image, BoundResourceNamespace::SRV},
+      {7, 3, 2, 2, BoundResourceClass::Image, BoundResourceNamespace::UAV}};
+  int A = 1, B = 2, C = 3;
+  std::vector<FemeImageDescriptor> Read = {makeImageDescriptor(&A),
+                                           makeImageDescriptor(&B)};
+  std::vector<FemeImageDescriptor> Write = {makeImageDescriptor(&C)};
+  BoundImageBinding SRV{7, 3, Read, BoundResourceNamespace::SRV};
+  BoundImageBinding UAV{7, 3, Write, BoundResourceNamespace::UAV};
+  auto Heap = materializeImageHeap(Info, {UAV, SRV}, {});
+  ASSERT_EQ(Heap.size(), 4u);
+  EXPECT_EQ(Heap[0].Data, &A);
+  EXPECT_EQ(Heap[1].Data, &B);
+  EXPECT_EQ(Heap[2].Data, &C);
+  EXPECT_EQ(Heap[3].Data, nullptr);
+  EXPECT_THAT_ERROR(validateBoundImageBindings(Info, {{7, 3, Read}}), Failed());
+  EXPECT_THAT_ERROR(validateBoundImageBindings(Info, {SRV, SRV}), Failed());
+  EXPECT_THAT_ERROR(validateBoundImageBindings(
+                        Info, {{7, 4, Read, BoundResourceNamespace::SRV}}),
+                    Failed());
+  EXPECT_THAT_ERROR(validateBoundImageBindings(
+                        Info, {{7, 3, Read, BoundResourceNamespace::CBV}}),
+                    Failed());
+}
+
+TEST(ResourceHeapTest, UnqualifiedImageBindingInfersUnambiguousNamespace) {
+  ResourceInfo Info;
+  Info.ReservedImageHeapSize = 1;
+  Info.BoundRanges = {
+      {7, 3, 1, 0, BoundResourceClass::Image, BoundResourceNamespace::SRV},
+      {7, 3, 1, 0, BoundResourceClass::Buffer, BoundResourceNamespace::UAV}};
+  int A = 1;
+  std::vector<FemeImageDescriptor> Descs = {makeImageDescriptor(&A)};
+  auto Heap = materializeImageHeap(Info, {{7, 3, Descs}}, {});
+  ASSERT_EQ(Heap.size(), 1u);
+  EXPECT_EQ(Heap[0].Data, &A);
+}
+
 TEST(ResourceHeapTest, ImageAndSamplerRangesFillTheirOwnHeaps) {
   // The three heaps are numbered independently, so a class-`Image` range at
   // heap base 0 and a class-`Sampler` range at heap base 0 must land in
