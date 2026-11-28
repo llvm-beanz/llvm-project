@@ -137903,3 +137903,34 @@ ABIs. Inspection found BoundImageBinding lacks explicit SRV/UAV namespace
 identity even though reflected ranges carry it; correct that shared binding
 mechanism before adding the image compiler bridge. Complete roots, remaining
 storage/resource classes and ordering still remain. W2 is not complete.
+
+# W2 prerequisite: qualified shared image bindings
+
+Commit 1a25c32cee64 fixes the host-side image namespace gap before introducing
+Windows image descriptors. BoundImageBinding now carries Namespace; the
+existing exact-match/fallback heap matcher uses it. A class-filtered validator
+reuses the buffer identity rules, with SRV/UAV-only image qualification.
+JIT dispatch propagates errors before preparation, while low-level materializers
+retain the existing cantFail contract. Legacy unambiguous inputs remain valid.
+
+Focused tests distinguish SRV/UAV arrays at identical space/register identities
+in reversed input order, zero-filled short tails, ambiguous unqualified input,
+duplicate qualification, missing declarations and invalid CBV qualification.
+A buffer declaration at the same identity does not make an image ambiguous.
+The resource-heap suite passes 12/12. Full FeMe passes 4417, with 15 skipped and
+10 unsupported, callbacks 65/65 and stock-runtime/coexistence 371/371, after
+shared DLL relinking and confirmed FeMe CPU Vulkan Device selection. Changes
+were diff-formatted; both cached/worktree whitespace checks passed.
+
+This intentionally changes no artifact or Windows argument layout: v19,
+bridge4/artifact11 remain unchanged. It is host-side identity support only.
+Further inspection established that DXIL BoundResourceNormalization currently
+normalizes buffers only; SPIR-V supplies the existing unqualified image and
+sampler prefixes. Artifact parsing also explicitly rejects qualified images.
+Thus adding a bridge alone would not provide traditional texture binding.
+
+Next: extend shared DXIL normalization to separate buffer/image/sampler
+prefixes with checked finite ranges and independently offset native heaps;
+admit qualified images in a versioned artifact, then wire owned descriptors
+and image/sampler dispatch through the compiler bridge. Reuse existing CPU
+image helpers and keep unsupported shapes explicit. W2 is not complete.
