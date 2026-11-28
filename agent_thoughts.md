@@ -137780,3 +137780,22 @@ no reference implementation or test shader is copied. Shared layout queries
 must not advertise texture/UAV execution before its owned path is tested.
 Static samplers, full root compatibility, other resource classes, counters
 and synchronization still remain. W2 is not complete.
+
+# W2 test improvement: observable ignored typed stores
+
+Commit 08c46b3a9a81 strengthens the narrow integer store matrix independently
+of the pitched-copy implementation. The inactive, out-of-range and read-only
+calls previously reused values already present in storage, so an incorrect
+write could remain invisible. Replacement values now differ in each stored
+component, preserving the exact byte and guard assertions.
+
+The focused saturation selector passed, followed by full FeMe 4413 passed,
+15 skipped and 10 unsupported, callback gates 65/65 and stock-runtime/
+coexistence gates 363/363. FeMe CPU Vulkan Device identity was confirmed in
+the launch shell, and OS tests followed shared DLL relinking. This changes
+test sensitivity, not runtime behavior, capability advertisements or CTS
+results.
+
+Next: commit the separately validated buffer-footprint slice and continue
+texture allocation/views, complete roots, resource classes and ordering.
+The requested W2 closeout remains open.
