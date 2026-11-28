@@ -1861,6 +1861,14 @@ the bridge can provide actual dynamic heaps. The native borrowed-view tests
 do not establish owned DDI texture views, sampler heaps or static samplers.
 See the implementation log and v21 inventory.
 
+Recorded commands retain immutable binding identities separately from prepared
+buffer descriptors: register namespace/space, table slot, root address and inline
+constant offset/count. Submission preparation resolves current live slots and
+addresses into fresh descriptors. Inline pointers are formed against the
+submission's copied constant bank, not borrowed from recording storage. This
+preserves descriptor updates and replay while allowing image/sampler preparation
+to use separate output arrays without compacting the recorded identities.
+
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane
   non-uniform selection. Preserve the logical index mapping needed by W6's

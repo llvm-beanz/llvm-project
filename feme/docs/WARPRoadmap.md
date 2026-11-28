@@ -50,6 +50,8 @@ controls distinguish image namespaces and sampler arrays. Private Windows
 bridge 5 now prepares checked borrowed image views and finite sampler arrays,
 with copied mip layouts, SRV load mappings and explicit native-heap rejection.
 Owned DDI texture shader views/sampler heaps and static samplers remain open.
+Recorded binding identities are now separate from execution descriptors, retaining
+live descriptor updates and copied inline state before adding owned image views.
 The generated v21 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.

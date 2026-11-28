@@ -1308,6 +1308,18 @@ struct PredicationState {
   D3D12DDI_PREDICATION_OP Operation = D3D12DDI_PREDICATION_OP_EQUAL_ZERO;
 };
 
+/// Immutable recording identities; execution rebuilds descriptors from live
+/// slots without overwriting these addresses, registers or constant offsets.
+struct RecordedBinding {
+  UINT Namespace = 0;
+  UINT Space = 0;
+  UINT Register = 0;
+  UINT64 TableDescriptor = 0;
+  UINT64 Address = 0;
+  UINT ConstantOffset = 0;
+  UINT ConstantCount = 0;
+};
+
 struct RecordedCommand {
   enum class Kind {
     Dispatch,
@@ -1318,12 +1330,11 @@ struct RecordedCommand {
   RecordedCommand *Next = nullptr;
   void *Pipeline = nullptr;
   FeMeWarpDispatchDesc Dispatch;
+  UINT BindingCount = 0;
+  std::array<RecordedBinding, MaxRootParameters> Bindings{};
   std::array<FeMeWarpBufferBinding, MaxRootParameters> Buffers{};
   std::array<UINT, MaxRootDwords> RootConstants{};
-  std::array<bool, MaxRootParameters> InlineBuffers{};
-  std::array<UINT, MaxRootParameters> InlineOffsets{};
   D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
-  std::array<UINT64, MaxRootParameters> TableDescriptors{};
   D3D12DDIARG_BUFFER_PLACEMENT Destination{};
   D3D12DDIARG_BUFFER_PLACEMENT Source{};
   UINT64 Bytes = 0;
@@ -2000,35 +2011,38 @@ HRESULT prepareDispatch(CommandList *State,
               descriptorTableSlot(Heap, State->RootTables[I], Range.Offset + K);
           if (!Slot)
             return E_INVALIDARG;
-          UINT Binding = Command->Dispatch.BufferCount++;
-          Command->TableDescriptors[Binding] = reinterpret_cast<UINT64>(Slot);
-          auto &Buffer = Command->Buffers[Binding];
-          Buffer.Namespace = Range.Namespace;
-          Buffer.Space = Range.Space;
-          Buffer.Register = Range.Register + K;
+          if (Command->BindingCount == Command->Bindings.size())
+            return E_INVALIDARG;
+          auto &Binding = Command->Bindings[Command->BindingCount++];
+          Binding.TableDescriptor = reinterpret_cast<UINT64>(Slot);
+          Binding.Namespace = Range.Namespace;
+          Binding.Space = Range.Space;
+          Binding.Register = Range.Register + K;
         }
       }
       continue;
     }
     if (!Parameter.ConstantCount && !State->RootAddresses[I])
       continue;
-    UINT Binding = Command->Dispatch.BufferCount++;
-    auto &Buffer = Command->Buffers[Binding];
+    if (Command->BindingCount == Command->Bindings.size())
+      return E_INVALIDARG;
+    auto &Binding = Command->Bindings[Command->BindingCount++];
     if (Parameter.ConstantCount) {
-      Command->InlineBuffers[Binding] = true;
-      Command->InlineOffsets[Binding] = Parameter.ConstantOffset;
-      Buffer.Data = Command->RootConstants.data() + Parameter.ConstantOffset;
-      Buffer.SizeInBytes = UINT64(Parameter.ConstantCount) * sizeof(UINT);
+      Binding.ConstantOffset = Parameter.ConstantOffset;
+      Binding.ConstantCount = Parameter.ConstantCount;
     } else {
+      void *Data = nullptr;
+      UINT64 Size = 0;
       Result = feme::probe::getWarpBufferAddress(
-          State->Owner, State->RootAddresses[I], Buffer.Data,
-          Buffer.SizeInBytes, Parameter.Namespace == 2);
+          State->Owner, State->RootAddresses[I], Data, Size,
+          Parameter.Namespace == 2);
       if (FAILED(Result))
         return Result;
+      Binding.Address = State->RootAddresses[I];
     }
-    Buffer.Namespace = Parameter.Namespace;
-    Buffer.Space = Parameter.Space;
-    Buffer.Register = Parameter.Register;
+    Binding.Namespace = Parameter.Namespace;
+    Binding.Space = Parameter.Space;
+    Binding.Register = Parameter.Register;
   }
   return S_OK;
 }
@@ -2525,21 +2539,26 @@ void APIENTRY setPredication(D3D12DDI_HCOMMANDLIST List,
 HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
                                 feme::probe::WarpBufferAccess &Buffers) {
   DescriptorAccess Descriptors;
-  for (UINT J = 0; J < Command->Dispatch.BufferCount; ++J) {
-    auto &Buffer = Command->Buffers[J];
-    if (Command->InlineBuffers[J])
+  Command->Dispatch.BufferCount = 0;
+  for (UINT J = 0; J < Command->BindingCount; ++J) {
+    const auto &Binding = Command->Bindings[J];
+    auto &Buffer = Command->Buffers[Command->Dispatch.BufferCount++];
+    Buffer = {};
+    Buffer.Namespace = Binding.Namespace;
+    Buffer.Space = Binding.Space;
+    Buffer.Register = Binding.Register;
+    if (Binding.ConstantCount) {
+      Buffer.Data = Command->RootConstants.data() + Binding.ConstantOffset;
+      Buffer.SizeInBytes = UINT64(Binding.ConstantCount) * sizeof(UINT);
       continue;
-    if (Command->TableDescriptors[J]) {
+    }
+    if (Binding.TableDescriptor) {
       auto *Heap = *findDescriptorHeap(Command->DescriptorHeap);
       if (!Heap || Heap->Owner != State->Owner)
         return E_INVALIDARG;
-      auto *Slot = descriptorTableSlot(Heap, Command->TableDescriptors[J], 0);
-      if (!Slot || Slot->Namespace != Buffer.Namespace)
+      auto *Slot = descriptorTableSlot(Heap, Binding.TableDescriptor, 0);
+      if (!Slot || Slot->Namespace != Binding.Namespace)
         return E_INVALIDARG;
-      Buffer.Data = nullptr;
-      Buffer.SizeInBytes = 0;
-      Buffer.CounterData = nullptr;
-      Buffer.CounterSizeInBytes = 0;
       Buffer.Kind = Slot->Format != DXGI_FORMAT_UNKNOWN ? 2
                     : Slot->Stride                      ? 1
                                                         : 0;
@@ -2573,9 +2592,8 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
       }
       continue;
     }
-    HRESULT Result =
-        Buffers.address(reinterpret_cast<UINT64>(Buffer.Data), Buffer.Data,
-                        Buffer.SizeInBytes, Buffer.Namespace == 2);
+    HRESULT Result = Buffers.address(Binding.Address, Buffer.Data,
+                                     Buffer.SizeInBytes, Buffer.Namespace == 2);
     if (FAILED(Result))
       return Result;
   }
@@ -2769,10 +2787,6 @@ HRESULT snapshotSubmission(UINT Count, const D3D12DDI_HCOMMANDLIST *Lists,
       Copy->Next = nullptr;
       Copy->Pipeline = nullptr;
       Copy->Dispatch.Buffers = Copy->Buffers.data();
-      for (UINT J = 0; J < Copy->Dispatch.BufferCount; ++J)
-        if (Copy->InlineBuffers[J])
-          Copy->Buffers[J].Data =
-              Copy->RootConstants.data() + Copy->InlineOffsets[J];
       appendCommand(Submission.First, Submission.Last, Copy);
       if (Command->Pipeline) {
         HRESULT Result =

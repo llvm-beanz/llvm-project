@@ -809,6 +809,24 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Immutable recorded binding identities before owned image preparation
+
+Recorded commands now store register namespace/space, table address, root
+address and inline constant offset/count separately from prepared descriptors.
+Execution rebuilds buffer descriptors from current live owner/heap metadata;
+it never repurposes recorded identities. Inline pointers are formed from each
+submission's copied constant bank during resolution, replacing clone-time
+pointer retargeting. Binding-count guards retain the finite 64-binding limit.
+
+Focused native DXBC/DXIL lifecycle/dispatch controls pass **3/3**, full FeMe
+**4427** / **15** skipped / **10** unsupported, callbacks **65/65** and
+stock-runtime/coexistence **371/371**. FeMe ICD identity was confirmed before
+full/coexistence launches and shared DLL relinking preceded OS execution.
+The existing descriptor-update, inline-state, indirect, guarded buffer and held
+lifetime matrix is unchanged. Inventory v21/bridge5/artifact12 and advertisements
+are unchanged. This is preparation for owned image/sampler output arrays, not
+their implementation or W2 completion.
+
 #### Checked borrowed images and samplers through compiler bridge 5
 
 Private bridge **5** admits separate finite image/sampler bindings, rejects older
