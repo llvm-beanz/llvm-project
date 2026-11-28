@@ -137389,3 +137389,33 @@ typed/counter/image views, static samplers and complete root compatibility,
 image formats/planes/footprints and resource classes/residency, then complete
 barriers, queries/predication, indirect root changes and removal wakeups.
 Do not claim W2 or a complete feature level from these bounded scalar tables.
+
+# W2 progress: finite and non-uniform buffer descriptor arrays
+
+f80e12e17fa0 completes the tested finite-array slice, not W2. Table plans now
+retain counts and expand each element into an individual namespace/space/
+register binding. Validate endpoints, aggregate capacity and overlaps against
+every array register, not just its base. The compiler reconstructs each
+reflected range's contiguous descriptor span, requiring every element while
+still filtering valid unused roots. The existing register field suffices;
+compiler bridge ABI 1 was not silently extended.
+
+All eight array controls now cover CBV, SRV and UAV arrays together, not only
+SRVs. Explicit NonUniformResourceIndex selection alternates within waves.
+Different CBV values, SRV offsets and spaces detect incorrect selection.
+After recording, descriptors are copied and table bases changed; submitted
+work uses its recorded bases but current descriptors. A final null SRV/CBV
+element must read zero while a different null UAV element must ignore writes.
+The CPU oracle checks those effects independently for every result and guard.
+
+Native cases additionally cover zero/65 entries, the 64-entry limit, register
+overflow, overlap with a non-base array element and valid cross-namespace
+reuse. Final evidence: full check-feme 4403 passes, callbacks 65/65, stock
+runtime 79/79 and inventory v8 with forty-three unique OS gates. Original DXBC,
+DXIL, system-WARP and held cross-queue/pending teardown controls all pass.
+
+Next: typed formats and counter/atomic views, images/samplers, complete root
+compatibility and unbounded/general heaps. Then complete resource classes and
+residency plus remaining barriers, queries/predication, indirect root changes
+and removal wakeups. Preserve ABI versioning when adding new descriptor
+fields; no unmodified-KMD or complete-feature-level claim has changed.
