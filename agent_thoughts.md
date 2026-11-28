@@ -137267,3 +137267,76 @@ classes, barrier/query/indirect semantics and the broader synchronization/
 isolation matrix. W3-W7 graphics, advanced FL12_2 features, DXR, presentation
 and conformance remain open. Do not distribute the bring-up profile as a
 complete lower feature level or weaken host bounds checks to advance it.
+
+# W2 progress: owned placed buffers, aliases and indirect compute
+
+W2 remains open. This session implements tested resource/synchronization
+slices, not the complete root/descriptor/image/barrier contract. The selected
+application-local stock D3D12/DXGI and unmodified WARP KMD contract is unchanged.
+No Microsoft implementation/test shader was copied, no ordinal 199 or system
+WARP execution was substituted into owned mode, and no system binary, driver
+installation or shared-environment process reset was used.
+
+Independently tested implementation commits:
+- f2533541132f: placed buffer resources and bounded aliases.
+- d1c6e9d32b4b: current-DDI whole-buffer alias ordering and decreasing fences.
+- 86a0a0aedf76: execution-time refresh of recorded root GPUVA bounds.
+- a8f70bba88d5: owned dispatch-only indirect signatures and execution.
+- ae94a0c63360: roadmap, implementation log and design progress/remaining work.
+
+Placed resources use ReuseBufferGPUVA with a live implicit backing resource
+and placement offset, not another kernel allocation or a guessed HeapOffset
+field. Validate owner, alignment, rounded extent and destination collisions.
+Mappings and allocation lifetime remain shared; each resource has its own
+logical range. Root GPUVAs do not identify the original overlapping resource:
+choose the largest matching live logical extent, excluding the implicit
+backing allocation. A small alias cannot shadow a valid larger root. Refresh
+submission-local bindings at execution so removing a larger alias does not
+freeze obsolete bounds into a surviving buffer. Recorded addresses remain
+unchanged and mappings stay guarded throughout CPU execution.
+
+The SDK's current 0022 barrier union has no Aliasing member. The attempted
+obsolete-union implementation failed compilation; the authorized stock
+runtime conversion uses ranged barriers with ALIASING and optional BEGIN/END
+flags, all-subresource and all-byte sentinels. Accept that whole-buffer encoding
+without pretending ordinary split transitions or finite ranged barriers work.
+Public alias/map/copy/readback controls retain resources through completion
+and independently check every byte against system WARP and scalar expectations.
+Native cases include alias bounds growing from 4097 to 8193 and shrinking back.
+
+Indirect execution reuses the retained compute pipeline/root snapshot and
+queue worker. The signature registry validates private handles before
+dereferencing them and copies the immutable stride into recorded work.
+Argument and count buffers stay resource-handle bounded and are read after
+earlier copies/kernel waits, not during recording. Clamp count to the maximum,
+honor padding/nonzero offsets, and reject invalid dispatch dimensions before
+CPU execution. Dispatch-only signatures do not change root arguments; draws,
+root-changing signatures, rays and mesh remain unsupported.
+
+The new original shader controls cover DXBC, native DXC DXIL, system WARP and
+held cross-queue work/pending teardown. Argument uploads are written after
+recording and copied to default storage at execution. The scalar oracle checks
+180 values and 16 guards, count clamping from 99 to two, zero-count work,
+no-count execution and a skipped invalid second record. The first reference
+run exposed an invalid probe lifetime: releasing the public signature before
+execution removed the reference device. Retaining signatures through completion
+fixed the application; owned implementation success alone was not sufficient
+evidence that early release was permitted.
+
+Final evidence: native compiler/DDI selectors 4/4, callback probes 65/65 and
+stock-runtime probes 51/51. The full assertions-enabled, cached, PCH-disabled
+check-feme suite passed 4400 tests, with 15 skipped and 10 unsupported.
+The final OS run followed refreshed main compiler/ICD artifacts and validated
+generated inventory v3 with fifteen registered OS gates. Compiler bridge ABI
+stays at 1, and complete_product_feature_level remains null. Both Vulkan ICD
+environment variables were set and FeMe CPU Vulkan Device verified in each
+Vulkan/full/coexistence launching shell. Missing vswhere.exe and duplicate
+driver-sorting-layer warnings were nonfatal.
+
+Next steps: complete explicit root-layout driven constants/multiple CBVs,
+shader/root compatibility, descriptors/tables/static samplers and execution-time
+view preparation. Then connect shared image storage/formats/planes/footprints
+to owned resources and views, implement reserved/shared resource/residency
+requirements, and finish transitions/promotion/decay/splits/ranges,
+queries/predication, indirect root changes/draws and removal wakeups.
+Do not close W2 from portable plan tests or the dispatch-only indirect slice.
