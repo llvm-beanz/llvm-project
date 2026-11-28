@@ -77,6 +77,10 @@ static bool testDispatch(const std::vector<std::uint32_t> &Tokens,
   Buffer.Kind = 2;
   Buffer.Format = DXGI_FORMAT_R32_TYPELESS;
   Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  for (auto Format : {DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R32G32B32A32_UINT}) {
+    Buffer.Format = Format;
+    Good &= FeMeWarpDispatchCompute(Pipeline, &Desc) < 0;
+  }
   Buffer.Kind = Buffer.Format = 0;
   Bad = Desc;
   Bad.BufferCount = 0;

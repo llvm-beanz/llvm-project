@@ -784,6 +784,41 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned two/four-component R32 buffer SRVs
+
+R32G32 and R32G32B32A32 UINT/SINT/FLOAT SRVs now retain their eight/sixteen-byte
+element geometry through checked descriptor creation and the compiler bridge.
+Explicit DXGI-to-FeMe mapping reuses the existing typed CPU conversion helpers;
+borrowed extents must contain whole elements. Native tests independently check
+SRV admission, wider UAV rejection without descriptor mutation, multiplication/
+addition overflow without mutation, and rejected wider borrowed UAV bindings.
+Foreign-owner tests use a supported scalar format so unsupported-format errors
+cannot mask the ownership check.
+
+Twenty-four stock-runtime controls cover six vector input formats through
+owned DXBC, original DXIL, independent system WARP and held/pending teardown.
+They read the second component with finite non-uniform descriptor selection,
+nonzero first elements, post-record descriptor copies and null replacement;
+scalar UAV outputs and guards are checked against signed/numerical-float oracles.
+
+The initial wider-UAV attempt passed six reference controls but failed eighteen
+owned controls at the public typed-UAV capability check. Microsoft's
+[typed UAV load contract](https://learn.microsoft.com/en-us/windows/win32/direct3d12/typed-unordered-access-view-loads)
+requires the complete fifteen-format additional set before enabling
+`TypedUAVLoadAdditionalFormats`; working R32 vector helpers alone are not enough.
+The corrected scope is wider SRVs only, with scalar R32 UAV output. Wider formats
+advertise BUFFER only, wider UAV creation/bindings are explicitly rejected,
+and the additional-format flag remains false. An illegal scalar-to-vector
+constructor in the first fixture attempt was corrected before the final gates.
+
+Final validation: **4403** full-suite passes, **15** skipped, **10** unsupported;
+**65/65** callback passes; **123/123** stock-runtime passes, including all
+twenty-four wider controls. FeMe ICD identity was confirmed before full/Vulkan
+coexistence execution. Inventory **v11** validates **87** unique required OS
+gates, bridge ABI **2**, and no complete product feature-level claim.
+Wider typed UAVs/the complete additional-format set, counters, images/samplers,
+complete roots/resources/barriers/queries and the rest of W2 remain open.
+
 #### Owned execution-time buffer predication
 
 Command lists now retain resource/offset/operation predication state, with

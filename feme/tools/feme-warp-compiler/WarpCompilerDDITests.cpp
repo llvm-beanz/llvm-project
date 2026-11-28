@@ -795,26 +795,54 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
     UAV.Buffer.hDrvCounterResource = {};
     SRV.Buffer.StructureByteStride = 0;
     for (auto Format :
-         {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT}) {
+         {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT,
+          DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32_UINT,
+          DXGI_FORMAT_R32G32_SINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
+          DXGI_FORMAT_R32G32B32A32_UINT, DXGI_FORMAT_R32G32B32A32_SINT}) {
       UINT Support = 0;
+      bool Scalar = Format == DXGI_FORMAT_R32_FLOAT ||
+                    Format == DXGI_FORMAT_R32_UINT ||
+                    Format == DXGI_FORMAT_R32_SINT;
       Core.pfnCheckFormatSupport(Device, Format, &Support);
-      Good &= Support == (D3D12DDI_FORMAT_SUPPORT_BUFFER |
-                          D3D12DDI_FORMAT_SUPPORT_UAV_READS |
-                          D3D12DDI_FORMAT_SUPPORT_UAV_WRITES);
+      UINT ExpectedSupport = D3D12DDI_FORMAT_SUPPORT_BUFFER;
+      if (Scalar)
+        ExpectedSupport |= D3D12DDI_FORMAT_SUPPORT_UAV_READS |
+                           D3D12DDI_FORMAT_SUPPORT_UAV_WRITES;
+      Good &= Support == ExpectedSupport;
       SRV.Format = UAV.Format = Format;
       UAV.Buffer.Flags = D3D12DDI_BUFFER_UAV_FLAG_NONE;
       LastError = S_OK;
       Core.pfnCreateShaderResourceView(Device, &SRV, Third);
-      Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
       Good &= LastError == S_OK;
+      std::memcpy(Before.data(), reinterpret_cast<void *>(Fourth.ptr), Stride);
+      Core.pfnCreateUnorderedAccessView(Device, &UAV, Fourth);
+      Good &= LastError == (Scalar ? S_OK : E_NOTIMPL);
+      if (!Scalar)
+        Good &= std::memcmp(Before.data(), reinterpret_cast<void *>(Fourth.ptr),
+                            Stride) == 0;
     }
     std::memcpy(Before.data(), reinterpret_cast<void *>(Third.ptr), Stride);
-    SRV.Format = DXGI_FORMAT_R32G32_UINT;
+    SRV.Buffer.FirstElement = std::numeric_limits<UINT64>::max() / 16;
+    LastError = S_OK;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == E_INVALIDARG &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                        Stride) == 0;
+    ++SRV.Buffer.FirstElement;
+    LastError = S_OK;
+    Core.pfnCreateShaderResourceView(Device, &SRV, Third);
+    Good &= LastError == E_INVALIDARG &&
+            std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                        Stride) == 0;
+    SRV.Buffer.FirstElement = 0;
+    std::memcpy(Before.data(), reinterpret_cast<void *>(Third.ptr), Stride);
+    SRV.Format = DXGI_FORMAT_R16_FLOAT;
     Core.pfnCreateShaderResourceView(Device, &SRV, Third);
     Good &= LastError == E_NOTIMPL &&
             std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
                         Stride) == 0;
     LastError = S_OK;
+    UAV.Format = DXGI_FORMAT_R32_UINT;
     Core.pfnCreateUnorderedAccessView(OtherDevice, &UAV, Fourth);
     Good &= LastError == E_INVALIDARG;
     std::memcpy(Expected.data(), reinterpret_cast<void *>(Third.ptr),

@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 10)
+  set(FEME_WARP_PROFILE_VERSION 11)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -584,7 +584,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --reference-structured-array-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-structured-array-commands
     COMMAND warp-compiler-harness --ordered-structured-array-commands)
-  foreach(scalar IN ITEMS uint sint float)
+  foreach(scalar IN ITEMS uint sint float uint2 sint2 float2 uint4 sint4 float4)
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-typed-${scalar}-commands
       COMMAND warp-compiler-harness --typed-${scalar}-commands)
     feme_add_probe_test(NAME os-routed-warp-compiler-reference-typed-${scalar}-commands
@@ -597,10 +597,12 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   if(FEME_DXC_EXECUTABLE)
     set(FEME_WARP_PROFILE_DXC_EVIDENCE true)
     set(WARP_DXIL_TYPED_FIXTURES)
-    foreach(scalar IN ITEMS uint sint float)
-      set(shader_scalar "${scalar}")
-      if(scalar STREQUAL "sint")
-        set(shader_scalar int)
+    foreach(scalar IN ITEMS uint sint float uint2 sint2 float2 uint4 sint4 float4)
+      string(REPLACE "sint" "int" shader_scalar "${scalar}")
+      string(REGEX REPLACE "[24]$" "" output_scalar "${shader_scalar}")
+      set(vector_define)
+      if(scalar MATCHES "[24]$")
+        set(vector_define -DTYPED_VECTOR=1)
       endif()
       set(fixture "${WARP_COMPILER_OUTPUT_DIR}/owned-typed-${scalar}-compute.dxil")
       list(APPEND WARP_DXIL_TYPED_FIXTURES "${fixture}")
@@ -608,6 +610,8 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
         COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
           -DBUFFER=1 -DCBV=1 -DBUFFER_VIEWS=1 -DTYPED_VIEWS=1
           -DTYPED_SCALAR=${shader_scalar} -DDESCRIPTOR_ARRAYS=1
+          -DTYPED_OUTPUT_SCALAR=${output_scalar}
+          ${vector_define}
           -DROOT_REGISTER=u3 -Fo "${fixture}"
           "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-dxil.hlsl"
         DEPENDS ../../test/Tools/warp-compiler-dxil.hlsl

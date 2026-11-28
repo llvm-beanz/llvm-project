@@ -125,9 +125,23 @@ void APIENTRY queryNodeMap(D3D12DDI_HDEVICE Device, UINT Count, UINT *Map) {
 UINT APIENTRY implicitAdapterMask(D3D12DDI_HDEVICE) { return 0; }
 
 #ifdef FEME_BOOTSTRAP_WARP_COMPILER
-bool isTypedBufferFormat(DXGI_FORMAT Format) {
-  return Format == DXGI_FORMAT_R32_FLOAT || Format == DXGI_FORMAT_R32_UINT ||
-         Format == DXGI_FORMAT_R32_SINT;
+UINT typedBufferElementSize(DXGI_FORMAT Format) {
+  switch (Format) {
+  case DXGI_FORMAT_R32_FLOAT:
+  case DXGI_FORMAT_R32_UINT:
+  case DXGI_FORMAT_R32_SINT:
+    return 4;
+  case DXGI_FORMAT_R32G32_FLOAT:
+  case DXGI_FORMAT_R32G32_UINT:
+  case DXGI_FORMAT_R32G32_SINT:
+    return 8;
+  case DXGI_FORMAT_R32G32B32A32_FLOAT:
+  case DXGI_FORMAT_R32G32B32A32_UINT:
+  case DXGI_FORMAT_R32G32B32A32_SINT:
+    return 16;
+  default:
+    return 0;
+  }
 }
 #endif
 
@@ -139,10 +153,12 @@ void APIENTRY checkFormat(D3D12DDI_HDEVICE Device, DXGI_FORMAT Format,
   }
   *Support = 0;
 #ifdef FEME_BOOTSTRAP_WARP_COMPILER
-  if (isTypedBufferFormat(Format))
-    *Support = D3D12DDI_FORMAT_SUPPORT_BUFFER |
-               D3D12DDI_FORMAT_SUPPORT_UAV_READS |
-               D3D12DDI_FORMAT_SUPPORT_UAV_WRITES;
+  UINT ElementSize = typedBufferElementSize(Format);
+  if (ElementSize)
+    *Support = D3D12DDI_FORMAT_SUPPORT_BUFFER;
+  if (ElementSize == 4)
+    *Support |=
+        D3D12DDI_FORMAT_SUPPORT_UAV_READS | D3D12DDI_FORMAT_SUPPORT_UAV_WRITES;
 #else
   (void)Format;
 #endif
@@ -835,12 +851,14 @@ HRESULT makeBufferView(feme::probe::WarpDeviceState *Owner,
       (Stride &&
        (Format != DXGI_FORMAT_UNKNOWN || Stride % 4 || Stride > 2048 || Flags)))
     return E_INVALIDARG;
+  UINT ElementSize = Stride  ? Stride
+                     : Flags ? 4
+                             : typedBufferElementSize(Format);
   if (!Flags && !Stride) {
-    if (!isTypedBufferFormat(Format))
+    if (!ElementSize || (Namespace == 2 && ElementSize != 4))
       return E_NOTIMPL;
     Value.Format = Format;
   }
-  UINT ElementSize = Stride ? Stride : 4;
   if (First > std::numeric_limits<UINT64>::max() / ElementSize)
     return E_INVALIDARG;
   Value.Namespace = Namespace;

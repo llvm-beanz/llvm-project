@@ -51,8 +51,40 @@ feme::cpu::ResourceFormat typedBufferFormat(std::uint32_t Format) {
     return feme::cpu::ResourceFormat::R32_UINT;
   case DXGI_FORMAT_R32_SINT:
     return feme::cpu::ResourceFormat::R32_SINT;
+  case DXGI_FORMAT_R32G32_FLOAT:
+    return feme::cpu::ResourceFormat::R32G32_FLOAT;
+  case DXGI_FORMAT_R32G32_UINT:
+    return feme::cpu::ResourceFormat::R32G32_UINT;
+  case DXGI_FORMAT_R32G32_SINT:
+    return feme::cpu::ResourceFormat::R32G32_SINT;
+  case DXGI_FORMAT_R32G32B32A32_FLOAT:
+    return feme::cpu::ResourceFormat::R32G32B32A32_FLOAT;
+  case DXGI_FORMAT_R32G32B32A32_UINT:
+    return feme::cpu::ResourceFormat::R32G32B32A32_UINT;
+  case DXGI_FORMAT_R32G32B32A32_SINT:
+    return feme::cpu::ResourceFormat::R32G32B32A32_SINT;
   default:
     return feme::cpu::ResourceFormat::Unknown;
+  }
+}
+
+std::uint32_t typedBufferElementSize(feme::cpu::ResourceFormat Format) {
+  using feme::cpu::ResourceFormat;
+  switch (Format) {
+  case ResourceFormat::R32_FLOAT:
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32_SINT:
+    return 4;
+  case ResourceFormat::R32G32_FLOAT:
+  case ResourceFormat::R32G32_UINT:
+  case ResourceFormat::R32G32_SINT:
+    return 8;
+  case ResourceFormat::R32G32B32A32_FLOAT:
+  case ResourceFormat::R32G32B32A32_UINT:
+  case ResourceFormat::R32G32B32A32_SINT:
+    return 16;
+  default:
+    return 0;
   }
 }
 
@@ -345,14 +377,16 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
   std::array<feme::cpu::BoundResourceBinding, 64> Bindings{};
   for (std::uint32_t I = 0; I < Desc->BufferCount; ++I) {
     const auto &Buffer = Desc->Buffers[I];
+    auto Format = typedBufferFormat(Buffer.Format);
+    auto ElementSize = typedBufferElementSize(Format);
     if ((!Buffer.Data != !Buffer.SizeInBytes) || Buffer.Kind > 2 ||
         (Buffer.Namespace < 1 || Buffer.Namespace > 3) ||
         (Buffer.Namespace == 3 && Buffer.Kind != 0) ||
         (Buffer.Kind == 0 && Buffer.Stride) ||
         (Buffer.Kind != 2 && Buffer.Format) ||
-        (Buffer.Kind == 2 && (Buffer.Stride || Buffer.SizeInBytes % 4 ||
-                              typedBufferFormat(Buffer.Format) ==
-                                  feme::cpu::ResourceFormat::Unknown)) ||
+        (Buffer.Kind == 2 && (Buffer.Stride || !ElementSize ||
+                              (Buffer.Namespace == 2 && ElementSize != 4) ||
+                              Buffer.SizeInBytes % ElementSize)) ||
         (Buffer.Kind == 1 && (!Buffer.Stride || Buffer.Stride % 4 ||
                               Buffer.SizeInBytes % Buffer.Stride))) {
       llvm::errs() << "FeMe WARP dispatch: invalid buffer binding\n";

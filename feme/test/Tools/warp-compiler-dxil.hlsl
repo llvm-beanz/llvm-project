@@ -26,11 +26,14 @@
 #define ROOT_REGISTER u0
 #endif
 #ifdef TYPED_VIEWS
+#ifndef TYPED_OUTPUT_SCALAR
+#define TYPED_OUTPUT_SCALAR TYPED_SCALAR
+#endif
 #ifdef DESCRIPTOR_ARRAYS
-RWBuffer<TYPED_SCALAR> output[2] : register(ROOT_REGISTER);
+RWBuffer<TYPED_OUTPUT_SCALAR> output[2] : register(ROOT_REGISTER);
 Buffer<TYPED_SCALAR> input[2] : register(t3);
 #else
-RWBuffer<TYPED_SCALAR> output : register(ROOT_REGISTER);
+RWBuffer<TYPED_OUTPUT_SCALAR> output : register(ROOT_REGISTER);
 Buffer<TYPED_SCALAR> input : register(t3);
 #endif
 #elif defined(STRUCTURED_VIEWS)
@@ -108,11 +111,17 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
 #endif
 #endif
 #ifdef TYPED_VIEWS
+#ifdef TYPED_VECTOR
+  uint value = uint(OUTPUT[index]) + peer + bias +
+               uint(input[NonUniformResourceIndex(index % 2)][index].y);
+  OUTPUT[index] = value;
+#else
 #ifdef DESCRIPTOR_ARRAYS
   OUTPUT[index] = uint(OUTPUT[index]) + peer + bias +
                   uint(input[NonUniformResourceIndex(index % 2)][index]);
 #else
   OUTPUT[index] = uint(OUTPUT[index]) + peer + bias + uint(input[index]);
+#endif
 #endif
 #elif defined(STRUCTURED_VIEWS)
 #ifdef DESCRIPTOR_ARRAYS
