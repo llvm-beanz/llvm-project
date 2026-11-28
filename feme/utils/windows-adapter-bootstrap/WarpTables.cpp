@@ -129,6 +129,17 @@ static_assert(FeMeWarpDefaultComponentMapping ==
               D3D12DDI_DEFAULT_SHADER_4_COMPONENT_MAPPING);
 UINT typedBufferElementSize(DXGI_FORMAT Format) {
   switch (Format) {
+  case DXGI_FORMAT_R8_UNORM:
+  case DXGI_FORMAT_R8_UINT:
+  case DXGI_FORMAT_R8_SINT:
+    return 1;
+  case DXGI_FORMAT_R16_FLOAT:
+  case DXGI_FORMAT_R16_UINT:
+  case DXGI_FORMAT_R16_SINT:
+    return 2;
+  case DXGI_FORMAT_R8G8B8A8_UNORM:
+  case DXGI_FORMAT_R8G8B8A8_UINT:
+  case DXGI_FORMAT_R8G8B8A8_SINT:
   case DXGI_FORMAT_R32_FLOAT:
   case DXGI_FORMAT_R32_UINT:
   case DXGI_FORMAT_R32_SINT:
@@ -136,6 +147,9 @@ UINT typedBufferElementSize(DXGI_FORMAT Format) {
   case DXGI_FORMAT_R32G32_FLOAT:
   case DXGI_FORMAT_R32G32_UINT:
   case DXGI_FORMAT_R32G32_SINT:
+  case DXGI_FORMAT_R16G16B16A16_FLOAT:
+  case DXGI_FORMAT_R16G16B16A16_UINT:
+  case DXGI_FORMAT_R16G16B16A16_SINT:
     return 8;
   case DXGI_FORMAT_R32G32B32A32_FLOAT:
   case DXGI_FORMAT_R32G32B32A32_UINT:
@@ -144,6 +158,11 @@ UINT typedBufferElementSize(DXGI_FORMAT Format) {
   default:
     return 0;
   }
+}
+
+bool typedBufferUAVSupported(DXGI_FORMAT Format) {
+  return Format == DXGI_FORMAT_R32_FLOAT || Format == DXGI_FORMAT_R32_UINT ||
+         Format == DXGI_FORMAT_R32_SINT;
 }
 #endif
 
@@ -158,7 +177,7 @@ void APIENTRY checkFormat(D3D12DDI_HDEVICE Device, DXGI_FORMAT Format,
   UINT ElementSize = typedBufferElementSize(Format);
   if (ElementSize)
     *Support = D3D12DDI_FORMAT_SUPPORT_BUFFER;
-  if (ElementSize == 4)
+  if (typedBufferUAVSupported(Format))
     *Support |=
         D3D12DDI_FORMAT_SUPPORT_UAV_READS | D3D12DDI_FORMAT_SUPPORT_UAV_WRITES;
 #else
@@ -860,7 +879,7 @@ HRESULT makeBufferView(feme::probe::WarpDeviceState *Owner,
                      : Flags ? 4
                              : typedBufferElementSize(Format);
   if (!Flags && !Stride) {
-    if (!ElementSize || (Namespace == 2 && ElementSize != 4))
+    if (!ElementSize || (Namespace == 2 && !typedBufferUAVSupported(Format)))
       return E_NOTIMPL;
     Value.Format = Format;
   }

@@ -784,6 +784,43 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned narrow and packed typed SRVs
+
+The subsequent v15 slice adds twelve narrow/packed typed SRV formats:
+R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT. The bridge and owned
+views use exact one/two/four/eight-byte element geometry and existing shared
+decoders. Buffer-only support does not imply typed UAV support: both owned
+and borrowed UAV validation explicitly require scalar R32 formats, including
+rejecting four-byte RGBA8 UAVs. Bridge 4 and artifact 10 remain unchanged.
+
+Ninety-six new controls cover ordinary/mapped views through owned DXBC,
+original DXIL, independent system WARP and held execution. Packed upload data
+occupies a separate tail after the output seed; byte/word writes preserve
+signed values, UNORM recovery and exact FP16 half-unit fractions. Copies,
+post-record changes, non-uniform selection, null read/write behavior, guards
+and pending ownership remain checked. Live-view `GetDimensions` contributes
+the exact 180-element count independently of physical format/shader width.
+The query is skipped on the final null-view replay; null loads still execute.
+
+Initial controls passed 90/96; six legacy RGBA8_UNORM compiler crashes came
+from a full macro array without its required null sentinel. A vector with an
+explicit sentinel fixes that probe bug. Adding non-uniform dimension queries
+then exposed the shared canonical matcher/scalarizer gap, fixed separately
+in `4de6aa4c385c`. The first unrestricted query experiment also crashed the
+reference process on its null-view replay; no vendor root cause or normative
+null-query behavior was established. A phase check through the live CBV
+keeps dimension comparisons on live views without weakening null-load tests.
+An initially incorrect phase condition mixed global/index and X parity;
+using the first live constant corrected the test before final validation.
+
+Validation: new controls **96/96**, full **4412** passed / **15** skipped /
+**10** unsupported, callbacks **65/65**, stock-runtime **271/271**.
+FeMe ICD identity was confirmed before full/coexistence launches. Inventory
+**v15** has **235** unique required OS gates and no complete feature-level
+claim. No KMD, Vulkan advertisement or CTS-result change is claimed. W2
+remains open for complete typed UAVs/other formats, images/resources/bindings
+and synchronization.
+
 #### Owned typed SRV component mappings
 
 Bridge ABI **4** adds a checked D3D shader-component encoding for borrowed buffer

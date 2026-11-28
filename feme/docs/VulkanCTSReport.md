@@ -1,5 +1,13 @@
 # Vulkan CTS status
 
+## Packed WARP SRV and query regression scope, not CTS
+
+The packed typed-SRV and non-uniform buffer-query slices pass 4412 full FeMe
+tests (15 skipped, 10 unsupported), 65 callback gates and 271 stock-runtime/
+coexistence gates. FeMe CPU Vulkan Device identity was confirmed before
+launching full/coexistence tests. Bridge 4 and artifact 10 remain unchanged;
+Vulkan advertisements are unchanged. This is not a new CTS result.
+
 ## Shared typed-buffer component mappings, not CTS
 
 The descriptor-backed typed-buffer mapping prerequisite passes the full FeMe

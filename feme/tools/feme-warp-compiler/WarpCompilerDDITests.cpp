@@ -801,11 +801,27 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
                         Stride) == 0;
     UAV.Buffer.CounterOffsetInBytes = 0;
     SRV.Buffer.StructureByteStride = 0;
-    for (auto Format :
-         {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT,
-          DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32_UINT,
-          DXGI_FORMAT_R32G32_SINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
-          DXGI_FORMAT_R32G32B32A32_UINT, DXGI_FORMAT_R32G32B32A32_SINT}) {
+    for (auto Format : {DXGI_FORMAT_R8_UNORM,
+                        DXGI_FORMAT_R8_UINT,
+                        DXGI_FORMAT_R8_SINT,
+                        DXGI_FORMAT_R16_FLOAT,
+                        DXGI_FORMAT_R16_UINT,
+                        DXGI_FORMAT_R16_SINT,
+                        DXGI_FORMAT_R8G8B8A8_UNORM,
+                        DXGI_FORMAT_R8G8B8A8_UINT,
+                        DXGI_FORMAT_R8G8B8A8_SINT,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        DXGI_FORMAT_R16G16B16A16_UINT,
+                        DXGI_FORMAT_R16G16B16A16_SINT,
+                        DXGI_FORMAT_R32_FLOAT,
+                        DXGI_FORMAT_R32_UINT,
+                        DXGI_FORMAT_R32_SINT,
+                        DXGI_FORMAT_R32G32_FLOAT,
+                        DXGI_FORMAT_R32G32_UINT,
+                        DXGI_FORMAT_R32G32_SINT,
+                        DXGI_FORMAT_R32G32B32A32_FLOAT,
+                        DXGI_FORMAT_R32G32B32A32_UINT,
+                        DXGI_FORMAT_R32G32B32A32_SINT}) {
       UINT Support = 0;
       bool Scalar = Format == DXGI_FORMAT_R32_FLOAT ||
                     Format == DXGI_FORMAT_R32_UINT ||
@@ -868,7 +884,7 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
                         Stride) == 0;
     SRV.Buffer.FirstElement = 0;
     std::memcpy(Before.data(), reinterpret_cast<void *>(Third.ptr), Stride);
-    SRV.Format = DXGI_FORMAT_R16_FLOAT;
+    SRV.Format = DXGI_FORMAT_R16G16_FLOAT;
     Core.pfnCreateShaderResourceView(Device, &SRV, Third);
     Good &= LastError == E_NOTIMPL &&
             std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),

@@ -36,7 +36,7 @@
     "dispatch_groups_per_dimension": 65535
   },
   "binding_scope": ["root raw SRV", "root raw UAV", "root CBV", "multiple inline constants", "finite CBV/SRV/UAV descriptor-table ranges", "non-uniform finite buffer-array selection", "all-stage visibility"],
-  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32_UINT/R32_SINT/R32_FLOAT typed buffer SRV/UAVs", "R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRVs only", "typed SRV component mappings and constant/default channels", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
+  "descriptor_scope": ["CBV/SRV/UAV heap ownership", "CBV creation and null CBVs", "raw/structured buffer SRV/UAV creation and null views", "R32_UINT/R32_SINT/R32_FLOAT typed buffer SRV/UAVs", "R32G32/R32G32B32A32 UINT/SINT/FLOAT typed buffer SRVs only", "R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT typed buffer SRVs only", "typed SRV component mappings and constant/default channels", "non-uniform live typed-buffer dimension queries", "CPU-source descriptor copies", "execution-time finite buffer table preparation", "live CPU-metadata residency"],
   "resource_scope": ["committed L0 buffers", "placed L0 buffers", "upload", "readback", "default UAV"],
   "root_gpuva_alias_bounds": "largest matching live logical buffer extent; excludes implicit backing allocations",
   "barrier_scope": ["buffer transition", "buffer UAV", "whole-buffer aliasing via 0022 ranged flags"],
@@ -68,10 +68,13 @@
     "Tools/feme-run/cbv-bounds.ll",
     "Transforms/DXIL/dxil-raise-raw-buffer-ops.ll",
     "Transforms/DXIL/dxil-raise-buffer-counter.ll",
+    "Transforms/DXIL/dxil-raise-typed-getdimensions.ll",
     "Transforms/CPU/resource-lowering-counter.ll",
+    "Transforms/CPU/resource-lowering-typed-getdimensions.ll",
     "Transforms/CPU/simdize-groupshared-used-lists.ll"
   ],
   "os_required_gates": [
+@FEME_WARP_PACKED_GATES@
     "os-routed-warp-compiler-owned-buffer",
     "os-routed-warp-compiler-owned-mapped-typed-uint-commands",
     "os-routed-warp-compiler-owned-ordered-mapped-typed-uint-commands",

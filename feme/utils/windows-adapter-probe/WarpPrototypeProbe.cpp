@@ -717,19 +717,43 @@ HRESULT exerciseBufferCommands(
                                                                          : 1;
   bool ConstantBindings = CBV || Inline;
   UINT Components = 1;
+  bool Normalized =
+      Typed == DXGI_FORMAT_R8_UNORM || Typed == DXGI_FORMAT_R8G8B8A8_UNORM;
   bool Floating = Typed == DXGI_FORMAT_R32_FLOAT ||
                   Typed == DXGI_FORMAT_R32G32_FLOAT ||
-                  Typed == DXGI_FORMAT_R32G32B32A32_FLOAT;
-  bool Signed = Typed == DXGI_FORMAT_R32_SINT ||
-                Typed == DXGI_FORMAT_R32G32_SINT ||
-                Typed == DXGI_FORMAT_R32G32B32A32_SINT;
+                  Typed == DXGI_FORMAT_R32G32B32A32_FLOAT ||
+                  Typed == DXGI_FORMAT_R16_FLOAT ||
+                  Typed == DXGI_FORMAT_R16G16B16A16_FLOAT || Normalized;
+  bool Signed =
+      Typed == DXGI_FORMAT_R32_SINT || Typed == DXGI_FORMAT_R32G32_SINT ||
+      Typed == DXGI_FORMAT_R32G32B32A32_SINT || Typed == DXGI_FORMAT_R8_SINT ||
+      Typed == DXGI_FORMAT_R16_SINT || Typed == DXGI_FORMAT_R8G8B8A8_SINT ||
+      Typed == DXGI_FORMAT_R16G16B16A16_SINT;
   if (Typed == DXGI_FORMAT_R32G32_FLOAT || Typed == DXGI_FORMAT_R32G32_UINT ||
       Typed == DXGI_FORMAT_R32G32_SINT)
     Components = 2;
   if (Typed == DXGI_FORMAT_R32G32B32A32_FLOAT ||
       Typed == DXGI_FORMAT_R32G32B32A32_UINT ||
-      Typed == DXGI_FORMAT_R32G32B32A32_SINT)
+      Typed == DXGI_FORMAT_R32G32B32A32_SINT ||
+      Typed == DXGI_FORMAT_R8G8B8A8_UNORM ||
+      Typed == DXGI_FORMAT_R8G8B8A8_UINT ||
+      Typed == DXGI_FORMAT_R8G8B8A8_SINT ||
+      Typed == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+      Typed == DXGI_FORMAT_R16G16B16A16_UINT ||
+      Typed == DXGI_FORMAT_R16G16B16A16_SINT)
     Components = 4;
+  UINT ComponentBytes = 4;
+  if (Typed == DXGI_FORMAT_R8_UNORM || Typed == DXGI_FORMAT_R8_UINT ||
+      Typed == DXGI_FORMAT_R8_SINT || Typed == DXGI_FORMAT_R8G8B8A8_UNORM ||
+      Typed == DXGI_FORMAT_R8G8B8A8_UINT || Typed == DXGI_FORMAT_R8G8B8A8_SINT)
+    ComponentBytes = 1;
+  if (Typed == DXGI_FORMAT_R16_FLOAT || Typed == DXGI_FORMAT_R16_UINT ||
+      Typed == DXGI_FORMAT_R16_SINT ||
+      Typed == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+      Typed == DXGI_FORMAT_R16G16B16A16_UINT ||
+      Typed == DXGI_FORMAT_R16G16B16A16_SINT)
+    ComponentBytes = 2;
+  bool Packed = ComponentBytes != 4;
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
       "groupshared uint sharedValues[30];\n"
@@ -744,6 +768,13 @@ HRESULT exerciseBufferCommands(
       "}\n";
   constexpr char CBVSource[] =
       "#ifdef TYPED_VIEWS\n"
+      "#ifdef TYPED_UNORM\n"
+      "#define TYPED_INPUT(v) uint((v) * 255.0f + 0.5f)\n"
+      "#elif defined(TYPED_HALF)\n"
+      "#define TYPED_INPUT(v) uint((v) * 2.0f)\n"
+      "#else\n"
+      "#define TYPED_INPUT(v) uint(v)\n"
+      "#endif\n"
       "#ifdef DESCRIPTOR_ARRAYS\n"
       "RWBuffer<TYPED_OUTPUT_SCALAR> output[2] : register(u3);\n"
       "Buffer<TYPED_SCALAR> input[2] : register(t3);\n"
@@ -816,6 +847,14 @@ HRESULT exerciseBufferCommands(
       "uint bias = valuesA[id.x % 2] + valuesB[id.x % 2];\n"
       "#endif\n"
       "#endif\n"
+      "#ifdef PACKED_VIEWS\n"
+      "if (A[NonUniformResourceIndex(index % 2)].values[0] < "
+      "17 + (index % 2) * 11) {\n"
+      "uint viewElements;\n"
+      "input[NonUniformResourceIndex(index % 2)].GetDimensions(viewElements);\n"
+      "bias += viewElements;\n"
+      "}\n"
+      "#endif\n"
       "#ifdef COUNTER_VIEWS\n"
       "#ifdef APPEND_VIEWS\n"
       "if (index % 2) output[1].Append(index);\n"
@@ -832,15 +871,15 @@ HRESULT exerciseBufferCommands(
       "#elif defined(TYPED_VIEWS)\n"
       "#ifdef TYPED_VECTOR\n"
       "uint value = uint(OUTPUT[index]) + peer + bias + "
-      "uint(input[NonUniformResourceIndex(index % 2)][index].y);\n"
+      "TYPED_INPUT(input[NonUniformResourceIndex(index % 2)][index].y);\n"
       "OUTPUT[index] = value;\n"
       "#else\n"
       "#ifdef DESCRIPTOR_ARRAYS\n"
       "OUTPUT[index] = uint(OUTPUT[index]) + peer + bias + "
-      "uint(input[NonUniformResourceIndex(index % 2)][index]);\n"
+      "TYPED_INPUT(input[NonUniformResourceIndex(index % 2)][index]);\n"
       "#else\n"
       "OUTPUT[index] = uint(OUTPUT[index]) + peer + bias + "
-      "uint(input[index]);\n"
+      "TYPED_INPUT(input[index]);\n"
       "#endif\n"
       "#endif\n"
       "#elif defined(STRUCTURED_VIEWS)\n"
@@ -915,36 +954,41 @@ HRESULT exerciseBufferCommands(
   RootDesc.pParameters = Parameters.data();
   ComPtr<ID3D12RootSignature> Root;
   ComPtr<ID3D12PipelineState> Pipeline;
-  std::array<D3D_SHADER_MACRO, 7> Defines{};
-  UINT DefineCount = 0;
+  std::vector<D3D_SHADER_MACRO> Defines;
   if (Inline)
-    Defines[DefineCount++] = {"INLINE_CONSTANTS", "1"};
+    Defines.push_back({"INLINE_CONSTANTS", "1"});
   if (Views)
-    Defines[DefineCount++] = {"BUFFER_VIEWS", "1"};
+    Defines.push_back({"BUFFER_VIEWS", "1"});
   if (Structured)
-    Defines[DefineCount++] = {"STRUCTURED_VIEWS", "1"};
+    Defines.push_back({"STRUCTURED_VIEWS", "1"});
   if (Arrays)
-    Defines[DefineCount++] = {"DESCRIPTOR_ARRAYS", "1"};
+    Defines.push_back({"DESCRIPTOR_ARRAYS", "1"});
   if (CounterDelta) {
-    Defines[DefineCount++] = {"COUNTER_VIEWS", "1"};
-    Defines[DefineCount++] = {"COUNTER_OPERATION", CounterDelta > 0
-                                                       ? "IncrementCounter"
-                                                       : "DecrementCounter"};
+    Defines.push_back({"COUNTER_VIEWS", "1"});
+    Defines.push_back({"COUNTER_OPERATION", CounterDelta > 0
+                                                ? "IncrementCounter"
+                                                : "DecrementCounter"});
     if (Append)
-      Defines[DefineCount++] = {"APPEND_VIEWS", "1"};
+      Defines.push_back({"APPEND_VIEWS", "1"});
     if (Consume)
-      Defines[DefineCount++] = {"CONSUME_VIEWS", "1"};
+      Defines.push_back({"CONSUME_VIEWS", "1"});
   }
   const char *OutputType = Floating ? "float" : Signed ? "int" : "uint";
   std::string TypedName = OutputType;
   if (Components > 1)
     TypedName += std::to_string(Components);
   if (Typed != DXGI_FORMAT_UNKNOWN) {
-    Defines[DefineCount++] = {"TYPED_VIEWS", "1"};
-    Defines[DefineCount++] = {"TYPED_SCALAR", TypedName.c_str()};
-    Defines[DefineCount++] = {"TYPED_OUTPUT_SCALAR", OutputType};
+    Defines.push_back({"TYPED_VIEWS", "1"});
+    Defines.push_back({"TYPED_SCALAR", TypedName.c_str()});
+    Defines.push_back({"TYPED_OUTPUT_SCALAR", OutputType});
     if (Components > 1)
-      Defines[DefineCount++] = {"TYPED_VECTOR", "1"};
+      Defines.push_back({"TYPED_VECTOR", "1"});
+    if (Normalized)
+      Defines.push_back({"TYPED_UNORM", "1"});
+    if (Packed && Floating && !Normalized)
+      Defines.push_back({"TYPED_HALF", "1"});
+    if (Packed)
+      Defines.push_back({"PACKED_VIEWS", "1"});
     D3D12_FEATURE_DATA_FORMAT_SUPPORT Support{Typed};
     HRESULT Status =
         report("Check typed buffer format",
@@ -966,6 +1010,7 @@ HRESULT exerciseBufferCommands(
         !(Support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE))
       return report("Missing typed buffer load/store support", E_FAIL);
   }
+  Defines.push_back({nullptr, nullptr});
   HRESULT Result = createComputePipeline(
       Device, ConstantBindings ? CBVSource : Source,
       ConstantBindings ? sizeof(CBVSource) - 1 : sizeof(Source) - 1, RootDesc,
@@ -984,7 +1029,10 @@ HRESULT exerciseBufferCommands(
   Heap.CreationNodeMask = Heap.VisibleNodeMask = 1;
   D3D12_RESOURCE_DESC Desc{};
   Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  Desc.Width = Structured ? 2 * Bytes : Components * Bytes;
+  UINT UploadBytes = Packed       ? Bytes + Words * Components * ComponentBytes
+                     : Structured ? 2 * Bytes
+                                  : Components * Bytes;
+  Desc.Width = UploadBytes;
   Desc.Height = Desc.DepthOrArraySize = Desc.MipLevels = 1;
   Desc.SampleDesc.Count = 1;
   Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -1138,13 +1186,42 @@ HRESULT exerciseBufferCommands(
     UINT Value = I * 7 + 5;
     return Signed ? 0u - Value : Value;
   };
-  for (UINT I = 0; I < Words * Components * (Structured ? 2 : 1); ++I) {
+  auto PackedSample = [Signed, Floating, Normalized,
+                       ComponentBytes](UINT Element, UINT Channel) {
+    UINT Hash = Element * 997 + Channel * 331 + 17;
+    if (Floating && !Normalized)
+      return Hash % 8;
+    if (Signed)
+      return 0u - (Hash % (ComponentBytes == 1 ? 127 : 32767) + 1);
+    return Hash % (ComponentBytes == 1 ? 256 : 65536);
+  };
+  for (UINT I = 0; I < Words * (Packed ? 1 : Components * (Structured ? 2 : 1));
+       ++I) {
     if (Floating)
       static_cast<float *>(Memory)[I] = static_cast<float>(InitialValue(I));
     else
       static_cast<UINT *>(Memory)[I] = InitialValue(I);
   }
-  D3D12_RANGE UploadWritten{0, Structured ? 2 * Bytes : Components * Bytes};
+  if (Packed)
+    for (UINT Element = 0; Element < Words; ++Element)
+      for (UINT Channel = 0; Channel < Components; ++Channel) {
+        auto *Destination = static_cast<unsigned char *>(Memory) + Bytes +
+                            (Element * Components + Channel) * ComponentBytes;
+        UINT Sample = PackedSample(Element, Channel);
+        if (ComponentBytes == 1) {
+          auto Value = static_cast<unsigned char>(Sample);
+          std::memcpy(Destination, &Value, sizeof(Value));
+        } else {
+          UINT16 Value = static_cast<UINT16>(Sample);
+          if (Floating) {
+            constexpr UINT16 HalfSamples[] = {0x0000, 0x3800, 0x3c00, 0x3e00,
+                                              0x4000, 0x4100, 0x4200, 0x4300};
+            Value = HalfSamples[(Element * 997 + Channel * 331 + 17) % 8];
+          }
+          std::memcpy(Destination, &Value, sizeof(Value));
+        }
+      }
+  D3D12_RANGE UploadWritten{0, UploadBytes};
   Upload->Unmap(0, &UploadWritten);
   D3D12_COMMAND_QUEUE_DESC QueueDesc{};
   QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
@@ -1425,7 +1502,8 @@ HRESULT exerciseBufferCommands(
                     Components > 1 ? MappingSource : 1, 2, 3);
           }
           Input.Buffer.FirstElement =
-              (Structured ? 2 : 4) + I * (Structured ? 2 : 4);
+              Packed ? Bytes / (Components * ComponentBytes) + 4 + I * 4
+                     : (Structured ? 2 : 4) + I * (Structured ? 2 : 4);
           bool Null = Repeat == 2 && I == 0;
           Device->CreateShaderResourceView(
               Null ? nullptr : Upload.Get(), &Input,
@@ -1683,22 +1761,29 @@ HRESULT exerciseBufferCommands(
                                       : Repeat + 1;
         if (Arrays) {
           UINT Element = I % 2;
-          UINT InputWord = Structured ? 2 * I + 5 + 4 * Element
+          UINT InputWord = Packed       ? I + 4 + 4 * Element
+                           : Structured ? 2 * I + 5 + 4 * Element
                            : Components > 1
                                ? Components * (I + 4 + 4 * Element) + 1
                                : I + 4 + 4 * Element;
-          UINT InputValue = InitialValue(InputWord);
+          UINT InputValue =
+              Packed ? PackedSample(InputWord, Components > 1 ? 1 : 0)
+                     : InitialValue(InputWord);
+          UINT MappedOne = Normalized ? 255 : Packed && Floating ? 2 : 1;
           for (UINT Step = 0; Step <= Repeat; ++Step) {
             if (Step == 2 && Element == 1)
               continue;
             UINT Bias = 23 + Step * 5 + Element * 30;
+            if (Packed && Step != 2)
+              Bias += Threads;
             if (Step == 2)
               Bias -= X % 2 ? 10 : 16;
             UINT Value = Step == 2 ? 0 : InputValue;
             if (MappedTyped && Step != 2)
-              Value = Step == 0
-                          ? (Components == 1 ? 1 : InitialValue(InputWord - 1))
-                          : (Element ? 1 : 0);
+              Value = Step == 0 ? (Components == 1 ? MappedOne
+                                   : Packed        ? PackedSample(InputWord, 0)
+                                            : InitialValue(InputWord - 1))
+                                : (Element ? MappedOne : 0);
             Expected += PeerGlobal + Bias + Value;
           }
         } else {
@@ -1926,13 +2011,55 @@ int wmain(int Argc, wchar_t **Argv) {
       {L"--typed-sint4-commands", L"--reference-typed-sint4-commands",
        L"--ordered-typed-sint4-commands", L"--dxil-typed-sint4-commands"},
       {L"--typed-float4-commands", L"--reference-typed-float4-commands",
-       L"--ordered-typed-float4-commands", L"--dxil-typed-float4-commands"}};
-  const DXGI_FORMAT TypedFormats[] = {
-      DXGI_FORMAT_R32_UINT,          DXGI_FORMAT_R32_SINT,
-      DXGI_FORMAT_R32_FLOAT,         DXGI_FORMAT_R32G32_UINT,
-      DXGI_FORMAT_R32G32_SINT,       DXGI_FORMAT_R32G32_FLOAT,
-      DXGI_FORMAT_R32G32B32A32_UINT, DXGI_FORMAT_R32G32B32A32_SINT,
-      DXGI_FORMAT_R32G32B32A32_FLOAT};
+       L"--ordered-typed-float4-commands", L"--dxil-typed-float4-commands"},
+      {L"--typed-uint16-commands", L"--reference-typed-uint16-commands",
+       L"--ordered-typed-uint16-commands", L"--dxil-typed-uint16-commands"},
+      {L"--typed-sint16-commands", L"--reference-typed-sint16-commands",
+       L"--ordered-typed-sint16-commands", L"--dxil-typed-sint16-commands"},
+      {L"--typed-float16-commands", L"--reference-typed-float16-commands",
+       L"--ordered-typed-float16-commands", L"--dxil-typed-float16-commands"},
+      {L"--typed-uint8-commands", L"--reference-typed-uint8-commands",
+       L"--ordered-typed-uint8-commands", L"--dxil-typed-uint8-commands"},
+      {L"--typed-sint8-commands", L"--reference-typed-sint8-commands",
+       L"--ordered-typed-sint8-commands", L"--dxil-typed-sint8-commands"},
+      {L"--typed-unorm8-commands", L"--reference-typed-unorm8-commands",
+       L"--ordered-typed-unorm8-commands", L"--dxil-typed-unorm8-commands"},
+      {L"--typed-uint16x4-commands", L"--reference-typed-uint16x4-commands",
+       L"--ordered-typed-uint16x4-commands", L"--dxil-typed-uint16x4-commands"},
+      {L"--typed-sint16x4-commands", L"--reference-typed-sint16x4-commands",
+       L"--ordered-typed-sint16x4-commands", L"--dxil-typed-sint16x4-commands"},
+      {L"--typed-float16x4-commands", L"--reference-typed-float16x4-commands",
+       L"--ordered-typed-float16x4-commands",
+       L"--dxil-typed-float16x4-commands"},
+      {L"--typed-uint8x4-commands", L"--reference-typed-uint8x4-commands",
+       L"--ordered-typed-uint8x4-commands", L"--dxil-typed-uint8x4-commands"},
+      {L"--typed-sint8x4-commands", L"--reference-typed-sint8x4-commands",
+       L"--ordered-typed-sint8x4-commands", L"--dxil-typed-sint8x4-commands"},
+      {L"--typed-unorm8x4-commands", L"--reference-typed-unorm8x4-commands",
+       L"--ordered-typed-unorm8x4-commands",
+       L"--dxil-typed-unorm8x4-commands"}};
+  const DXGI_FORMAT TypedFormats[] = {DXGI_FORMAT_R32_UINT,
+                                      DXGI_FORMAT_R32_SINT,
+                                      DXGI_FORMAT_R32_FLOAT,
+                                      DXGI_FORMAT_R32G32_UINT,
+                                      DXGI_FORMAT_R32G32_SINT,
+                                      DXGI_FORMAT_R32G32_FLOAT,
+                                      DXGI_FORMAT_R32G32B32A32_UINT,
+                                      DXGI_FORMAT_R32G32B32A32_SINT,
+                                      DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                      DXGI_FORMAT_R16_UINT,
+                                      DXGI_FORMAT_R16_SINT,
+                                      DXGI_FORMAT_R16_FLOAT,
+                                      DXGI_FORMAT_R8_UINT,
+                                      DXGI_FORMAT_R8_SINT,
+                                      DXGI_FORMAT_R8_UNORM,
+                                      DXGI_FORMAT_R16G16B16A16_UINT,
+                                      DXGI_FORMAT_R16G16B16A16_SINT,
+                                      DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                      DXGI_FORMAT_R8G8B8A8_UINT,
+                                      DXGI_FORMAT_R8G8B8A8_SINT,
+                                      DXGI_FORMAT_R8G8B8A8_UNORM};
+  static_assert(ARRAYSIZE(TypedModes) == ARRAYSIZE(TypedFormats));
   for (UINT I = 0; I < ARRAYSIZE(TypedModes); ++I)
     for (UINT J = 0; J < 4; ++J) {
       std::wstring MappedMode =

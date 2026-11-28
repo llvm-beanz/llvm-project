@@ -32,7 +32,9 @@ for direct/indirect dispatch and buffer copies. Structured UAV counter views
 execute increment/decrement and bounded uint append/consume through the shared
 masked atomic runtime.
 Typed SRVs additionally execute checked component mappings, constants and
-absent-channel defaults. The generated v14 inventory
+absent-channel defaults. R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT
+SRVs also execute packed decoding, mappings and live-view dimension queries.
+The generated v15 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.
 
@@ -72,7 +74,8 @@ W2 remaining work is tracked without deeper milestone nesting:
 
 The shared typed-buffer runtime and Windows bridge 4 execute descriptor-backed
 typed SRV component mappings (artifact ABI 10), including post-record updates,
-nulls and held execution.
+nulls and held execution. Twelve additional narrow SRV formats reuse existing
+decoders with exact physical element geometry; UAVs remain scalar R32 only.
 
 The shared compiler/runtime and Windows bridge now support checked structured
 UAV counter views, per-active-lane increment/decrement and bounded uint append/
@@ -82,7 +85,7 @@ W2(b) operations, still remain.
 | Step | Current boundary and remaining work |
 |---|---|
 | W2(a) | Raw SRV/UAV roots, multiple CBVs, inline constants and finite CBV/raw/structured tables execute; static samplers, unbounded/general heaps and complete shader/root compatibility remain. |
-| W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, scalar R32 SRV/UAVs, two/four-component R32 SRVs, typed SRV component mappings, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; wider typed UAVs/the complete additional-format set, other typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
+| W2(b) | Live-owner GPUVA/handle lookup, alias bounds, buffer view creation/copies, execution-time finite/non-uniform array preparation, scalar R32 SRV/UAVs, two/four-component R32 and twelve narrow/packed SRVs, typed SRV component mappings/live dimensions, structured UAV counters, bounded uint append/consume and null CBV/SRV/UAV views execute; wider typed UAVs/the complete additional-format set, other typed/image views, general append/consume payload coverage, volatility, unbounded ranges and complete atomic operations remain. |
 | W2(c) | Committed and placed buffers share real WARP allocations and pass alias/copy readback. Images/formats/views/footprints, reserved/shared resources and broader residency remain. |
 | W2(d) | Kernel-ordered copies/direct and indirect dispatch, execution-time 64-bit predication, whole-buffer alias barriers and decreasing fences pass. Complete transitions/promotion/decay/splits, finite ranged barriers, queries, indirect root changes/draws and general removal wakeups remain. |
 

@@ -63,6 +63,30 @@ feme::cpu::ResourceFormat typedBufferFormat(std::uint32_t Format) {
     return feme::cpu::ResourceFormat::R32G32B32A32_UINT;
   case DXGI_FORMAT_R32G32B32A32_SINT:
     return feme::cpu::ResourceFormat::R32G32B32A32_SINT;
+  case DXGI_FORMAT_R8_UNORM:
+    return feme::cpu::ResourceFormat::R8_UNORM;
+  case DXGI_FORMAT_R8_UINT:
+    return feme::cpu::ResourceFormat::R8_UINT;
+  case DXGI_FORMAT_R8_SINT:
+    return feme::cpu::ResourceFormat::R8_SINT;
+  case DXGI_FORMAT_R16_FLOAT:
+    return feme::cpu::ResourceFormat::R16_FLOAT;
+  case DXGI_FORMAT_R16_UINT:
+    return feme::cpu::ResourceFormat::R16_UINT;
+  case DXGI_FORMAT_R16_SINT:
+    return feme::cpu::ResourceFormat::R16_SINT;
+  case DXGI_FORMAT_R8G8B8A8_UNORM:
+    return feme::cpu::ResourceFormat::R8G8B8A8_UNORM;
+  case DXGI_FORMAT_R8G8B8A8_UINT:
+    return feme::cpu::ResourceFormat::R8G8B8A8_UINT;
+  case DXGI_FORMAT_R8G8B8A8_SINT:
+    return feme::cpu::ResourceFormat::R8G8B8A8_SINT;
+  case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    return feme::cpu::ResourceFormat::R16G16B16A16_FLOAT;
+  case DXGI_FORMAT_R16G16B16A16_UINT:
+    return feme::cpu::ResourceFormat::R16G16B16A16_UINT;
+  case DXGI_FORMAT_R16G16B16A16_SINT:
+    return feme::cpu::ResourceFormat::R16G16B16A16_SINT;
   default:
     return feme::cpu::ResourceFormat::Unknown;
   }
@@ -71,6 +95,17 @@ feme::cpu::ResourceFormat typedBufferFormat(std::uint32_t Format) {
 std::uint32_t typedBufferElementSize(feme::cpu::ResourceFormat Format) {
   using feme::cpu::ResourceFormat;
   switch (Format) {
+  case ResourceFormat::R8_UNORM:
+  case ResourceFormat::R8_UINT:
+  case ResourceFormat::R8_SINT:
+    return 1;
+  case ResourceFormat::R16_FLOAT:
+  case ResourceFormat::R16_UINT:
+  case ResourceFormat::R16_SINT:
+    return 2;
+  case ResourceFormat::R8G8B8A8_UNORM:
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_SINT:
   case ResourceFormat::R32_FLOAT:
   case ResourceFormat::R32_UINT:
   case ResourceFormat::R32_SINT:
@@ -78,6 +113,9 @@ std::uint32_t typedBufferElementSize(feme::cpu::ResourceFormat Format) {
   case ResourceFormat::R32G32_FLOAT:
   case ResourceFormat::R32G32_UINT:
   case ResourceFormat::R32G32_SINT:
+  case ResourceFormat::R16G16B16A16_FLOAT:
+  case ResourceFormat::R16G16B16A16_UINT:
+  case ResourceFormat::R16G16B16A16_SINT:
     return 8;
   case ResourceFormat::R32G32B32A32_FLOAT:
   case ResourceFormat::R32G32B32A32_UINT:
@@ -394,6 +432,9 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
     const auto &Buffer = Desc->Buffers[I];
     auto Format = typedBufferFormat(Buffer.Format);
     auto ElementSize = typedBufferElementSize(Format);
+    bool ScalarR32 = Buffer.Format == DXGI_FORMAT_R32_FLOAT ||
+                     Buffer.Format == DXGI_FORMAT_R32_UINT ||
+                     Buffer.Format == DXGI_FORMAT_R32_SINT;
     if ((!Buffer.Data != !Buffer.SizeInBytes) ||
         !FeMeWarpValidComponentMapping(Buffer.Shader4ComponentMapping) ||
         (Buffer.Shader4ComponentMapping != FeMeWarpDefaultComponentMapping &&
@@ -409,7 +450,7 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
         (Buffer.Kind == 0 && Buffer.Stride) ||
         (Buffer.Kind != 2 && Buffer.Format) ||
         (Buffer.Kind == 2 && (Buffer.Stride || !ElementSize ||
-                              (Buffer.Namespace == 2 && ElementSize != 4) ||
+                              (Buffer.Namespace == 2 && !ScalarR32) ||
                               Buffer.SizeInBytes % ElementSize)) ||
         (Buffer.Kind == 1 && (!Buffer.Stride || Buffer.Stride % 4 ||
                               Buffer.SizeInBytes % Buffer.Stride))) {

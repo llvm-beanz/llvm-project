@@ -21,7 +21,8 @@ decreasing monitored fences, dispatch-only indirect commands and multiple
 root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
 R32_UINT/R32_SINT/R32_FLOAT typed buffer views, two/four-component R32 SRVs
 and buffer-command predication, plus checked structured-UAV counters and bounded
-uint append/consume and typed SRV component mappings; inventory v14
+uint append/consume, typed SRV component mappings and narrow/packed SRVs;
+inventory v15
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1764,7 +1765,11 @@ post-record copies. Bridge ABI 4 explicitly carries a DXGI format and maps
 it to FeMe's distinct format numbering; old compilation/dispatch versions
 are rejected. Two/four-component R32 UINT/SINT/FLOAT SRVs additionally use
 their actual eight/sixteen-byte element geometry and sparse component loads.
-These wider formats advertise buffer support only; wider UAV descriptors
+R8/RGBA8 UINT/SINT/UNORM and R16/RGBA16 UINT/SINT/FLOAT SRVs additionally use
+their actual one/two/four/eight-byte element geometry and existing shared
+decoders. Non-uniform live-view dimension queries count physical texels
+independently of shader scalar/vector widths and component mappings.
+These additional formats advertise buffer support only; wider UAV descriptors
 and borrowed UAV bindings are explicitly rejected. The normative
 `TypedUAVLoadAdditionalFormats` flag remains false until the complete
 mandatory additional-format set is implemented and tested. Only scalar R32
@@ -1801,7 +1806,7 @@ Both zero-comparison operations suppress matching commands; barriers remain
 unconditional. List reset disables predication, and pending submissions retain
 their captured state. Direct/indirect DXBC/DXIL, separate system-WARP and held
 teardown controls pass. Queries and remaining synchronization still stay open.
-See the implementation log and v14 inventory.
+See the implementation log and v15 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 14)
+  set(FEME_WARP_PROFILE_VERSION 15)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -592,7 +592,19 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-counter-${operation}-commands
       COMMAND warp-compiler-harness --ordered-counter-${operation}-commands)
   endforeach()
-  foreach(scalar IN ITEMS uint sint float uint2 sint2 float2 uint4 sint4 float4)
+  set(WARP_TYPED_FORMATS uint sint float uint2 sint2 float2 uint4 sint4 float4
+    uint16 sint16 float16 uint8 sint8 unorm8
+    uint16x4 sint16x4 float16x4 uint8x4 sint8x4 unorm8x4)
+  set(FEME_WARP_PACKED_GATES "")
+  foreach(scalar IN LISTS WARP_TYPED_FORMATS)
+    if(scalar MATCHES "(16|8)")
+      foreach(prefix IN ITEMS owned owned-ordered owned-dxil reference)
+        foreach(binding IN ITEMS typed mapped-typed)
+          string(APPEND FEME_WARP_PACKED_GATES
+            "    \"os-routed-warp-compiler-${prefix}-${binding}-${scalar}-commands\",\n")
+        endforeach()
+      endforeach()
+    endif()
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-typed-${scalar}-commands
       COMMAND warp-compiler-harness --typed-${scalar}-commands)
     feme_add_probe_test(NAME os-routed-warp-compiler-reference-typed-${scalar}-commands
@@ -643,8 +655,30 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       DEPENDS ${WARP_DXIL_COUNTER_FIXTURES})
     add_dependencies(warp-compiler-harness warp-dxil-counter-fixtures)
     set(WARP_DXIL_TYPED_FIXTURES)
-    foreach(scalar IN ITEMS uint sint float uint2 sint2 float2 uint4 sint4 float4)
-      string(REPLACE "sint" "int" shader_scalar "${scalar}")
+    foreach(scalar IN LISTS WARP_TYPED_FORMATS)
+      set(normalized_define)
+      set(half_define)
+      set(packed_define)
+      if(scalar MATCHES "(16|8)")
+        set(packed_define -DPACKED_VIEWS=1)
+        if(scalar MATCHES "^(float|unorm)")
+          set(shader_scalar float)
+        elseif(scalar MATCHES "^sint")
+          set(shader_scalar int)
+        else()
+          set(shader_scalar uint)
+        endif()
+        if(scalar MATCHES "x4$")
+          string(APPEND shader_scalar "4")
+        endif()
+        if(scalar MATCHES "^unorm")
+          set(normalized_define -DTYPED_UNORM=1)
+        elseif(scalar MATCHES "^float16")
+          set(half_define -DTYPED_HALF=1)
+        endif()
+      else()
+        string(REPLACE "sint" "int" shader_scalar "${scalar}")
+      endif()
       string(REGEX REPLACE "[24]$" "" output_scalar "${shader_scalar}")
       set(vector_define)
       if(scalar MATCHES "[24]$")
@@ -658,6 +692,9 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
           -DTYPED_SCALAR=${shader_scalar} -DDESCRIPTOR_ARRAYS=1
           -DTYPED_OUTPUT_SCALAR=${output_scalar}
           ${vector_define}
+          ${normalized_define}
+          ${half_define}
+          ${packed_define}
           -DROOT_REGISTER=u3 -Fo "${fixture}"
           "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-dxil.hlsl"
         DEPENDS ../../test/Tools/warp-compiler-dxil.hlsl

@@ -26,6 +26,13 @@
 #define ROOT_REGISTER u0
 #endif
 #ifdef TYPED_VIEWS
+#ifdef TYPED_UNORM
+#define TYPED_INPUT(v) uint((v) * 255.0f + 0.5f)
+#elif defined(TYPED_HALF)
+#define TYPED_INPUT(v) uint((v) * 2.0f)
+#else
+#define TYPED_INPUT(v) uint(v)
+#endif
 #ifndef TYPED_OUTPUT_SCALAR
 #define TYPED_OUTPUT_SCALAR TYPED_SCALAR
 #endif
@@ -117,6 +124,14 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
 #endif
 #endif
 #endif
+#ifdef PACKED_VIEWS
+  // Query both live views before the final null-view replay.
+  if (A[NonUniformResourceIndex(index % 2)].values[0] < 17 + (index % 2) * 11) {
+    uint viewElements;
+    input[NonUniformResourceIndex(index % 2)].GetDimensions(viewElements);
+    bias += viewElements;
+  }
+#endif
 #ifdef COUNTER_VIEWS
 #ifdef APPEND_VIEWS
   if (index % 2)
@@ -137,14 +152,14 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
 #elif defined(TYPED_VIEWS)
 #ifdef TYPED_VECTOR
   uint value = uint(OUTPUT[index]) + peer + bias +
-               uint(input[NonUniformResourceIndex(index % 2)][index].y);
+               TYPED_INPUT(input[NonUniformResourceIndex(index % 2)][index].y);
   OUTPUT[index] = value;
 #else
 #ifdef DESCRIPTOR_ARRAYS
   OUTPUT[index] = uint(OUTPUT[index]) + peer + bias +
-                  uint(input[NonUniformResourceIndex(index % 2)][index]);
+                  TYPED_INPUT(input[NonUniformResourceIndex(index % 2)][index]);
 #else
-  OUTPUT[index] = uint(OUTPUT[index]) + peer + bias + uint(input[index]);
+  OUTPUT[index] = uint(OUTPUT[index]) + peer + bias + TYPED_INPUT(input[index]);
 #endif
 #endif
 #elif defined(STRUCTURED_VIEWS)
