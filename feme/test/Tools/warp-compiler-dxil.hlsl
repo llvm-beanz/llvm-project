@@ -38,7 +38,14 @@ Buffer<TYPED_SCALAR> input : register(t3);
 #endif
 #elif defined(STRUCTURED_VIEWS)
 #ifdef DESCRIPTOR_ARRAYS
+#ifdef APPEND_VIEWS
+AppendStructuredBuffer<uint> output[2] : register(ROOT_REGISTER);
+#else
 RWStructuredBuffer<uint> output[2] : register(ROOT_REGISTER);
+#endif
+#ifdef CONSUME_VIEWS
+ConsumeStructuredBuffer<uint> counterInput[2] : register(u7);
+#endif
 #else
 RWStructuredBuffer<uint> output : register(ROOT_REGISTER);
 #endif
@@ -111,10 +118,22 @@ void main(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID) {
 #endif
 #endif
 #ifdef COUNTER_VIEWS
+#ifdef APPEND_VIEWS
+  if (index % 2)
+    output[1].Append(index);
+  else
+    output[0].Append(index);
+#elif defined(CONSUME_VIEWS)
+  if (index % 2)
+    OUTPUT[index] = counterInput[1].Consume();
+  else
+    OUTPUT[index] = counterInput[0].Consume();
+#else
   if (index % 2)
     OUTPUT[index] = output[1].COUNTER_OPERATION();
   else
     OUTPUT[index] = output[0].COUNTER_OPERATION();
+#endif
 #elif defined(TYPED_VIEWS)
 #ifdef TYPED_VECTOR
   uint value = uint(OUTPUT[index]) + peer + bias +

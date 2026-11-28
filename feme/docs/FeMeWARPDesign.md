@@ -20,8 +20,8 @@ adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
 decreasing monitored fences, dispatch-only indirect commands and multiple
 root CBVs, inline constants, finite CBV/raw/structured descriptor tables and
 R32_UINT/R32_SINT/R32_FLOAT typed buffer views, two/four-component R32 SRVs
-and buffer-command predication, plus checked structured-UAV counters;
-inventory v12
+and buffer-command predication, plus checked structured-UAV counters and bounded
+uint append/consume; inventory v13
 explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
@@ -1780,15 +1780,20 @@ rejects old compilation/dispatch versions and malformed/non-structured
 counter bindings. The existing CPU descriptor field and masked atomic
 helper execute per-active-lane increments/decrements. Divergent fixed-counter
 selection, non-uniform output arrays, post-record counter uploads, independent
-system-WARP controls and held teardown pass; general append/consume coverage
-remains open.
+system-WARP controls and held teardown pass. Bounded uint append writes ninety
+unique invocation IDs into each counter-selected output region; consume reads
+ninety distinct values from each separate structured source region. Both verify
+exact counter counts, untouched guards/source data and final null-output
+preservation. Consume data and counters may share one real WARP allocation at
+disjoint checked offsets. General payload coverage and dynamically indexed
+counter-expression parity remain open.
 Predication captures resource/offset/operation for each dispatch or buffer
 copy, then reads the exact 64-bit live buffer value at ordered execution.
 Both zero-comparison operations suppress matching commands; barriers remain
 unconditional. List reset disables predication, and pending submissions retain
 their captured state. Direct/indirect DXBC/DXIL, separate system-WARP and held
 teardown controls pass. Queries and remaining synchronization still stay open.
-See the implementation log and v12 inventory.
+See the implementation log and v13 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

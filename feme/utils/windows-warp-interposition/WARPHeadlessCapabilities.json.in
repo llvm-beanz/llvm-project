@@ -43,7 +43,7 @@
   "indirect_scope": ["dispatch-only signatures", "four-byte-aligned padded strides", "execution-time arguments and optional clamped count"],
   "synchronization": "runtime monitored fences and per-queue kernel Ready/Done gates",
   "predication_scope": ["execution-time 64-bit buffer values", "equal/not-equal-zero suppression", "direct/indirect dispatch and buffer copies", "recorded state and disabled list reset", "unpredicated barriers"],
-  "counter_scope": ["structured UAV counter resource ownership", "4096-byte-aligned counter offsets", "execution-time exact four-byte storage", "per-active-lane increment/decrement", "divergent fixed-counter selection and non-uniform output arrays", "CPU descriptor copies and null replacement", "pending submission lifetime"],
+  "counter_scope": ["structured UAV counter resource ownership", "4096-byte-aligned counter offsets", "execution-time exact four-byte storage", "per-active-lane increment/decrement", "bounded uint append/consume with guarded data and exact counts", "divergent fixed-counter selection and non-uniform output arrays", "CPU descriptor copies and null replacement", "pending submission lifetime"],
   "normative_requirements": [
     "D3D12_MAX_ROOT_COST",
     "D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT",
@@ -164,6 +164,14 @@
     "os-routed-warp-compiler-owned-ordered-counter-decrement-commands",
     "os-routed-warp-compiler-owned-dxil-counter-decrement-commands",
     "os-routed-warp-compiler-reference-counter-decrement-commands",
+    "os-routed-warp-compiler-owned-counter-append-commands",
+    "os-routed-warp-compiler-owned-ordered-counter-append-commands",
+    "os-routed-warp-compiler-owned-dxil-counter-append-commands",
+    "os-routed-warp-compiler-reference-counter-append-commands",
+    "os-routed-warp-compiler-owned-counter-consume-commands",
+    "os-routed-warp-compiler-owned-ordered-counter-consume-commands",
+    "os-routed-warp-compiler-owned-dxil-counter-consume-commands",
+    "os-routed-warp-compiler-reference-counter-consume-commands",
     "os-routed-warp-compiler-owned-coexistence",
     "os-routed-warp-compiler-reference-buffer-commands",
     "os-routed-warp-compiler-reference-placed-buffers"
@@ -175,7 +183,7 @@
   },
   "unsupported": [
     "complete graphics or feature-level conformance",
-    "wider typed UAVs and TypedUAVLoadAdditionalFormats, other typed buffer formats, general append/consume and dynamically indexed counter-expression parity, component remapping and unbounded ranges",
+    "wider typed UAVs and TypedUAVLoadAdditionalFormats, other typed buffer formats, general append/consume payload coverage and dynamically indexed counter-expression parity, component remapping and unbounded ranges",
     "images and samplers",
     "native fences and implicit multi-GPU",
     "split transitions, finite ranged/atomic-copy barriers, texture aliasing and enhanced barriers",

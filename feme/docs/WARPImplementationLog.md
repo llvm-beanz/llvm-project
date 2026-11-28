@@ -784,6 +784,38 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned bounded structured append/consume
+
+Eight more public controls exercise AppendStructuredBuffer<uint> and
+ConsumeStructuredBuffer<uint> through owned DXBC, original DXIL, independent
+system WARP and held/pending teardown. This reuses the tested masked counter
+helper and bridge ABI **3**, without a runtime/artifact ABI or KMD change.
+
+Each replay appends ninety unique parity-selected invocation IDs into each
+bounded output region, or consumes ninety distinct values from each separate
+structured source region into non-uniform output arrays. Counter-selected data
+accesses, exact final counts, all surrounding guards and unchanged consume
+source data are checked. The final replay replaces the second descriptors with
+nulls and compares its outputs byte-for-byte with the preceding replay.
+Descriptors and seeds are updated after recording. Held submission controls
+retain recorded work after list/allocator/pipeline/queue release.
+
+Consume data lives after the two 4096-byte-aligned counters in the same real
+allocation, with disjoint checked view ranges. The existing **9/9** heap,
+**10** residency and **9 dispatches / 10 copies** provenance audits remain.
+The first build rejected an uncaptured constexpr in the seed lambda; capturing
+the thread count explicitly fixed it before the first test execution.
+
+Validation: **8/8** new controls; full **4408** passed, **15** skipped,
+**10** unsupported; callbacks **65/65**; stock-runtime **139/139**, including
+all sixteen counter controls and the existing native compiler selectors.
+FeMe CPU Vulkan Device identity was checked before full/coexistence execution.
+Inventory **v13** records **103** unique required OS gates, bridge **3** and
+no complete feature-level claim. No new CTS result or Vulkan advertisement
+is claimed. General append/consume payload coverage, dynamically indexed
+counter-expression parity, wider typed formats/UAVs, images and complete
+bindings/resources/synchronization still prevent W2 closeout.
+
 #### Owned structured-UAV counter views
 
 Structured UAV descriptors now retain counter resource identity and a
