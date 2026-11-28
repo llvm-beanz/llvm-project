@@ -138253,3 +138253,31 @@ Remaining W2 includes optional RG and other image formats/dimensions, the
 sampling/plane/MSAA matrix, complete atomics and general resources/roots/heaps/
 residency/barriers/queries/indirect/removal. These commits close finite volume
 and admitted narrow-integer image slices, not W2 or the full WARP roadmap.
+
+# W2 optional RG integer buffer and image views
+
+Committed 1d337b48369b. RG8/RG16 UINT/SINT now use exact two/four-byte geometry
+in the native shared format admission and compiler mapping helpers. Those
+helpers also serve typed buffers, so the same commit extends their independent
+buffer format matrix instead of admitting an untested dependent path.
+
+Forty-eight new buffer gates cover generated/original DXIL, mapped SRVs, live
+dimensions, typed UAV loads/stores, post-record descriptor updates, replay and
+held execution. Sixteen new signed/unsigned texture gates reuse the complete
+subresource/padding/upload oracle. Two-channel OOB alpha is checked against the
+reference-proven default, while null descriptors remain all-zero. No additional
+shared runtime implementation or ABI change was needed.
+
+New format selectors64/64, native DDI fixtures3/3, full FeMe4434 passed/15 skipped/
+10 unsupported, callbacks65/65, stock-runtime/coexistence491/491. FeMe ICD
+identity was confirmed before the full regression and coexistence runs.
+Generated v27 verified455 unique existing required OS gates and18 native
+fixtures, bridge6/artifact14, complete product FL null. The main DDI constructor
+matrix now includes the four additions; its focused fixtures were rerun after
+that test extension. No CTS or Vulkan advertisement changes.
+
+The user explicitly requires continued implementation, not completion of a
+finite subset. Next work is native image-dimensional execution using the
+existing complete-readback harness, followed by other optional formats,
+sampling/planes/MSAA, atomics and the remaining general W2 roots/resources/
+residency/barrier/query/indirect/removal contracts. W2 remains in progress.
