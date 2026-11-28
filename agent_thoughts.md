@@ -138015,3 +138015,28 @@ erase the single/array distinction but preserve slice counts; normalize them
 against owned resource geometry and the shader's dimension-specific helpers.
 Static samplers, texture UAV stores and remaining W2 resource/root/ordering
 contracts remain open. W2 is not complete.
+
+# W2 prerequisite: immutable recorded binding identities
+
+Commit 3fb865d40273 separates recording identities from execution descriptors.
+RecordedBinding retains namespace/space/register, live table address, root
+address and inline constant offset/count. Resolution rebuilds descriptors
+without compacting or rewriting those identities. Inline pointers are formed
+against the submission's copied bank; clone-time pointer retargeting is no
+longer necessary. Explicit binding-count guards retain the 64-binding limit.
+
+This is a deliberately small preparatory change before mixed image/buffer
+materialization. Native DXBC/DXIL lifecycle/dispatch controls pass 3/3, full
+FeMe 4427 with 15 skipped/10 unsupported, callbacks 65/65 and stock-runtime/
+coexistence 371/371. FeMe ICD identity was confirmed before launches. Main/
+shared relinks completed before OS testing. Existing live descriptor updates,
+inline state, indirect dispatch, guarded output and held-lifetime controls
+retain their behavior. v21/bridge5/artifact12 and advertisements are unchanged.
+
+Next add normalized texture SRV view metadata and live image-view access to
+WarpHeap, keeping textures excluded from shader buffer/GPUVA lookup. Build
+separate prepared image arrays from immutable recorded identities; copy mip
+layouts and retain the resource lock throughout dispatch. Validate selected
+mips/layers, format/dimension compatibility and shader-resource admission.
+Sampler heaps/static state, UAVs, broader resource classes/formats, roots and
+ordering still remain. W2 is not complete.
