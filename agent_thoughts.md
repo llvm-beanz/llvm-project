@@ -137799,3 +137799,40 @@ results.
 Next: commit the separately validated buffer-footprint slice and continue
 texture allocation/views, complete roots, resource classes and ordering.
 The requested W2 closeout remains open.
+
+# W2 progress: pitched buffer-footprint copies
+
+Commit 1b32a30b14fb adds the owned typed texture-copy DDI for placed buffer
+footprints, not texture resources. Physical pitched layouts and matching
+physical/virtual extents reuse FeMeImage's existing region walker. The SDK
+shim compiles that shared source instead of duplicating geometry. Exact
+mapped formats, signed boxes, row/depth pitches, full logical footprints,
+placement offsets and touched spans are checked. Commands snapshot scalar
+geometry and execute through the existing ordered owner lookup and predication.
+
+The probes distinguish source/destination pitches and two depth slices, then
+combine a full region with a partial overwrite. Exact whole-buffer checks
+cover data, padding, guards and unchanged source storage. Mutated caller
+layouts/boxes test snapshots. Held controls check untouched output before
+their gate and release list/allocator while keeping resources alive.
+
+The first build exposed the DDI box's uppercase signed LONG fields. A first
+held probe released upload storage too early; that violates D3D12 lifetime
+and correctly failed live-owner lookup. The probe was corrected rather than
+weakening the registry, and a held system-WARP control was added. All four
+focused controls then passed.
+
+Full FeMe passed 4413 with 15 skipped and 10 unsupported; callbacks passed
+65/65 and stock-runtime/coexistence passed 363/363 after shared DLL relinking.
+The launch shell confirmed FeMe CPU Vulkan Device identity. Generated v18 has
+327 unique required OS gates and 11 existing native fixtures, all verified.
+Bridge 4/artifact 11, buffer-only resource scope and the null complete-FL
+claim were checked. Formatting made no source changes; two newly added CMake
+CRLF lines were normalized without changing historical unchanged bytes.
+No KMD/system driver modification, texture/view advertisement, Vulkan
+capability change or new CTS result is claimed.
+
+Next: implement texture storage/subresource metadata with shared image layouts,
+preserving D3D mip/array indexing and the existing 96-byte WARP allocation ABI.
+Complete image views/samplers, other resources, root contracts and ordering
+still remain. W2 is not complete.
