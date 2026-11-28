@@ -809,6 +809,37 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Owned finite texture UAV views and DXIL stores
+
+Owned texture allocations now admit unordered-access storage. Copied 1D/2D
+UAV descriptions reuse SRV geometry validation with write permission and one
+selected mip, preserving independent live image preparation. Buffer counter
+fields are inspected only for buffer descriptors. Native UAV bindings set the
+shared Direct3D integer-store saturation flag. Volume UAV views still reject
+until selected W-slice behavior is proven.
+
+The first owned fixture exposed missing DXIL texture-store canonicalization:
+divergent vector operands reached SIMD still attached to the raised intrinsic.
+Supported writable non-ROV FP32/i32 1D/array, 2D/array and 3D stores now lower
+to existing image-store helpers, padding narrow payloads without changing type.
+Shared admission reports unsupported handle/coordinate/texel shapes explicitly.
+Focused lowering tests cover every dimension, scalar/vector payloads, untouched
+invalid/read-only/ROV inputs, idempotence and divergent per-lane stores.
+
+Four original-DXIL owned/reference controls execute 2D-array stores/loads with
+selected mip/layers, post-record CPU descriptor copies, OOB/null accesses,
+dimensions from a live view, replay and queue-held recording teardown. Readback
+checks all twelve subresources plus physical padding and shader-output guards;
+unaddressed mips/layers/texels and upload bytes remain unchanged. Normal controls
+execute three dispatches and 52 copies; held controls execute one and 26.
+Resources, GPU heaps, roots and PSOs remain alive through completion.
+
+Validation: focused **8/8**, full FeMe **4432** passed / **15** skipped /
+**10** unsupported, callbacks **65/65**, stock-runtime/coexistence **391/391**,
+with confirmed FeMe ICD identity. Inventory **v24** retains bridge 5/artifact 12
+and a null complete product FL. Native narrow formats, volume/dimensional views,
+the remaining image/sampling matrix and general W2 contracts stay open.
+
 #### Shared Direct3D integer image-store conversion
 
 `FEME_IMAGE_SATURATE_INTEGER_STORES` opts storage-image stores into the same

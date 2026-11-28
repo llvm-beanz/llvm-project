@@ -191,7 +191,7 @@ bool testTextureAllocationInfo(D3D12DDI_HDEVICE Device,
   LastError = S_OK;
   Core.pfnCheckResourceAllocationInfo(
       Device, &Desc, D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_NONE, 0, 1, &Info);
-  Good &= LastError == E_NOTIMPL;
+  Good &= LastError == S_OK && Info.ResourceDataSize == 65536;
   LastError = S_OK;
   return Good;
 }
@@ -1236,6 +1236,42 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
       Core.pfnCreateShaderResourceView(Device, &Invalid, Third);
       Good &= LastError == (Case >= 4 ? E_NOTIMPL : E_INVALIDARG) &&
               std::memcmp(Before.data(), reinterpret_cast<void *>(Third.ptr),
+                          Stride) == 0;
+    }
+    D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002 TextureUAV{};
+    TextureUAV.ResourceDimension = D3D12DDI_RD_TEXTURE2D;
+    TextureUAV.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+    TextureUAV.Tex2D.ArraySize = 2;
+    LastError = S_OK;
+    Core.pfnCreateUnorderedAccessView(Device, &TextureUAV, Fourth);
+    Good &= LastError == S_OK;
+    std::memcpy(Before.data(), reinterpret_cast<void *>(Fourth.ptr), Stride);
+    for (UINT Case = 0; Case < 6; ++Case) {
+      auto Invalid = TextureUAV;
+      switch (Case) {
+      case 0:
+        Invalid.Tex2D.MipSlice = FeMeWarpMaxImageMipLevels;
+        break;
+      case 1:
+        Invalid.Tex2D.ArraySize = 0;
+        break;
+      case 2:
+        Invalid.Tex2D.FirstArraySlice = 2048;
+        break;
+      case 3:
+        Invalid.hDrvResource.pDrvPrivate = reinterpret_cast<void *>(1);
+        break;
+      case 4:
+        Invalid.Tex2D.PlaneSlice = 1;
+        break;
+      case 5:
+        Invalid.ResourceDimension = D3D12DDI_RD_TEXTURE3D;
+        break;
+      }
+      LastError = S_OK;
+      Core.pfnCreateUnorderedAccessView(Device, &Invalid, Fourth);
+      Good &= LastError == (Case >= 4 ? E_NOTIMPL : E_INVALIDARG) &&
+              std::memcmp(Before.data(), reinterpret_cast<void *>(Fourth.ptr),
                           Stride) == 0;
     }
   } else

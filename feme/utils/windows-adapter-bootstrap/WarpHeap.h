@@ -25,9 +25,9 @@ UINT warpFormatElementSize(DXGI_FORMAT Format);
 
 /// Populate committed and placed resource entries, not a complete device table.
 /// These callbacks use the existing WARP KMD allocation ABI. Shared-resource
-/// opening, protected heaps and shader-visible texture views are not supported.
-/// Publication through FillDDITable remains
-/// gated on the complete device contract.
+/// opening, protected heaps and complete texture-format coverage are
+/// unsupported. Publication through FillDDITable remains gated on the complete
+/// device contract.
 void populateWarpHeapDDIs(D3D12DDI_DEVICE_FUNCS_CORE_0072 &Table);
 
 /// Keep live buffer mappings stable throughout a CPU command.
@@ -51,9 +51,15 @@ public:
       D3D12DDI_HRESOURCE Resource, UINT Index, D3D12DDI_SUBRESOURCE_INFO &Info,
       D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT *Layout = nullptr);
 #ifdef FEME_BOOTSTRAP_WARP_COMPILER
-  /// Resolve a selected SRV view without exposing texture storage as a buffer.
+  /// Resolve a selected image view without exposing texture storage as a
+  /// buffer.
   HRESULT imageView(
       const D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 &View,
+      FeMeWarpImageBinding &Image,
+      std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> &Layouts,
+      bool UnorderedAccess = false);
+  HRESULT imageView(
+      const D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002 &View,
       FeMeWarpImageBinding &Image,
       std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> &Layouts);
 #endif

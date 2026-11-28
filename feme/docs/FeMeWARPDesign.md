@@ -1870,8 +1870,21 @@ copies, replay and queue-held list/allocator release. Resources, shader-visible
 heaps, root signatures and PSOs remain alive until completion. Null-view
 dimension queries are not part of that reference oracle: the installed WARP JIT
 faulted on the exploratory query; live-view queries and null loads pass
-independently. Other dimensions/formats need their execution matrix, and texture
-UAVs remain open. Owned CPU/shader-visible sampler heaps now use checked
+independently. Other dimensions/formats need their execution matrix. Owned
+1D/2D texture UAV descriptions now select one mip and checked array spans
+through the same normalizer with unordered-access permission. Descriptor slots
+copy native UAV metadata; submission-local resolution uses the qualified UAV
+image namespace and opts integer stores into Direct3D saturation.
+Shared DXIL full-texel stores canonicalize FP32/i32 scalar/vector payloads for
+1D/array, 2D/array and 3D into existing image-store helpers. Unsupported
+non-heap, read-only, ROV or mismatched coordinate/texel shapes receive early
+diagnostics; native volume UAV views still reject pending W-slice evidence.
+Original-DXIL owned/reference 2D-array controls verify selected mip/layer writes,
+loads and dimensions, OOB/null loads/stores, live CPU-source descriptor copies,
+replay and held teardown. Readback covers every subresource and padding rather
+than only shader output, preserving untouched texels, other mips/layers, guards
+and upload storage. Remaining native dimensions and narrow-format execution
+coverage stay open. Owned CPU/shader-visible sampler heaps now use checked
 heap-type-specific creation/copy paths and shared canonical state validation.
 Native inactive anisotropy/comparison fields normalize before validation.
 Resource and sampler heaps coexist, selected by type rather than bind order;
@@ -1890,7 +1903,7 @@ covered only by scalar static samplers before issuing shader DDIs.
 Original-DXIL owned/reference controls execute point/linear filtering,
 clamp/custom-border/opaque-black addressing, copied live sampler updates, null
 images, replay and held list/allocator/CPU-heap release. Complete sampling
-operation/format coverage remains open. See the implementation log and v23
+operation/format coverage remains open. See the implementation log and v24
 inventory.
 
 Recorded commands retain immutable binding identities separately from prepared

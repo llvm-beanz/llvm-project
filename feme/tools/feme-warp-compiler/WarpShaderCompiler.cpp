@@ -248,6 +248,8 @@ bool prepareImage(const FeMeWarpImageBinding &Image,
                                           : feme::cpu::FEME_IMAGE_STORAGE;
   if (Image.Namespace == 1)
     Descriptor.Flags |= feme::cpu::FEME_IMAGE_LOAD_SWIZZLE;
+  else
+    Descriptor.Flags |= feme::cpu::FEME_IMAGE_SATURATE_INTEGER_STORES;
   Descriptor.MipLayouts = Layouts.data();
   Descriptor.MipLayoutCount = Image.MipLevels;
   Descriptor.Swizzle = componentSwizzle(Image.Shader4ComponentMapping);

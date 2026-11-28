@@ -143,9 +143,8 @@ HRESULT validateResource(const D3D12DDIARG_CREATERESOURCE_0003 *Args,
     if (Args->ResourceType != D3D12DDI_RT_TEXTURE1D &&
         Args->ResourceType != D3D12DDI_RT_TEXTURE2D && !Is3D)
       return E_NOTIMPL;
-    if ((Args->Layout != D3D12DDI_TL_UNDEFINED &&
-         Args->Layout != D3D12DDI_TL_ROW_MAJOR) ||
-        (Args->Flags & D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS))
+    if (Args->Layout != D3D12DDI_TL_UNDEFINED &&
+        Args->Layout != D3D12DDI_TL_ROW_MAJOR)
       return E_NOTIMPL;
     UINT ElementSize = warpFormatElementSize(Args->Format);
     if (!ElementSize)
@@ -905,8 +904,10 @@ HRESULT WarpBufferAccess::subresource(
 HRESULT WarpBufferAccess::imageView(
     const D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 &View,
     FeMeWarpImageBinding &Image,
-    std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> &Layouts) {
+    std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> &Layouts,
+    bool UnorderedAccess) {
   Image = {};
+  Image.Namespace = UnorderedAccess ? 2 : 1;
   if (!Owner || !warpFormatElementSize(View.Format) ||
       !FeMeWarpValidComponentMapping(View.Shader4ComponentMapping))
     return E_INVALIDARG;
@@ -980,7 +981,9 @@ HRESULT WarpBufferAccess::imageView(
     bool Volume = Type == D3D12DDI_RT_TEXTURE3D;
     UINT Layers = Volume ? 1 : Desc.DepthOrArraySize;
     if (Desc.ResourceType != Type || Desc.Format != View.Format ||
-        !(Desc.Flags & D3D12DDI_RESOURCE_FLAG_0003_SHADER_RESOURCE) ||
+        !(Desc.Flags &
+          (UnorderedAccess ? D3D12DDI_RESOURCE_FLAG_0022_UNORDERED_ACCESS
+                           : D3D12DDI_RESOURCE_FLAG_0003_SHADER_RESOURCE)) ||
         !Entry->Heap->Locked || !Entry->Heap->Memory ||
         FirstMip >= Desc.MipLevels || FirstLayer >= Layers ||
         LayerCount > Layers - FirstLayer ||
@@ -1010,6 +1013,38 @@ HRESULT WarpBufferAccess::imageView(
     return S_OK;
   }
   return E_INVALIDARG;
+}
+
+HRESULT WarpBufferAccess::imageView(
+    const D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002 &View,
+    FeMeWarpImageBinding &Image,
+    std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> &Layouts) {
+  D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 Selected{};
+  Selected.hDrvResource = View.hDrvResource;
+  Selected.Format = View.Format;
+  Selected.ResourceDimension = View.ResourceDimension;
+  Selected.Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
+  switch (View.ResourceDimension) {
+  case D3D12DDI_RD_TEXTURE1D:
+    Selected.Tex1D.MostDetailedMip = View.Tex1D.MipSlice;
+    Selected.Tex1D.MipLevels = 1;
+    Selected.Tex1D.FirstArraySlice = View.Tex1D.FirstArraySlice;
+    Selected.Tex1D.ArraySize = View.Tex1D.ArraySize;
+    break;
+  case D3D12DDI_RD_TEXTURE2D:
+    Selected.Tex2D.MostDetailedMip = View.Tex2D.MipSlice;
+    Selected.Tex2D.MipLevels = 1;
+    Selected.Tex2D.FirstArraySlice = View.Tex2D.FirstArraySlice;
+    Selected.Tex2D.ArraySize = View.Tex2D.ArraySize;
+    Selected.Tex2D.PlaneSlice = View.Tex2D.PlaneSlice;
+    break;
+  case D3D12DDI_RD_TEXTURE3D:
+  case D3D12DDI_RD_TEXTURECUBE:
+  case D3D12DDI_RD_BUFFER:
+  case D3D12DDI_RD_RAYTRACING_ACCELERATION_STRUCTURE_0042:
+    return E_NOTIMPL;
+  }
+  return imageView(Selected, Image, Layouts, true);
 }
 #endif
 

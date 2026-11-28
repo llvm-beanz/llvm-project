@@ -1,5 +1,14 @@
 # Vulkan CTS status
 
+## Owned WARP texture-UAV regression scope, not CTS
+
+Texture UAV preparation and shared DXIL stores pass 4432 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 391 stock-runtime/coexistence
+gates with confirmed FeMe ICD identity. Four new owned/reference gates check
+selected stores/loads, every subresource, nulls, replay and held lifetime.
+Vulkan integer-store truncation, advertisements and artifact12 layouts remain
+unchanged. This is not CTS evidence or complete W2/image coverage.
+
 ## Owned WARP sampler regression scope, not CTS
 
 Sampler heaps and copied scalar static state pass 4429 full FeMe tests

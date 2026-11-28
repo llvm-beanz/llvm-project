@@ -4001,11 +4001,14 @@ Notes and constraints:
   their behavior. DXIL image/sampler normalization and image namespace
   serialization now supply this identity end-to-end. Windows bridge 5 prepares
   checked borrowed image/mip-layout and sampler PODs into these separate heaps;
-  owned finite texture SRVs now resolve live mip/layer geometry into these PODs.
+  owned finite texture SRV/UAVs now resolve live mip/layer geometry into these PODs.
   Submission-local layout banks keep recording identities separate from borrowed
   execution pointers. Owned sampler tables now populate an independent array;
   scalar static sampler state is copied from native roots into recordings.
-  Texture UAVs and complete operation/format coverage remain open.
+  Native 2D-array UAV execution checks selected stores/loads and complete
+  subresource readback; volume views and complete operation/format coverage
+  remain open. DXIL full-texel stores use the existing masked image-store
+  helpers for writable non-ROV FP32/i32 1D/array, 2D/array and 3D handles.
   Direct3D SRV descriptors
   set `FEME_IMAGE_LOAD_SWIZZLE`, opting addressed loads into component mapping.
   Ordinary Vulkan storage-image reads leave this bit clear and remain unmapped.
@@ -4016,7 +4019,8 @@ Notes and constraints:
   narrow typed-texel packer as buffers: 8-/16-bit UINT/SINT channels saturate
   only with this bit set. Vulkan descriptors leave it clear and retain
   truncation. Masking, coordinate checks and physical bounds precede conversion.
-  This shared mechanism does not itself admit owned native texture UAVs.
+  Native UAV preparation sets this bit; the shared flag does not itself prove
+  the remaining native narrow-format execution matrix.
 
   DXIL normalization publishes six-field ranges in
   `!feme.cpu.bound_resources.v2`; legacy/SPIR-V five-field

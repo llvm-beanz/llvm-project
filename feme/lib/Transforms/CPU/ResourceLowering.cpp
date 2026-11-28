@@ -788,7 +788,7 @@ unsigned getTexelWidth(Type *Ty, Type *ScalarTy) {
 
 /// Lowers supported `llvm.dx.resource.sample`/`samplelevel`/
 /// `samplebias[.clamp]`/`samplegrad[.clamp]`/`samplecmp[.clamp]`/
-/// `samplecmplevelzero`/`load.level`/`load.ms`/`getdimensions.*`
+/// `samplecmplevelzero`/`load.level`/`load.ms`/`store.texture`/`getdimensions.*`
 /// calls in
 /// \p F whose handle operand(s) `classifyImageHandle`/`classifySamplerHandle`
 /// recognize into the corresponding canonical `feme.cpu.image.*` call (see
@@ -911,6 +911,56 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env,
                 Kind == dxil::ResourceKind::TextureCubeArray))
         Dimensions = Builder.CreateShuffleVector(Dimensions, {0, 1});
       CI->replaceAllUsesWith(Dimensions);
+      CI->eraseFromParent();
+      SampleHandles.insert(Image);
+      Changed = true;
+      continue;
+    }
+    if (isSupportedDXILStore(*CI)) {
+      IRBuilder<> Builder(CI);
+      auto *Image = cast<CallInst>(CI->getArgOperand(0));
+      auto Kind = cast<dxil::TextureExtType>(Image->getType())->getDimension();
+      Value *Coord = CI->getArgOperand(1);
+      Value *Texel = CI->getArgOperand(2);
+      Type *ScalarTy = Texel->getType()->getScalarType();
+      unsigned Width = getTexelWidth(Texel->getType(), ScalarTy);
+      if (Width != 4) {
+        Value *Padded =
+            Constant::getNullValue(FixedVectorType::get(ScalarTy, 4));
+        for (unsigned C = 0; C < Width; ++C)
+          Padded = Builder.CreateInsertElement(
+              Padded,
+              Texel->getType()->isVectorTy()
+                  ? Builder.CreateExtractElement(Texel, uint64_t{C})
+                  : Texel,
+              C);
+        Texel = Padded;
+      }
+      bool Integer = ScalarTy->isIntegerTy(32);
+      Value *Index = Image->getArgOperand(0);
+      Value *X = Coord->getType()->isIntegerTy(32)
+                     ? Coord
+                     : Builder.CreateExtractElement(Coord, uint64_t{0});
+      if (Kind == dxil::ResourceKind::Texture1D)
+        (Integer ? createStore1DI32 : createStore1D)(
+            Builder, Env, Index, X, Texel, Builder.getTrue(), "");
+      else {
+        Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
+        if (Kind == dxil::ResourceKind::Texture1DArray)
+          (Integer ? createStore1DArrayI32 : createStore1DArray)(
+              Builder, Env, Index, X, Y, Texel, Builder.getTrue(), "");
+        else if (Kind == dxil::ResourceKind::Texture2D)
+          (Integer ? createStore2DI32 : createStore2D)(
+              Builder, Env, Index, X, Y, Texel, Builder.getTrue(), "");
+        else {
+          Value *Z = Builder.CreateExtractElement(Coord, uint64_t{2});
+          auto Store =
+              Kind == dxil::ResourceKind::Texture3D
+                  ? (Integer ? createStore3DI32 : createStore3D)
+                  : (Integer ? createStore2DArrayI32 : createStore2DArray);
+          Store(Builder, Env, Index, X, Y, Z, Texel, Builder.getTrue(), "");
+        }
+      }
       CI->eraseFromParent();
       SampleHandles.insert(Image);
       Changed = true;
@@ -1376,7 +1426,8 @@ bool hasImageAccesses(const Function &F) {
       continue;
     Intrinsic::ID ID = getIntrinsicID(CI);
     if (isSupportedDXILGetDimensions(*CI) || isSupportedDXILLoad(*CI) ||
-        isSupportedDXILSampleLevel(*CI) || isSupportedDXILSample(*CI))
+        isSupportedDXILStore(*CI) || isSupportedDXILSampleLevel(*CI) ||
+        isSupportedDXILSample(*CI))
       return true;
     if (ID == Intrinsic::dx_resource_samplegrad ||
         ID == Intrinsic::dx_resource_samplegrad_clamp) {
@@ -1769,6 +1820,39 @@ bool feme::cpu::isSupportedDXILLoad(const CallInst &CI) {
     if (!isa_and_nonnull<ConstantInt>(Offset->getAggregateElement(Axis)))
       return false;
   return true;
+}
+
+bool feme::cpu::isSupportedDXILStore(const CallInst &CI) {
+  if (getIntrinsicID(&CI) != Intrinsic::dx_resource_store_texture ||
+      CI.arg_size() != 3)
+    return false;
+  auto *Image = dyn_cast<CallInst>(CI.getArgOperand(0));
+  auto *Ty = dyn_cast<dxil::TextureExtType>(CI.getArgOperand(0)->getType());
+  if (!Image ||
+      getIntrinsicID(Image) != Intrinsic::dx_resource_handlefromheap || !Ty ||
+      Ty->getNumTypeParameters() != 1 || Ty->getNumIntParameters() != 4 ||
+      !Ty->isWriteable() || Ty->isROV())
+    return false;
+  auto Kind = Ty->getDimension();
+  bool Is1D = Kind == dxil::ResourceKind::Texture1D ||
+              Kind == dxil::ResourceKind::Texture1DArray;
+  bool Is2D = Kind == dxil::ResourceKind::Texture2D ||
+              Kind == dxil::ResourceKind::Texture2DArray;
+  if (!Is1D && !Is2D && Kind != dxil::ResourceKind::Texture3D)
+    return false;
+  Type *TexelTy = Ty->getResourceType();
+  Type *ScalarTy = TexelTy->getScalarType();
+  if ((!ScalarTy->isFloatTy() && !ScalarTy->isIntegerTy(32)) ||
+      !getTexelWidth(TexelTy, ScalarTy) ||
+      CI.getArgOperand(2)->getType() != TexelTy)
+    return false;
+  Type *IntTy = Type::getInt32Ty(CI.getContext());
+  Type *CoordTy =
+      Kind == dxil::ResourceKind::Texture1D
+          ? IntTy
+          : FixedVectorType::get(
+                IntTy, Is1D || Kind == dxil::ResourceKind::Texture2D ? 2 : 3);
+  return CI.getArgOperand(1)->getType() == CoordTy;
 }
 
 static bool isSupportedDXILComparisonSample(const CallInst &CI) {

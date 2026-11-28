@@ -118,6 +118,10 @@ bool isSupportedDXILGetDimensions(const llvm::CallInst &CI);
 /// zero.
 bool isSupportedDXILLoad(const llvm::CallInst &CI);
 
+/// Tests heap-backed writable, non-ROV FP32/i32 1D/array, 2D/array or 3D
+/// stores with shape-matched i32 coordinates and the declared texel type.
+bool isSupportedDXILStore(const llvm::CallInst &CI);
+
 /// Tests heap-backed FP32 1D/2D/3D/cube (including array) biased sampling in a
 /// fragment stage, with scalar/vector results, supported offsets and optional
 /// MinLod clamp.

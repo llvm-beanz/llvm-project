@@ -52,6 +52,24 @@ declare <4 x float> @llvm.dx.resource.samplelevel.v4f32.timg.tsamp.v2f32(
     <2 x float>, float, <2 x i32>)
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
 
+; CHECK-LABEL: define void @divergent_store(
+; CHECK-COUNT-4: call void @feme.cpu.image.store.2darray.v4i32(ptr %image_heap, i32 %image_heap_count, i32 {{%.*}}, i32 {{%.*}}, i32 0, i32 0, <4 x i32> {{%.*}}, i1 {{%.*}})
+define void @divergent_store() #0 {
+  %tid = call i32 @llvm.dx.thread.id(i32 0)
+  %img = call target("dx.Texture", <4 x i32>, 1, 0, 0, 7)
+      @llvm.dx.resource.handlefromheap.tuav(i32 %tid)
+  %coord = insertelement <3 x i32> zeroinitializer, i32 %tid, i32 0
+  %texel = insertelement <4 x i32> zeroinitializer, i32 %tid, i32 1
+  call void @llvm.dx.resource.store.texture.tuav.v3i32.v4i32(
+      target("dx.Texture", <4 x i32>, 1, 0, 0, 7) %img,
+      <3 x i32> %coord, <4 x i32> %texel)
+  ret void
+}
+declare target("dx.Texture", <4 x i32>, 1, 0, 0, 7)
+    @llvm.dx.resource.handlefromheap.tuav(i32)
+declare void @llvm.dx.resource.store.texture.tuav.v3i32.v4i32(
+    target("dx.Texture", <4 x i32>, 1, 0, 0, 7), <3 x i32>, <4 x i32>)
+
 ; An explicit-LOD sample never synthesizes derivatives at all (its own LOD
 ; is a direct operand, not computed from screen-space coordinate spread),
 ; so every lane performs identically regardless of stage -- this was

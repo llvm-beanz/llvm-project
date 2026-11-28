@@ -503,7 +503,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 23)
+  set(FEME_WARP_PROFILE_VERSION 24)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -778,6 +778,15 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       "${WARP_COMPILER_OUTPUT_DIR}/owned-structured-array-compute.dxil")
     set(WARP_DXIL_TEXTURE_VIEW_FIXTURE
       "${WARP_COMPILER_OUTPUT_DIR}/owned-texture-view-compute.dxil")
+    set(WARP_DXIL_TEXTURE_UAV_VIEW_FIXTURE
+      "${WARP_COMPILER_OUTPUT_DIR}/owned-texture-uav-view-compute.dxil")
+    add_custom_command(OUTPUT "${WARP_DXIL_TEXTURE_UAV_VIEW_FIXTURE}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${WARP_COMPILER_OUTPUT_DIR}"
+      COMMAND "${FEME_DXC_EXECUTABLE}" -T cs_6_0 -E main
+        -Fo "${WARP_DXIL_TEXTURE_UAV_VIEW_FIXTURE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../test/Tools/warp-compiler-texture-uav-views.hlsl"
+      DEPENDS ../../test/Tools/warp-compiler-texture-uav-views.hlsl
+      VERBATIM)
     set(WARP_DXIL_SAMPLER_VIEW_FIXTURE
       "${WARP_COMPILER_OUTPUT_DIR}/owned-sampler-view-compute.dxil")
     set(WARP_DXIL_STATIC_SAMPLER_VIEW_FIXTURE
@@ -811,6 +820,9 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       feme_add_probe_test(NAME os-routed-warp-compiler-${gate_mode}texture-views
         COMMAND warp-compiler-harness "--${mode}texture-views"
           "${WARP_DXIL_TEXTURE_VIEW_FIXTURE}")
+      feme_add_probe_test(NAME os-routed-warp-compiler-${gate_mode}texture-uav-views
+        COMMAND warp-compiler-harness "--${mode}texture-uav-views"
+          "${WARP_DXIL_TEXTURE_UAV_VIEW_FIXTURE}")
       feme_add_probe_test(NAME os-routed-warp-compiler-${gate_mode}single-layer-texture-views
         COMMAND warp-compiler-harness "--${mode}single-layer-texture-views"
           "${WARP_DXIL_TEXTURE_VIEW_FIXTURE}")
@@ -861,6 +873,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
       VERBATIM)
     add_custom_target(warp-owned-dxil-fixture
       DEPENDS ${WARP_DXIL_TYPED_FIXTURES}
+        "${WARP_DXIL_TEXTURE_UAV_VIEW_FIXTURE}"
         "${WARP_DXIL_TEXTURE_VIEW_FIXTURE}"
         "${WARP_DXIL_SAMPLER_VIEW_FIXTURE}"
         "${WARP_DXIL_STATIC_SAMPLER_VIEW_FIXTURE}"

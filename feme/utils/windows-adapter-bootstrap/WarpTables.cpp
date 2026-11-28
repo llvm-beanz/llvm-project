@@ -731,7 +731,10 @@ struct DescriptorSlot {
   UINT64 CounterOffset = 0;
   UINT Shader4ComponentMapping = FeMeWarpDefaultComponentMapping;
   bool Image = false;
-  D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 ImageView{};
+  union {
+    D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002 ImageView{};
+    D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002 UAVImageView;
+  };
   FeMeWarpSamplerBinding Sampler{};
 };
 
@@ -1029,20 +1032,27 @@ createUAV(D3D12DDI_HDEVICE Device,
     reportError(Device, E_INVALIDARG);
     return;
   }
-  if (Desc->ResourceDimension != D3D12DDI_RD_BUFFER) {
-    reportError(Device, E_NOTIMPL);
-    return;
-  }
   DescriptorSlot Value;
-  HRESULT Result = makeBufferView(
-      Owner, Desc->hDrvResource, Desc->Format, Desc->Buffer.FirstElement,
-      Desc->Buffer.NumElements, Desc->Buffer.StructureByteStride,
-      Desc->Buffer.Flags, 2, Value);
+  HRESULT Result;
+  if (Desc->ResourceDimension == D3D12DDI_RD_BUFFER)
+    Result = makeBufferView(Owner, Desc->hDrvResource, Desc->Format,
+                            Desc->Buffer.FirstElement, Desc->Buffer.NumElements,
+                            Desc->Buffer.StructureByteStride,
+                            Desc->Buffer.Flags, 2, Value);
+  else {
+    feme::probe::WarpBufferAccess Access(Owner);
+    FeMeWarpImageBinding Image;
+    std::array<FeMeWarpImageMipLayout, FeMeWarpMaxImageMipLevels> Layouts{};
+    Result = Access.imageView(*Desc, Image, Layouts);
+    Value.Image = true;
+    Value.UAVImageView = *Desc;
+    Value.Namespace = 2;
+  }
   if (FAILED(Result)) {
     reportError(Device, Result);
     return;
   }
-  if (Desc->Buffer.hDrvCounterResource.pDrvPrivate) {
+  if (!Value.Image && Desc->Buffer.hDrvCounterResource.pDrvPrivate) {
     if (!Desc->hDrvResource.pDrvPrivate || !Value.Stride ||
         Desc->Buffer.CounterOffsetInBytes % 4096) {
       reportError(Device, E_INVALIDARG);
@@ -1058,7 +1068,7 @@ createUAV(D3D12DDI_HDEVICE Device,
     }
     Value.CounterResource = Desc->Buffer.hDrvCounterResource;
     Value.CounterOffset = Desc->Buffer.CounterOffsetInBytes;
-  } else if (Desc->Buffer.CounterOffsetInBytes) {
+  } else if (!Value.Image && Desc->Buffer.CounterOffsetInBytes) {
     reportError(Device, E_INVALIDARG);
     return;
   }
@@ -2754,8 +2764,11 @@ HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
     if (Slot && Slot->Image) {
       UINT Index = Prepared.Dispatch.ImageCount++;
       auto &Image = Prepared.Images[Index];
-      HRESULT Result = Buffers.imageView(Slot->ImageView, Image,
-                                         Prepared.ImageLayouts[Index]);
+      HRESULT Result = Slot->Namespace == 2
+                           ? Buffers.imageView(Slot->UAVImageView, Image,
+                                               Prepared.ImageLayouts[Index])
+                           : Buffers.imageView(Slot->ImageView, Image,
+                                               Prepared.ImageLayouts[Index]);
       if (FAILED(Result))
         return Result;
       Image.Namespace = Binding.Namespace;

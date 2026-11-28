@@ -1,5 +1,11 @@
 # Vulkan core mandatory-feature/limit/extension inventory
 
+Owned texture UAV preparation/shared DXIL stores pass 4432 full FeMe tests
+(15 skipped, 10 unsupported), 65 callbacks and 391 stock-runtime/coexistence
+gates, including four new selected-write/subresource controls. FeMe ICD identity
+was confirmed; Vulkan integer truncation and advertisements are unchanged.
+No inventory regeneration or CTS result.
+
 Owned sampler heaps/static state pass 4429 full FeMe tests
 (15 skipped, 10 unsupported), 65 callbacks and 387 stock-runtime/coexistence
 gates, with eight new sampler execution controls and confirmed FeMe ICD identity.

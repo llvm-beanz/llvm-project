@@ -86,6 +86,19 @@ Error checkSupportedRaisedOps(const Module &M) {
               F.getName().str().c_str());
       }
       continue;
+    case Intrinsic::dx_resource_store_texture:
+      for (const User *U : F.users()) {
+        const auto *CI = dyn_cast<CallInst>(U);
+        if (!CI || !isSupportedDXILStore(*CI))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "unsupported raised operation: '%s' requires heap-backed "
+              "writable non-ROV FP32/i32 1D/array, 2D/array or 3D texture "
+              "stores with shape-matched i32 coordinates and the declared "
+              "texel type",
+              F.getName().str().c_str());
+      }
+      continue;
     case Intrinsic::dx_resource_load_ms:
       for (const User *U : F.users()) {
         const auto *CI = dyn_cast<CallInst>(U);
