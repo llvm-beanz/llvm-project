@@ -138117,3 +138117,24 @@ Reuse buffer integer-store saturation for Direct3D image stores without changing
 Vulkan behavior. Broader dimensions/formats/sampling, general resources/roots/
 heaps, residency and complete barriers/queries/indirect/removal work remain.
 W2 is not complete.
+
+# W2 shared narrow integer image-store saturation
+
+Commit 6c4a421f970b renames the existing buffer saturation packer to a shared
+typed-texel packer and routes integer stores for all image shapes through it.
+The new image flag uses the same opt-in bit as typed-buffer descriptors;
+unflagged Vulkan stores still truncate. Existing physical coordinate/extent
+and inactive-lane checks continue to run before packing.
+
+The focused runtime case executes all twelve 8-/16-bit UINT/SINT formats with
+one/two/four channels, clear/set flags, signed/unsigned overflow, inactive/OOB
+stores and neighboring byte guards. Full check-feme passes4430, skips15 and
+marks10 unsupported. FeMe ICD identity was confirmed before regression runs.
+No bridge/artifact or native inventory version changes are needed for this
+shared conversion prerequisite; v23 remains a finite native subset.
+
+Next wire owned texture UAV allocation/view admission and live preparation to
+the image flag, then add original DXIL owned/reference controls with mip/layer
+guards, null loads/stores, live descriptor copies, replay and held lifetime.
+Do not infer 3D W-slice semantics from an SRV's geometry: prove them against
+stock WARP before accepting selected volume UAV views. W2 remains open.
