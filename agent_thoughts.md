@@ -137582,3 +137582,28 @@ Next steps remain full W2 acceptance: general counter payload/dynamic-selection
 coverage, mandatory typed formats/UAVs, component mappings, image resources and
 samplers, complete roots/residency/barriers/queries and other indirect signatures.
 W2 must not be struck through merely because this bounded slice passes.
+# W2 progress: shared typed-buffer component mappings
+
+Commit `63739c28fd3e` adds a real descriptor field rather than encoding mapping
+state in unrelated flag bits or copying/remapping resource contents into a
+scratch buffer. The latter would invalidate alias visibility during execution.
+Typed loads reuse existing image swizzle helpers after decoding and padding,
+then narrow to the requested result width. Invalid accesses return zero before
+swizzling so forced-one components cannot manufacture valid-looking data.
+
+The changed descriptor stride requires artifact ABI 10; versions 8 and 9 are
+explicitly rejected. Existing zero-initialized descriptor construction preserves
+identity, raw/structured/counter behavior and Vulkan advertisements. Two JIT
+tests exercise actual heap index one, all load widths, FP32/signed integers,
+reordering/constants/padding, null/masked/OOB/empty-heap guards. Full FeMe passed
+4410/15 skipped/10 unsupported; current stock-runtime/coexistence passed 139/139.
+The strengthened null and prior-version tests passed 3/3 afterward. FeMe ICD
+identity was verified before relevant launches; no CTS executable/result exists
+at the historical Windows paths.
+
+Windows mapping admission is deliberately still open: bridge 3 has no field to
+carry it. Next add checked D3D component encoding, owned descriptor persistence
+and execution-time bridge materialization, then original DXBC/DXIL/reference
+and pending-lifetime controls. Inventory remains v13/103 OS gates until that
+separate step passes. Full W2 still needs the other formats, resources, bindings
+and synchronization work; this prerequisite is not a closeout claim.
