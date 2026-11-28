@@ -137858,3 +137858,48 @@ unchanged spans, avoiding incidental CRLF churn.
 Next: materialize owned texture storage and D3D subresource metadata using
 these shared layouts. Texture views/samplers, complete bindings, resource
 classes and ordering remain open. W2 is not complete.
+
+# W2 progress: owned linear texture storage and subresources
+
+Commit d8d87ce2736d materializes checked single-plane, single-sample linear
+textures with shared aligned mip-major geometry. Resource metadata snapshots
+required pitches and mip layouts rather than retaining creation pointers.
+Existing WARP allocation metadata now carries actual texture dimension,
+format, pitch, size and mip/array counts, preserving the 96-byte KMD ABI.
+Callback-only builds remain buffer-only.
+
+D3D subresource indexing is mip-fastest, unlike the physical mip-major layout.
+The live registry resolves indices through remainder/quotient and shared
+layout math. SELECT_SUBRESOURCE, used by the stock runtime for real textures,
+encodes that index in placement Offset, not bytes; copy recording now
+normalizes it into physical geometry and byte placement. Shader buffer/GPUVA
+lookup still rejects textures. Transition subresource indices are checked.
+
+Eight new public controls cover owned/reference and held 3D/2D-array textures
+with three mips and two depth slices/layers. Independent byte oracles cover
+all mips/layers, full/partial overwrites, guards, padding, unchanged source
+storage and retained resources after list/allocator release. Native allocation
+queries cover dimensional families, required pitches and malformed boundaries.
+
+Initial owned copies exposed the unhandled SELECT_SUBRESOURCE layout. The
+next probe failure came from unaligned mip upload placements incompatible
+with FeMe's reported 512-byte contract; fixing the probe, rather than lowering
+the capability limit, restored parity. An unsigned-literal narrowing issue
+was also caught at build time. Temporary tracing was removed before final
+validation. Native selectors pass 4/4 and combined texture/footprint controls
+12/12. Full FeMe passes 4415 with 15 skipped and 10 unsupported, callbacks
+65/65, stock-runtime/coexistence 371/371 after shared DLL relinking, with
+confirmed FeMe CPU Vulkan Device identity.
+
+Generated v19 has 335 unique required OS gates and 11 existing fixtures,
+verified against source paths. Bridge4/artifact11 and the null complete-FL
+claim remain unchanged. The stale unsupported entry for the already-completed
+additional typed-UAV buffer set was corrected. No system/KMD modification,
+Vulkan advertisement change, texture shader-view claim or new CTS result is
+claimed.
+
+Next: texture SRV/UAV and sampler materialization must reuse the shared image
+ABIs. Inspection found BoundImageBinding lacks explicit SRV/UAV namespace
+identity even though reflected ranges carry it; correct that shared binding
+mechanism before adding the image compiler bridge. Complete roots, remaining
+storage/resource classes and ordering still remain. W2 is not complete.
