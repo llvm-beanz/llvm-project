@@ -67,13 +67,18 @@ struct SubresourceLayout {
 /// contiguously (`SampleStride == BytesPerBlock`), so a texel's
 /// `SampleCount` samples occupy `SampleCount * BytesPerBlock` bytes and a
 /// row is `Width` texels wide of that; a block-compressed format is never
-/// multisampled, so `SampleCount` is always 1 for one.
+/// multisampled, so `SampleCount` is always 1 for one. Optional nonzero
+/// power-of-two \p RowAlignment and \p SliceAlignment pad rows and slices
+/// independently; their default of one preserves packed storage. Slice
+/// alignment also aligns mip and array-layer offsets. Callers must bound
+/// the total size.
 std::pair<std::vector<feme::cpu::FemeImageSubresourceLayout>, uint64_t>
 computeSubresourceLayouts(bool Is3D, uint32_t Width, uint32_t Height,
                           uint32_t Depth, uint32_t MipLevels,
                           uint32_t ArrayLayers, uint32_t SampleCount,
                           uint32_t BlockWidth, uint32_t BlockHeight,
-                          uint32_t BytesPerBlock);
+                          uint32_t BytesPerBlock, uint32_t RowAlignment = 1,
+                          uint32_t SliceAlignment = 1);
 
 /// Derives one `(MipLevel, ArrayLayer)` subresource's layout from mip
 /// level `MipLevel`'s already-computed table entry \p L -- shared by a

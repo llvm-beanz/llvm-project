@@ -809,6 +809,25 @@ and **11** native fixtures; bridge 4/artifact 11 remain unchanged.
 This does not complete shader/root compatibility, static samplers, general
 heaps, graphics execution or W2.
 
+#### Shared aligned texture-storage geometry prerequisite
+
+`FeMeImage` subresource layouts now accept independent nonzero power-of-two
+row and slice alignments. Defaults of one preserve packed callers and Vulkan
+storage. Padded slice pitches retain mip-major ordering, fixed array layers,
+halved 3D depth and aligned mip/array offsets. Frontends remain responsible
+for checked size limits before allocation.
+
+Two new tests exercise non-power-of-two array geometry with 256-byte rows
+and 512-byte slices, and a shrinking 3D mip chain. Exact row/slice pitches,
+all mip offsets, array-layer offsets and total/depth sizes are checked.
+All **17/17** shared subresource-layout tests pass. Full FeMe passes
+**4415** / **15** skipped / **10** unsupported, callbacks **65/65** and
+stock-runtime/coexistence **363/363**, with confirmed FeMe ICD identity and
+OS testing after shared DLL relinking. Inventory remains v18/bridge4/
+artifact11, buffer-only and without a complete feature-level claim.
+This is a shared storage prerequisite, not texture allocation/view completion
+or a new Vulkan capability/CTS result.
+
 #### Owned pitched buffer-footprint copies
 
 The typed `pfnCopyTextureRegion` entry now normalizes uncompressed exact-format

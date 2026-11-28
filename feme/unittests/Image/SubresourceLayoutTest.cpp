@@ -88,6 +88,42 @@ TEST(SubresourceLayoutTest, Depth3DHalvesPerLevelInsteadOfArrayLayers) {
   EXPECT_EQ(TotalSize, 64u + 8u);
 }
 
+TEST(SubresourceLayoutTest, AlignedMipArrayRowsAndSlices) {
+  auto [Layouts, TotalSize] =
+      computeSubresourceLayouts(false, 131, 7, 1, 3, 3, 1, 1, 1, 4, 256, 512);
+  ASSERT_EQ(Layouts.size(), 3u);
+  EXPECT_EQ(Layouts[0].RowPitch, 768u);
+  EXPECT_EQ(Layouts[0].SlicePitch, 5632u);
+  EXPECT_EQ(Layouts[1].Offset, 16896u);
+  EXPECT_EQ(Layouts[1].RowPitch, 512u);
+  EXPECT_EQ(Layouts[1].SlicePitch, 1536u);
+  EXPECT_EQ(Layouts[2].Offset, 21504u);
+  EXPECT_EQ(Layouts[2].RowPitch, 256u);
+  EXPECT_EQ(Layouts[2].SlicePitch, 512u);
+  EXPECT_EQ(TotalSize, 23040u);
+  auto Last = computeSubresourceLayout(false, 1, Layouts[2], 2, 2);
+  EXPECT_EQ(Last.Offset, 22528u);
+  EXPECT_EQ(Last.Size, 512u);
+  EXPECT_EQ(Last.Offset + Last.Size, TotalSize);
+}
+
+TEST(SubresourceLayoutTest, Aligned3DSlicesFollowHalvedDepth) {
+  auto [Layouts, TotalSize] =
+      computeSubresourceLayouts(true, 19, 13, 5, 3, 1, 1, 1, 1, 4, 256, 512);
+  ASSERT_EQ(Layouts.size(), 3u);
+  EXPECT_EQ(Layouts[0].RowPitch, 256u);
+  EXPECT_EQ(Layouts[0].SlicePitch, 3584u);
+  EXPECT_EQ(Layouts[1].Offset, 17920u);
+  EXPECT_EQ(Layouts[1].SlicePitch, 1536u);
+  EXPECT_EQ(Layouts[2].Offset, 20992u);
+  EXPECT_EQ(Layouts[2].SlicePitch, 1024u);
+  EXPECT_EQ(TotalSize, 22016u);
+  auto Middle = computeSubresourceLayout(true, 5, Layouts[1], 1, 0);
+  EXPECT_EQ(Middle.Size, 3072u);
+  EXPECT_EQ(Middle.DepthPitch, 1536u);
+  EXPECT_EQ(Middle.Offset + Middle.Size, Layouts[2].Offset);
+}
+
 TEST(SubresourceLayoutTest, BlockCompressedRoundsUpToWholeBlocks) {
   // A 5x5 extent with 4x4 blocks needs ceil(5/4) == 2 blocks per
   // dimension, i.e. a 2x2 block grid, even though only one block's worth

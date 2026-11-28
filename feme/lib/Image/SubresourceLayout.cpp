@@ -16,6 +16,7 @@
 #include "feme/Image/SubresourceLayout.h"
 
 #include <algorithm>
+#include <cassert>
 
 using namespace feme::cpu;
 
@@ -26,7 +27,13 @@ computeSubresourceLayouts(bool Is3D, uint32_t Width, uint32_t Height,
                           uint32_t Depth, uint32_t MipLevels,
                           uint32_t ArrayLayers, uint32_t SampleCount,
                           uint32_t BlockWidth, uint32_t BlockHeight,
-                          uint32_t BytesPerBlock) {
+                          uint32_t BytesPerBlock, uint32_t RowAlignment,
+                          uint32_t SliceAlignment) {
+  assert(RowAlignment && !(RowAlignment & (RowAlignment - 1)));
+  assert(SliceAlignment && !(SliceAlignment & (SliceAlignment - 1)));
+  auto Align = [](uint64_t Size, uint32_t Alignment) {
+    return (Size + Alignment - 1) & ~uint64_t(Alignment - 1);
+  };
   std::vector<FemeImageSubresourceLayout> Layouts(MipLevels);
   uint64_t Offset = 0;
   for (uint32_t Level = 0; Level != MipLevels; ++Level) {
@@ -40,8 +47,9 @@ computeSubresourceLayouts(bool Is3D, uint32_t Width, uint32_t Height,
     FemeImageSubresourceLayout &L = Layouts[Level];
     L.Offset = Offset;
     L.SampleStride = SampleCount > 1 ? BytesPerBlock : 0;
-    L.RowPitch = uint64_t(BlocksWide) * BytesPerBlock * SampleCount;
-    L.SlicePitch = L.RowPitch * BlocksHigh;
+    L.RowPitch =
+        Align(uint64_t(BlocksWide) * BytesPerBlock * SampleCount, RowAlignment);
+    L.SlicePitch = Align(L.RowPitch * BlocksHigh, SliceAlignment);
     Offset += L.SlicePitch * SliceCount;
   }
   return {std::move(Layouts), Offset};

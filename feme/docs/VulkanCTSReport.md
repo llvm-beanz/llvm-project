@@ -1,5 +1,13 @@
 # Vulkan CTS status
 
+## Shared aligned image-layout regression scope, not CTS
+
+Optional row/slice alignment preserves packed defaults and passes 17 shared
+layout tests, including aligned arrays and shrinking 3D mips. Full FeMe passes
+4415 tests (15 skipped, 10 unsupported), callbacks 65 and stock-runtime/
+coexistence 363, with confirmed FeMe ICD identity. No Vulkan advertisement
+or new CTS result is claimed.
+
 ## Direct3D integer-store conversion regression scope, not CTS
 
 Descriptor-gated narrow integer saturation passes 4413 full FeMe tests

@@ -41,6 +41,8 @@ Root signatures additionally admit disjoint conventional graphics-stage
 bindings, without exposing them to compute execution.
 Placed buffer-footprint copies additionally preserve independent row/depth
 pitches, partial regions, recording snapshots and ordered execution.
+Shared aligned mip/array storage geometry is tested as a texture prerequisite;
+owned texture allocation/views remain open.
 The generated v18 inventory
 is an internal headless subset, not complete graphics, shader-model or feature-level
 conformance. W2-W7 remain open.

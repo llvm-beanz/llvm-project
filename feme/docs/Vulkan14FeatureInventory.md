@@ -429,7 +429,8 @@ Vulkan feature advertisements are unchanged by the shared DirectX counter
 helper, typed-buffer component mappings and non-uniform buffer queries.
 Packed WARP SRVs/UAVs reuse existing decoders. Descriptor-gated narrow integer
 store saturation preserves flag-clear conversion and image stores.
-Validation is the full FeMe gate (4413 passed, 15 skipped, 10 unsupported)
+Shared aligned image geometry preserves default packed storage.
+Validation is the full FeMe gate (4415 passed, 15 skipped, 10 unsupported)
 and 363 stock-runtime/coexistence gates (including Windows root visibility
 and pitched buffer-footprint copies)
 with confirmed FeMe ICD identity,

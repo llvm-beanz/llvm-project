@@ -1828,6 +1828,10 @@ different pitches, full/partial copies, exact padding/guards, unchanged
 source storage and held execution after list/allocator release. Resources
 remain alive through completion, as required by D3D12. This is buffer storage
 with placed footprints, not texture allocation or image-view execution.
+Shared mip-major layout computation accepts optional row/slice alignment
+for texture preparation; default packed Vulkan geometry is unchanged.
+Aligned array offsets and shrinking 3D mips are unit-tested, but the owned
+texture allocation/view boundary remains open.
 See the implementation log and v18 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,

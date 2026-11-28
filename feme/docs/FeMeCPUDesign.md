@@ -3537,6 +3537,13 @@ shared image geometry's mip-major order, with all layers/depth slices
 inside each level. Spatial extents and 3D depth halve/clamp to one;
 physical array/cube layers remain fixed. The existing runner checks are
 retained instead of calling the shared helper's unchecked arithmetic.
+The shared image-layout helper additionally supports independently aligned
+rows and slices for Windows storage preparation. Nonzero power-of-two
+alignments default to one, preserving existing packed Vulkan/runner layouts.
+Aligned slice pitches retain mip-major storage and align array/mip offsets;
+3D depth still halves per mip. Callers must retain checked size bounds.
+Two focused aligned-array/3D tests supplement existing packed-layout tests;
+this prerequisite does not itself implement owned D3D12 texture resources.
 Single-mip defaults, zero-fill and repeated-dispatch ownership are
 preserved. Canonical all-path tests cover 1D/2D plain/array and 3D mips,
 non-power-of-two geometry, mip-31 bounds, trailing zero-fill and cube
