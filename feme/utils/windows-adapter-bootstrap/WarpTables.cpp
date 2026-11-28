@@ -151,10 +151,24 @@ struct BufferRootParameter {
   UINT Register = 0;
   UINT ConstantOffset = 0;
   UINT ConstantCount = 0;
+  UINT RangeBase = 0;
+  UINT RangeCount = 0;
+};
+
+struct ConstantTableRange {
+  UINT Space = 0;
+  UINT Register = 0;
+  UINT Offset = 0;
 };
 
 BufferRootParameter
 getRootParameter(const D3D12DDI_ROOT_PARAMETER_0013 &Parameter) {
+  if (Parameter.ParameterType ==
+      D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+    BufferRootParameter Result;
+    Result.RangeCount = Parameter.DescriptorTable.NumDescriptorRanges;
+    return Result;
+  }
   bool Constants =
       Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   return {Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_SRV   ? 1u
@@ -172,6 +186,8 @@ struct RootSignature {
   D3D12DDI_ROOT_SIGNATURE_FLAGS Flags;
   UINT Count = 0;
   std::array<BufferRootParameter, MaxRootParameters> Parameters{};
+  UINT RangeCount = 0;
+  std::array<ConstantTableRange, MaxRootParameters> Ranges{};
 };
 
 template <typename Descriptor, typename Handle> struct ImmutableState {
@@ -245,23 +261,75 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
   if (Root.NumParameters > MaxRootParameters ||
       (Root.NumParameters && !Root.pRootParameters))
     return E_INVALIDARG;
-  UINT Cost = 0;
+  UINT Cost = 0, BindingCount = 0;
+  std::array<BufferRootParameter, MaxRootParameters> Bindings{};
+  auto AddBinding = [&](BufferRootParameter Binding) {
+    if (BindingCount == Bindings.size())
+      return false;
+    for (UINT I = 0; I < BindingCount; ++I)
+      if (Binding.Namespace == Bindings[I].Namespace &&
+          Binding.Space == Bindings[I].Space &&
+          Binding.Register == Bindings[I].Register)
+        return false;
+    Bindings[BindingCount++] = Binding;
+    return true;
+  };
   for (UINT I = 0; I < Root.NumParameters; ++I) {
     const auto &Parameter = Root.pRootParameters[I];
     if ((Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_SRV &&
          Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_UAV &&
          Parameter.ParameterType != D3D12DDI_ROOT_PARAMETER_TYPE_CBV &&
          Parameter.ParameterType !=
+             D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE &&
+         Parameter.ParameterType !=
              D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) ||
         Parameter.ShaderVisibility != D3D12DDI_SHADER_VISIBILITY_ALL)
       return E_NOTIMPL;
     bool Constants =
         Parameter.ParameterType == D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    bool Table = Parameter.ParameterType ==
+                 D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     const auto Binding = getRootParameter(Parameter);
-    UINT ParameterCost = Constants ? Binding.ConstantCount : 2;
+    UINT ParameterCost = Table ? 1 : Constants ? Binding.ConstantCount : 2;
     if (!ParameterCost || ParameterCost > MaxRootDwords - Cost)
       return E_INVALIDARG;
     Cost += ParameterCost;
+    if (Table) {
+      const auto &Ranges = Parameter.DescriptorTable;
+      if (!Ranges.NumDescriptorRanges || !Ranges.pDescriptorRanges ||
+          Ranges.NumDescriptorRanges > MaxRootParameters)
+        return E_INVALIDARG;
+      UINT64 Cursor = 0;
+      for (UINT J = 0; J < Ranges.NumDescriptorRanges; ++J) {
+        const auto &Range = Ranges.pDescriptorRanges[J];
+        if (Range.RangeType != D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV ||
+            Range.NumDescriptors != 1)
+          return E_NOTIMPL;
+        constexpr UINT DataMask =
+            D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DATA_VOLATILE |
+            D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DATA_STATIC_WHILE_SET_AT_EXECUTE |
+            D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DATA_STATIC;
+        constexpr UINT Volatile =
+            D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DESCRIPTORS_VOLATILE;
+        constexpr UINT KeepingBounds =
+            D3D12DDI_DESCRIPTOR_RANGE_FLAG_0052_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
+        UINT Flags = Range.Flags;
+        UINT DataFlags = Flags & DataMask;
+        if ((Flags & ~(DataMask | Volatile | KeepingBounds)) ||
+            (DataFlags && (DataFlags & (DataFlags - 1))) ||
+            ((Flags & Volatile) && (Flags & KeepingBounds)))
+          return E_INVALIDARG;
+        UINT64 Offset = Range.OffsetInDescriptorsFromTableStart ==
+                                std::numeric_limits<UINT>::max()
+                            ? Cursor
+                            : Range.OffsetInDescriptorsFromTableStart;
+        if (Offset >= std::numeric_limits<UINT>::max() ||
+            !AddBinding({3, Range.RegisterSpace, Range.BaseShaderRegister}))
+          return E_INVALIDARG;
+        Cursor = Offset + 1;
+      }
+      continue;
+    }
     auto Flags = Constants ? D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_NONE
                            : Parameter.Descriptor.Flags;
     if (Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_NONE &&
@@ -270,12 +338,8 @@ HRESULT validateRoot(const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0013 *Args) {
             D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_STATIC_WHILE_SET_AT_EXECUTE &&
         Flags != D3D12DDI_ROOT_DESCRIPTOR_FLAG_0013_DATA_STATIC)
       return E_INVALIDARG;
-    for (UINT J = 0; J < I; ++J) {
-      const auto Other = getRootParameter(Root.pRootParameters[J]);
-      if (Binding.Namespace == Other.Namespace &&
-          Binding.Space == Other.Space && Binding.Register == Other.Register)
-        return E_INVALIDARG;
-    }
+    if (!AddBinding(Binding))
+      return E_INVALIDARG;
   }
 #endif
   return S_OK;
@@ -307,6 +371,20 @@ HRESULT APIENTRY createRoot(D3D12DDI_HDEVICE Device,
   for (UINT I = 0; I < State->Count; ++I) {
     const auto &Parameter = Args->pRootSignature_1_1->pRootParameters[I];
     State->Parameters[I] = getRootParameter(Parameter);
+    if (State->Parameters[I].RangeCount) {
+      State->Parameters[I].RangeBase = State->RangeCount;
+      UINT Cursor = 0;
+      for (UINT J = 0; J < Parameter.DescriptorTable.NumDescriptorRanges; ++J) {
+        const auto &Range = Parameter.DescriptorTable.pDescriptorRanges[J];
+        UINT Offset = Range.OffsetInDescriptorsFromTableStart ==
+                              std::numeric_limits<UINT>::max()
+                          ? Cursor
+                          : Range.OffsetInDescriptorsFromTableStart;
+        State->Ranges[State->RangeCount++] = {Range.RegisterSpace,
+                                              Range.BaseShaderRegister, Offset};
+        Cursor = Offset + 1;
+      }
+    }
     if (State->Parameters[I].ConstantCount) {
       State->Parameters[I].ConstantOffset = ConstantOffset;
       ConstantOffset += Parameter.Constants.Num32BitValues;
@@ -504,11 +582,277 @@ void APIENTRY resetCommandPool(D3D12DDI_HDEVICE Device,
 }
 
 struct DescriptorSlot {
-  D3D12DDI_DESCRIPTOR_HEAP_TYPE Type;
-  D3D12DDI_HRESOURCE Resource;
-  UINT64 ByteOffset;
-  UINT64 ByteSize;
+  UINT Namespace = 0;
+  UINT Stride = 0;
+  D3D12DDI_HRESOURCE Resource{};
+  UINT64 ByteOffset = 0;
+  UINT64 ByteSize = 0;
+  UINT64 Address = 0;
 };
+
+struct DescriptorHeap {
+  DescriptorHeap *Next;
+  feme::probe::WarpDeviceState *Owner;
+  D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001 Desc;
+  std::unique_ptr<DescriptorSlot[]> Slots;
+  feme::probe::WarpDescriptorHeapRegistration Registration{};
+};
+
+SRWLOCK DescriptorLock = SRWLOCK_INIT;
+DescriptorHeap *DescriptorHeaps = nullptr;
+
+class DescriptorAccess {
+public:
+  DescriptorAccess() { AcquireSRWLockExclusive(&DescriptorLock); }
+  ~DescriptorAccess() { ReleaseSRWLockExclusive(&DescriptorLock); }
+};
+
+DescriptorHeap **findDescriptorHeap(D3D12DDI_HDESCRIPTORHEAP Heap) {
+  auto **Entry = &DescriptorHeaps;
+  while (*Entry && *Entry != Heap.pDrvPrivate)
+    Entry = &(*Entry)->Next;
+  return Entry;
+}
+
+DescriptorSlot *descriptorTableSlot(DescriptorHeap *Heap, UINT64 Address,
+                                    UINT Offset) {
+  UINT64 Base = reinterpret_cast<UINT64>(Heap->Slots.get());
+  if (!(Heap->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) ||
+      Address < Base || (Address - Base) % sizeof(DescriptorSlot))
+    return nullptr;
+  UINT64 Index = (Address - Base) / sizeof(DescriptorSlot);
+  if (Index >= Heap->Desc.NumDescriptors ||
+      Offset >= Heap->Desc.NumDescriptors - Index)
+    return nullptr;
+  return Heap->Slots.get() + Index + Offset;
+}
+
+DescriptorSlot *descriptorRange(feme::probe::WarpDeviceState *Owner,
+                                UINT64 Address, UINT Count,
+                                bool CopySource = false) {
+  for (auto *Heap = DescriptorHeaps; Heap; Heap = Heap->Next) {
+    UINT64 Base = reinterpret_cast<UINT64>(Heap->Slots.get());
+    if (Heap->Owner != Owner || Address < Base ||
+        (Address - Base) % sizeof(DescriptorSlot) ||
+        !(Heap->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE) ||
+        (CopySource &&
+         (Heap->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)))
+      continue;
+    UINT64 Index = (Address - Base) / sizeof(DescriptorSlot);
+    if (Index <= Heap->Desc.NumDescriptors &&
+        Count <= Heap->Desc.NumDescriptors - Index)
+      return Heap->Slots.get() + Index;
+  }
+  return nullptr;
+}
+
+HRESULT
+validateDescriptorHeap(const D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001 *Args) {
+  if (!Args || Args->NodeMask != 1 || !Args->NumDescriptors ||
+      Args->NumDescriptors > 1000000 ||
+      (Args->Flags & ~(D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE |
+                       D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)))
+    return E_INVALIDARG;
+  return Args->Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ? S_OK
+                                                                 : E_NOTIMPL;
+}
+
+SIZE_T APIENTRY
+descriptorHeapSize(D3D12DDI_HDEVICE Device,
+                   const D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001 *Args) {
+  HRESULT Result = validateDescriptorHeap(Args);
+  if (FAILED(Result)) {
+    if (Args)
+      std::fprintf(stderr,
+                   "FeMe descriptor heap rejected: type=%u count=%u flags=%u "
+                   "nodes=%u result=0x%08lx\n",
+                   Args->Type, Args->NumDescriptors, Args->Flags,
+                   Args->NodeMask, static_cast<unsigned long>(Result));
+    reportError(Device, Result);
+    return 0;
+  }
+  return sizeof(DescriptorHeap);
+}
+
+HRESULT APIENTRY
+createDescriptorHeap(D3D12DDI_HDEVICE Device,
+                     const D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001 *Args,
+                     D3D12DDI_HDESCRIPTORHEAP Heap) {
+  HRESULT Result = validateDescriptorHeap(Args);
+  if (FAILED(Result))
+    return Result;
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || !Heap.pDrvPrivate)
+    return E_INVALIDARG;
+  DescriptorAccess Access;
+  if (*findDescriptorHeap(Heap))
+    return E_INVALIDARG;
+  std::unique_ptr<DescriptorSlot[]> Slots(
+      new (std::nothrow) DescriptorSlot[Args->NumDescriptors]);
+  if (!Slots)
+    return E_OUTOFMEMORY;
+  auto *State = new (Heap.pDrvPrivate)
+      DescriptorHeap{DescriptorHeaps, Owner, *Args, std::move(Slots)};
+  DescriptorHeaps = State;
+  AcquireSRWLockExclusive(&Owner->DescriptorLock);
+  State->Registration = {Owner->DescriptorList, Heap.pDrvPrivate};
+  Owner->DescriptorList = &State->Registration;
+  ReleaseSRWLockExclusive(&Owner->DescriptorLock);
+  ++Owner->LiveImmutableStates;
+  return S_OK;
+}
+
+void APIENTRY destroyDescriptorHeap(D3D12DDI_HDEVICE Device,
+                                    D3D12DDI_HDESCRIPTORHEAP Heap) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  DescriptorAccess Access;
+  auto **Entry = findDescriptorHeap(Heap);
+  if (!Owner || !*Entry || (*Entry)->Owner != Owner) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  auto *State = *Entry;
+  *Entry = State->Next;
+  AcquireSRWLockExclusive(&Owner->DescriptorLock);
+  auto **Registration = &Owner->DescriptorList;
+  while (*Registration != &State->Registration)
+    Registration = &(*Registration)->Next;
+  *Registration = State->Registration.Next;
+  ReleaseSRWLockExclusive(&Owner->DescriptorLock);
+  State->~DescriptorHeap();
+  --Owner->LiveImmutableStates;
+}
+
+D3D12DDI_CPU_DESCRIPTOR_HANDLE APIENTRY
+descriptorCPUStart(D3D12DDI_HDEVICE Device, D3D12DDI_HDESCRIPTORHEAP Heap) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  DescriptorAccess Access;
+  auto *State = *findDescriptorHeap(Heap);
+  if (!Owner || !State || State->Owner != Owner) {
+    reportError(Device, E_INVALIDARG);
+    return {};
+  }
+  if (!(State->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE))
+    return {};
+  return {reinterpret_cast<SIZE_T>(State->Slots.get())};
+}
+
+D3D12DDI_GPU_DESCRIPTOR_HANDLE APIENTRY
+descriptorGPUStart(D3D12DDI_HDEVICE Device, D3D12DDI_HDESCRIPTORHEAP Heap) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  DescriptorAccess Access;
+  auto *State = *findDescriptorHeap(Heap);
+  if (!Owner || !State || State->Owner != Owner) {
+    reportError(Device, E_INVALIDARG);
+    return {};
+  }
+  if (!(State->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+    return {};
+  return {reinterpret_cast<UINT64>(State->Slots.get())};
+}
+
+void APIENTRY createCBV(D3D12DDI_HDEVICE Device,
+                        const D3D12DDI_CONSTANT_BUFFER_VIEW_DESC *Desc,
+                        D3D12DDI_CPU_DESCRIPTOR_HANDLE Destination) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  DescriptorSlot Value;
+  Value.Namespace = 3;
+  if (Desc) {
+    if (!Desc->SizeInBytes || Desc->SizeInBytes > 65536 ||
+        Desc->SizeInBytes % 256 || Desc->BufferLocation % 256 ||
+        Desc->Padding) {
+      reportError(Device, E_INVALIDARG);
+      return;
+    }
+    Value.Address = Desc->BufferLocation;
+    Value.ByteSize = Desc->SizeInBytes;
+    if (Value.Address) {
+      void *Data = nullptr;
+      UINT64 Extent = 0;
+      HRESULT Result =
+          feme::probe::getWarpBufferAddress(Owner, Value.Address, Data, Extent);
+      if (FAILED(Result) || Value.ByteSize > Extent) {
+        reportError(Device, E_INVALIDARG);
+        return;
+      }
+    }
+  }
+  DescriptorAccess Access;
+  auto *Slot = descriptorRange(Owner, Destination.ptr, 1);
+  if (!Owner || !Slot) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  *Slot = Value;
+}
+
+void APIENTRY
+copyDescriptors(D3D12DDI_HDEVICE Device, UINT DestinationCount,
+                const D3D12DDI_CPU_DESCRIPTOR_HANDLE *Destinations,
+                const UINT *DestinationSizes, UINT SourceCount,
+                const D3D12DDI_CPU_DESCRIPTOR_HANDLE *Sources,
+                const UINT *SourceSizes, D3D12DDI_DESCRIPTOR_HEAP_TYPE Type) {
+  auto *Owner = static_cast<feme::probe::WarpDeviceState *>(Device.pDrvPrivate);
+  if (!Owner || Type != D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+      (DestinationCount && !Destinations) || (SourceCount && !Sources)) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  DescriptorAccess Access;
+  UINT64 DestinationTotal = 0, SourceTotal = 0;
+  for (UINT I = 0; I < DestinationCount; ++I) {
+    UINT Count = DestinationSizes ? DestinationSizes[I] : 1;
+    if (!descriptorRange(Owner, Destinations[I].ptr, Count)) {
+      reportError(Device, E_INVALIDARG);
+      return;
+    }
+    DestinationTotal += Count;
+  }
+  for (UINT I = 0; I < SourceCount; ++I) {
+    UINT Count = SourceSizes ? SourceSizes[I] : 1;
+    if (!descriptorRange(Owner, Sources[I].ptr, Count, true)) {
+      reportError(Device, E_INVALIDARG);
+      return;
+    }
+    SourceTotal += Count;
+  }
+  if (DestinationTotal != SourceTotal ||
+      SourceTotal >
+          std::numeric_limits<SIZE_T>::max() / sizeof(DescriptorSlot)) {
+    reportError(Device, E_INVALIDARG);
+    return;
+  }
+  if (!SourceTotal)
+    return;
+  std::unique_ptr<DescriptorSlot[]> Values(
+      new (std::nothrow) DescriptorSlot[static_cast<SIZE_T>(SourceTotal)]);
+  if (!Values) {
+    reportError(Device, E_OUTOFMEMORY);
+    return;
+  }
+  SIZE_T Offset = 0;
+  for (UINT I = 0; I < SourceCount; ++I) {
+    UINT Count = SourceSizes ? SourceSizes[I] : 1;
+    std::memcpy(Values.get() + Offset,
+                descriptorRange(Owner, Sources[I].ptr, Count, true),
+                SIZE_T(Count) * sizeof(DescriptorSlot));
+    Offset += Count;
+  }
+  Offset = 0;
+  for (UINT I = 0; I < DestinationCount; ++I) {
+    UINT Count = DestinationSizes ? DestinationSizes[I] : 1;
+    std::memcpy(descriptorRange(Owner, Destinations[I].ptr, Count),
+                Values.get() + Offset, SIZE_T(Count) * sizeof(DescriptorSlot));
+    Offset += Count;
+  }
+}
+
+void APIENTRY copyDescriptorsSimple(D3D12DDI_HDEVICE Device, UINT Count,
+                                    D3D12DDI_CPU_DESCRIPTOR_HANDLE Destination,
+                                    D3D12DDI_CPU_DESCRIPTOR_HANDLE Source,
+                                    D3D12DDI_DESCRIPTOR_HEAP_TYPE Type) {
+  copyDescriptors(Device, 1, &Destination, &Count, 1, &Source, &Count, Type);
+}
 
 UINT APIENTRY descriptorSize(D3D12DDI_HDEVICE Device,
                              D3D12DDI_DESCRIPTOR_HEAP_TYPE Type) {
@@ -784,6 +1128,8 @@ struct RecordedCommand {
   std::array<UINT, MaxRootDwords> RootConstants{};
   std::array<bool, MaxRootParameters> InlineBuffers{};
   std::array<UINT, MaxRootParameters> InlineOffsets{};
+  D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
+  std::array<UINT64, MaxRootParameters> TableDescriptors{};
   D3D12DDIARG_BUFFER_PLACEMENT Destination{};
   D3D12DDIARG_BUFFER_PLACEMENT Source{};
   UINT64 Bytes = 0;
@@ -838,6 +1184,9 @@ struct CommandList {
   std::array<BufferRootParameter, MaxRootParameters> RootParameters{};
   std::array<UINT64, MaxRootParameters> RootAddresses{};
   std::array<UINT, MaxRootDwords> RootConstants{};
+  std::array<ConstantTableRange, MaxRootParameters> RootRanges{};
+  std::array<UINT64, MaxRootParameters> RootTables{};
+  D3D12DDI_HDESCRIPTORHEAP DescriptorHeap{};
   UINT64 Marker = 0;
   RecordedCommand *First = nullptr;
   RecordedCommand *Last = nullptr;
@@ -1264,6 +1613,8 @@ void APIENTRY resetList(D3D12DDI_HCOMMANDLIST List,
   State->RootCount = 0;
   State->RootAddresses.fill(0);
   State->RootConstants.fill(0);
+  State->RootTables.fill(0);
+  State->DescriptorHeap = {};
 }
 
 void APIENTRY closeList(D3D12DDI_HCOMMANDLIST List) {
@@ -1327,10 +1678,13 @@ void APIENTRY setComputeRoot(D3D12DDI_HCOMMANDLIST List,
     return;
   State->RootIdentity = Signature;
   State->RootCount = Signature ? Signature->Count : 0;
-  if (Signature)
+  if (Signature) {
     State->RootParameters = Signature->Parameters;
+    State->RootRanges = Signature->Ranges;
+  }
   State->RootAddresses.fill(0);
   State->RootConstants.fill(0);
+  State->RootTables.fill(0);
 }
 
 void setRootBuffer(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT64 Address,
@@ -1344,7 +1698,8 @@ void setRootBuffer(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT64 Address,
       State->Owner, Address, Data, Size, Namespace == 2);
   if (Index >= State->RootCount || Address % (Namespace == 3 ? 256 : 16) ||
       State->RootParameters[Index].Namespace != Namespace ||
-      State->RootParameters[Index].ConstantCount || FAILED(Result)) {
+      State->RootParameters[Index].ConstantCount ||
+      State->RootParameters[Index].RangeCount || FAILED(Result)) {
     reportObjectError(List, E_INVALIDARG);
     return;
   }
@@ -1392,6 +1747,22 @@ void APIENTRY setRootConstant(D3D12DDI_HCOMMANDLIST List, UINT Index, UINT Data,
   setRootConstants(List, Index, 1, &Data, Offset);
 }
 
+void APIENTRY setRootTable(D3D12DDI_HCOMMANDLIST List, UINT Index,
+                           D3D12DDI_GPU_DESCRIPTOR_HANDLE Address) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  DescriptorAccess Access;
+  auto *Heap = *findDescriptorHeap(State->DescriptorHeap);
+  if (Index >= State->RootCount || !State->RootParameters[Index].RangeCount ||
+      !Heap || Heap->Owner != State->Owner ||
+      !descriptorTableSlot(Heap, Address.ptr, 0)) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  State->RootTables[Index] = Address.ptr;
+}
+
 HRESULT prepareDispatch(CommandList *State,
                         std::unique_ptr<RecordedCommand> &Command) {
   if (!State->Pipeline)
@@ -1406,8 +1777,31 @@ HRESULT prepareDispatch(CommandList *State,
     return Result;
   Command->Dispatch.Buffers = Command->Buffers.data();
   Command->RootConstants = State->RootConstants;
+  Command->DescriptorHeap = State->DescriptorHeap;
   for (UINT I = 0; I < State->RootCount; ++I) {
     const auto &Parameter = State->RootParameters[I];
+    if (Parameter.RangeCount) {
+      if (!State->RootTables[I])
+        continue;
+      DescriptorAccess Access;
+      auto *Heap = *findDescriptorHeap(State->DescriptorHeap);
+      if (!Heap || Heap->Owner != State->Owner)
+        return E_INVALIDARG;
+      for (UINT J = 0; J < Parameter.RangeCount; ++J) {
+        const auto &Range = State->RootRanges[Parameter.RangeBase + J];
+        auto *Slot =
+            descriptorTableSlot(Heap, State->RootTables[I], Range.Offset);
+        if (!Slot)
+          return E_INVALIDARG;
+        UINT Binding = Command->Dispatch.BufferCount++;
+        Command->TableDescriptors[Binding] = reinterpret_cast<UINT64>(Slot);
+        auto &Buffer = Command->Buffers[Binding];
+        Buffer.Namespace = 3;
+        Buffer.Space = Range.Space;
+        Buffer.Register = Range.Register;
+      }
+      continue;
+    }
     if (!Parameter.ConstantCount && !State->RootAddresses[I])
       continue;
     UINT Binding = Command->Dispatch.BufferCount++;
@@ -1603,6 +1997,7 @@ void APIENTRY clearRootArguments(D3D12DDI_HCOMMANDLIST List) {
   if (auto *State = recordingList(List)) {
     State->RootAddresses.fill(0);
     State->RootConstants.fill(0);
+    State->RootTables.fill(0);
   }
 }
 
@@ -1620,8 +2015,28 @@ void APIENTRY setTopology(D3D12DDI_HCOMMANDLIST List,
 }
 
 void APIENTRY setDescriptorHeaps(D3D12DDI_HCOMMANDLIST List, UINT Count,
-                                 D3D12DDI_HDESCRIPTORHEAP *) {
-  validateNeutralState(List, Count == 0);
+                                 D3D12DDI_HDESCRIPTORHEAP *Heaps) {
+  auto *State = recordingList(List);
+  if (!State)
+    return;
+  if (Count > 1 || (Count && !Heaps)) {
+    reportObjectError(List, E_INVALIDARG);
+    return;
+  }
+  D3D12DDI_HDESCRIPTORHEAP Selected{};
+  if (Count) {
+    DescriptorAccess Access;
+    auto *Heap = *findDescriptorHeap(Heaps[0]);
+    if (!Heap || Heap->Owner != State->Owner ||
+        !(Heap->Desc.Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)) {
+      reportObjectError(List, E_INVALIDARG);
+      return;
+    }
+    Selected = Heaps[0];
+  }
+  if (State->DescriptorHeap.pDrvPrivate != Selected.pDrvPrivate)
+    State->RootTables.fill(0);
+  State->DescriptorHeap = Selected;
 }
 
 void APIENTRY setViewports(D3D12DDI_HCOMMANDLIST List, UINT Count,
@@ -1684,6 +2099,40 @@ void APIENTRY setPredication(D3D12DDI_HCOMMANDLIST List,
                            Operation == D3D12DDI_PREDICATION_OP_EQUAL_ZERO);
 }
 
+HRESULT resolveDispatchBindings(CommandQueue *State, RecordedCommand *Command,
+                                feme::probe::WarpBufferAccess &Buffers) {
+  DescriptorAccess Descriptors;
+  for (UINT J = 0; J < Command->Dispatch.BufferCount; ++J) {
+    auto &Buffer = Command->Buffers[J];
+    if (Command->InlineBuffers[J])
+      continue;
+    if (Command->TableDescriptors[J]) {
+      auto *Heap = *findDescriptorHeap(Command->DescriptorHeap);
+      if (!Heap || Heap->Owner != State->Owner)
+        return E_INVALIDARG;
+      auto *Slot = descriptorTableSlot(Heap, Command->TableDescriptors[J], 0);
+      if (!Slot || Slot->Namespace != Buffer.Namespace)
+        return E_INVALIDARG;
+      Buffer.Data = nullptr;
+      Buffer.SizeInBytes = 0;
+      if (!Slot->Address)
+        continue;
+      UINT64 Extent = 0;
+      HRESULT Result = Buffers.address(Slot->Address, Buffer.Data, Extent);
+      if (FAILED(Result) || Slot->ByteSize > Extent)
+        return E_INVALIDARG;
+      Buffer.SizeInBytes = Slot->ByteSize;
+      continue;
+    }
+    HRESULT Result =
+        Buffers.address(reinterpret_cast<UINT64>(Buffer.Data), Buffer.Data,
+                        Buffer.SizeInBytes, Buffer.Namespace == 2);
+    if (FAILED(Result))
+      return Result;
+  }
+  return S_OK;
+}
+
 HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
   HRESULT Result = S_OK;
   for (auto *Command = Submission->First; Command && SUCCEEDED(Result);
@@ -1699,15 +2148,7 @@ HRESULT executeSubmission(CommandQueue *State, PendingSubmission *Submission) {
     }
     if (Command->Type == RecordedCommand::Kind::Dispatch ||
         Command->Type == RecordedCommand::Kind::IndirectDispatch) {
-      for (UINT J = 0; J < Command->Dispatch.BufferCount && SUCCEEDED(Result);
-           ++J) {
-        auto &Buffer = Command->Buffers[J];
-        if (Command->InlineBuffers[J])
-          continue;
-        Result =
-            Access.address(reinterpret_cast<UINT64>(Buffer.Data), Buffer.Data,
-                           Buffer.SizeInBytes, Buffer.Namespace == 2);
-      }
+      Result = resolveDispatchBindings(State, Command, Access);
       UINT Count = 1;
       void *Arguments = nullptr;
       if (SUCCEEDED(Result) &&
@@ -2020,6 +2461,14 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnDestroyCommandPool = destroyCommandPool;
     Table.pfnResetCommandPool = resetCommandPool;
     Table.pfnGetDescriptorSizeInBytes = descriptorSize;
+    Table.pfnCalcPrivateDescriptorHeapSize = descriptorHeapSize;
+    Table.pfnCreateDescriptorHeap = createDescriptorHeap;
+    Table.pfnDestroyDescriptorHeap = destroyDescriptorHeap;
+    Table.pfnGetCPUDescriptorHandleForHeapStart = descriptorCPUStart;
+    Table.pfnGetGPUDescriptorHandleForHeapStart = descriptorGPUStart;
+    Table.pfnCreateConstantBufferView = createCBV;
+    Table.pfnCopyDescriptors = copyDescriptors;
+    Table.pfnCopyDescriptorsSimple = copyDescriptorsSimple;
     Table.pfnCalcPrivatePipelineStateSize = pipelineSize;
     Table.pfnCreatePipelineState = createPipeline;
     Table.pfnDestroyPipelineState = destroyPipeline;
@@ -2082,6 +2531,7 @@ HRESULT feme::probe::fillWarpPrototypeTable(D3D12DDI_TABLE_TYPE Type,
     Table.pfnSetComputeRootConstantBufferView = setRootCBV;
     Table.pfnSetComputeRoot32BitConstant = setRootConstant;
     Table.pfnSetComputeRoot32BitConstants = setRootConstants;
+    Table.pfnSetComputeRootDescriptorTable = setRootTable;
     Table.pfnDispatch = dispatch;
     Table.pfnExecuteIndirect = executeIndirect;
     Table.pfnCopyBufferRegion = copyBuffer;

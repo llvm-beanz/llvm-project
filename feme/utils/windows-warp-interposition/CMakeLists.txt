@@ -500,7 +500,7 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
   set_target_properties(warp-compiler-harness PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${WARP_COMPILER_OUTPUT_DIR}")
   target_link_libraries(warp-compiler-harness PRIVATE d3d12 dxgi d3dcompiler)
-  set(FEME_WARP_PROFILE_VERSION 5)
+  set(FEME_WARP_PROFILE_VERSION 6)
   target_compile_definitions(warp-compiler-harness PRIVATE
     FEME_WARP_PROFILE_VERSION=${FEME_WARP_PROFILE_VERSION})
   set(FEME_WARP_PROFILE_DXC_EVIDENCE false)
@@ -542,6 +542,12 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     COMMAND warp-compiler-harness --reference-constant-commands)
   feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-constant-commands
     COMMAND warp-compiler-harness --ordered-constant-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-table-commands
+    COMMAND warp-compiler-harness --table-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-reference-table-commands
+    COMMAND warp-compiler-harness --reference-table-commands)
+  feme_add_probe_test(NAME os-routed-warp-compiler-owned-ordered-table-commands
+    COMMAND warp-compiler-harness --ordered-table-commands)
   find_program(FEME_DXC_EXECUTABLE NAMES dxc
     DOC "DXC for original owned-DXIL execution fixtures")
   if(FEME_DXC_EXECUTABLE)
@@ -591,6 +597,9 @@ if(FEME_WARP_COMPILER_DLL OR FEME_WARP_COMPILER_LIBRARY)
     feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-constant-commands
       COMMAND warp-compiler-harness --dxil-constant-commands
         "${WARP_DXIL_CONSTANT_FIXTURE}")
+    feme_add_probe_test(NAME os-routed-warp-compiler-owned-dxil-table-commands
+      COMMAND warp-compiler-harness --dxil-table-commands
+        "${WARP_DXIL_CBV_FIXTURE}")
     get_filename_component(FEME_DXC_DIRECTORY "${FEME_DXC_EXECUTABLE}" DIRECTORY)
     find_file(FEME_DXCOMPILER_DLL NAMES dxcompiler.dll
       HINTS "${FEME_DXC_DIRECTORY}")

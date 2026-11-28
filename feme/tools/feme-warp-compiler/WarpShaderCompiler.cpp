@@ -329,7 +329,7 @@ std::int32_t FeMeWarpDispatchCompute(void *Pipeline,
   std::uint32_t BindingCount = 0;
   for (std::uint32_t I = 0; I < Desc->BufferCount; ++I) {
     const auto &Buffer = Desc->Buffers[I];
-    if (!Buffer.Data || !Buffer.SizeInBytes || Buffer.Kind > 1 ||
+    if ((!Buffer.Data != !Buffer.SizeInBytes) || Buffer.Kind > 1 ||
         (Buffer.Namespace < 1 || Buffer.Namespace > 3) ||
         (Buffer.Namespace == 3 && Buffer.Kind != 0) ||
         (Buffer.Kind == 0 && Buffer.Stride) ||

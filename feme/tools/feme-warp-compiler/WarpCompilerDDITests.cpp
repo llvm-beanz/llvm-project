@@ -599,7 +599,114 @@ bool testWarpCompilerDDIs(const std::vector<std::uint32_t> &Tokens) {
   Parameters[0].Constants.Num32BitValues = 0;
   Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0;
   Good &= Owner.LiveRootSignatures == 0;
+  D3D12DDI_DESCRIPTOR_RANGE_0013 TableRange{};
+  TableRange.RangeType = D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV;
+  TableRange.NumDescriptors = 1;
+  TableRange.BaseShaderRegister = 3;
+  TableRange.OffsetInDescriptorsFromTableStart =
+      std::numeric_limits<UINT>::max();
+  RootDesc.NumParameters = 1;
+  Parameters[0] = {};
+  Parameters[0].ParameterType = D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  Parameters[0].ShaderVisibility = D3D12DDI_SHADER_VISIBILITY_ALL;
+  Parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+  Parameters[0].DescriptorTable.pDescriptorRanges = &TableRange;
+  Storage TableRootStorage(
+      Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs));
+  D3D12DDI_HROOTSIGNATURE TableRoot{TableRootStorage.data()};
+  Good &= Core.pfnCreateRootSignature(Device, &RootArgs, TableRoot) == S_OK;
+  Core.pfnDestroyRootSignature(Device, TableRoot);
+  TableRange.NumDescriptors = 2;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_NOTIMPL;
+  TableRange.NumDescriptors = 1;
+  TableRange.Flags =
+      D3D12DDI_DESCRIPTOR_RANGE_FLAG_0013_DESCRIPTORS_VOLATILE |
+      D3D12DDI_DESCRIPTOR_RANGE_FLAG_0052_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_INVALIDARG;
+  Parameters[0].DescriptorTable.NumDescriptorRanges = 0;
+  Good &= Core.pfnCalcPrivateRootSignatureSize(Device, &RootArgs) == 0 &&
+          LastError == E_INVALIDARG;
   Good &= testQueueWorkerFailure(Device, Core);
+  D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001 HeapArgs{};
+  HeapArgs.Type = D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  HeapArgs.NodeMask = 1;
+  HeapArgs.NumDescriptors = 4;
+  HeapArgs.Flags = D3D12DDI_DESCRIPTOR_HEAP_FLAG_CPU_VISIBLE;
+  auto BadHeapArgs = HeapArgs;
+  BadHeapArgs.NumDescriptors = 0;
+  Good &= Core.pfnCalcPrivateDescriptorHeapSize(Device, &BadHeapArgs) == 0;
+  BadHeapArgs.NumDescriptors = 1000001;
+  Good &= Core.pfnCalcPrivateDescriptorHeapSize(Device, &BadHeapArgs) == 0;
+  Storage CPUHeapStorage(
+      Core.pfnCalcPrivateDescriptorHeapSize(Device, &HeapArgs));
+  D3D12DDI_HDESCRIPTORHEAP CPUHeap{CPUHeapStorage.data()};
+  Good &= Core.pfnCreateDescriptorHeap(Device, &HeapArgs, CPUHeap) == S_OK;
+  Good &=
+      Core.pfnCreateDescriptorHeap(Device, &HeapArgs, CPUHeap) == E_INVALIDARG;
+  auto CPUBase = Core.pfnGetCPUDescriptorHandleForHeapStart(Device, CPUHeap);
+  Good &= CPUBase.ptr &&
+          !Core.pfnGetGPUDescriptorHandleForHeapStart(Device, CPUHeap).ptr;
+  HeapArgs.Flags |= D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  Storage GPUHeapStorage(
+      Core.pfnCalcPrivateDescriptorHeapSize(Device, &HeapArgs));
+  D3D12DDI_HDESCRIPTORHEAP GPUHeap{GPUHeapStorage.data()};
+  Good &= Core.pfnCreateDescriptorHeap(Device, &HeapArgs, GPUHeap) == S_OK;
+  auto GPUCPUBase = Core.pfnGetCPUDescriptorHandleForHeapStart(Device, GPUHeap);
+  Good &= GPUCPUBase.ptr &&
+          Core.pfnGetGPUDescriptorHandleForHeapStart(Device, GPUHeap).ptr;
+  UINT Stride = Core.pfnGetDescriptorSizeInBytes(Device, HeapArgs.Type);
+  D3D12DDI_CONSTANT_BUFFER_VIEW_DESC NullView{};
+  NullView.SizeInBytes = 256;
+  Core.pfnCreateConstantBufferView(Device, &NullView, CPUBase);
+  NullView.SizeInBytes = 512;
+  D3D12DDI_CPU_DESCRIPTOR_HANDLE Second{CPUBase.ptr + Stride};
+  Core.pfnCreateConstantBufferView(Device, &NullView, Second);
+  if (CPUBase.ptr && GPUCPUBase.ptr) {
+    std::vector<unsigned char> Expected(2 * Stride);
+    std::memcpy(Expected.data(), reinterpret_cast<void *>(CPUBase.ptr),
+                Expected.size());
+    Core.pfnCopyDescriptorsSimple(Device, 2, GPUCPUBase, CPUBase,
+                                  HeapArgs.Type);
+    Good &=
+        std::memcmp(Expected.data(), reinterpret_cast<void *>(GPUCPUBase.ptr),
+                    Expected.size()) == 0;
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE Destinations[] = {
+        {GPUCPUBase.ptr + 2 * Stride}, {GPUCPUBase.ptr + 3 * Stride}};
+    UINT Count = 2;
+    Core.pfnCopyDescriptors(Device, 2, Destinations, nullptr, 1, &CPUBase,
+                            &Count, HeapArgs.Type);
+    Good &= std::memcmp(Expected.data(),
+                        reinterpret_cast<void *>(Destinations[0].ptr),
+                        Expected.size()) == 0;
+    LastError = S_OK;
+    Core.pfnCopyDescriptorsSimple(Device, 1, CPUBase, GPUCPUBase,
+                                  HeapArgs.Type);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Core.pfnCopyDescriptorsSimple(Device, 5, GPUCPUBase, CPUBase,
+                                  HeapArgs.Type);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE Misaligned{CPUBase.ptr + 1};
+    Core.pfnCreateConstantBufferView(Device, &NullView, Misaligned);
+    Good &= LastError == E_INVALIDARG;
+    LastError = S_OK;
+    Core.pfnCreateConstantBufferView(OtherDevice, &NullView, CPUBase);
+    Good &= LastError == E_INVALIDARG;
+    Good &= std::memcmp(Expected.data(), reinterpret_cast<void *>(CPUBase.ptr),
+                        Expected.size()) == 0;
+  } else
+    Good = false;
+  Core.pfnDestroyDescriptorHeap(OtherDevice, GPUHeap);
+  Good &= LastError == E_INVALIDARG;
+  Core.pfnDestroyDescriptorHeap(Device, GPUHeap);
+  Core.pfnDestroyDescriptorHeap(Device, CPUHeap);
+  LastError = S_OK;
+  Good &= !Core.pfnGetCPUDescriptorHandleForHeapStart(Device, CPUHeap).ptr &&
+          LastError == E_INVALIDARG;
+  Good &= Owner.LiveImmutableStates == 0;
   Good &= testQueueWorkerFailure(Device, Core, true);
   std::puts(Good ? "compiled DDI ownership PASS"
                  : "compiled DDI ownership FAIL");

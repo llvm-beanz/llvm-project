@@ -784,6 +784,43 @@ parameters and multiple inline constants. Full W2 remains open for descriptor
 heaps/tables/static samplers, complete root compatibility, images/resource
 classes and the remaining synchronization/query/indirect contract.
 
+#### Owned descriptor heaps and scalar CBV tables
+
+The frontend owns checked CPU/shader-visible CBV/SRV/UAV heap storage, live
+handle registries, CBV creation and CPU-source descriptor copies. Descriptor
+copies validate all source/destination ranges before changing any destination,
+including optional range-size arrays, ownership, alignment and shader-visible
+source rejection. Root tables currently admit scalar CBV ranges, with explicit
+and append offsets, register-space separation and aggregate binding limits.
+Other descriptor families, arrays and unbounded/non-uniform ranges remain open.
+
+Commands snapshot heap identity, table bases and immutable range mappings.
+The worker reads current descriptors after kernel readiness, resolves bounded
+live GPUVAs and preserves each CBV's view extent. Null CBVs materialize zero
+descriptors; uninitialized/mismatched entries and stale/foreign heaps are
+errors. Table mutations after recording do not change the recorded bases.
+
+Stock D3D12 submits CPU descriptor heaps as pageable objects during creation.
+Initially rejecting object type 24 removed the device after a successful CPU
+heap constructor, before shader-visible heap creation reached the driver.
+Live per-device registrations now validate that CPU metadata; paging filters
+exclude it from KMD allocation lists while retaining all real heaps in mixed
+lists. No fabricated allocation, GPU-handle workaround or reference-driver
+forwarding was added. The process lesson is recorded in `.instructions.md`.
+
+Native tests cover heap/copy ownership, stale and misaligned handles, atomic
+copy rejection, scalar table admission and malformed range flags. Callback
+tests additionally verify descriptor-only and mixed KMD residency. Four
+stock-runtime gates cover owned SM 5.1/DXIL, independent system WARP and
+future kernel waits/pending teardown. They copy descriptors after recording,
+use distinct table/range offsets, explicitly evict/make metadata resident,
+and verify null CBVs against every scalar output and guard word.
+
+Validation: **4403** full-suite passes, **65/65** callback passes and **63/63**
+stock-runtime passes. Inventory **v6** records twenty-seven OS gates, a
+million-entry heap capacity and the current 64-binding/scalar-CBV table
+boundary. Complete feature level remains null; W2 is still open.
+
 #### Owned W2 buffer and indirect progress (2026-11-27)
 
 W2 is **not closed**. Four tested implementation steps extend the owned

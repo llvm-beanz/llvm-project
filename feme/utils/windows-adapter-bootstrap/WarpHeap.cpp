@@ -540,8 +540,21 @@ HRESULT validateObjects(WarpDeviceState *Owner, UINT Count,
   if (!Owner || (Count && !Objects))
     return E_INVALIDARG;
   for (UINT I = 0; I < Count; ++I) {
-    if (Objects[I].Type != D3D12DDI_HT_HEAP)
+    if (Objects[I].Type == D3D12DDI_HT_DESCRIPTOR_HEAP) {
+      bool Found = false;
+      AcquireSRWLockShared(&Owner->DescriptorLock);
+      for (auto *Entry = Owner->DescriptorList; Entry; Entry = Entry->Next)
+        Found |= Entry->Handle == Objects[I].Handle;
+      ReleaseSRWLockShared(&Owner->DescriptorLock);
+      if (!Found)
+        return E_INVALIDARG;
+      continue;
+    }
+    if (Objects[I].Type != D3D12DDI_HT_HEAP) {
+      std::fprintf(stderr, "FeMe residency unsupported object type=%u\n",
+                   Objects[I].Type);
       return E_NOTIMPL;
+    }
     auto *Heap = static_cast<HeapState *>(Objects[I].Handle);
     if (!Heap || Heap->Owner != Owner)
       return E_INVALIDARG;
@@ -558,7 +571,11 @@ HRESULT APIENTRY makeResident(D3D12DDI_HDEVICE Device,
   HRESULT Result = validateObjects(Owner, Args->NumObjects, Args->pObjects);
   if (FAILED(Result))
     return Result;
-  if (!Args->NumObjects) {
+  UINT HeapCount = 0;
+  for (UINT I = 0; I < Args->NumObjects; ++I)
+    HeapCount += Args->pObjects[I].Type == D3D12DDI_HT_HEAP;
+  // Descriptor heaps are live CPU metadata, not KMD allocations.
+  if (!HeapCount) {
     Args->WaitMask = 0;
     Args->pPagingFenceValue[0] = 0;
     return S_OK;
@@ -568,13 +585,16 @@ HRESULT APIENTRY makeResident(D3D12DDI_HDEVICE Device,
   if (!Owner->UMCallbacks || !Owner->UMCallbacks->pfnMakeResidentCb)
     return E_NOINTERFACE;
   std::unique_ptr<D3DKMT_HANDLE[]> Handles(new (std::nothrow)
-                                               D3DKMT_HANDLE[Args->NumObjects]);
+                                               D3DKMT_HANDLE[HeapCount]);
   if (!Handles)
     return E_OUTOFMEMORY;
+  UINT Index = 0;
   for (UINT I = 0; I < Args->NumObjects; ++I)
-    Handles[I] = static_cast<HeapState *>(Args->pObjects[I].Handle)->Allocation;
+    if (Args->pObjects[I].Type == D3D12DDI_HT_HEAP)
+      Handles[Index++] =
+          static_cast<HeapState *>(Args->pObjects[I].Handle)->Allocation;
   D3DDDI_MAKERESIDENT Resident{};
-  Resident.NumAllocations = Args->NumObjects;
+  Resident.NumAllocations = HeapCount;
   Resident.AllocationList = Handles.get();
   Resident.Flags = Args->Flags;
   D3D12DDI_HRTDEVICE RTDevice{};
@@ -585,7 +605,8 @@ HRESULT APIENTRY makeResident(D3D12DDI_HDEVICE Device,
     return E_UNEXPECTED;
   if (Result == S_OK || Result == E_PENDING) {
     for (UINT I = 0; I < Args->NumObjects; ++I)
-      if (static_cast<HeapState *>(Args->pObjects[I].Handle)->RTResource) {
+      if (Args->pObjects[I].Type == D3D12DDI_HT_HEAP &&
+          static_cast<HeapState *>(Args->pObjects[I].Handle)->RTResource) {
         ++AppMakeResident;
         HasRTPagingQueue = true;
       }
@@ -603,18 +624,24 @@ HRESULT APIENTRY evict(D3D12DDI_HDEVICE Device, const D3D12DDIARG_EVICT *Args) {
   HRESULT Result = validateObjects(Owner, Args->NumObjects, Args->pObjects);
   if (FAILED(Result))
     return Result;
-  if (!Args->NumObjects)
+  UINT HeapCount = 0;
+  for (UINT I = 0; I < Args->NumObjects; ++I)
+    HeapCount += Args->pObjects[I].Type == D3D12DDI_HT_HEAP;
+  if (!HeapCount)
     return S_OK;
   if (!Owner->UMCallbacks || !Owner->UMCallbacks->pfnEvictCb)
     return E_NOINTERFACE;
   std::unique_ptr<D3DKMT_HANDLE[]> Handles(new (std::nothrow)
-                                               D3DKMT_HANDLE[Args->NumObjects]);
+                                               D3DKMT_HANDLE[HeapCount]);
   if (!Handles)
     return E_OUTOFMEMORY;
+  UINT Index = 0;
   for (UINT I = 0; I < Args->NumObjects; ++I)
-    Handles[I] = static_cast<HeapState *>(Args->pObjects[I].Handle)->Allocation;
+    if (Args->pObjects[I].Type == D3D12DDI_HT_HEAP)
+      Handles[Index++] =
+          static_cast<HeapState *>(Args->pObjects[I].Handle)->Allocation;
   D3DDDICB_EVICT Evict{};
-  Evict.NumAllocations = Args->NumObjects;
+  Evict.NumAllocations = HeapCount;
   Evict.AllocationList = Handles.get();
   Evict.Flags = Args->Flags;
   D3D12DDI_HRTDEVICE RTDevice{};
@@ -622,7 +649,8 @@ HRESULT APIENTRY evict(D3D12DDI_HDEVICE Device, const D3D12DDIARG_EVICT *Args) {
   Result = Owner->UMCallbacks->pfnEvictCb(RTDevice, &Evict);
   if (Result == S_OK)
     for (UINT I = 0; I < Args->NumObjects; ++I)
-      if (static_cast<HeapState *>(Args->pObjects[I].Handle)->RTResource)
+      if (Args->pObjects[I].Type == D3D12DDI_HT_HEAP &&
+          static_cast<HeapState *>(Args->pObjects[I].Handle)->RTResource)
         ++AppEvict;
   return Result == S_OK || FAILED(Result) ? Result : E_UNEXPECTED;
 }

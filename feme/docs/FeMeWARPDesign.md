@@ -18,7 +18,8 @@ and copies, monitored fences, completed readback and pending teardown.
 The W1 v1 inventory records the completed internal headless subset. W2 now
 adds owned placed buffers, bounded aliases, whole-buffer alias barriers,
 decreasing monitored fences, dispatch-only indirect commands and multiple
-root CBVs and inline constants; inventory v5 explicitly marks W2 in progress.
+root CBVs, inline constants and scalar CBV descriptor tables; inventory v6
+explicitly marks W2 in progress.
 General bindings/resources, graphics, ray traversal,
 presentation and conformance remain W2-W7 work.
 
@@ -1335,7 +1336,8 @@ now provides portable, owned 1.0/1.1 binding plans and a non-dispatch
 inspection path. It preserves serialized promises and resolves table
 offsets, but does not implement the runtime mapping below, enforce every
 SDK semantic rule or replace use-inferred cbuffer promotion. Explicit
-root-driven tables and general descriptor preparation remain pending.
+General tables and descriptor preparation remain pending; scalar CBV ranges
+now execute through owned descriptor heaps and CPU-source copies.
 Owned raw SRV/UAV and CBV roots now map to bounded CPU
 descriptors; the owned compiler disables inferred single-CBV promotion.
 
@@ -1736,7 +1738,14 @@ held cross-queue execution. Inline constants additionally validate partial
 updates, source-storage independence and rebased submission-local pointers
 after recording objects are released. Root layouts enforce the aggregate
 64-DWORD cost, allowing up to 64 one-DWORD parameters or 32 root descriptors.
-See the implementation log and v5 inventory.
+CBV tables snapshot heap identity, table addresses and immutable range mappings,
+not descriptor contents. Execution resolves the live heap after kernel readiness
+and copies descriptor metadata while holding its registry lock. Null CBVs
+materialize zero descriptors; uninitialized or mismatched descriptors are errors.
+CPU descriptor metadata participates in runtime paging callbacks without
+fabricating KMD allocations. Mixed pageable lists still submit every real
+allocation. General descriptor families/arrays and broader residency remain open.
+See the implementation log and v6 inventory.
 
 - Parse serialized Root Signature 1.0/1.1 data and implement descriptor heaps,
   tables, unbounded ranges, static samplers, root descriptors, and per-lane

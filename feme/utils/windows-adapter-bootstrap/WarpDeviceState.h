@@ -33,6 +33,12 @@ struct WarpUserModeContext {
   UINT32 CommandBufferSize = 0;
 };
 
+/// Live CPU descriptor metadata admitted by the pageable-object callbacks.
+struct WarpDescriptorHeapRegistration {
+  WarpDescriptorHeapRegistration *Next = nullptr;
+  void *Handle = nullptr;
+};
+
 /// Runtime-owned private device storage and its retained KMD objects.
 struct WarpDeviceState {
   const D3DDDI_DEVICECALLBACKS *KTCallbacks = nullptr;
@@ -58,6 +64,8 @@ struct WarpDeviceState {
   std::atomic<SIZE_T> LiveResources{0};
   SRWLOCK ResourceLock = SRWLOCK_INIT;
   void *ResourceList = nullptr;
+  SRWLOCK DescriptorLock = SRWLOCK_INIT;
+  WarpDescriptorHeapRegistration *DescriptorList = nullptr;
   std::atomic<SIZE_T> LiveRootSignatures{0};
   std::atomic<SIZE_T> LiveNullShaders{0};
   std::atomic<SIZE_T> LiveCompiledShaders{0};

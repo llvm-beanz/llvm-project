@@ -696,7 +696,8 @@ HRESULT exerciseCommands(ID3D12Device *Device,
 HRESULT exerciseBufferCommands(ID3D12Device *Device,
                                const D3D12_SHADER_BYTECODE *DXIL = nullptr,
                                bool Ordered = false, bool Indirect = false,
-                               bool CBV = false, bool Inline = false) {
+                               bool CBV = false, bool Inline = false,
+                               bool Tables = false) {
   bool ConstantBindings = CBV || Inline;
   constexpr char Source[] =
       "RWByteAddressBuffer output : register(u3);\n"
@@ -749,6 +750,20 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       Parameters[I].Descriptor.RegisterSpace = I == 2 ? 7 : 0;
     }
     Parameters[I].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  }
+  D3D12_DESCRIPTOR_RANGE Ranges[2]{};
+  if (Tables) {
+    for (UINT I = 0; I < 2; ++I) {
+      Ranges[I].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+      Ranges[I].NumDescriptors = 1;
+      Ranges[I].BaseShaderRegister = 3;
+      Ranges[I].RegisterSpace = I ? 7 : 0;
+      Ranges[I].OffsetInDescriptorsFromTableStart = I ? 3 : 1;
+    }
+    Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters[1].DescriptorTable.NumDescriptorRanges = 2;
+    Parameters[1].DescriptorTable.pDescriptorRanges = Ranges;
+    Parameters[2].Descriptor.ShaderRegister = 10;
   }
   D3D12_ROOT_SIGNATURE_DESC RootDesc{};
   RootDesc.NumParameters = ConstantBindings ? 4 : 1;
@@ -815,6 +830,42 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       if (FAILED(Result))
         return Result;
     }
+  }
+  ComPtr<ID3D12DescriptorHeap> CPUDescriptors, GPUDescriptors;
+  UINT DescriptorStride = 0;
+  D3D12_CPU_DESCRIPTOR_HANDLE CPUStart{}, GPUCPUStart{};
+  D3D12_GPU_DESCRIPTOR_HANDLE GPUStart{};
+  if (Tables) {
+    D3D12_DESCRIPTOR_HEAP_DESC DescriptorDesc{};
+    DescriptorDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    DescriptorDesc.NumDescriptors = 3;
+    Result = report("Create CPU descriptor heap",
+                    Device->CreateDescriptorHeap(
+                        &DescriptorDesc, IID_PPV_ARGS(&CPUDescriptors)));
+    if (FAILED(Result))
+      return Result;
+    DescriptorDesc.NumDescriptors = 6;
+    DescriptorDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    Result = report("Create shader-visible descriptor heap",
+                    Device->CreateDescriptorHeap(
+                        &DescriptorDesc, IID_PPV_ARGS(&GPUDescriptors)));
+    if (FAILED(Result))
+      return Result;
+    DescriptorStride = Device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    CPUStart = CPUDescriptors->GetCPUDescriptorHandleForHeapStart();
+    GPUCPUStart = GPUDescriptors->GetCPUDescriptorHandleForHeapStart();
+    GPUStart = GPUDescriptors->GetGPUDescriptorHandleForHeapStart();
+    if (!DescriptorStride || !CPUStart.ptr || !GPUCPUStart.ptr || !GPUStart.ptr)
+      return report("Missing owned descriptor handles", E_FAIL);
+    ID3D12Pageable *Pageables[] = {CPUDescriptors.Get(), GPUDescriptors.Get()};
+    Result = report("Evict descriptor metadata", Device->Evict(2, Pageables));
+    if (FAILED(Result))
+      return Result;
+    Result = report("Make descriptor metadata resident",
+                    Device->MakeResident(2, Pageables));
+    if (FAILED(Result))
+      return Result;
   }
   ComPtr<ID3D12Resource> ArgumentUpload, Arguments;
   constexpr UINT ArgumentBytes = 64;
@@ -949,13 +1000,19 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
     List->ResourceBarrier(1, &Barrier);
     List->SetComputeRootSignature(Root.Get());
     List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress());
-    if (CBV) {
+    if (CBV && !Tables) {
       for (UINT I = 0; I < Constants.size(); ++I)
         List->SetComputeRootConstantBufferView(
             I + 1, Constants[I]->GetGPUVirtualAddress() + 256);
       if (Repeat == 1)
         List->SetComputeRootConstantBufferView(
             3, Constants[0]->GetGPUVirtualAddress());
+    }
+    if (Tables) {
+      ID3D12DescriptorHeap *Heaps[] = {GPUDescriptors.Get()};
+      List->SetDescriptorHeaps(1, Heaps);
+      D3D12_GPU_DESCRIPTOR_HANDLE Base{GPUStart.ptr + DescriptorStride};
+      List->SetComputeRootDescriptorTable(1, Base);
     }
     if (Inline) {
       UINT ValuesA[] = {7 + Repeat * 5, 0xab, 0xab, 0xab, 0xab};
@@ -978,11 +1035,13 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
       List->Dispatch(3, 2, 1);
     List->SetComputeRootUnorderedAccessView(0, Output->GetGPUVirtualAddress() +
                                                    16);
-    if (CBV)
+    if (CBV && !Tables)
       List->SetComputeRootConstantBufferView(
           1, Constants[0]->GetGPUVirtualAddress());
     if (Inline)
       List->SetComputeRoot32BitConstant(1, 0xeeeeeeee, 0);
+    if (Tables)
+      List->SetComputeRootDescriptorTable(1, GPUStart);
     Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
     List->ResourceBarrier(1, &Barrier);
@@ -1006,6 +1065,33 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         Values[4] = I ? 10 : 13 + Repeat * 5;
         D3D12_RANGE Written{0, 512};
         Constants[I]->Unmap(0, &Written);
+      }
+    }
+    if (Tables) {
+      for (UINT I = 0; I < 2; ++I) {
+        D3D12_CONSTANT_BUFFER_VIEW_DESC View{};
+        View.BufferLocation = I == 1 && Repeat == 2
+                                  ? 0
+                                  : Constants[I]->GetGPUVirtualAddress() + 256;
+        View.SizeInBytes = 256;
+        D3D12_CPU_DESCRIPTOR_HANDLE Destination{CPUStart.ptr +
+                                                I * DescriptorStride};
+        Device->CreateConstantBufferView(&View, Destination);
+      }
+      D3D12_CPU_DESCRIPTOR_HANDLE Destinations[] = {
+          {GPUCPUStart.ptr + 2 * DescriptorStride},
+          {GPUCPUStart.ptr + 4 * DescriptorStride}};
+      if (!Repeat) {
+        for (UINT I = 0; I < 2; ++I) {
+          D3D12_CPU_DESCRIPTOR_HANDLE SourceDescriptor{CPUStart.ptr +
+                                                       I * DescriptorStride};
+          Device->CopyDescriptorsSimple(1, Destinations[I], SourceDescriptor,
+                                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        }
+      } else {
+        UINT Count = 2;
+        Device->CopyDescriptors(2, Destinations, nullptr, 1, &CPUStart, &Count,
+                                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
       }
     }
     if (Indirect) {
@@ -1128,6 +1214,8 @@ HRESULT exerciseBufferCommands(ID3D12Device *Device,
         Expected += Executions * (PeerGlobal + 23);
         if (ConstantBindings)
           Expected += 5 * Repeat * (Repeat + 1) / 2;
+        if (Tables && Repeat == 2)
+          Expected -= X % 2 ? 10 : 16;
       }
       Valid = static_cast<const UINT *>(Memory)[I] == Expected;
       if (!Valid)
@@ -1242,6 +1330,15 @@ int wmain(int Argc, wchar_t **Argv) {
   bool Inline =
       ReferenceConstants || OrderedConstants || DXILConstants ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--constant-commands") == 0);
+  bool ReferenceTables =
+      Argc == 2 && std::wcscmp(Argv[1], L"--reference-table-commands") == 0;
+  bool OrderedTables =
+      Argc == 2 && std::wcscmp(Argv[1], L"--ordered-table-commands") == 0;
+  bool DXILTables =
+      Argc == 3 && std::wcscmp(Argv[1], L"--dxil-table-commands") == 0;
+  bool Tables = ReferenceTables || OrderedTables || DXILTables ||
+                (Argc == 2 && std::wcscmp(Argv[1], L"--table-commands") == 0);
+  CBV |= Tables;
   bool ReferenceIndirect =
       Argc == 2 && std::wcscmp(Argv[1], L"--reference-indirect-commands") == 0;
   bool OrderedIndirect =
@@ -1256,15 +1353,16 @@ int wmain(int Argc, wchar_t **Argv) {
   bool PlacedBuffers =
       ReferencePlacedBuffers ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--placed-buffers") == 0);
-  bool Reference = ReferenceConstants || ReferenceCBV || ReferenceIndirect ||
-                   ReferenceBufferCommands || ReferencePlacedBuffers ||
+  bool Reference = ReferenceTables || ReferenceConstants || ReferenceCBV ||
+                   ReferenceIndirect || ReferenceBufferCommands ||
+                   ReferencePlacedBuffers ||
                    (Argc == 2 && std::wcscmp(Argv[1], L"--reference") == 0);
   bool OrderedBufferCommands =
-      OrderedConstants || OrderedCBV || OrderedIndirect ||
+      OrderedTables || OrderedConstants || OrderedCBV || OrderedIndirect ||
       (Argc == 2 && std::wcscmp(Argv[1], L"--ordered-buffer-commands") == 0);
   bool Fences = Argc == 2 && std::wcscmp(Argv[1], L"--fences") == 0;
   bool DXILBufferCommands =
-      DXILConstants || DXILCBV || DXILIndirect ||
+      DXILTables || DXILConstants || DXILCBV || DXILIndirect ||
       (Argc == 3 && std::wcscmp(Argv[1], L"--dxil-buffer-commands") == 0);
   bool BufferCommands =
       Inline || CBV || Indirect || DXILBufferCommands ||
@@ -1292,6 +1390,8 @@ int wmain(int Argc, wchar_t **Argv) {
                          "--constant-commands|--reference-constant-commands|"
                          "--ordered-constant-commands|"
                          "--dxil-constant-commands FILE|"
+                         "--table-commands|--reference-table-commands|"
+                         "--ordered-table-commands|--dxil-table-commands FILE|"
                          "--placed-buffers|--reference-placed-buffers|"
                          "--coexist DXCOMPILER_DLL VULKAN_ICD_DLL]\n");
     return 1;
@@ -1411,7 +1511,7 @@ int wmain(int Argc, wchar_t **Argv) {
   if (SUCCEEDED(Result) && BufferCommands)
     Result = exerciseBufferCommands(
         Device.Get(), DXILBufferCommands ? &DXIL : nullptr,
-        OrderedBufferCommands, Indirect, CBV, Inline);
+        OrderedBufferCommands, Indirect, CBV, Inline, Tables);
 #ifdef FEME_WARP_COEXIST
   if (SUCCEEDED(Result) && Coexist)
     Result = Coexistence.compile();

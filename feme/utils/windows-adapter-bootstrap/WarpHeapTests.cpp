@@ -476,6 +476,36 @@ bool residency() {
   Valid &= check(F.Errors.ValidCallbacks && F.Errors.ResidentCalls == 3 &&
                      F.Errors.EvictCalls == 1,
                  "only validated heap handles reach KMD paging callbacks");
+  int DescriptorHandle = 0;
+  feme::probe::WarpDescriptorHeapRegistration Descriptor{nullptr,
+                                                         &DescriptorHandle};
+  F.State.DescriptorList = &Descriptor;
+  D3D12DDI_HANDLE_AND_TYPE Mixed[2]{};
+  Mixed[0].Handle = F.Heap.pDrvPrivate;
+  Mixed[0].Type = D3D12DDI_HT_HEAP;
+  Mixed[1].Handle = &DescriptorHandle;
+  Mixed[1].Type = D3D12DDI_HT_DESCRIPTOR_HEAP;
+  Resident.NumObjects = Evict.NumObjects = 2;
+  Resident.pObjects = Evict.pObjects = Mixed;
+  F.Errors.ResidentResult = S_OK;
+  Valid &= check(F.Table.pfnMakeResident(F.Device, &Resident) == S_OK &&
+                     F.Table.pfnEvict(F.Device, &Evict) == S_OK &&
+                     F.Errors.ValidCallbacks && F.Errors.ResidentCalls == 4 &&
+                     F.Errors.EvictCalls == 2,
+                 "mixed residency submits only the real KMD allocation");
+  Resident.NumObjects = Evict.NumObjects = 1;
+  Resident.pObjects = Evict.pObjects = Mixed + 1;
+  Fence = 99;
+  Resident.WaitMask = 8;
+  Valid &= check(F.Table.pfnMakeResident(F.Device, &Resident) == S_OK &&
+                     F.Table.pfnEvict(F.Device, &Evict) == S_OK && Fence == 0 &&
+                     Resident.WaitMask == 0 && F.Errors.ResidentCalls == 4 &&
+                     F.Errors.EvictCalls == 2,
+                 "live CPU descriptors need no KMD paging operation");
+  F.State.DescriptorList = nullptr;
+  Valid &= check(F.Table.pfnMakeResident(F.Device, &Resident) == E_INVALIDARG &&
+                     F.Table.pfnEvict(F.Device, &Evict) == E_INVALIDARG,
+                 "stale descriptor residency is rejected without dereference");
   return Valid;
 }
 
